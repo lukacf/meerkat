@@ -93,7 +93,7 @@ from meerkat import ConfigEnvelope
 - `backend: str | None`
 - `resolved_paths: dict[str, str] | None`
 
-`ConfigWriteResult` carries the same fields plus `live_propagation: dict | None`.
+`ConfigWriteResult` carries the same fields plus `live_propagation: WireLiveConfigPropagationReport | None`, the typed per-channel hot-swap / refresh / close outcome (`swapped`, `skipped`, `swap_failed`, `refreshed`, `closed`, `refresh_failed`, `close_failed`).
 
 ## Models and schedules
 

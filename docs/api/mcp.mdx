@@ -616,6 +616,14 @@ Response includes config envelope fields:
 - `backend`
 - `resolved_paths` (only when the server runs with `--expose-paths`)
 
+The MCP surface returns only the `ConfigEnvelope` shown above. It does **not**
+carry the `live_propagation` field: that is part of the richer RPC/REST
+`ConfigWriteResult` contract, which reports the per-channel hot-swap / refresh /
+close outcome (`swapped`, `skipped`, `swap_failed`, `refreshed`, `closed`,
+`refresh_failed`, `close_failed`) when a `set`/`patch` write fans out to live
+channels. Use the JSON-RPC or REST `config/set` / `config/patch` methods when
+you need the typed live-propagation report.
+
 ### meerkat_capabilities
 
 Returns the runtime capability set with status resolved against config.

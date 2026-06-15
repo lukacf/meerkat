@@ -2524,12 +2524,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             // BeginUnregisterSession, each closed by its feedback input. The
             // final UnregisterSession transition is guarded on all three
             // being closed, so no in-process producer can fire at a
-            // torn-down session: teardown completion is defined as
-            // "producers quiesced".
+            // torn-down session. Teardown completion is defined as "each
+            // producer concluded" — either it quiesced cleanly OR, when it
+            // failed to quiesce within the drain grace window, it was
+            // force-aborted. The `*_forced_abort` fields record which
+            // disposition closed the runtime-loop / comms-drain obligation so
+            // a forced teardown is recorded honestly rather than laundered as
+            // clean quiescence. An aborted task is no longer runnable and
+            // cannot fire post-commit inputs, so the post-commit races stay
+            // structurally impossible under either disposition.
             unregister_runtime_loop_drain_pending: bool,
             unregister_comms_drain_exit_pending: bool,
             unregister_completion_waiter_drain_pending: bool,
             unregister_teardown_retains_snapshot: bool,
+            unregister_runtime_loop_forced_abort: bool,
+            unregister_comms_drain_forced_abort: bool,
             staged_session_phase: StagedSessionPhase,
             staged_session_id: Option<SessionId>,
             staged_session_keep_alive: Option<bool>,
@@ -2982,6 +2991,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             unregister_comms_drain_exit_pending = false,
             unregister_completion_waiter_drain_pending = false,
             unregister_teardown_retains_snapshot = false,
+            unregister_runtime_loop_forced_abort = false,
+            unregister_comms_drain_forced_abort = false,
             staged_session_phase = StagedSessionPhase::NotStaged,
             staged_session_id = None,
             staged_session_keep_alive = None,
@@ -3212,8 +3223,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 generation: Option<Generation>,
                 runtime_epoch_id: Option<RuntimeEpochId>,
             },
-            RuntimeLoopStoppedForUnregister { session_id: SessionId },
-            CommsDrainExitedForUnregister { session_id: SessionId },
+            RuntimeLoopStoppedForUnregister { session_id: SessionId, forced_abort: bool },
+            CommsDrainExitedForUnregister { session_id: SessionId, forced_abort: bool },
             CompletionWaitersResolvedForUnregister { session_id: SessionId },
             UnregisterSession {
                 session_id: SessionId,
@@ -5884,10 +5895,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         // outstanding completion waiters from minted runtime-terminated
         // authority) and closes the obligation with the matching feedback
         // input. The final UnregisterSession below is guarded on all drains
-        // closed, so teardown commit *means* "producers quiesced" — the
-        // post-commit guard-rejection races (ResolveRuntimeCompletionResult,
-        // StopRuntimeExecutor, NotifyDrainExited, turn-state inputs) are
-        // structurally impossible from owned tasks.
+        // closed, so teardown commit *means* "every producer concluded" —
+        // either it quiesced cleanly, or (when it failed to quiesce within
+        // the bounded drain grace window) the shell force-aborted it and
+        // reports `forced_abort: true`, which the machine records rather than
+        // laundering as clean quiescence. Under either disposition the task is
+        // no longer runnable, so the post-commit guard-rejection races
+        // (ResolveRuntimeCompletionResult, StopRuntimeExecutor,
+        // NotifyDrainExited, turn-state inputs) are structurally impossible
+        // from owned tasks.
         //
         // Self-loops: the drain window does not change the lifecycle phase;
         // the runtime loop may still commit its in-flight run while
@@ -5907,6 +5923,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.unregister_comms_drain_exit_pending = true;
                 self.unregister_completion_waiter_drain_pending = true;
                 self.unregister_teardown_retains_snapshot = false;
+                self.unregister_runtime_loop_forced_abort = false;
+                self.unregister_comms_drain_forced_abort = false;
             }
             to Idle
             emit RequestRuntimeLoopStopForUnregister { session_id: session_id }
@@ -5929,6 +5947,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.unregister_comms_drain_exit_pending = true;
                 self.unregister_completion_waiter_drain_pending = true;
                 self.unregister_teardown_retains_snapshot = true;
+                self.unregister_runtime_loop_forced_abort = false;
+                self.unregister_comms_drain_forced_abort = false;
             }
             to Idle
             emit RequestRuntimeLoopStopForUnregister { session_id: session_id }
@@ -5938,24 +5958,26 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition RuntimeLoopStoppedForUnregister {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RuntimeLoopStoppedForUnregister { session_id }
+            on input RuntimeLoopStoppedForUnregister { session_id, forced_abort }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
             guard "obligation_open" { self.unregister_runtime_loop_drain_pending == true }
             update {
                 self.unregister_runtime_loop_drain_pending = false;
+                self.unregister_runtime_loop_forced_abort = forced_abort;
             }
             to Idle
         }
 
         transition CommsDrainExitedForUnregister {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CommsDrainExitedForUnregister { session_id }
+            on input CommsDrainExitedForUnregister { session_id, forced_abort }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "unregister_draining" { self.registration_phase == RegistrationPhase::Draining }
             guard "obligation_open" { self.unregister_comms_drain_exit_pending == true }
             update {
                 self.unregister_comms_drain_exit_pending = false;
+                self.unregister_comms_drain_forced_abort = forced_abort;
                 // An aborted drain task never reports its own NotifyDrainExited;
                 // the drain obligation closure settles the drain substate so the
                 // unregistered machine does not retain a Running drain fact.

@@ -83,6 +83,25 @@ pub fn registered_model_provider_mismatch_reason(
     registry.provider_override_mismatch_reason(provider, model)
 }
 
+/// Resolve the durable `auth_binding` for a hot-swap target identity,
+/// mirroring the core resolver (`meerkat-core::resolve_session_llm_identity_override`).
+///
+/// `target_provider` is the provider already resolved for the swap target.
+fn resolve_reconfigure_auth_binding(
+    request: &SessionLlmReconfigureRequest,
+    current: &SessionLlmIdentity,
+    target_provider: meerkat_core::Provider,
+) -> Option<meerkat_core::AuthBindingRef> {
+    match &request.auth_binding {
+        Some(TurnMetadataOverride::Clear) => None,
+        Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
+        // Inherit: a provider change without an explicit binding drops the
+        // stale binding; otherwise the durable binding is retained.
+        None if target_provider != current.provider => None,
+        None => current.auth_binding.clone(),
+    }
+}
+
 /// Surface-agnostic implementation of [`SessionLlmReconfigureHost`].
 ///
 /// Surfaces construct one of these per-call (RPC, REST, MCP, …) so the
@@ -339,11 +358,7 @@ impl SessionRuntimeLlmReconfigureHost {
             None
         };
 
-        let auth_binding = match &request.auth_binding {
-            Some(TurnMetadataOverride::Clear) => None,
-            Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
-            None => current.auth_binding.clone(),
-        };
+        let auth_binding = resolve_reconfigure_auth_binding(request, current, provider);
 
         Ok(SessionLlmIdentity {
             model,
@@ -484,5 +499,93 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .discard_live_session(session_id)
             .await
             .map_err(session_error_to_runtime_driver)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::{AuthBindingRef, BindingId, BindingOrigin, Provider, RealmId};
+
+    fn anthropic_binding() -> AuthBindingRef {
+        AuthBindingRef {
+            realm: RealmId::parse("tenant_a").unwrap(),
+            binding: BindingId::parse("anthropic_default").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        }
+    }
+
+    fn anthropic_identity() -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: "test-anthropic-default".to_string(),
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(anthropic_binding()),
+        }
+    }
+
+    fn request_with_auth_binding(
+        auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
+    ) -> SessionLlmReconfigureRequest {
+        SessionLlmReconfigureRequest {
+            model: None,
+            provider: None,
+            provider_params: None,
+            auth_binding,
+        }
+    }
+
+    // Mirrors `meerkat-core::session::llm_identity_model_override_switches_to_catalog_provider`:
+    // a provider change with no explicit binding must drop the stale binding so
+    // materialization never carries a previous provider's auth into the swap.
+    #[test]
+    fn provider_change_without_explicit_binding_clears_auth_binding() {
+        let current = anthropic_identity();
+        let request = request_with_auth_binding(None);
+
+        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::OpenAI);
+
+        assert!(
+            resolved.is_none(),
+            "provider switches must not inherit a binding from the previous provider"
+        );
+    }
+
+    #[test]
+    fn same_provider_without_explicit_binding_inherits_durable_binding() {
+        let current = anthropic_identity();
+        let request = request_with_auth_binding(None);
+
+        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::Anthropic);
+
+        assert_eq!(resolved, Some(anthropic_binding()));
+    }
+
+    #[test]
+    fn explicit_clear_drops_binding_even_without_provider_change() {
+        let current = anthropic_identity();
+        let request = request_with_auth_binding(Some(TurnMetadataOverride::Clear));
+
+        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::Anthropic);
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn explicit_set_overrides_binding_across_provider_change() {
+        let current = anthropic_identity();
+        let target = AuthBindingRef {
+            realm: RealmId::parse("tenant_b").unwrap(),
+            binding: BindingId::parse("openai_default").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        let request = request_with_auth_binding(Some(TurnMetadataOverride::Set(target.clone())));
+
+        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::OpenAI);
+
+        assert_eq!(resolved, Some(target));
     }
 }

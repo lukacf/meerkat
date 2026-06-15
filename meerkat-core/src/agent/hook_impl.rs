@@ -25,23 +25,6 @@ where
             return Ok(HookExecutionReport::empty());
         };
 
-        {
-            let planned = hook_engine
-                .matching_hooks(&invocation, Some(&self.hook_run_overrides))
-                .map_err(Self::map_hook_engine_error)?;
-            for hook_id in planned {
-                crate::event_tap::tap_emit(
-                    &self.event_tap,
-                    event_tx,
-                    AgentEvent::HookStarted {
-                        hook_id,
-                        point: invocation.point,
-                    },
-                )
-                .await;
-            }
-        }
-
         let report = match hook_engine
             .execute(invocation.clone(), Some(&self.hook_run_overrides))
             .await
@@ -53,6 +36,24 @@ where
                 return Err(Self::map_hook_engine_error(err));
             }
         };
+
+        // `HookStarted` means execution actually began. The engine reports the
+        // hook ids it truly started in `report.started` — foreground entries it
+        // ran (a deny short-circuit leaves later entries absent) and background
+        // entries it acquired a permit for and spawned (a saturated queue leaves
+        // skipped entries absent). Emitting from `matching_hooks()` instead would
+        // fire `HookStarted` for hooks that never began.
+        for hook_id in &report.started {
+            crate::event_tap::tap_emit(
+                &self.event_tap,
+                event_tx,
+                AgentEvent::HookStarted {
+                    hook_id: hook_id.clone(),
+                    point: invocation.point,
+                },
+            )
+            .await;
+        }
 
         for outcome in &report.outcomes {
             if let Some(reason) = &outcome.failure_reason {
@@ -115,6 +116,24 @@ where
         err: &HookEngineError,
     ) {
         if let Some(hook_id) = err.hook_id() {
+            // A `HookEngineError` carrying a hook_id means that hook actually
+            // began executing (Timeout / adapter-runtime ExecutionFailed both
+            // originate from `execute_one` after start; pre-start config breaks
+            // surface as `InvalidConfiguration`, hook_id == None). The partial
+            // `HookExecutionReport` — including the id pushed into `started` —
+            // is discarded when `execute()` returns `Err`, so emit the
+            // `HookStarted` here, before the terminal `HookFailed`, to preserve
+            // the invariant that every terminal hook event is preceded by its
+            // start (observability for timed-out / hard-failed hooks).
+            crate::event_tap::tap_emit(
+                &self.event_tap,
+                event_tx,
+                AgentEvent::HookStarted {
+                    hook_id: hook_id.clone(),
+                    point: invocation.point,
+                },
+            )
+            .await;
             crate::event_tap::tap_emit(
                 &self.event_tap,
                 event_tx,

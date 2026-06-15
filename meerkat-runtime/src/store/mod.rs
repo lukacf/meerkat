@@ -438,6 +438,25 @@ pub trait RuntimeStore: Send + Sync {
         expected_current: &[u8],
     ) -> Result<bool, RuntimeStoreError>;
 
+    /// Report whether the runtime-projection fallback for `runtime_id` is
+    /// quarantined.
+    ///
+    /// This is a durable single-owner fact: when
+    /// [`clear_session_snapshot_if_current`](Self::clear_session_snapshot_if_current)
+    /// matches and DELETEs a rejected runtime snapshot, the same atomic boundary
+    /// records the quarantine marker. A subsequent live snapshot write clears it.
+    /// Recovery reads this to decide whether a store-only projection may stand in
+    /// for an absent runtime snapshot. The default is fail-safe (`false`): stores
+    /// that cannot record the marker durably never claim a snapshot is
+    /// quarantined.
+    async fn is_runtime_projection_quarantined(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = runtime_id;
+        Ok(false)
+    }
+
     /// Persist a single input state (for durable-before-ack).
     async fn persist_input_state(
         &self,

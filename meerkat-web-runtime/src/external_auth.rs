@@ -92,6 +92,16 @@ pub fn register_external_auth_resolver(callback: JsValue) -> Result<(), JsValue>
     Ok(())
 }
 
+/// Clear any registered JS-side external-auth resolver.
+///
+/// Called on runtime teardown / re-init so a fresh runtime in the same
+/// WASM module never inherits the previous host's auth callback. Runtime
+/// lifecycle owns resolver lifecycle (single owner).
+#[cfg(target_arch = "wasm32")]
+pub fn clear_external_auth_resolver() {
+    EXTERNAL_AUTH_RESOLVER.with(|slot| *slot.borrow_mut() = None);
+}
+
 /// Returns `true` if a JS-side external-auth resolver has been
 /// registered. Exposed to the browser so host pages can verify their
 /// registration before creating a session.

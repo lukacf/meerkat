@@ -243,6 +243,91 @@ export interface SkillSourceProvenance {
   transport_kind: SourceTransportKind;
 }
 
+export interface WireLiveHotSwapSkipReasonNoOpOrOverride {
+  kind: "no_op_or_override";
+}
+
+export interface WireLiveHotSwapSkipReasonIdentityLookupFailed {
+  error: string;
+  kind: "identity_lookup_failed";
+}
+
+export type WireLiveHotSwapSkipReason = WireLiveHotSwapSkipReasonNoOpOrOverride | WireLiveHotSwapSkipReasonIdentityLookupFailed;
+
+export interface WireLiveChannelRefreshFailureOpenConfigBuildFailed {
+  error: string;
+  kind: "open_config_build_failed";
+}
+
+export interface WireLiveChannelRefreshFailureSnapshotVersionFailed {
+  error: string;
+  kind: "snapshot_version_failed";
+}
+
+export interface WireLiveChannelRefreshFailureEnqueueFailed {
+  error: string;
+  kind: "enqueue_failed";
+}
+
+export interface WireLiveChannelRefreshFailureQueueAcceptanceRejected {
+  error: string;
+  kind: "queue_acceptance_rejected";
+}
+
+export type WireLiveChannelRefreshFailure = WireLiveChannelRefreshFailureOpenConfigBuildFailed | WireLiveChannelRefreshFailureSnapshotVersionFailed | WireLiveChannelRefreshFailureEnqueueFailed | WireLiveChannelRefreshFailureQueueAcceptanceRejected;
+
+export interface WireLiveChannelCloseFailureSignalFailed {
+  error: string;
+  kind: "signal_failed";
+}
+
+export interface WireLiveChannelCloseFailureCloseAuthorityRejected {
+  error: string;
+  kind: "close_authority_rejected";
+}
+
+export interface WireLiveChannelCloseFailureCommitHandoffMissing {
+  kind: "commit_handoff_missing";
+}
+
+export interface WireLiveChannelCloseFailureHostCommitFailed {
+  error: string;
+  kind: "host_commit_failed";
+}
+
+export type WireLiveChannelCloseFailure = WireLiveChannelCloseFailureSignalFailed | WireLiveChannelCloseFailureCloseAuthorityRejected | WireLiveChannelCloseFailureCommitHandoffMissing | WireLiveChannelCloseFailureHostCommitFailed;
+
+export interface WireLiveHotSwapSkip {
+  reason: WireLiveHotSwapSkipReason;
+  session_id: string;
+}
+
+export interface WireLiveSwapFailure {
+  error: string;
+  session_id: string;
+}
+
+export interface WireLiveRefreshFailure {
+  failure: WireLiveChannelRefreshFailure;
+  session_id: string;
+}
+
+export interface WireLiveCloseFailure {
+  failure: WireLiveChannelCloseFailure;
+  session_id: string;
+}
+
+export interface WireLiveConfigPropagationReport {
+  clean: boolean;
+  close_failed: WireLiveCloseFailure[];
+  closed: string[];
+  refresh_failed: WireLiveRefreshFailure[];
+  refreshed: string[];
+  skipped: WireLiveHotSwapSkip[];
+  swap_failed: WireLiveSwapFailure[];
+  swapped: string[];
+}
+
 export interface CallbackToolDefinition {
   description: string;
   input_schema: unknown;
@@ -268,7 +353,7 @@ export interface ConfigWriteResult {
   config: unknown;
   generation: number;
   instance_id?: string;
-  live_propagation?: Record<string, unknown>;
+  live_propagation?: WireLiveConfigPropagationReport;
   realm_id?: string;
   resolved_paths?: Record<string, unknown>;
 }

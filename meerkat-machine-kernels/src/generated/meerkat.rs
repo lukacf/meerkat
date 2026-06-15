@@ -10259,6 +10259,8 @@ pub struct State {
     pub unregister_comms_drain_exit_pending: bool,
     pub unregister_completion_waiter_drain_pending: bool,
     pub unregister_teardown_retains_snapshot: bool,
+    pub unregister_runtime_loop_forced_abort: bool,
+    pub unregister_comms_drain_forced_abort: bool,
     pub staged_session_phase: StagedSessionPhase,
     pub staged_session_id: Option<SessionId>,
     pub staged_session_keep_alive: Option<bool>,
@@ -10491,10 +10493,12 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeLoopStoppedForUnregister {
         pub session_id: SessionId,
+        pub forced_abort: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommsDrainExitedForUnregister {
         pub session_id: SessionId,
+        pub forced_abort: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CompletionWaitersResolvedForUnregister {
@@ -15919,6 +15923,8 @@ pub fn initial_state() -> State {
         unregister_comms_drain_exit_pending: false,
         unregister_completion_waiter_drain_pending: false,
         unregister_teardown_retains_snapshot: false,
+        unregister_runtime_loop_forced_abort: false,
+        unregister_comms_drain_forced_abort: false,
         staged_session_phase: StagedSessionPhase::NotStaged,
         staged_session_id: None,
         staged_session_keep_alive: None,

@@ -18376,13 +18376,19 @@ impl MobActor {
                     return Ok(false);
                 }
                 Err(error) => {
+                    // Fail closed: an indeterminate runtime state must REQUIRE the
+                    // admission barrier so the steer routes through real machine
+                    // admission instead of bypassing it with a direct event inject.
+                    // Bypassing on an unknown state would ack Completed before the
+                    // machine admits the turn, so we demand admission whenever the
+                    // runtime state cannot be determined.
                     tracing::debug!(
                         agent_identity = %entry.agent_identity,
                         session_id = %session_id,
                         error = %error,
-                        "runtime state unavailable while checking autonomous steer admission barrier"
+                        "runtime state unavailable; requiring autonomous steer admission barrier (fail closed)"
                     );
-                    return Ok(false);
+                    return Ok(true);
                 }
             }
         }

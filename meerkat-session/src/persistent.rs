@@ -1253,9 +1253,6 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// stored-only session is rebuilt at most once and archived snapshots
     /// cannot become writable again through rehydration races.
     recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
-    /// Runtime snapshots quarantined after rejecting a checkpoint may fall back
-    /// to the latest store projection for recovery in this service process.
-    quarantined_runtime_projection_fallbacks: Mutex<HashSet<SessionId>>,
     /// Typed faults recorded by detached event-projection tasks that halted on
     /// a durable append failure. Replay reads fail closed on these instead of
     /// serving an event stream with a silent sequence hole.
@@ -3373,7 +3370,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
-            quarantined_runtime_projection_fallbacks: Mutex::new(HashSet::new()),
             event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -4376,6 +4372,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(runtime_store) = self.runtime_store.as_ref() else {
             return Ok(());
         };
+        // The runtime store records the durable quarantine marker atomically
+        // inside `clear_session_snapshot_if_current` (in the same transaction
+        // that deletes the rejected snapshot), so the fact survives a process
+        // restart without a process-local mirror here.
         let cleared = runtime_store
             .clear_session_snapshot_if_current(&Self::runtime_id_for_session(id), rejected_snapshot)
             .await
@@ -4384,12 +4384,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to quarantine rejected runtime session snapshot: {error}"
                 )))
             })?;
-        if cleared {
-            self.quarantined_runtime_projection_fallbacks
-                .lock()
-                .await
-                .insert(id.clone());
-        } else {
+        if !cleared {
             tracing::warn!(
                 session_id = %id,
                 "runtime snapshot changed before fail-closed quarantine; leaving newer runtime authority intact"
@@ -4399,10 +4394,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     async fn runtime_projection_fallback_quarantined(&self, id: &SessionId) -> bool {
-        self.quarantined_runtime_projection_fallbacks
-            .lock()
-            .await
-            .contains(id)
+        let rid = Self::runtime_id_for_session(id);
+        match self.runtime_store.as_ref() {
+            Some(store) => match store.is_runtime_projection_quarantined(&rid).await {
+                Ok(quarantined) => quarantined,
+                Err(error) => {
+                    // Fail closed: an unreadable quarantine marker leaves the
+                    // store projection ineligible for recovery fallback.
+                    tracing::error!(
+                        session_id = %id,
+                        error = %error,
+                        "failed to read durable runtime-projection quarantine marker; treating as not quarantined (recovery stays fail-closed)"
+                    );
+                    false
+                }
+            },
+            None => false,
+        }
     }
 
     async fn fail_closed_runtime_projection_preflight(
@@ -7485,6 +7493,15 @@ mod tests {
             }
             self.inner
                 .clear_session_snapshot_if_current(runtime_id, expected_current)
+                .await
+        }
+
+        async fn is_runtime_projection_quarantined(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .is_runtime_projection_quarantined(runtime_id)
                 .await
         }
 

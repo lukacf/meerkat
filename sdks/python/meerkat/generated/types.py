@@ -307,6 +307,94 @@ metadata only; `source_uuid` is the stable identity."""
     status: Optional[SourceIdentityStatus] = None
 
 
+# Reason a live channel was skipped during config propagation.
+class WireLiveHotSwapSkipReasonNoOpOrOverride(TypedDict, total=False):
+    kind: Required[Literal['no_op_or_override']]
+
+class WireLiveHotSwapSkipReasonIdentityLookupFailed(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['identity_lookup_failed']]
+
+WireLiveHotSwapSkipReason = WireLiveHotSwapSkipReasonNoOpOrOverride | WireLiveHotSwapSkipReasonIdentityLookupFailed
+
+# Why a live channel refresh failed during config propagation.
+class WireLiveChannelRefreshFailureOpenConfigBuildFailed(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['open_config_build_failed']]
+
+class WireLiveChannelRefreshFailureSnapshotVersionFailed(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['snapshot_version_failed']]
+
+class WireLiveChannelRefreshFailureEnqueueFailed(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['enqueue_failed']]
+
+class WireLiveChannelRefreshFailureQueueAcceptanceRejected(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['queue_acceptance_rejected']]
+
+WireLiveChannelRefreshFailure = WireLiveChannelRefreshFailureOpenConfigBuildFailed | WireLiveChannelRefreshFailureSnapshotVersionFailed | WireLiveChannelRefreshFailureEnqueueFailed | WireLiveChannelRefreshFailureQueueAcceptanceRejected
+
+# Why a live channel close failed during config propagation.
+class WireLiveChannelCloseFailureSignalFailed(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['signal_failed']]
+
+class WireLiveChannelCloseFailureCloseAuthorityRejected(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['close_authority_rejected']]
+
+class WireLiveChannelCloseFailureCommitHandoffMissing(TypedDict, total=False):
+    kind: Required[Literal['commit_handoff_missing']]
+
+class WireLiveChannelCloseFailureHostCommitFailed(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['host_commit_failed']]
+
+WireLiveChannelCloseFailure = WireLiveChannelCloseFailureSignalFailed | WireLiveChannelCloseFailureCloseAuthorityRejected | WireLiveChannelCloseFailureCommitHandoffMissing | WireLiveChannelCloseFailureHostCommitFailed
+
+@dataclass
+class WireLiveHotSwapSkip:
+    """A live channel that was skipped during config propagation."""
+    reason: WireLiveHotSwapSkipReason
+    session_id: str
+
+
+@dataclass
+class WireLiveSwapFailure:
+    """A live channel whose hot-swap failed during config propagation."""
+    error: str
+    session_id: str
+
+
+@dataclass
+class WireLiveRefreshFailure:
+    """A live channel whose refresh failed during config propagation."""
+    failure: WireLiveChannelRefreshFailure
+    session_id: str
+
+
+@dataclass
+class WireLiveCloseFailure:
+    """A live channel whose close failed during config propagation."""
+    failure: WireLiveChannelCloseFailure
+    session_id: str
+
+
+@dataclass
+class WireLiveConfigPropagationReport:
+    """Typed wire projection of the live-config propagation report."""
+    clean: bool
+    close_failed: list[WireLiveCloseFailure]
+    closed: list[str]
+    refresh_failed: list[WireLiveRefreshFailure]
+    refreshed: list[str]
+    skipped: list[WireLiveHotSwapSkip]
+    swap_failed: list[WireLiveSwapFailure]
+    swapped: list[str]
+
+
 @dataclass
 class CallbackToolDefinition:
     """Public callback tool definition accepted by `tools/register`.
@@ -347,7 +435,7 @@ owns the embedded envelope (the browser runtime serves no config writes)."""
     generation: int
     backend: Optional[str] = None
     instance_id: Optional[str] = None
-    live_propagation: Optional[dict[str, Any]] = None
+    live_propagation: Optional[WireLiveConfigPropagationReport] = None
     realm_id: Optional[str] = None
     resolved_paths: Optional[dict[str, Any]] = None
 

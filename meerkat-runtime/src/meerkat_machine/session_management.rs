@@ -1486,6 +1486,12 @@ impl MeerkatMachine {
         // loop can re-acquire it to commit and exit. Phase 4: await quiescence.
         drop(gate_guard);
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized awaiting runtime-loop and comms-drain quiescence");
+        // Track whether each producer concluded cleanly or had to be
+        // force-aborted after its drain grace window. The feedback inputs
+        // below carry this disposition so the machine records a forced
+        // teardown honestly instead of laundering it as clean quiescence.
+        let mut runtime_loop_forced_abort = false;
+        let mut comms_drain_forced_abort = false;
         if let Some(loop_handle) = loop_handle {
             // Dropping `wake_tx`/`effect_tx` (above) drives the loop through its
             // canonical `StopRuntimeExecutor` exit *once it returns to its
@@ -1527,6 +1533,7 @@ impl MeerkatMachine {
                 }
                 Err(_elapsed) => {
                     abort_handle.abort();
+                    runtime_loop_forced_abort = true;
                     tracing::warn!(
                         %session_id,
                         "runtime loop did not quiesce within the unregister drain grace window after hard-cancel; aborting the stuck loop task"
@@ -1559,6 +1566,7 @@ impl MeerkatMachine {
                 }
                 Err(_elapsed) => {
                     drain_abort.abort();
+                    comms_drain_forced_abort = true;
                     tracing::warn!(
                         %session_id,
                         "comms drain task did not quiesce within the unregister drain grace window; abandoning the already-aborted drain task so teardown cannot stall"
@@ -1607,16 +1615,21 @@ impl MeerkatMachine {
         }
 
         // Phase 6: fire the three feedback inputs to close the obligations.
+        // Each runtime-loop / comms-drain input carries whether that producer
+        // quiesced cleanly or had to be force-aborted after its grace window,
+        // so the machine records the real teardown disposition.
         for (input, context) in [
             (
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                    forced_abort: runtime_loop_forced_abort,
                 },
                 "RuntimeLoopStoppedForUnregister",
             ),
             (
                 crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                    forced_abort: comms_drain_forced_abort,
                 },
                 "CommsDrainExitedForUnregister",
             ),
@@ -1763,16 +1776,21 @@ impl MeerkatMachine {
                 return false;
             }
         }
+        // A terminal storeless session has no runtime loop or comms drain task
+        // attached, so both producers conclude trivially (cleanly) — there is
+        // nothing to force-abort.
         for (input, context) in [
             (
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                    forced_abort: false,
                 },
                 "RuntimeLoopStoppedForUnregister",
             ),
             (
                 crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                    forced_abort: false,
                 },
                 "CommsDrainExitedForUnregister",
             ),

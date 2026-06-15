@@ -720,29 +720,23 @@ where
                             self.retry_policy.max_retries,
                         )?;
                         if let LlmFailureRecoveryKind::Recover = recovery {
-                            if fallback_activation_is_pre_stream_safe(
-                                &error,
-                                self.client.stream_output_observed(),
-                            ) && let Some(switch) = self.client.prepare_model_fallback(&error)
-                            {
-                                let new_identity = switch.new_identity.clone();
-                                let (next_tools, next_params, next_max_tokens, notice) = self
-                                    .apply_model_fallback_switch(
-                                        switch,
-                                        &error,
-                                        current_tools.as_ref(),
-                                    )?;
-                                let next_params = Self::apply_extraction_request_overrides(
-                                    new_identity.provider,
-                                    next_params,
-                                    extraction_output_schema.as_ref(),
-                                )?;
-                                self.client.commit_model_fallback(&new_identity);
-                                current_tools = next_tools;
-                                current_provider_params = next_params;
-                                current_max_tokens = next_max_tokens;
-                                current_messages.push(notice);
-                            }
+                            // P0 Dogma Invariant 1: the MeerkatMachine
+                            // `RecoverableFailure` gate must commit BEFORE any
+                            // durable/client mutation. `prepare_model_fallback`
+                            // is non-mutating, so we only *compute* the pending
+                            // switch here; activation (auth-lease rotation,
+                            // durable metadata persistence, client active-index
+                            // commit) is deferred until the machine accepts the
+                            // recovery.
+                            let pending_switch: Option<AgentLlmFallbackSwitch> =
+                                if fallback_activation_is_pre_stream_safe(
+                                    &error,
+                                    self.client.stream_output_observed(),
+                                ) {
+                                    self.client.prepare_model_fallback(&error)
+                                } else {
+                                    None
+                                };
                             let retry_schedule = self
                                 .retry_policy
                                 .schedule_retry(&error, attempt, self.budget.remaining_duration())
@@ -763,6 +757,28 @@ where
                                     run_id: run_id.clone(),
                                     retry: retry_schedule.clone(),
                                 })?;
+                            // Machine accepted the recovery: only now activate
+                            // the fallback switch (rotate auth lease, persist
+                            // identity, commit the client active index).
+                            if let Some(switch) = pending_switch {
+                                let new_identity = switch.new_identity.clone();
+                                let (next_tools, next_params, next_max_tokens, notice) = self
+                                    .apply_model_fallback_switch(
+                                        switch,
+                                        &error,
+                                        current_tools.as_ref(),
+                                    )?;
+                                let next_params = Self::apply_extraction_request_overrides(
+                                    new_identity.provider,
+                                    next_params,
+                                    extraction_output_schema.as_ref(),
+                                )?;
+                                self.client.commit_model_fallback(&new_identity);
+                                current_tools = next_tools;
+                                current_provider_params = next_params;
+                                current_max_tokens = next_max_tokens;
+                                current_messages.push(notice);
+                            }
                             self.execute_turn_effects(&recover, turn_count, event_tx)
                                 .await?;
                             let _ = crate::event_tap::tap_emit(
@@ -802,25 +818,22 @@ where
                         self.retry_policy.max_retries,
                     )?;
                     if let LlmFailureRecoveryKind::Recover = recovery {
-                        if fallback_activation_is_pre_stream_safe(
-                            &e,
-                            self.client.stream_output_observed(),
-                        ) && let Some(switch) = self.client.prepare_model_fallback(&e)
-                        {
-                            let new_identity = switch.new_identity.clone();
-                            let (next_tools, next_params, next_max_tokens, notice) = self
-                                .apply_model_fallback_switch(switch, &e, current_tools.as_ref())?;
-                            let next_params = Self::apply_extraction_request_overrides(
-                                new_identity.provider,
-                                next_params,
-                                extraction_output_schema.as_ref(),
-                            )?;
-                            self.client.commit_model_fallback(&new_identity);
-                            current_tools = next_tools;
-                            current_provider_params = next_params;
-                            current_max_tokens = next_max_tokens;
-                            current_messages.push(notice);
-                        }
+                        // P0 Dogma Invariant 1: the MeerkatMachine
+                        // `RecoverableFailure` gate must commit BEFORE any
+                        // durable/client mutation. `prepare_model_fallback` is
+                        // non-mutating, so we only *compute* the pending switch
+                        // here; activation (auth-lease rotation, durable
+                        // metadata persistence, client active-index commit) is
+                        // deferred until the machine accepts the recovery.
+                        let pending_switch: Option<AgentLlmFallbackSwitch> =
+                            if fallback_activation_is_pre_stream_safe(
+                                &e,
+                                self.client.stream_output_observed(),
+                            ) {
+                                self.client.prepare_model_fallback(&e)
+                            } else {
+                                None
+                            };
                         let retry_schedule = self
                             .retry_policy
                             .schedule_retry(&e, attempt, self.budget.remaining_duration())
@@ -842,6 +855,24 @@ where
                                 run_id: run_id.clone(),
                                 retry: retry_schedule.clone(),
                             })?;
+                        // Machine accepted the recovery: only now activate the
+                        // fallback switch (rotate auth lease, persist identity,
+                        // commit the client active index).
+                        if let Some(switch) = pending_switch {
+                            let new_identity = switch.new_identity.clone();
+                            let (next_tools, next_params, next_max_tokens, notice) = self
+                                .apply_model_fallback_switch(switch, &e, current_tools.as_ref())?;
+                            let next_params = Self::apply_extraction_request_overrides(
+                                new_identity.provider,
+                                next_params,
+                                extraction_output_schema.as_ref(),
+                            )?;
+                            self.client.commit_model_fallback(&new_identity);
+                            current_tools = next_tools;
+                            current_provider_params = next_params;
+                            current_max_tokens = next_max_tokens;
+                            current_messages.push(notice);
+                        }
                         self.execute_turn_effects(&recover, turn_count, event_tx)
                             .await?;
                         let _ = crate::event_tap::tap_emit(
@@ -5466,6 +5497,7 @@ mod tests {
                     return Ok(HookExecutionReport::empty());
                 }
                 Ok(HookExecutionReport {
+                    started: vec![crate::hooks::HookId::new("observe-run-completed")],
                     outcomes: vec![HookOutcome {
                         hook_id: crate::hooks::HookId::new("observe-run-completed"),
                         point: HookPoint::RunCompleted,
@@ -5616,6 +5648,194 @@ mod tests {
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::HookDenied),
             "RunCompleted hook denial should leave the machine-owned terminal cause"
+        );
+    }
+
+    /// `HookStarted` must mean execution actually began. The agent emits one
+    /// `HookStarted` per id in `report.started` (the hooks the engine truly
+    /// ran), NOT per id from `matching_hooks()` (which advertises every matched
+    /// hook, including ones a deny short-circuit or a saturated background queue
+    /// never ran). This engine advertises two matching ids but reports only the
+    /// first as started, proving the agent drives `HookStarted` off `started`.
+    #[tokio::test]
+    async fn hook_started_emitted_only_for_started_hooks_not_matched() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookId, HookInvocation, HookOutcome,
+            HookPoint,
+        };
+
+        struct PartialStartHook;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for PartialStartHook {
+            fn matching_hooks(
+                &self,
+                invocation: &HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<Vec<HookId>, HookEngineError> {
+                if invocation.point == HookPoint::RunStarted {
+                    Ok(vec![HookId::new("ran"), HookId::new("skipped")])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::RunStarted {
+                    return Ok(HookExecutionReport::empty());
+                }
+                // Two hooks matched, but only "ran" actually executed; "skipped"
+                // never began (e.g. it sat behind a saturated background queue).
+                Ok(HookExecutionReport {
+                    started: vec![HookId::new("ran")],
+                    outcomes: vec![HookOutcome {
+                        hook_id: HookId::new("ran"),
+                        point: HookPoint::RunStarted,
+                        priority: 0,
+                        registration_index: 0,
+                        decision: None,
+                        failure_reason: None,
+                        duration_ms: Some(0),
+                    }],
+                    decision: None,
+                })
+            }
+        }
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_hook_engine(Arc::new(PartialStartHook))
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .unwrap();
+
+        let mut started_ids = Vec::new();
+        let mut completed_ids = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::HookStarted { hook_id, point } => {
+                    assert_eq!(point, HookPoint::RunStarted);
+                    started_ids.push(hook_id);
+                }
+                crate::event::AgentEvent::HookCompleted { hook_id, .. } => {
+                    completed_ids.push(hook_id);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            started_ids,
+            vec![HookId::new("ran")],
+            "HookStarted must fire only for hooks the engine actually started, \
+             not for every matched hook"
+        );
+        assert_eq!(
+            completed_ids,
+            vec![HookId::new("ran")],
+            "the started hook also completes"
+        );
+    }
+
+    /// A foreground hook that BEGINS execution and then hard-errors (timeout or
+    /// adapter runtime failure) must still emit `HookStarted` before its
+    /// terminal `HookFailed`. When `execute()` returns `Err`, the partial
+    /// `HookExecutionReport` — including the id pushed into `started` — is
+    /// discarded, so the agent surfaces the start from the engine error itself
+    /// (a `HookEngineError` carrying a hook_id means that hook began). Without
+    /// this, a timed-out hook would emit a terminal `HookFailed` with no
+    /// preceding `HookStarted` — the inverse of the started-without-terminal
+    /// gap this fix closed.
+    #[tokio::test]
+    async fn hook_started_emitted_before_hook_failed_on_engine_error() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookId, HookInvocation, HookPoint,
+        };
+
+        struct TimingOutHook;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for TimingOutHook {
+            fn matching_hooks(
+                &self,
+                invocation: &HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<Vec<HookId>, HookEngineError> {
+                if invocation.point == HookPoint::RunStarted {
+                    Ok(vec![HookId::new("slow")])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::RunStarted {
+                    return Ok(HookExecutionReport::empty());
+                }
+                // The hook began executing, then timed out. The partial report
+                // (with "slow" in `started`) is discarded as the error
+                // propagates; the agent must still surface HookStarted.
+                Err(HookEngineError::Timeout {
+                    hook_id: HookId::new("slow"),
+                    timeout_ms: 1,
+                })
+            }
+        }
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_hook_engine(Arc::new(TimingOutHook))
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        // The run may fail-close on the hook engine error; the event ordering
+        // is what this test pins, so the run result itself is not asserted.
+        let _ = agent.run_with_events("prompt".to_string().into(), tx).await;
+
+        let mut sequence: Vec<(&str, HookId)> = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::HookStarted { hook_id, point } => {
+                    assert_eq!(point, HookPoint::RunStarted);
+                    sequence.push(("started", hook_id));
+                }
+                crate::event::AgentEvent::HookFailed { hook_id, .. } => {
+                    sequence.push(("failed", hook_id));
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            sequence,
+            vec![
+                ("started", HookId::new("slow")),
+                ("failed", HookId::new("slow")),
+            ],
+            "a hook that started then hard-errored must emit HookStarted before \
+             HookFailed, never a terminal HookFailed with no preceding start"
         );
     }
 
@@ -9242,6 +9462,371 @@ mod tests {
         assert!(
             !client.fallback_committed(),
             "fallback must not activate after user-visible stream output escaped"
+        );
+    }
+
+    /// Wraps the generated-kernel-backed [`TestTurnStateHandle`] but rejects the
+    /// `RecoverableFailure` machine gate. Every other input (including the
+    /// `ClassifyLlmFailureRecovery` classifier that yields `Recover`) flows
+    /// through real MeerkatMachine authority; only the recoverable-failure
+    /// commit is forced to refuse.
+    #[derive(Debug)]
+    struct RejectRecoverableFailureHandle {
+        inner: crate::agent::test_turn_state_handle::TestTurnStateHandle,
+    }
+
+    impl RejectRecoverableFailureHandle {
+        fn new() -> Self {
+            Self {
+                inner: crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            }
+        }
+    }
+
+    impl crate::handles::TurnStateHandle for RejectRecoverableFailureHandle {
+        fn apply_turn_input(
+            &self,
+            input: crate::turn_execution_authority::TurnExecutionInput,
+        ) -> Result<
+            Vec<crate::turn_execution_authority::TurnExecutionEffect>,
+            crate::handles::DslTransitionError,
+        > {
+            if matches!(
+                input,
+                crate::turn_execution_authority::TurnExecutionInput::RecoverableFailure { .. }
+            ) {
+                return Err(crate::handles::DslTransitionError::guard_rejected(
+                    "RejectRecoverableFailureHandle::apply_turn_input",
+                    "test handle rejects the RecoverableFailure machine gate",
+                ));
+            }
+            self.inner.apply_turn_input(input)
+        }
+
+        fn start_conversation_run(
+            &self,
+            run_id: RunId,
+            primitive_kind: TurnPrimitiveKind,
+            admitted_content_shape: ContentShape,
+            vision_enabled: bool,
+            image_tool_results_enabled: bool,
+            max_extraction_retries: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_conversation_run(
+                run_id,
+                primitive_kind,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+                max_extraction_retries,
+            )
+        }
+
+        fn start_immediate_append(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_immediate_append(run_id)
+        }
+
+        fn start_immediate_context(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.start_immediate_context(run_id)
+        }
+
+        fn primitive_applied(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.primitive_applied(run_id)
+        }
+
+        fn llm_returned_tool_calls(
+            &self,
+            run_id: RunId,
+            tool_count: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_tool_calls(run_id, tool_count)
+        }
+
+        fn llm_returned_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.llm_returned_terminal(run_id)
+        }
+
+        fn register_pending_ops(
+            &self,
+            run_id: RunId,
+            op_refs: std::collections::BTreeSet<crate::ops::AsyncOpRef>,
+            barrier_operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner
+                .register_pending_ops(run_id, op_refs, barrier_operation_ids)
+        }
+
+        fn tool_calls_resolved(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.tool_calls_resolved(run_id)
+        }
+
+        fn ops_barrier_satisfied(
+            &self,
+            run_id: RunId,
+            operation_ids: std::collections::BTreeSet<crate::ops::OperationId>,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.ops_barrier_satisfied(run_id, operation_ids)
+        }
+
+        fn boundary_continue(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_continue(run_id)
+        }
+
+        fn boundary_complete(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.boundary_complete(run_id)
+        }
+
+        fn enter_extraction(
+            &self,
+            run_id: RunId,
+            max_retries: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.enter_extraction(run_id, max_retries)
+        }
+
+        fn extraction_start(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_start(run_id)
+        }
+
+        fn extraction_validation_passed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_passed(run_id)
+        }
+
+        fn extraction_validation_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_validation_failed(run_id, error)
+        }
+
+        fn extraction_failed(
+            &self,
+            run_id: RunId,
+            error: String,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.extraction_failed(run_id, error)
+        }
+
+        fn recoverable_failure(
+            &self,
+            run_id: RunId,
+            retry: crate::retry::LlmRetrySchedule,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.recoverable_failure(run_id, retry)
+        }
+
+        fn fatal_failure(
+            &self,
+            run_id: RunId,
+            failure: TurnFailureSource,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.fatal_failure(run_id, failure)
+        }
+
+        fn retry_requested(
+            &self,
+            run_id: RunId,
+            retry_attempt: u32,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.retry_requested(run_id, retry_attempt)
+        }
+
+        fn cancel_now(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancel_now(run_id)
+        }
+
+        fn request_cancel_after_boundary(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.request_cancel_after_boundary(run_id)
+        }
+
+        fn cancellation_observed(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.cancellation_observed(run_id)
+        }
+
+        fn acknowledge_terminal(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.acknowledge_terminal(run_id)
+        }
+
+        fn turn_limit_reached(
+            &self,
+            run_id: RunId,
+            turn_count: u64,
+            max_turns: u64,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.turn_limit_reached(run_id, turn_count, max_turns)
+        }
+
+        fn budget_exhausted(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.budget_exhausted(run_id)
+        }
+
+        fn time_budget_exceeded(
+            &self,
+            run_id: RunId,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.time_budget_exceeded(run_id)
+        }
+
+        fn force_cancel_no_run(&self) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.force_cancel_no_run()
+        }
+
+        fn run_completed(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_completed(run_id)
+        }
+
+        fn run_failed(
+            &self,
+            run_id: RunId,
+            reason: crate::turn_execution_authority::TurnFailureReason,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_failed(run_id, reason)
+        }
+
+        fn run_cancelled(&self, run_id: RunId) -> Result<(), crate::handles::DslTransitionError> {
+            self.inner.run_cancelled(run_id)
+        }
+
+        fn snapshot(&self) -> crate::handles::TurnStateSnapshot {
+            self.inner.snapshot()
+        }
+    }
+
+    /// P0 Dogma Invariant 1: fallback activation must be gated behind the
+    /// MeerkatMachine `RecoverableFailure` acceptance. If the machine rejects
+    /// the recovery, NO durable/client mutation may have happened: the client
+    /// active index stays on the primary model and the persisted session
+    /// metadata still names the primary model.
+    #[tokio::test]
+    async fn model_fallback_does_not_mutate_when_machine_rejects_recovery() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(FallbackActivatingClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&[
+            crate::VIEW_IMAGE_TOOL_NAME,
+            "shell",
+        ]));
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
+        // Seed durable session metadata so the fallback persistence branch in
+        // `apply_model_fallback_switch` is genuinely reachable; the guard under
+        // test is that this `model` is NOT rewritten to the backup identity.
+        session
+            .set_session_metadata(crate::SessionMetadata {
+                schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
+                model: "primary".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: crate::provider::Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: crate::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("typed metadata setter should route through generated authority");
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .with_turn_state_handle(Arc::new(RejectRecoverableFailureHandle::new()))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+
+        let err = agent
+            .run("trigger fallback".to_string().into())
+            .await
+            .expect_err(
+                "a rejected RecoverableFailure machine gate must fail the run, not silently \
+                 activate the fallback",
+            );
+        assert!(
+            matches!(err, AgentError::InternalError(ref message)
+                if message.contains("RecoverableFailure")),
+            "rejection must propagate as an InternalError naming the rejected gate, got: {err:?}"
+        );
+
+        // Client active index untouched: still serving the primary model.
+        assert_eq!(
+            client.model(),
+            "primary",
+            "client active index must not commit the fallback when the machine rejects recovery"
+        );
+
+        // Durable session metadata untouched: still names the primary model,
+        // never the backup identity that the fallback would have persisted.
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("seeded session metadata should survive the build");
+        assert_eq!(
+            metadata.model, "primary",
+            "session metadata must not persist the fallback identity when recovery is rejected"
+        );
+
+        // Only the primary stream call ever ran (no fallback retry).
+        assert_eq!(
+            client.seen_tools().len(),
+            1,
+            "exactly one (primary) stream call should have run before the rejected gate"
         );
     }
 

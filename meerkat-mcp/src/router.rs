@@ -2002,6 +2002,7 @@ impl McpRouter {
 
         let mut tool_to_server = HashMap::new();
         let mut canonical_tools: BTreeMap<String, Arc<ToolDef>> = BTreeMap::new();
+        let mut collided: BTreeSet<String> = BTreeSet::new();
         let mut complete = true;
 
         for server_name in server_names {
@@ -2014,19 +2015,32 @@ impl McpRouter {
                 continue;
             };
             for tool in &entry.tools {
-                if let Some(previous_owner) =
-                    tool_to_server.insert(tool.name.to_string(), server_name.clone())
-                    && previous_owner != server_name
+                // Fail closed by exclusion: a tool name owned by two different
+                // servers is ambiguous, so it must be dispatchable from NEITHER.
+                // A same-name-same-server re-entry is not a collision.
+                if let Some(existing_owner) = tool_to_server.get(tool.name.as_str())
+                    && existing_owner != &server_name
                 {
                     tracing::warn!(
                         tool = %tool.name,
-                        previous_owner = %previous_owner,
-                        current_owner = %server_name,
-                        "MCP projection remapped duplicate tool name to newer owner"
+                        existing_owner = %existing_owner,
+                        colliding_owner = %server_name,
+                        "MCP projection tool name owned by two servers; excluding it from the published catalog (ambiguous => denied)"
                     );
+                    collided.insert(tool.name.to_string());
+                    complete = false;
+                    continue;
                 }
+                tool_to_server.insert(tool.name.to_string(), server_name.clone());
                 canonical_tools.insert(tool.name.to_string(), Arc::clone(tool));
             }
+        }
+
+        // Remove every collided name so a tool exposed by two servers is
+        // routable from neither (the first writer is also dropped here).
+        for name in &collided {
+            tool_to_server.remove(name);
+            canonical_tools.remove(name);
         }
 
         let catalog_entries: Arc<[ToolCatalogEntry]> = canonical_tools
@@ -2176,17 +2190,19 @@ impl McpRouter {
         let _guard = InflightCallGuard::new(&entry.active_calls);
         let result = conn.call_tool(name, args).await;
 
+        // Fail closed (matching CallStarted): a rejected CallFinished is
+        // authoritative divergence, not a benign no-op. Surface the tool
+        // result only when the surface owner accepts the finish.
         if let Err(error) = self
             .surface_owner
             .apply(ExternalToolSurfaceInput::CallFinished {
                 surface_id: sid.clone(),
             })
         {
-            tracing::warn!(
-                server = %server_name,
-                error = %error,
-                "Surface owner rejected CallFinished"
-            );
+            return Err(McpError::ServerUnavailable {
+                server: server_name.clone(),
+                state: format!("Surface owner rejected CallFinished: {error}"),
+            });
         }
 
         result
@@ -2597,13 +2613,25 @@ mod tests {
 
     fn complete_add(router: &mut McpRouter, server_name: &str) {
         let sid = SurfaceId::from(server_name);
+        // Read the per-surface sequences from the owner's surface snapshot
+        // after each transition rather than `staged_intents_in_order()[0]` +
+        // a hardcoded `pending_task_sequence: 1`. The `[0]` form and the
+        // hardcoded task sequence only happen to be correct for the FIRST
+        // surface; once a second surface is staged they diverge and
+        // PendingSucceeded fails its task/lineage sequence guards. The
+        // snapshot exposes the authoritative staged/pending/lineage sequences
+        // minted by the handle for this surface.
         router
             .surface_owner
             .apply(ExternalToolSurfaceInput::StageAdd {
                 surface_id: sid.clone(),
             })
             .expect("stage add");
-        let staged_sequence = router.surface_owner.staged_intents_in_order()[0].2;
+        let staged_sequence = router
+            .surface_owner
+            .surface_snapshot(server_name)
+            .and_then(|snap| snap.staged_intent_sequence)
+            .expect("staged intent sequence after stage add");
         router
             .surface_owner
             .apply(ExternalToolSurfaceInput::ApplyBoundary {
@@ -2612,13 +2640,21 @@ mod tests {
                 applied_at_turn: TurnNumber(staged_sequence),
             })
             .expect("apply add boundary");
+        let pending = router
+            .surface_owner
+            .surface_snapshot(server_name)
+            .expect("surface snapshot after apply boundary");
         router
             .surface_owner
             .apply(ExternalToolSurfaceInput::PendingSucceeded {
                 surface_id: sid,
                 operation: SurfaceDeltaOperation::Add,
-                pending_task_sequence: 1,
-                staged_intent_sequence: staged_sequence,
+                pending_task_sequence: pending
+                    .pending_task_sequence
+                    .expect("pending task sequence after apply boundary"),
+                staged_intent_sequence: pending
+                    .pending_lineage_sequence
+                    .expect("pending lineage sequence after apply boundary"),
                 applied_at_turn: TurnNumber(staged_sequence),
             })
             .expect("add success");
@@ -2907,6 +2943,179 @@ mod tests {
         }
     }
 
+    /// Surface handle decorator that delegates every read/transition to a real
+    /// generated handle, but rejects `CallFinished` inputs. Used to prove the
+    /// router fails closed when the surface owner rejects the finish for a tool
+    /// call whose underlying transport already returned a result (fix #7).
+    struct RejectCallFinishedSurfaceHandle {
+        inner: Arc<dyn ExternalToolSurfaceHandle>,
+    }
+
+    impl RejectCallFinishedSurfaceHandle {
+        fn new() -> Self {
+            Self {
+                inner: generated_surface_handle(),
+            }
+        }
+    }
+
+    impl ExternalToolSurfaceHandle for RejectCallFinishedSurfaceHandle {
+        fn apply_surface_input(
+            &self,
+            input: CoreSurfaceInput,
+        ) -> Result<CoreSurfaceTransition, DslTransitionError> {
+            match input {
+                CoreSurfaceInput::CallFinished { .. } => Err(DslTransitionError::guard_rejected(
+                    "RejectCallFinishedSurfaceHandle",
+                    "call finished forcibly rejected for test",
+                )),
+                other => self.inner.apply_surface_input(other),
+            }
+        }
+
+        fn register(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.register(surface_id)
+        }
+
+        fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_add(surface_id, now_ms)
+        }
+
+        fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_remove(surface_id, now_ms)
+        }
+
+        fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.inner.stage_reload(surface_id, now_ms)
+        }
+
+        fn apply_boundary(
+            &self,
+            surface_id: String,
+            now_ms: u64,
+            staged_intent_sequence: u64,
+            applied_at_turn: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.inner
+                .apply_boundary(surface_id, now_ms, staged_intent_sequence, applied_at_turn)
+        }
+
+        fn mark_pending_succeeded(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.inner.mark_pending_succeeded(
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+            )
+        }
+
+        fn mark_pending_failed(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+            cause: ExternalToolSurfaceFailureCause,
+        ) -> Result<(), DslTransitionError> {
+            self.inner.mark_pending_failed(
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+                cause,
+            )
+        }
+
+        fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.call_started(surface_id)
+        }
+
+        fn call_finished(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::CallFinished { surface_id })
+                .map(|_| ())
+        }
+
+        fn finalize_removal_clean(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.finalize_removal_clean(surface_id)
+        }
+
+        fn finalize_removal_forced(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.inner.finalize_removal_forced(surface_id)
+        }
+
+        fn snapshot_aligned(&self, epoch: u64) -> Result<(), DslTransitionError> {
+            self.inner.snapshot_aligned(epoch)
+        }
+
+        fn shutdown_surface(&self) -> Result<(), DslTransitionError> {
+            self.inner.shutdown_surface()
+        }
+
+        fn surface_snapshot(&self, surface_id: &str) -> Option<SurfaceSnapshot> {
+            self.inner.surface_snapshot(surface_id)
+        }
+
+        fn diagnostic_snapshot(&self) -> SurfaceDiagnosticSnapshot {
+            self.inner.diagnostic_snapshot()
+        }
+
+        fn visible_surfaces(&self) -> BTreeSet<String> {
+            self.inner.visible_surfaces()
+        }
+
+        fn removing_surfaces(&self) -> BTreeSet<String> {
+            self.inner.removing_surfaces()
+        }
+
+        fn pending_surfaces(&self) -> BTreeSet<String> {
+            self.inner.pending_surfaces()
+        }
+
+        fn has_pending_or_staged(&self) -> bool {
+            self.inner.has_pending_or_staged()
+        }
+
+        fn snapshot_epoch(&self) -> u64 {
+            self.inner.snapshot_epoch()
+        }
+
+        fn snapshot_aligned_epoch(&self) -> u64 {
+            self.inner.snapshot_aligned_epoch()
+        }
+    }
+
+    /// Gate for fix #7: a surface-owner rejection of `CallFinished` is
+    /// authoritative divergence. The router must fail closed (return a typed
+    /// `ServerUnavailable` fault) instead of warn-and-returning the tool result
+    /// with router/machine inflight-call state diverged. Mirrors the
+    /// fail-closed `CallStarted` rejection path.
+    #[tokio::test]
+    async fn call_finished_rejection_fails_closed_not_returning_result() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router =
+            McpRouter::new_with_surface_handle(Arc::new(RejectCallFinishedSurfaceHandle::new()));
+        router
+            .add_server(test_server_config("test-server", &server_path))
+            .await
+            .expect("add_server");
+
+        // The underlying transport succeeds, but the surface owner rejects the
+        // CallFinished apply; the result must NOT be surfaced.
+        let err = router
+            .call_tool("echo", &serde_json::json!({"message": "hi"}))
+            .await
+            .expect_err("CallFinished rejection must fail closed, not return the result");
+        assert!(
+            matches!(err, McpError::ServerUnavailable { .. }),
+            "expected a typed ServerUnavailable fault, got {err:?}"
+        );
+    }
+
     /// Gate for dogma row #112: a surface-owner rejection of a finalize-removal
     /// is authoritative divergence. The router must fail closed (return a typed
     /// error) instead of warn-and-continuing with router/machine state diverged.
@@ -2955,6 +3164,133 @@ mod tests {
         assert!(
             matches!(err, McpError::ProtocolError { .. }),
             "expected a typed ProtocolError fault, got {err:?}"
+        );
+    }
+
+    /// Insert a shell `ServerEntry` directly with the given tool names. Used to
+    /// stage tool-name overlap between two visible servers without standing up
+    /// real MCP connections.
+    fn insert_entry_with_tools(router: &mut McpRouter, server_name: &str, tool_names: &[&str]) {
+        let tools: Vec<Arc<ToolDef>> = tool_names
+            .iter()
+            .map(|name| {
+                Arc::new(ToolDef::new(
+                    *name,
+                    format!("tool {name} from {server_name}"),
+                    serde_json::json!({"type": "object"}),
+                ))
+            })
+            .collect();
+        router.servers.insert(
+            server_name.to_string(),
+            ServerEntry {
+                config: McpServerConfig::stdio(
+                    server_name,
+                    "noop".to_string(),
+                    vec![],
+                    HashMap::new(),
+                ),
+                connection: None,
+                tools,
+                active_calls: AtomicUsize::new(0),
+            },
+        );
+    }
+
+    /// Gate for fixes #6: a tool name exposed by two different servers is
+    /// ambiguous and must be dispatchable from NEITHER. The OLD behavior was
+    /// last-wins (silently route to an arbitrary owner). The published
+    /// projection must exclude the collided name entirely while leaving each
+    /// server's non-colliding tools routable.
+    #[tokio::test]
+    async fn duplicate_tool_name_across_servers_is_excluded_from_projection() {
+        let mut router = generated_handle_owner_router();
+
+        // Two active, visible servers.
+        complete_add(&mut router, "server-a");
+        complete_add(&mut router, "server-b");
+
+        // Both expose "shared"; each also exposes a unique tool.
+        insert_entry_with_tools(&mut router, "server-a", &["shared", "only_a"]);
+        insert_entry_with_tools(&mut router, "server-b", &["shared", "only_b"]);
+
+        let complete = router.publish_projection_snapshot();
+        assert!(
+            !complete,
+            "a tool-name collision is an incomplete projection (fail closed)"
+        );
+
+        let projection = Arc::clone(&router.projection);
+
+        // The colliding name is absent from routing and the catalog.
+        assert!(
+            !projection.tool_to_server.contains_key("shared"),
+            "collided tool name must not be routable from any server"
+        );
+        assert!(
+            projection
+                .catalog_entries
+                .iter()
+                .all(|entry| entry.tool.name.as_str() != "shared"),
+            "collided tool name must be excluded from the published catalog"
+        );
+
+        // Non-colliding tools from each server remain routable.
+        assert_eq!(
+            projection.tool_to_server.get("only_a").map(String::as_str),
+            Some("server-a")
+        );
+        assert_eq!(
+            projection.tool_to_server.get("only_b").map(String::as_str),
+            Some("server-b")
+        );
+        assert!(
+            projection
+                .catalog_entries
+                .iter()
+                .any(|entry| entry.tool.name.as_str() == "only_a")
+        );
+        assert!(
+            projection
+                .catalog_entries
+                .iter()
+                .any(|entry| entry.tool.name.as_str() == "only_b")
+        );
+
+        // Dispatching the ambiguous name fails not_found (denied, never routed).
+        let err = router
+            .call_tool("shared", &serde_json::json!({}))
+            .await
+            .expect_err("collided tool name must not dispatch");
+        assert!(
+            matches!(err, McpError::ToolNotFound(_)),
+            "ambiguous tool name must be denied as not_found, got {err:?}"
+        );
+    }
+
+    /// Same-name-same-server re-entry (the same tool listed twice by one server)
+    /// is NOT a collision; the tool stays routable and the projection complete.
+    #[test]
+    fn duplicate_tool_name_within_single_server_is_not_a_collision() {
+        let mut router = generated_handle_owner_router();
+        complete_add(&mut router, "solo");
+        insert_entry_with_tools(&mut router, "solo", &["dup", "dup", "unique"]);
+
+        let complete = router.publish_projection_snapshot();
+        assert!(
+            complete,
+            "a same-server duplicate is not a collision; projection stays complete"
+        );
+
+        let projection = Arc::clone(&router.projection);
+        assert_eq!(
+            projection.tool_to_server.get("dup").map(String::as_str),
+            Some("solo"),
+            "same-server duplicate tool name remains routable"
+        );
+        assert_eq!(
+            projection.tool_to_server.get("unique").map(String::as_str),
+            Some("solo")
         );
     }
 

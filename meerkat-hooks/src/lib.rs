@@ -1050,14 +1050,19 @@ impl HookEngine for DefaultHookEngine {
             .enumerate()
         {
             // Every resolved entry has a typed adapter (resolved at the config
-            // boundary). A missing adapter is an internal invariant break, not
-            // a recoverable runtime state, so fail closed with a typed error
-            // rather than parsing JSON here.
+            // boundary). A missing adapter is a pre-execution config-resolution
+            // invariant break (the hook never starts), so fail closed with an
+            // InvalidConfiguration error rather than ExecutionFailed. This keeps
+            // the rule "a HookEngineError carrying a hook_id() means that hook
+            // actually began executing" — Timeout and adapter-runtime
+            // ExecutionFailed both originate from execute_one after the hook
+            // started — which Agent::execute_hooks relies on to emit a
+            // HookStarted before the terminal HookFailed on the error path.
             let adapter = resolved.adapter(&entry.id).cloned().ok_or_else(|| {
-                HookEngineError::ExecutionFailed {
-                    hook_id: entry.id.clone(),
-                    reason: "no resolved adapter for hook id".to_string(),
-                }
+                HookEngineError::InvalidConfiguration(format!(
+                    "no resolved adapter for hook id '{}'",
+                    entry.id
+                ))
             })?;
             if entry.mode == HookExecutionMode::Background {
                 background.push((registration_index, entry, adapter));
@@ -1080,6 +1085,11 @@ impl HookEngine for DefaultHookEngine {
 
         let mut merged = HookExecutionReport::empty();
         for (registration_index, entry, adapter) in foreground {
+            // Record the start before running: a foreground hook that actually
+            // executes is the only one that earns a `HookStarted` event. A deny
+            // short-circuit breaks the loop below, so later foreground entries
+            // are never pushed here.
+            merged.started.push(entry.id.clone());
             let outcome = self
                 .execute_one(entry, adapter, registration_index, invocation.clone())
                 .await?;
@@ -1124,6 +1134,10 @@ impl HookEngine for DefaultHookEngine {
                         continue;
                     }
                 };
+                // A permit was acquired and the task is about to be spawned, so
+                // this background hook truly begins executing — record its start.
+                // The saturated `continue` branch above never reaches here.
+                merged.started.push(entry.id.clone());
                 let engine = self.clone();
                 let invocation_cloned = invocation.clone();
                 let task = async move {
@@ -1724,6 +1738,10 @@ mod tests {
         assert!(matches!(report.decision, Some(HookDecision::Deny { .. })));
         assert_eq!(report.outcomes.len(), 1);
         assert_eq!(observed_runs.load(AtomicOrdering::SeqCst), 0);
+        // A foreground deny short-circuits the loop, so only the hook that
+        // actually ran is reported as started — the skipped lower-priority
+        // observer must not appear (it never began execution).
+        assert_eq!(report.started, vec![HookId::new("guardrail-deny")]);
     }
 
     #[tokio::test]
@@ -2283,13 +2301,18 @@ mod tests {
             .await
             .expect("register bg-slow handler");
 
-        engine
+        let report = engine
             .execute(
                 invocation(HookPoint::PostToolExecution, SessionId::new()),
                 None,
             )
             .await
             .expect("execute background hooks");
+
+        // Only the hook that acquired the permit and was spawned actually began
+        // executing — the saturated/skipped second hook must not be reported as
+        // started (and so earns no HookStarted event).
+        assert_eq!(report.started, vec![HookId::new("bg-first")]);
 
         // The first hook took the only permit at dispatch time; the second was
         // queue-full and recorded a typed Skipped signal (not a silent skip).

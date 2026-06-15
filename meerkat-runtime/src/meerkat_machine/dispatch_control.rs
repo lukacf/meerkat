@@ -156,7 +156,7 @@ impl MeerkatMachine {
                     let flags = resolved.coarse_flags();
                     let preview_result = {
                         let drv = driver.lock().await;
-                        drv.preview_accept_resolved_input(input.clone(), resolved.clone())
+                        drv.preview_accept_resolved_input(input.clone(), &resolved)
                             .await
                             .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?
                     };
@@ -196,7 +196,7 @@ impl MeerkatMachine {
                     let result = {
                         let mut drv = driver.lock().await;
                         let result = drv
-                            .accept_resolved_input(input, resolved.clone())
+                            .accept_resolved_input(input, resolved)
                             .await
                             .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
                         if !Self::accept_outcome_matches_preview(&preview_result, &result) {

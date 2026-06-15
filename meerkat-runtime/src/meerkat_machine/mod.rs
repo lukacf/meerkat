@@ -540,10 +540,7 @@ pub(crate) fn authorize_stored_input_state_seed(
             abandon_reason,
             abandon_attempt_count,
             attempt_count: u64::from(seed.attempt_count),
-            run_id: seed
-                .last_run_id
-                .as_ref()
-                .map(std::string::ToString::to_string),
+            run_id: seed.last_run_id.as_ref().map(dsl::RunId::from_domain),
             boundary_sequence: seed.last_boundary_sequence,
             admission_sequence: seed.admission_sequence,
             recovery_lane: seed.recovery_lane.map(dsl::InputLane::from),
@@ -894,14 +891,16 @@ type MeerkatMachineCommandFuture<'a> = Pin<
     Box<dyn Future<Output = Result<MeerkatMachineCommandResult, MeerkatMachineCommandError>> + 'a>,
 >;
 
+#[cfg(test)]
+pub(crate) use driver::machine_select_runtime_loop_batch;
 pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, cancel_runtime_loop_run,
     commit_runtime_loop_run, fail_machine_run, fail_runtime_loop_run,
-    machine_batch_primitive_projections, machine_batch_runtime_semantics,
-    machine_commit_prepared_destroy, machine_commit_service_turn_terminal_receipt,
-    machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
-    machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
-    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
+    machine_authorize_runtime_loop_batch, machine_batch_primitive_projections,
+    machine_batch_runtime_semantics, machine_commit_prepared_destroy,
+    machine_commit_service_turn_terminal_receipt, machine_prepare_bindings_projection,
+    machine_prepare_destroy, machine_recover_ephemeral_driver, machine_recover_persistent_driver,
+    machine_recycle_preserving_work, machine_reset, machine_retire, machine_stop_runtime,
     prepare_runtime_loop_batch_start,
 };
 

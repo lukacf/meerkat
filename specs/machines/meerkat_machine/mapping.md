@@ -5529,6 +5529,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `current_run_has_pre_run_phase`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `staged_inputs_are_not_queued`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `staged_inputs_have_run_association`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `staged_surface_ops_are_known_and_sequenced`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

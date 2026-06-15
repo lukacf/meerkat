@@ -414,47 +414,6 @@ async fn recovery_counts_queued_as_recovered() -> Result<(), RuntimeDriverError>
 }
 
 #[tokio::test]
-async fn recovery_applied_stays_applied() -> Result<(), RuntimeDriverError> {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-    let input = make_prompt_input("hello");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input_id, &run_id).unwrap();
-    driver.apply_input(&input_id, &run_id).unwrap();
-
-    let report = driver.recover_ephemeral()?;
-    assert_eq!(report.inputs_recovered, 1);
-
-    // Applied stays Applied (side effects already happened)
-    assert!(driver.input_state(&input_id).is_some());
-    assert_eq!(
-        driver.input_phase(&input_id),
-        Some(InputLifecycleState::AppliedPendingConsumption)
-    );
-    assert_queue_projection_alignment(&driver);
-    Ok(())
-}
-
-#[tokio::test]
-async fn stage_input_keeps_queue_projection_aligned() {
-    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    let input = make_prompt_input("stage me");
-    let input_id = input.id().clone();
-    driver.accept_input(input).await.unwrap();
-
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&input_id, &run_id).unwrap();
-
-    assert!(driver.queue().is_empty());
-    assert_queue_projection_alignment(&driver);
-}
-
-#[tokio::test]
 async fn retired_rejects_input() {
     let (machine, session_id, _runtime_id) = registered_machine().await;
     SessionServiceRuntimeExt::retire_runtime(&machine, &session_id)

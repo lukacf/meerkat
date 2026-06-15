@@ -37,6 +37,16 @@ pub struct RuntimeEpochId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct RunId(pub String);
 
+impl RunId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn get(&self, _key: &str) -> String {
+        self.0.clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct InputId(pub String);
 
@@ -2610,7 +2620,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_abandon_attempt_count: Map<String, u64>,
             input_attempt_counts: Map<String, u64>,
             max_stage_attempts: u64,
-            input_run_associations: Map<String, String>,
+            input_run_associations: Map<String, RunId>,
             input_boundary_sequences: Map<String, u64>,
             live_boundary_context_sequence_by_run: Map<RunId, u64>,
             next_admission_seq: u64,
@@ -3594,7 +3604,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 abandon_reason: Option<Enum<InputAbandonReason>>,
                 abandon_attempt_count: u64,
                 attempt_count: u64,
-                run_id: Option<String>,
+                run_id: Option<RunId>,
                 boundary_sequence: Option<u64>,
                 admission_sequence: Option<u64>,
                 recovery_lane: Option<Enum<InputLane>>,
@@ -3700,7 +3710,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 abandon_reason: Option<Enum<InputAbandonReason>>,
                 abandon_attempt_count: u64,
                 attempt_count: u64,
-                run_id: Option<String>,
+                run_id: Option<RunId>,
                 boundary_sequence: Option<u64>,
                 admission_sequence: Option<u64>,
                 admission_sequence_recovery: Option<Enum<RecoveredInputNormalizationReasonKind>>,
@@ -3712,7 +3722,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             ChangeLane { input_id: String, new_lane: Enum<InputLane> },
             PrioritizeInput { input_id: String },
             DeferInputBehindBacklog { input_id: String },
-            StageForRun { input_id: String, run_id: String },
+            StageForRun { input_id: String, run_id: RunId },
             IncrementAttemptCount { input_id: String },
             RollbackStaged { input_id: String, lane: Enum<InputLane> },
             ResolveStagedRollback { input_id: String, lane: Enum<InputLane> },
@@ -5459,6 +5469,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         invariant current_run_has_pre_run_phase {
             (self.current_run_id == None && self.pre_run_phase == None)
             || (self.current_run_id != None && self.pre_run_phase != None)
+        }
+
+        invariant staged_inputs_are_not_queued {
+            for_all(input_id in self.input_phases.keys(),
+                self.input_phases.get(input_id).get("value") != InputPhase::Staged
+                || !self.input_lane.contains_key(input_id))
+        }
+
+        invariant staged_inputs_have_run_association {
+            for_all(input_id in self.input_phases.keys(),
+                self.input_phases.get(input_id).get("value") != InputPhase::Staged
+                || self.input_run_associations.contains_key(input_id))
         }
 
         invariant staged_surface_ops_are_known_and_sequenced {
@@ -15534,11 +15556,23 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition StageForRun {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input StageForRun { input_id, run_id }
-            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_queued" {
+                self.input_phases.contains_key(input_id)
+                && self.input_phases.get(input_id).get("value") == InputPhase::Queued
+            }
+            guard "input_lane_bound" { self.input_lane.contains_key(input_id) }
+            guard "input_sequence_bound" { self.input_admission_seq.contains_key(input_id) }
+            guard "input_recovery_lane_bound" { self.input_recovery_lanes.contains_key(input_id) }
+            guard "input_not_run_associated" { !self.input_run_associations.contains_key(input_id) }
+            guard "current_run_matches" {
+                self.current_run_id != None
+                && self.current_run_id.get("value") == run_id
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Staged);
                 self.input_run_associations.insert(input_id, run_id);
                 self.input_lane.remove(input_id);
+                self.input_attempt_counts.increment(input_id, 1);
             }
             to Idle
             emit RecordRunAssociation

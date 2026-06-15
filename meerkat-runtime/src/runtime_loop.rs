@@ -153,9 +153,8 @@ async fn resolve_runtime_completion_waiters(
     .await;
     let mut registry = completions.lock().await;
     match result_class {
-        Ok(result_class) => resolve_completion_waiters_from_authority(
-            &mut registry,
-            input_ids,
+        Ok(result_class) => registry.resolve_runtime_completion_authorized(
+            input_ids.iter().cloned(),
             terminal,
             result_class,
             finalization_error,
@@ -188,9 +187,8 @@ async fn resolve_machine_terminal_completion_waiters(
     let error_metadata = machine_terminal_completion_error(driver, reason.clone()).await;
     let mut registry = completions.lock().await;
     match (result_class, error_metadata) {
-        (Ok(result_class), Ok(error_metadata)) => resolve_completion_waiters_from_authority(
-            &mut registry,
-            input_ids,
+        (Ok(result_class), Ok(error_metadata)) => registry.resolve_runtime_completion_authorized(
+            input_ids.iter().cloned(),
             None,
             result_class,
             error_metadata,
@@ -216,155 +214,6 @@ async fn runtime_terminated_completion_class(
         crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
     )
     .await
-}
-
-fn resolve_completion_waiters_from_authority(
-    registry: &mut crate::completion::CompletionRegistry,
-    input_ids: &[InputId],
-    terminal: Option<&CoreApplyTerminal>,
-    authority: crate::meerkat_machine::driver::RuntimeCompletionResultAuthority,
-    finalization_error: Option<meerkat_core::TurnErrorMetadata>,
-) {
-    use crate::meerkat_machine::dsl::RuntimeCompletionResultClass;
-
-    match authority.class() {
-        RuntimeCompletionResultClass::Completed => {
-            let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved Completed without result payload",
-                );
-                return;
-            };
-            for input_id in input_ids {
-                registry.resolve_completed_authorized(
-                    input_id,
-                    result.as_ref().clone(),
-                    authority.clone(),
-                );
-            }
-        }
-        RuntimeCompletionResultClass::CompletedWithoutResult => {
-            if !matches!(terminal, Some(CoreApplyTerminal::NoPendingBoundary) | None) {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved CompletedWithoutResult with terminal payload",
-                );
-                return;
-            }
-            for input_id in input_ids {
-                registry.resolve_without_result_authorized(input_id, authority.clone());
-            }
-        }
-        RuntimeCompletionResultClass::CallbackPending => {
-            let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal else {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved CallbackPending without callback payload",
-                );
-                return;
-            };
-            for input_id in input_ids {
-                registry.resolve_callback_pending_authorized(
-                    input_id,
-                    tool_name.clone(),
-                    args.clone(),
-                    authority.clone(),
-                );
-            }
-        }
-        RuntimeCompletionResultClass::Cancelled => {
-            if terminal.is_some() || finalization_error.is_some() {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved Cancelled with payload",
-                );
-                return;
-            }
-            for input_id in input_ids {
-                registry.resolve_cancelled_authorized(input_id, authority.clone());
-            }
-        }
-        RuntimeCompletionResultClass::AbandonedWithError => {
-            if matches!(terminal, Some(CoreApplyTerminal::RunResult(_))) {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved AbandonedWithError with result payload",
-                );
-                return;
-            }
-            let Some(error) = finalization_error else {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved AbandonedWithError without typed error",
-                );
-                return;
-            };
-            let reason = error
-                .detail
-                .clone()
-                .unwrap_or_else(|| "runtime finalization failed".to_string());
-            for input_id in input_ids {
-                registry.resolve_abandoned_with_error_authorized(
-                    input_id,
-                    reason.clone(),
-                    error.clone(),
-                    authority.clone(),
-                );
-            }
-        }
-        RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
-            // The class authority still requires that output was produced (a
-            // RunResult terminal), but the produced result is deliberately NOT
-            // forwarded to waiters: finalization (durable commit) failed, so the
-            // run is not durably terminal and the output must not be surfaced as
-            // a usable success result.
-            let Some(CoreApplyTerminal::RunResult(_result)) = terminal else {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved CompletedWithFinalizationFailure without result payload",
-                );
-                return;
-            };
-            let Some(error) = finalization_error else {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved finalization failure without typed error",
-                );
-                return;
-            };
-            for input_id in input_ids {
-                registry.resolve_completed_with_finalization_failure_authorized(
-                    input_id,
-                    error.clone(),
-                    authority.clone(),
-                );
-            }
-        }
-        RuntimeCompletionResultClass::RuntimeTerminated => {
-            if terminal.is_some() || finalization_error.is_some() {
-                fail_closed_completion_waiters(
-                    registry,
-                    input_ids,
-                    "runtime completion authority resolved RuntimeTerminated with payload",
-                );
-                return;
-            }
-            registry.resolve_inputs_runtime_terminated(
-                input_ids.iter().cloned(),
-                "runtime terminated",
-                authority,
-            );
-        }
-    }
 }
 
 fn fail_closed_completion_waiters(
@@ -1357,21 +1206,24 @@ async fn process_queue(
             // The authority implements steer-first priority and same-boundary
             // batching for steer inputs; queue inputs follow the prompt-aware
             // batching policy.
-            let batch_ids = crate::meerkat_machine::machine_select_runtime_loop_batch(&d);
-
-            if batch_ids.is_empty() {
+            let Some(batch) = crate::meerkat_machine::machine_authorize_runtime_loop_batch(&d)
+            else {
                 return false;
-            }
+            };
 
-            // Dequeue the batch members from the physical queues.
-            let staged_inputs: Vec<_> = batch_ids
-                .iter()
-                .filter_map(|id| d.dequeue_by_id(id))
-                .collect();
-
-            if staged_inputs.is_empty() {
-                return false;
-            }
+            // Dequeue the batch members from the physical queues. The physical
+            // projection must exactly match the machine-selected batch; partial
+            // shrinkage would turn projection drift into different semantic work.
+            let staged_inputs = match d.dequeue_batch_exact(&batch) {
+                Ok(staged_inputs) => staged_inputs,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "runtime loop batch projection conformance failed"
+                    );
+                    return true;
+                }
+            };
 
             let run_id = prebound_run_id.unwrap_or_else(RunId::new);
 
@@ -1422,15 +1274,15 @@ async fn process_queue(
                     },
                 ),
             };
-            Some((contributing_input_ids, staged_ids, run_id, primitive))
+            Some((contributing_input_ids, run_id, primitive, batch))
         };
 
         match dequeued {
-            Some((input_ids, staged_ids, run_id, primitive)) => {
+            Some((input_ids, run_id, primitive, batch)) => {
                 if let Err(err) = crate::meerkat_machine::prepare_runtime_loop_batch_start(
                     driver,
                     run_id.clone(),
-                    &staged_ids,
+                    batch,
                 )
                 .await
                 {
@@ -3357,9 +3209,8 @@ mod tests {
             args: serde_json::json!({ "value": "browser" }),
         });
 
-        resolve_completion_waiters_from_authority(
-            &mut registry,
-            std::slice::from_ref(&input_id),
+        registry.resolve_runtime_completion_authorized(
+            std::iter::once(input_id.clone()),
             terminal.as_ref(),
             crate::meerkat_machine::driver::test_runtime_completion_authority(
                 crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CallbackPending,
@@ -3396,9 +3247,8 @@ mod tests {
         };
         let terminal = Some(CoreApplyTerminal::RunResult(Box::new(run_result)));
 
-        resolve_completion_waiters_from_authority(
-            &mut registry,
-            std::slice::from_ref(&input_id),
+        registry.resolve_runtime_completion_authorized(
+            std::iter::once(input_id.clone()),
             terminal.as_ref(),
             crate::meerkat_machine::driver::test_runtime_completion_authority(
                 crate::meerkat_machine::dsl::RuntimeCompletionResultClass::Completed,

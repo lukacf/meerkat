@@ -119,10 +119,69 @@ impl MachineAdmissionAuthority {
     }
 }
 
+/// Runtime-local proof that generated admission authority authorized execution
+/// of the accepted input's semantic admission plan.
+#[must_use = "runtime ingress execution capability must be consumed by accept_resolved_input"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeIngressExecutionCapability {
+    input_id: String,
+    lane: mm_dsl::InputLane,
+    plan: mm_dsl::AdmissionPlanKind,
+}
+
+impl RuntimeIngressExecutionCapability {
+    fn from_admission_resolved_effect(
+        input_id: String,
+        lane: mm_dsl::InputLane,
+        plan: mm_dsl::AdmissionPlanKind,
+    ) -> Self {
+        Self {
+            input_id,
+            lane,
+            plan,
+        }
+    }
+
+    fn validate_for(
+        self,
+        input_id: &InputId,
+        handling_mode: HandlingMode,
+        admission_plan: &AdmissionPlan,
+    ) -> Result<(), String> {
+        if self.input_id != input_id.to_string() {
+            return Err(format!(
+                "runtime ingress capability id '{}' did not match accepted input '{input_id}'",
+                self.input_id
+            ));
+        }
+
+        let expected_lane = mm_dsl::InputLane::from(handling_mode);
+        if self.lane != expected_lane {
+            return Err(format!(
+                "runtime ingress capability lane {:?} did not match accepted input lane {expected_lane:?}",
+                self.lane
+            ));
+        }
+
+        let expected_plan = match admission_plan {
+            AdmissionPlan::ConsumedOnAccept => mm_dsl::AdmissionPlanKind::ConsumedOnAccept,
+            AdmissionPlan::Queued { .. } => mm_dsl::AdmissionPlanKind::Queued,
+        };
+        if self.plan != expected_plan {
+            return Err(format!(
+                "runtime ingress capability plan {:?} did not match accepted input plan {expected_plan:?}",
+                self.plan
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 /// Machine-owned resolution of an accepted input's semantic admission path.
 // Cannot derive `Eq`: `RuntimeInputProjection` carries a typed
 // `peer_response_terminal` fact whose render payload is a `serde_json::Value`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct ResolvedAdmission {
     policy: PolicyDecision,
     handling_mode: HandlingMode,
@@ -132,6 +191,7 @@ pub struct ResolvedAdmission {
     coarse_flags: CoarseAdmissionFlags,
     requires_active_pre_admission: bool,
     authority: MachineAdmissionAuthority,
+    execution_capability: Option<RuntimeIngressExecutionCapability>,
 }
 
 impl ResolvedAdmission {
@@ -145,6 +205,7 @@ impl ResolvedAdmission {
         coarse_flags: CoarseAdmissionFlags,
         requires_active_pre_admission: bool,
         authority: MachineAdmissionAuthority,
+        execution_capability: Option<(String, mm_dsl::InputLane, mm_dsl::AdmissionPlanKind)>,
     ) -> Self {
         Self {
             policy,
@@ -155,6 +216,11 @@ impl ResolvedAdmission {
             coarse_flags,
             requires_active_pre_admission,
             authority,
+            execution_capability: execution_capability.map(|(input_id, lane, plan)| {
+                RuntimeIngressExecutionCapability::from_admission_resolved_effect(
+                    input_id, lane, plan,
+                )
+            }),
         }
     }
 
@@ -166,6 +232,11 @@ impl ResolvedAdmission {
         self.requires_active_pre_admission
     }
 
+    #[cfg(test)]
+    pub(crate) fn policy(&self) -> &PolicyDecision {
+        &self.policy
+    }
+
     pub(crate) fn stages_run_boundary(&self) -> bool {
         self.policy.apply_mode == crate::policy::ApplyMode::StageRunBoundary
     }
@@ -174,22 +245,51 @@ impl ResolvedAdmission {
         &self.authority
     }
 
-    pub(crate) fn into_parts(
+    pub(crate) fn semantically_equivalent_to(&self, other: &Self) -> bool {
+        self.policy == other.policy
+            && self.handling_mode == other.handling_mode
+            && self.runtime_semantics == other.runtime_semantics
+            && self.primitive_projection == other.primitive_projection
+            && self.admission_plan == other.admission_plan
+            && self.coarse_flags == other.coarse_flags
+            && self.requires_active_pre_admission == other.requires_active_pre_admission
+            && self.authority == other.authority
+    }
+
+    pub(crate) fn consume_execution_capability(
         self,
-    ) -> (
-        PolicyDecision,
-        HandlingMode,
-        crate::ingress_types::RuntimeInputSemantics,
-        crate::ingress_types::RuntimeInputProjection,
-        AdmissionPlan,
-    ) {
+        input_id: &InputId,
+    ) -> Result<
         (
-            self.policy,
-            self.handling_mode,
-            self.runtime_semantics,
-            self.primitive_projection,
-            self.admission_plan,
-        )
+            PolicyDecision,
+            HandlingMode,
+            crate::ingress_types::RuntimeInputSemantics,
+            crate::ingress_types::RuntimeInputProjection,
+            AdmissionPlan,
+        ),
+        String,
+    > {
+        let Self {
+            policy,
+            handling_mode,
+            runtime_semantics,
+            primitive_projection,
+            admission_plan,
+            execution_capability,
+            ..
+        } = self;
+        let execution_capability = execution_capability.ok_or_else(|| {
+            "runtime ingress execution capability was not minted for this admission resolution"
+                .to_string()
+        })?;
+        execution_capability.validate_for(input_id, handling_mode, &admission_plan)?;
+        Ok((
+            policy,
+            handling_mode,
+            runtime_semantics,
+            primitive_projection,
+            admission_plan,
+        ))
     }
 }
 

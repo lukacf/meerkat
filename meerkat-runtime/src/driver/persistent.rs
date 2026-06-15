@@ -335,9 +335,11 @@ impl PersistentRuntimeDriver {
         self.inner.dequeue_next()
     }
 
-    /// Dequeue a specific input by ID (delegates to inner).
-    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
-        self.inner.dequeue_by_id(input_id)
+    pub(crate) fn dequeue_batch_exact(
+        &mut self,
+        batch: &crate::meerkat_machine::driver::AuthorizedRuntimeLoopBatch,
+    ) -> Result<Vec<(InputId, Input)>, RuntimeDriverError> {
+        self.inner.dequeue_batch_exact(batch)
     }
 
     pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
@@ -391,11 +393,27 @@ impl PersistentRuntimeDriver {
         input: Input,
         resolved: crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let flags = resolved.coarse_flags();
         let mut staged = self.inner.clone_with_isolated_dsl_authority();
         staged.ensure_contract_session_authority()?;
+        let staged_resolved = if resolved.authority().without_wake() {
+            staged.resolve_admission_without_wake_with_active_turn_boundary(
+                &input,
+                resolved.authority().active_turn_boundary_available(),
+            )?
+        } else {
+            staged.resolve_admission_with_active_turn_boundary(
+                &input,
+                resolved.authority().active_turn_boundary_available(),
+            )?
+        };
+        if !resolved.semantically_equivalent_to(&staged_resolved) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "staged admission resolution diverged from preview: preview={resolved:?}, staged={staged_resolved:?}"
+            )));
+        }
+        let flags = staged_resolved.coarse_flags();
         let staged_outcome = staged
-            .accept_resolved_input(input.clone(), resolved.clone())
+            .accept_resolved_input(input.clone(), staged_resolved)
             .await?;
 
         let AcceptOutcome::Accepted {
@@ -456,29 +474,27 @@ impl PersistentRuntimeDriver {
     pub(crate) async fn preview_accept_resolved_input(
         &self,
         input: Input,
-        resolved: crate::accept::ResolvedAdmission,
+        resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         let mut staged = self.inner.clone_with_isolated_dsl_authority();
         staged.ensure_contract_session_authority()?;
-        staged.accept_resolved_input(input, resolved).await
-    }
-
-    /// Stage input (delegates to inner).
-    pub fn stage_input(
-        &mut self,
-        input_id: &InputId,
-        run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::traits::RuntimeDriverError> {
-        self.inner.stage_input(input_id, run_id)
-    }
-
-    /// Stage a batch of inputs atomically (delegates to inner).
-    pub fn stage_batch(
-        &mut self,
-        input_ids: &[InputId],
-        run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::traits::RuntimeDriverError> {
-        self.inner.stage_batch(input_ids, run_id)
+        let staged_resolved = if resolved.authority().without_wake() {
+            staged.resolve_admission_without_wake_with_active_turn_boundary(
+                &input,
+                resolved.authority().active_turn_boundary_available(),
+            )?
+        } else {
+            staged.resolve_admission_with_active_turn_boundary(
+                &input,
+                resolved.authority().active_turn_boundary_available(),
+            )?
+        };
+        if !resolved.semantically_equivalent_to(&staged_resolved) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "staged admission preview diverged from caller resolution: preview={resolved:?}, staged={staged_resolved:?}"
+            )));
+        }
+        staged.accept_resolved_input(input, staged_resolved).await
     }
 
     pub(crate) fn machine_realize_stage_batch(

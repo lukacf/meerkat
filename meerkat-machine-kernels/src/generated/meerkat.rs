@@ -10316,7 +10316,7 @@ pub struct State {
     pub input_abandon_attempt_count: std::collections::BTreeMap<String, u64>,
     pub input_attempt_counts: std::collections::BTreeMap<String, u64>,
     pub max_stage_attempts: u64,
-    pub input_run_associations: std::collections::BTreeMap<String, String>,
+    pub input_run_associations: std::collections::BTreeMap<String, RunId>,
     pub input_boundary_sequences: std::collections::BTreeMap<String, u64>,
     pub live_boundary_context_sequence_by_run: std::collections::BTreeMap<RunId, u64>,
     pub next_admission_seq: u64,
@@ -11014,7 +11014,7 @@ pub mod inputs {
         pub abandon_reason: Option<InputAbandonReason>,
         pub abandon_attempt_count: u64,
         pub attempt_count: u64,
-        pub run_id: Option<String>,
+        pub run_id: Option<RunId>,
         pub boundary_sequence: Option<u64>,
         pub admission_sequence: Option<u64>,
         pub recovery_lane: Option<InputLane>,
@@ -11234,7 +11234,7 @@ pub mod inputs {
         pub abandon_reason: Option<InputAbandonReason>,
         pub abandon_attempt_count: u64,
         pub attempt_count: u64,
-        pub run_id: Option<String>,
+        pub run_id: Option<RunId>,
         pub boundary_sequence: Option<u64>,
         pub admission_sequence: Option<u64>,
         pub admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>,
@@ -11265,7 +11265,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StageForRun {
         pub input_id: String,
-        pub run_id: String,
+        pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct IncrementAttemptCount {

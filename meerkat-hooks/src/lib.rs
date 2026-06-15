@@ -1050,14 +1050,19 @@ impl HookEngine for DefaultHookEngine {
             .enumerate()
         {
             // Every resolved entry has a typed adapter (resolved at the config
-            // boundary). A missing adapter is an internal invariant break, not
-            // a recoverable runtime state, so fail closed with a typed error
-            // rather than parsing JSON here.
+            // boundary). A missing adapter is a pre-execution config-resolution
+            // invariant break (the hook never starts), so fail closed with an
+            // InvalidConfiguration error rather than ExecutionFailed. This keeps
+            // the rule "a HookEngineError carrying a hook_id() means that hook
+            // actually began executing" — Timeout and adapter-runtime
+            // ExecutionFailed both originate from execute_one after the hook
+            // started — which Agent::execute_hooks relies on to emit a
+            // HookStarted before the terminal HookFailed on the error path.
             let adapter = resolved.adapter(&entry.id).cloned().ok_or_else(|| {
-                HookEngineError::ExecutionFailed {
-                    hook_id: entry.id.clone(),
-                    reason: "no resolved adapter for hook id".to_string(),
-                }
+                HookEngineError::InvalidConfiguration(format!(
+                    "no resolved adapter for hook id '{}'",
+                    entry.id
+                ))
             })?;
             if entry.mode == HookExecutionMode::Background {
                 background.push((registration_index, entry, adapter));

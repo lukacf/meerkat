@@ -116,6 +116,24 @@ where
         err: &HookEngineError,
     ) {
         if let Some(hook_id) = err.hook_id() {
+            // A `HookEngineError` carrying a hook_id means that hook actually
+            // began executing (Timeout / adapter-runtime ExecutionFailed both
+            // originate from `execute_one` after start; pre-start config breaks
+            // surface as `InvalidConfiguration`, hook_id == None). The partial
+            // `HookExecutionReport` — including the id pushed into `started` —
+            // is discarded when `execute()` returns `Err`, so emit the
+            // `HookStarted` here, before the terminal `HookFailed`, to preserve
+            // the invariant that every terminal hook event is preceded by its
+            // start (observability for timed-out / hard-failed hooks).
+            crate::event_tap::tap_emit(
+                &self.event_tap,
+                event_tx,
+                AgentEvent::HookStarted {
+                    hook_id: hook_id.clone(),
+                    point: invocation.point,
+                },
+            )
+            .await;
             crate::event_tap::tap_emit(
                 &self.event_tap,
                 event_tx,

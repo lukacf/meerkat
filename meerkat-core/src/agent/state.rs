@@ -5750,6 +5750,95 @@ mod tests {
         );
     }
 
+    /// A foreground hook that BEGINS execution and then hard-errors (timeout or
+    /// adapter runtime failure) must still emit `HookStarted` before its
+    /// terminal `HookFailed`. When `execute()` returns `Err`, the partial
+    /// `HookExecutionReport` — including the id pushed into `started` — is
+    /// discarded, so the agent surfaces the start from the engine error itself
+    /// (a `HookEngineError` carrying a hook_id means that hook began). Without
+    /// this, a timed-out hook would emit a terminal `HookFailed` with no
+    /// preceding `HookStarted` — the inverse of the started-without-terminal
+    /// gap this fix closed.
+    #[tokio::test]
+    async fn hook_started_emitted_before_hook_failed_on_engine_error() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookId, HookInvocation, HookPoint,
+        };
+
+        struct TimingOutHook;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for TimingOutHook {
+            fn matching_hooks(
+                &self,
+                invocation: &HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<Vec<HookId>, HookEngineError> {
+                if invocation.point == HookPoint::RunStarted {
+                    Ok(vec![HookId::new("slow")])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::RunStarted {
+                    return Ok(HookExecutionReport::empty());
+                }
+                // The hook began executing, then timed out. The partial report
+                // (with "slow" in `started`) is discarded as the error
+                // propagates; the agent must still surface HookStarted.
+                Err(HookEngineError::Timeout {
+                    hook_id: HookId::new("slow"),
+                    timeout_ms: 1,
+                })
+            }
+        }
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_hook_engine(Arc::new(TimingOutHook))
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        // The run may fail-close on the hook engine error; the event ordering
+        // is what this test pins, so the run result itself is not asserted.
+        let _ = agent.run_with_events("prompt".to_string().into(), tx).await;
+
+        let mut sequence: Vec<(&str, HookId)> = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::HookStarted { hook_id, point } => {
+                    assert_eq!(point, HookPoint::RunStarted);
+                    sequence.push(("started", hook_id));
+                }
+                crate::event::AgentEvent::HookFailed { hook_id, .. } => {
+                    sequence.push(("failed", hook_id));
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            sequence,
+            vec![
+                ("started", HookId::new("slow")),
+                ("failed", HookId::new("slow")),
+            ],
+            "a hook that started then hard-errored must emit HookStarted before \
+             HookFailed, never a terminal HookFailed with no preceding start"
+        );
+    }
+
     /// Row #102 gate: a turn-state handle that REJECTS the terminal
     /// `run_completed` effect must NOT be laundered into a `tracing::warn!`
     /// while the run reports success. `execute_turn_effects` fail-closes by

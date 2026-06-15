@@ -155,6 +155,53 @@ fn destroy_runtime_clears_external_auth_resolver() {
     );
 }
 
+/// Regression (PR #781 review): the documented register-then-init flow must
+/// survive. Clearing the host resolver is scoped to teardown and to RE-INIT
+/// (replacing an existing runtime) — NOT to a first init. A resolver
+/// registered before the first `init_runtime_from_config` must still be live
+/// afterwards (else external-resolver auth fails silently), while a re-init
+/// that replaces an existing runtime must clear it so the new runtime cannot
+/// inherit the previous host's callback.
+#[wasm_bindgen_test]
+fn init_clears_resolver_only_when_replacing_existing_runtime() {
+    const CFG: &str = r#"{"anthropic_api_key":"sk-test","model":"claude-sonnet-4-5"}"#;
+    fn resolver_cb() -> JsValue {
+        JsValue::from(
+            js_sys::eval("(function (_) { return Promise.resolve('x'); })")
+                .unwrap()
+                .dyn_into::<Function>()
+                .unwrap(),
+        )
+    }
+
+    // Clean slate: teardown clears any prior runtime + resolver.
+    meerkat_web_runtime::destroy_runtime().expect("destroy");
+    assert!(!has_external_auth_resolver());
+
+    // Documented flow: register the host resolver, THEN first init.
+    register_external_auth_resolver(resolver_cb()).expect("register before first init");
+    assert!(has_external_auth_resolver());
+    meerkat_web_runtime::init_runtime_from_config(CFG).expect("first init");
+    assert!(
+        has_external_auth_resolver(),
+        "first init (register-then-init) must NOT clear the host external-auth resolver"
+    );
+
+    // Re-init WITHOUT teardown replaces the existing runtime; the new runtime
+    // must not inherit the prior resolver, so install clears it.
+    register_external_auth_resolver(resolver_cb()).expect("register again");
+    assert!(has_external_auth_resolver());
+    meerkat_web_runtime::init_runtime_from_config(CFG).expect("re-init");
+    assert!(
+        !has_external_auth_resolver(),
+        "re-init replacing an existing runtime must clear the prior host resolver"
+    );
+
+    // Teardown clears unconditionally.
+    meerkat_web_runtime::destroy_runtime().expect("destroy");
+    assert!(!has_external_auth_resolver());
+}
+
 /// Passing a non-function value returns an error — the handle is
 /// type-checked at registration time, not at invocation time.
 #[wasm_bindgen_test]
@@ -441,7 +488,7 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
             provider: "self_hosted".to_string(),
             auth_method: "static_bearer".to_string(),
             source: meerkat_core::CredentialSourceSpec::ExternalResolver {
-                handle: WASM_EXTERNAL_AUTH_RESOLVER_ID.to_string(),
+                handle: WASM_EXTERNAL_AUTH_RESOLVER_ID.into(),
             },
             constraints: Default::default(),
             metadata_defaults: Default::default(),

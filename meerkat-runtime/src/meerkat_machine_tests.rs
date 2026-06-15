@@ -24569,6 +24569,58 @@ async fn detach_ingress_clears_owner() {
 }
 
 #[tokio::test]
+async fn detach_drops_drain_task_runtime_clone_so_identity_claim_is_released() {
+    // Regression for the mob post-discard revival failure
+    // "Session identity already active". The spawned comms-drain task captures
+    // its own `Arc<dyn CommsRuntime>` clone, and a session-scoped inproc runtime
+    // owns the process-scoped session-identity `SessionClaim`, released ONLY when
+    // its LAST `Arc` is dropped. A fire-and-forget `handle.abort()` merely
+    // schedules cancellation, so on a single-threaded runtime the task's clone is
+    // still alive right after detach returns — and a same-id rebuild
+    // (`materialize_revived_member_session` -> `provision_member`) then collides
+    // with the still-held claim. The detach must JOIN the aborted drain task,
+    // dropping its captured clone before returning. We observe that here through a
+    // `Weak` handle: after detach, no strong `Arc` clone may survive.
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let weak_runtime = Arc::downgrade(&comms_runtime);
+    assert!(
+        adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
+            .await
+            .expect("attach session-owned drain"),
+        "first session-owned attach should spawn the drain task"
+    );
+
+    // Drop the test's own strong reference so the only remaining strong holders
+    // are the drain slot's `task_runtime` and the spawned drain task's captured
+    // clone — exactly the state a live keep-alive session is in before revival.
+    drop(comms_runtime);
+    assert!(
+        weak_runtime.upgrade().is_some(),
+        "precondition: the drain slot + drain task must still hold the comms runtime"
+    );
+
+    adapter
+        .update_peer_ingress_context(&session_id, false, None)
+        .await
+        .expect("detach drain");
+
+    assert!(
+        weak_runtime.upgrade().is_none(),
+        "after detach, every Arc<dyn CommsRuntime> clone (slot + drain task) must be \
+         dropped so the session-identity claim is released before any same-id rebuild; \
+         a lingering clone is the race that surfaces as 'Session identity already active'"
+    );
+}
+
+#[tokio::test]
 async fn attach_mob_ingress_promotes_from_session_owned() {
     // Mob provisioning is allowed to take over a session-owned drain
     // (the spec's promotion case). Silent downgrade is blocked; promotion

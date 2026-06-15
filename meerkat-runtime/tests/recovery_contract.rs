@@ -159,13 +159,6 @@ fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
     ids
 }
 
-fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    assert_eq!(driver.runtime_state(), pre_run_phase);
-    driver.contract_begin_run_authority(run_id).unwrap();
-    assert_eq!(driver.runtime_state(), RuntimeState::Running);
-    assert_eq!(driver.pre_run_phase(), Some(pre_run_phase));
-}
-
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
@@ -590,63 +583,4 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
             harness.name
         );
     }
-}
-
-#[tokio::test]
-async fn recovery_ephemeral_driver_contract_keeps_applied_boundary_inputs_out_of_replay() {
-    let mut driver = EphemeralRuntimeDriver::new(make_runtime_id("ephemeral"));
-    let first = make_prompt("first ephemeral contribution");
-    let second = make_prompt("second ephemeral contribution");
-    let first_id = first.id().clone();
-    let second_id = second.id().clone();
-    let expected_ids = sorted_id_strings(vec![first_id.clone(), second_id.clone()]);
-
-    driver.accept_input(first).await.unwrap();
-    driver.accept_input(second).await.unwrap();
-    let _ = driver.take_wake_requested();
-
-    let dequeued_first = driver.dequeue_next().unwrap().0;
-    let dequeued_second = driver.dequeue_next().unwrap().0;
-    assert_eq!(
-        dequeued_first, first_id,
-        "ephemeral driver should drain contributors in admission order before recovery"
-    );
-    assert_eq!(
-        dequeued_second, second_id,
-        "ephemeral driver should drain contributors in admission order before recovery"
-    );
-
-    let run_id = RunId::new();
-    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
-    driver.stage_input(&first_id, &run_id).unwrap();
-    driver.stage_input(&second_id, &run_id).unwrap();
-    driver.apply_input(&first_id, &run_id).unwrap();
-    driver.apply_input(&second_id, &run_id).unwrap();
-
-    let report = driver.recover().await.unwrap();
-    assert_eq!(
-        report.inputs_recovered, 2,
-        "ephemeral recovery should preserve both applied contributors in memory"
-    );
-    assert_eq!(
-        sorted_id_strings(driver.active_input_ids()),
-        expected_ids,
-        "ephemeral recovery should keep the same contributors active"
-    );
-
-    for input_id in [&first_id, &second_id] {
-        assert!(
-            driver.input_state(input_id).is_some(),
-            "ephemeral recovery should keep contributors visible"
-        );
-        assert_eq!(
-            driver.input_phase(input_id),
-            Some(InputLifecycleState::AppliedPendingConsumption),
-            "ephemeral recovery should not replay already-applied contributors"
-        );
-    }
-    assert!(
-        driver.dequeue_next().is_none(),
-        "ephemeral recovery should not requeue already-applied contributors"
-    );
 }

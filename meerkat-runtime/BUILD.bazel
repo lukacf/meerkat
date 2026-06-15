@@ -607,6 +607,7 @@ rust_test(
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
         "//meerkat-core:package_runfiles",
+        "//meerkat-machine-schema:package_runfiles",
         "//meerkat-mcp-server:package_runfiles",
         "//meerkat:package_runfiles",
     ],

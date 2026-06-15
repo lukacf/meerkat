@@ -131,7 +131,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_abandon_attempt_count`: `Map<String, u64>`
 - `input_attempt_counts`: `Map<String, u64>`
 - `max_stage_attempts`: `u64`
-- `input_run_associations`: `Map<String, String>`
+- `input_run_associations`: `Map<String, RunId>`
 - `input_boundary_sequences`: `Map<String, u64>`
 - `live_boundary_context_sequence_by_run`: `Map<RunId, u64>`
 - `next_admission_seq`: `u64`
@@ -382,7 +382,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyCallTimeout`(source: CallTimeoutSource, timeout_ms: u64)
 - `ClassifyLlmFailureRecovery`(failure_kind: Option<LlmRetryFailureKind>, retry_attempt: u64, max_retries: u64)
 - `ResolveTurnSurfaceResult`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass)
-- `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
+- `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
 - `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
 - `ClassifyRuntimeLifecycleDurability`(state: RuntimeLifecycleObservedState)
 - `ClassifyRuntimeLoopQueueAdmission`(state: RuntimeLifecycleObservedState, current_run_bound: Bool)
@@ -423,13 +423,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>)
+- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
 - `PrioritizeInput`(input_id: String)
 - `DeferInputBehindBacklog`(input_id: String)
-- `StageForRun`(input_id: String, run_id: String)
+- `StageForRun`(input_id: String, run_id: RunId)
 - `IncrementAttemptCount`(input_id: String)
 - `RollbackStaged`(input_id: String, lane: InputLane)
 - `ResolveStagedRollback`(input_id: String, lane: InputLane)
@@ -770,6 +770,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `unregister_drain_obligations_require_draining`
 - `current_run_only_while_running_or_retired`
 - `current_run_has_pre_run_phase`
+- `staged_inputs_are_not_queued`
+- `staged_inputs_have_run_association`
 - `staged_surface_ops_are_known_and_sequenced`
 - `staged_reload_surfaces_are_active`
 - `peer_ingress_owner_consistency`
@@ -8965,7 +8967,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `StageForRun`(input_id, run_id)
 - Guards:
-  - `input_tracked`
+  - `input_queued`
+  - `input_lane_bound`
+  - `input_sequence_bound`
+  - `input_recovery_lane_bound`
+  - `input_not_run_associated`
+  - `current_run_matches`
 - Emits: `RecordRunAssociation`
 - To: `Idle`
 
@@ -8973,7 +8980,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `StageForRun`(input_id, run_id)
 - Guards:
-  - `input_tracked`
+  - `input_queued`
+  - `input_lane_bound`
+  - `input_sequence_bound`
+  - `input_recovery_lane_bound`
+  - `input_not_run_associated`
+  - `current_run_matches`
 - Emits: `RecordRunAssociation`
 - To: `Attached`
 
@@ -8981,7 +8993,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StageForRun`(input_id, run_id)
 - Guards:
-  - `input_tracked`
+  - `input_queued`
+  - `input_lane_bound`
+  - `input_sequence_bound`
+  - `input_recovery_lane_bound`
+  - `input_not_run_associated`
+  - `current_run_matches`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 
@@ -8989,7 +9006,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `StageForRun`(input_id, run_id)
 - Guards:
-  - `input_tracked`
+  - `input_queued`
+  - `input_lane_bound`
+  - `input_sequence_bound`
+  - `input_recovery_lane_bound`
+  - `input_not_run_associated`
+  - `current_run_matches`
 - Emits: `RecordRunAssociation`
 - To: `Retired`
 
@@ -8997,7 +9019,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `StageForRun`(input_id, run_id)
 - Guards:
-  - `input_tracked`
+  - `input_queued`
+  - `input_lane_bound`
+  - `input_sequence_bound`
+  - `input_recovery_lane_bound`
+  - `input_not_run_associated`
+  - `current_run_matches`
 - Emits: `RecordRunAssociation`
 - To: `Stopped`
 

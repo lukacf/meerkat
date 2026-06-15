@@ -597,7 +597,7 @@ impl EphemeralRuntimeDriver {
     pub fn input_last_run_id(&self, input_id: &InputId) -> Option<RunId> {
         let key = Self::dsl_key(input_id);
         let raw = self.with_dsl_state(|state| state.input_run_associations.get(&key).cloned())?;
-        raw.parse::<uuid::Uuid>().ok().map(RunId::from_uuid)
+        raw.0.parse::<uuid::Uuid>().ok().map(RunId::from_uuid)
     }
 
     /// Read the committed boundary sequence for an input, from the DSL.
@@ -1074,7 +1074,7 @@ impl EphemeralRuntimeDriver {
                 run_id: recovered_seed
                     .last_run_id
                     .as_ref()
-                    .map(std::string::ToString::to_string),
+                    .map(mm_dsl::RunId::from_domain),
                 boundary_sequence: recovered_seed.last_boundary_sequence,
                 admission_sequence: recovered_seed.admission_sequence,
                 admission_sequence_recovery,
@@ -1853,28 +1853,29 @@ impl EphemeralRuntimeDriver {
         Some((queued.input_id, queued.input))
     }
 
-    /// Dequeue a specific input by ID from whichever queue contains it.
-    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
-        self.steer_queue
-            .dequeue_by_id(input_id)
-            .or_else(|| self.queue.dequeue_by_id(input_id))
-    }
-
-    pub fn stage_input(
+    pub(crate) fn dequeue_batch_exact(
         &mut self,
-        input_id: &InputId,
-        run_id: &RunId,
-    ) -> Result<(), RuntimeDriverError> {
-        self.stage_batch(std::slice::from_ref(input_id), run_id)
-    }
+        batch: &crate::meerkat_machine::driver::AuthorizedRuntimeLoopBatch,
+    ) -> Result<Vec<(InputId, Input)>, RuntimeDriverError> {
+        let mut staged_steer_queue = self.steer_queue.clone();
+        let mut staged_queue = self.queue.clone();
+        let mut dequeued = Vec::with_capacity(batch.input_ids().len());
 
-    /// Stage a batch of inputs via DSL `StageForRun` transitions.
-    pub fn stage_batch(
-        &mut self,
-        input_ids: &[InputId],
-        run_id: &RunId,
-    ) -> Result<(), RuntimeDriverError> {
-        self.machine_realize_stage_batch(input_ids, run_id)
+        for input_id in batch.input_ids() {
+            let Some(input) = staged_steer_queue
+                .dequeue_by_id(input_id)
+                .or_else(|| staged_queue.dequeue_by_id(input_id))
+            else {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "authorized runtime batch member {input_id} was missing from physical queue projection"
+                )));
+            };
+            dequeued.push(input);
+        }
+
+        self.steer_queue = staged_steer_queue;
+        self.queue = staged_queue;
+        Ok(dequeued)
     }
 
     /// Machine-owned realization for a validated staged contributor batch.
@@ -1892,15 +1893,9 @@ impl EphemeralRuntimeDriver {
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::StageForRun {
                     input_id: key,
-                    run_id: run_id.to_string(),
+                    run_id: mm_dsl::RunId(run_id.to_string()),
                 },
                 "StageForRun",
-            )?;
-            self.dsl_apply(
-                mm_dsl::MeerkatMachineInput::IncrementAttemptCount {
-                    input_id: Self::dsl_key(input_id),
-                },
-                "IncrementAttemptCount",
             )?;
 
             let now = Utc::now();
@@ -2599,6 +2594,7 @@ impl EphemeralRuntimeDriver {
         input: &Input,
         authority: MachineAdmissionAuthority,
         effects: Vec<mm_dsl::MeerkatMachineEffect>,
+        mint_execution_capability: bool,
     ) -> Result<ResolvedAdmission, RuntimeDriverError> {
         let Some(effect) = effects.into_iter().find_map(|effect| match effect {
             mm_dsl::MeerkatMachineEffect::AdmissionResolved {
@@ -2735,6 +2731,7 @@ impl EphemeralRuntimeDriver {
             },
             requires_active_pre_admission,
             authority,
+            mint_execution_capability.then_some((input_id, lane, plan)),
         ))
     }
 
@@ -2760,7 +2757,7 @@ impl EphemeralRuntimeDriver {
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
         )?;
-        self.resolved_admission_from_machine_effects(input, authority, effects)
+        self.resolved_admission_from_machine_effects(input, authority, effects, false)
     }
 
     pub(crate) fn resolve_admission(
@@ -2919,9 +2916,17 @@ impl EphemeralRuntimeDriver {
             Self::resolve_admission_plan_input(&authority),
             "ResolveAdmissionPlan",
         )?;
-        let resolved = self.resolved_admission_from_machine_effects(&input, authority, effects)?;
+        let committed_resolved =
+            self.resolved_admission_from_machine_effects(&input, authority, effects, true)?;
+        if !resolved.semantically_equivalent_to(&committed_resolved) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "committed admission resolution diverged from preview: preview={resolved:?}, committed={committed_resolved:?}"
+            )));
+        }
         let (policy, handling_mode, runtime_semantics, primitive_projection, admission_plan) =
-            resolved.into_parts();
+            committed_resolved
+                .consume_execution_capability(&input_id)
+                .map_err(RuntimeDriverError::Internal)?;
 
         let content_shape = ContentShape::from_kind(input.kind());
         let is_prompt = matches!(input, Input::Prompt(_));
@@ -3025,10 +3030,21 @@ impl EphemeralRuntimeDriver {
     pub(crate) async fn preview_accept_resolved_input(
         &self,
         input: Input,
-        resolved: crate::accept::ResolvedAdmission,
+        resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         let mut staged = self.clone_with_isolated_dsl_authority();
         staged.ensure_contract_session_authority()?;
+        let resolved = if resolved.authority().without_wake() {
+            staged.resolve_admission_without_wake_with_active_turn_boundary(
+                &input,
+                resolved.authority().active_turn_boundary_available(),
+            )?
+        } else {
+            staged.resolve_admission_with_active_turn_boundary(
+                &input,
+                resolved.authority().active_turn_boundary_available(),
+            )?
+        };
         staged.accept_resolved_input(input, resolved).await
     }
 
@@ -3889,9 +3905,15 @@ mod tests {
         let input_id = input.id().clone();
         driver.accept_input(input).await.unwrap();
 
+        let run_id = RunId::new();
+        driver
+            .contract_begin_run_authority(run_id.clone())
+            .expect("runtime run authority should begin through generated DSL");
+
         for attempt in 1..3 {
-            let run_id = RunId::new();
-            driver.stage_input(&input_id, &run_id).unwrap();
+            driver
+                .machine_realize_stage_batch(std::slice::from_ref(&input_id), &run_id)
+                .unwrap();
             assert_eq!(driver.input_attempt_count(&input_id), attempt);
 
             driver
@@ -3905,8 +3927,9 @@ mod tests {
             assert_eq!(driver.input_terminal_outcome(&input_id), None);
         }
 
-        let final_run_id = RunId::new();
-        driver.stage_input(&input_id, &final_run_id).unwrap();
+        driver
+            .machine_realize_stage_batch(std::slice::from_ref(&input_id), &run_id)
+            .unwrap();
         assert_eq!(driver.input_attempt_count(&input_id), 3);
         driver
             .rollback_staged(std::slice::from_ref(&input_id))
@@ -3923,6 +3946,47 @@ mod tests {
             })
         );
         assert!(!driver.has_queued_input(&input_id));
+    }
+
+    #[tokio::test]
+    async fn stage_input_keeps_queue_projection_aligned() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("stage-projection"));
+        let input = prompt_input("stage me");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let run_id = RunId::new();
+        driver.contract_begin_run_authority(run_id.clone()).unwrap();
+        driver
+            .machine_realize_stage_batch(std::slice::from_ref(&input_id), &run_id)
+            .unwrap();
+
+        assert!(driver.queue().is_empty());
+        driver.debug_assert_queue_projection_alignment();
+    }
+
+    #[tokio::test]
+    async fn recovery_applied_stays_applied() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("recovery-applied"));
+
+        let input = prompt_input("hello");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let run_id = RunId::new();
+        driver.contract_begin_run_authority(run_id.clone()).unwrap();
+        driver
+            .machine_realize_stage_batch(std::slice::from_ref(&input_id), &run_id)
+            .unwrap();
+        driver.apply_input(&input_id, &run_id).unwrap();
+
+        let report = driver.recover_ephemeral().unwrap();
+        assert_eq!(report.inputs_recovered, 1);
+        assert_eq!(
+            driver.input_phase(&input_id),
+            Some(InputLifecycleState::AppliedPendingConsumption)
+        );
+        driver.debug_assert_queue_projection_alignment();
     }
 
     #[tokio::test]
@@ -3953,7 +4017,7 @@ mod tests {
         );
 
         let err = driver
-            .stage_input(&input_id, &RunId::new())
+            .machine_realize_stage_batch(std::slice::from_ref(&input_id), &RunId::new())
             .expect_err("staging must not synthesize a queued phase without machine authority");
         assert!(
             matches!(&err, RuntimeDriverError::Internal(message) if message.contains("generated input lifecycle phase missing before staging")),
@@ -4158,8 +4222,7 @@ mod tests {
         let projected = driver.resolve_admission(&input).unwrap();
         assert!(projected.requires_active_runtime_pre_admission());
         let flags = projected.coarse_flags();
-        let (policy, _, _, _, _) = projected.into_parts();
-        assert_eq!(policy.wake_mode, WakeMode::WakeIfIdle);
+        assert_eq!(projected.policy().wake_mode, WakeMode::WakeIfIdle);
         assert!(!flags.interrupt_yielding);
         assert!(!flags.request_immediate_processing);
     }

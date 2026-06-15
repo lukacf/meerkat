@@ -30,7 +30,8 @@ pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
 ///
 /// The completion registry accepts this token rather than a bare generated enum
 /// so handwritten code cannot directly fabricate waiter public result truth.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "runtime completion authority must be consumed by waiter resolution"]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeCompletionResultAuthority {
     session_id: SessionId,
     agent_runtime_id: Option<crate::meerkat_machine::dsl::AgentRuntimeId>,
@@ -116,6 +117,68 @@ pub(crate) fn test_runtime_completion_authority(
         result_class,
         cleanup_observation,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeLoopBatchSource {
+    Queue,
+    Steer,
+}
+
+#[must_use = "runtime loop batch authority must be consumed by stage authorization"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AuthorizedRuntimeLoopBatch {
+    input_ids: Vec<InputId>,
+    source: RuntimeLoopBatchSource,
+}
+
+impl AuthorizedRuntimeLoopBatch {
+    fn from_machine_selection(
+        input_ids: Vec<InputId>,
+        source: RuntimeLoopBatchSource,
+    ) -> Option<Self> {
+        if input_ids.is_empty() {
+            None
+        } else {
+            Some(Self { input_ids, source })
+        }
+    }
+
+    pub(crate) fn input_ids(&self) -> &[InputId] {
+        &self.input_ids
+    }
+
+    fn into_stage_for_run(self, run_id: RunId) -> AuthorizedStageForRun {
+        AuthorizedStageForRun {
+            input_ids: self.input_ids,
+            run_id,
+            source: self.source,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_authorized_runtime_loop_batch(
+    input_ids: Vec<InputId>,
+) -> AuthorizedRuntimeLoopBatch {
+    AuthorizedRuntimeLoopBatch {
+        input_ids,
+        source: RuntimeLoopBatchSource::Queue,
+    }
+}
+
+#[must_use = "stage-for-run authority must be consumed by machine_realize_stage_batch"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AuthorizedStageForRun {
+    input_ids: Vec<InputId>,
+    run_id: RunId,
+    source: RuntimeLoopBatchSource,
+}
+
+impl AuthorizedStageForRun {
+    fn into_parts(self) -> (Vec<InputId>, RunId, RuntimeLoopBatchSource) {
+        (self.input_ids, self.run_id, self.source)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -314,7 +377,7 @@ impl DriverEntry {
     pub(crate) async fn preview_accept_resolved_input(
         &self,
         input: Input,
-        resolved: ResolvedAdmission,
+        resolved: &ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => d.preview_accept_resolved_input(input, resolved).await,
@@ -439,14 +502,13 @@ impl DriverEntry {
         }
     }
 
-    /// Dequeue a specific input by ID from whichever queue contains it.
-    pub(crate) fn dequeue_by_id(
+    pub(crate) fn dequeue_batch_exact(
         &mut self,
-        input_id: &InputId,
-    ) -> Option<(InputId, crate::input::Input)> {
+        batch: &AuthorizedRuntimeLoopBatch,
+    ) -> Result<Vec<(InputId, crate::input::Input)>, RuntimeDriverError> {
         match self {
-            DriverEntry::Ephemeral(d) => d.dequeue_by_id(input_id),
-            DriverEntry::Persistent(d) => d.dequeue_by_id(input_id),
+            DriverEntry::Ephemeral(d) => d.dequeue_batch_exact(batch),
+            DriverEntry::Persistent(d) => d.dequeue_batch_exact(batch),
         }
     }
 
@@ -683,12 +745,12 @@ impl DriverEntry {
     /// Stage a batch of inputs atomically in a single `StageDrainSnapshot`.
     pub(crate) fn machine_realize_stage_batch(
         &mut self,
-        input_ids: &[InputId],
-        run_id: &RunId,
+        authority: AuthorizedStageForRun,
     ) -> Result<(), crate::traits::RuntimeDriverError> {
+        let (input_ids, run_id, _source) = authority.into_parts();
         match self {
-            DriverEntry::Ephemeral(d) => d.machine_realize_stage_batch(input_ids, run_id),
-            DriverEntry::Persistent(d) => d.machine_realize_stage_batch(input_ids, run_id),
+            DriverEntry::Ephemeral(d) => d.machine_realize_stage_batch(&input_ids, &run_id),
+            DriverEntry::Persistent(d) => d.machine_realize_stage_batch(&input_ids, &run_id),
         }
     }
 
@@ -1317,6 +1379,21 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
     }
 
     Vec::new()
+}
+
+pub(crate) fn machine_authorize_runtime_loop_batch(
+    driver: &DriverEntry,
+) -> Option<AuthorizedRuntimeLoopBatch> {
+    let ingress = driver.driver_ingress();
+    let source = if ingress.steer_queue().is_empty() {
+        RuntimeLoopBatchSource::Queue
+    } else {
+        RuntimeLoopBatchSource::Steer
+    };
+    AuthorizedRuntimeLoopBatch::from_machine_selection(
+        machine_select_runtime_loop_batch(driver),
+        source,
+    )
 }
 
 pub(crate) fn machine_validate_stage_drain_snapshot(
@@ -2636,16 +2713,18 @@ pub(crate) async fn machine_recycle_preserving_work(
 pub(crate) async fn prepare_runtime_loop_batch_start(
     driver: &SharedDriver,
     run_id: RunId,
-    staged_ids: &[InputId],
+    batch: AuthorizedRuntimeLoopBatch,
 ) -> Result<(), RuntimeDriverError> {
     let mut driver = driver.lock().await;
-    machine_validate_stage_drain_snapshot(&driver, staged_ids)?;
+    let staged_ids = batch.input_ids().to_vec();
+    machine_validate_stage_drain_snapshot(&driver, &staged_ids)?;
+    let stage_authority = batch.into_stage_for_run(run_id.clone());
     machine_begin_run(&mut driver, run_id.clone()).map_err(|err| {
         RuntimeDriverError::Internal(format!("failed to start runtime run: {err}"))
     })?;
 
-    if let Err(err) = driver.machine_realize_stage_batch(staged_ids, &run_id) {
-        let _ = driver.rollback_staged(staged_ids);
+    if let Err(err) = driver.machine_realize_stage_batch(stage_authority) {
+        let _ = driver.rollback_staged(&staged_ids);
         if let Err(rollback_err) = machine_apply_run_return_projection(
             &mut driver,
             &run_id,

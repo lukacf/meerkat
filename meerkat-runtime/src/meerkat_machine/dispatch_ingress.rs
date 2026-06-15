@@ -229,7 +229,7 @@ impl MeerkatMachine {
                     );
                 }
 
-                let (resolved, outcome, handle, accepted_input_id, signal) = {
+                let (flags, stages_run_boundary, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
                     // origin/main observability: surface the idle/running
                     // disposition (idle, attached non-steer, or attached peer)
@@ -265,6 +265,7 @@ impl MeerkatMachine {
                         active_turn_boundary_available,
                     )?;
                     let flags = resolved.coarse_flags();
+                    let stages_run_boundary = resolved.stages_run_boundary();
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
@@ -289,7 +290,7 @@ impl MeerkatMachine {
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
                     let result = match driver
-                        .accept_resolved_input(input, resolved.clone())
+                        .accept_resolved_input(input, resolved)
                         .await
                         .map_err(Self::normalize_destroyed_error)
                     {
@@ -311,7 +312,8 @@ impl MeerkatMachine {
                                 })
                             };
                             (
-                                resolved,
+                                flags,
+                                stages_run_boundary,
                                 result,
                                 handle,
                                 Some(accepted_input_id),
@@ -323,7 +325,8 @@ impl MeerkatMachine {
 
                             if is_terminal || !register_completion {
                                 (
-                                    resolved,
+                                    flags,
+                                    stages_run_boundary,
                                     result,
                                     None,
                                     None,
@@ -335,7 +338,8 @@ impl MeerkatMachine {
                                     completions.register(existing_id.clone())
                                 };
                                 (
-                                    resolved,
+                                    flags,
+                                    stages_run_boundary,
                                     result,
                                     Some(handle),
                                     None,
@@ -354,7 +358,6 @@ impl MeerkatMachine {
                 let (signal, runtime_effect, effect_previous_dsl_state) = if let Some(input_id) =
                     accepted_input_id.clone()
                 {
-                    let flags = resolved.coarse_flags();
                     let (previous_dsl_state, effects) = self
                         .apply_session_dsl_input(
                             &session_id,
@@ -420,7 +423,7 @@ impl MeerkatMachine {
                 let has_boundary_handle = boundary_handle.is_some();
                 if active_turn_boundary_available
                     && signal.should_interrupt_yielding()
-                    && resolved.stages_run_boundary()
+                    && stages_run_boundary
                     && let (Some(input_id), Some(boundary_handle)) =
                         (accepted_input_id_for_live_boundary, boundary_handle)
                 {
@@ -532,7 +535,7 @@ impl MeerkatMachine {
                             "accepted steer input had no live boundary plan; leaving input queued for ordinary post-turn drain"
                         );
                     }
-                } else if signal.should_interrupt_yielding() && resolved.stages_run_boundary() {
+                } else if signal.should_interrupt_yielding() && stages_run_boundary {
                     tracing::debug!(
                         session_id = %session_id,
                         runtime_state = ?state,

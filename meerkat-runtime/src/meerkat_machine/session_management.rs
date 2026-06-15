@@ -1332,19 +1332,11 @@ impl MeerkatMachine {
         &self,
         entry: RuntimeSessionEntry,
         durability_authority: RuntimeOpsLifecycleDurabilityAuthority,
-        runtime_terminated_completion_authority:
-            crate::meerkat_machine::driver::RuntimeCompletionResultAuthority,
     ) {
         let runtime_id = entry.runtime_id.clone();
         let mut driver = entry.driver.lock().await;
         driver.sync_control_projection_from_dsl_authority();
         drop(driver);
-
-        let mut completions = entry.completions.lock().await;
-        completions.resolve_all_runtime_terminated(
-            "runtime session unregistered",
-            runtime_terminated_completion_authority,
-        );
 
         if durability_authority.action
             != crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
@@ -1604,12 +1596,12 @@ impl MeerkatMachine {
                     .map(|entry| Arc::clone(&entry.completions))
             };
             if let Some(completions) = completions {
-                // Same client-facing reason as the finalize sweep below — the
-                // drain-phase vs finalize-phase split is an internal detail and
-                // must not fragment the observable CompletionOutcome contract.
+                // The drain-phase sweep is the single token-consuming
+                // terminalization point for waiters the in-flight run did not
+                // already resolve with its committed outcome.
                 completions.lock().await.resolve_all_runtime_terminated(
                     "runtime session unregistered",
-                    runtime_terminated_completion_authority.clone(),
+                    runtime_terminated_completion_authority,
                 );
             }
         }
@@ -1683,12 +1675,8 @@ impl MeerkatMachine {
 
         if let Some(entry) = entry {
             tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized finalizing entry");
-            self.finalize_unregistered_session(
-                entry,
-                durability_authority,
-                runtime_terminated_completion_authority,
-            )
-            .await;
+            self.finalize_unregistered_session(entry, durability_authority)
+                .await;
         }
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized complete");
         Ok(())
@@ -1720,12 +1708,12 @@ impl MeerkatMachine {
         let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
             return false;
         };
-        let driver_handle = {
+        let (driver_handle, completions) = {
             let sessions = self.sessions.read().await;
             let Some(entry) = sessions.get(session_id) else {
                 return false;
             };
-            Arc::clone(&entry.driver)
+            (Arc::clone(&entry.driver), Arc::clone(&entry.completions))
         };
         let runtime_terminated_completion_authority =
             match crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
@@ -1743,6 +1731,10 @@ impl MeerkatMachine {
                     return false;
                 }
             };
+        completions.lock().await.resolve_all_runtime_terminated(
+            "storeless WASM session discarded",
+            runtime_terminated_completion_authority,
+        );
 
         // The terminal storeless session has no attached runtime loop or comms
         // drain task to quiesce, so the drain obligations are discharged
@@ -1868,7 +1860,6 @@ impl MeerkatMachine {
                 action:
                     crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::RetainSnapshot,
             },
-            runtime_terminated_completion_authority,
         )
         .await;
         true

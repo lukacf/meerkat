@@ -1237,6 +1237,28 @@ fn make_prompt(text: &str) -> Input {
     })
 }
 
+fn make_queued_external_event(label: &str) -> Input {
+    Input::ExternalEvent(crate::input::ExternalEventInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::External {
+                source_name: "unit-test".into(),
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        event_type: "batch_commit_atomicity".into(),
+        payload: serde_json::json!({ "label": label }),
+        blocks: None,
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
+    })
+}
+
 #[tokio::test]
 async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
     use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
@@ -15067,7 +15089,12 @@ async fn prepare_live_run_for_authority_test(
         )
     };
     let run_id = RunId::new();
-    prepare_runtime_loop_batch_start(&driver, run_id.clone(), std::slice::from_ref(&input_id))
+    let batch = {
+        let entry = driver.lock().await;
+        machine_authorize_runtime_loop_batch(&entry).expect("accepted input should authorize batch")
+    };
+    assert_eq!(batch.input_ids(), std::slice::from_ref(&input_id));
+    prepare_runtime_loop_batch_start(&driver, run_id.clone(), batch)
         .await
         .expect("run prepare should stage the accepted input");
     (driver, input_id, run_id)
@@ -15372,7 +15399,13 @@ async fn staged_batch_commit_driver(
         )
     };
     let run_id = RunId::new();
-    prepare_runtime_loop_batch_start(&driver, run_id.clone(), &staged_ids)
+    let batch = {
+        let entry = driver.lock().await;
+        machine_authorize_runtime_loop_batch(&entry)
+            .expect("accepted inputs should authorize batch")
+    };
+    assert_eq!(batch.input_ids(), staged_ids.as_slice());
+    prepare_runtime_loop_batch_start(&driver, run_id.clone(), batch)
         .await
         .expect("batch prepare should stage both inputs");
     (driver, run_id, staged_ids)
@@ -15602,7 +15635,7 @@ async fn persistent_staged_run_driver(
         .contract_begin_run_authority(run_id.clone())
         .expect("runtime run authority should begin through generated DSL");
     driver
-        .stage_input(&input_id, &run_id)
+        .machine_realize_stage_batch(std::slice::from_ref(&input_id), &run_id)
         .expect("input should stage for the run");
 
     (
@@ -15743,8 +15776,11 @@ async fn assert_commit_rejection_preserved_staged_batch(
 
 #[tokio::test]
 async fn run_commit_rejects_receipt_run_id_mismatch_before_mutation() {
-    let (driver, run_id, staged_ids) =
-        staged_batch_commit_driver(make_prompt("first"), make_prompt("second")).await;
+    let (driver, run_id, staged_ids) = staged_batch_commit_driver(
+        make_queued_external_event("first"),
+        make_queued_external_event("second"),
+    )
+    .await;
 
     let result = commit_runtime_loop_run(
         &driver,
@@ -15764,8 +15800,11 @@ async fn run_commit_rejects_receipt_run_id_mismatch_before_mutation() {
 
 #[tokio::test]
 async fn run_commit_rejects_reordered_receipt_contributors_before_mutation() {
-    let (driver, run_id, staged_ids) =
-        staged_batch_commit_driver(make_prompt("first"), make_prompt("second")).await;
+    let (driver, run_id, staged_ids) = staged_batch_commit_driver(
+        make_queued_external_event("first"),
+        make_queued_external_event("second"),
+    )
+    .await;
     let mut receipt_contributors = staged_ids.clone();
     receipt_contributors.reverse();
 
@@ -22515,9 +22554,13 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
         }
     };
 
-    let err = prepare_runtime_loop_batch_start(&driver, RunId::new(), &[InputId::new()])
-        .await
-        .expect_err("staging an unknown input should fail and unwind");
+    let err = prepare_runtime_loop_batch_start(
+        &driver,
+        RunId::new(),
+        crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![InputId::new()]),
+    )
+    .await
+    .expect_err("staging an unknown input should fail and unwind");
     assert!(
         err.to_string()
             .contains("failed to stage accepted input batch")

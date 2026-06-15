@@ -215,9 +215,47 @@ impl MeerkatMachine {
                 if drain_is_running && !self.stage_drain_stop_dsl(&session_id).await {
                     return Ok(MeerkatMachineCommandResult::Unit);
                 }
-                let mut sessions = self.sessions.write().await;
-                if let Some(entry) = sessions.get_mut(&session_id) {
-                    abort_slot(&mut entry.drain_slot);
+                // Abort the drain task AND await its quiescence before returning.
+                //
+                // The drain task captured its own `Arc<dyn CommsRuntime>` clone at
+                // spawn (`spawn_comms_drain`). That runtime owns the process-scoped
+                // session-identity `SessionClaim`, which is released only when its
+                // LAST `Arc` is dropped. A fire-and-forget `handle.abort()` merely
+                // schedules cancellation, so the task's clone — and with it the
+                // claim — can outlive this call. A caller that immediately rebuilds
+                // the same session id under the same identity (mob post-discard
+                // member revival via `update_peer_ingress_context(.., false, None)`
+                // → `provision_member`) then hits "Session identity already active"
+                // at `CommsRuntime`'s `try_acquire`, which surfaces as a terminal
+                // `MemberRestoreFailed`. Take the handle out (which also drops the
+                // slot's own clone) OUTSIDE the held `sessions` lock and bounded-await
+                // quiescence so every drain-task-held clone is dropped before we
+                // return. Mirrors the bounded comms-drain join in
+                // `unregister_session_inner_locked_authorized`.
+                let drain_handle = {
+                    let mut sessions = self.sessions.write().await;
+                    sessions
+                        .get_mut(&session_id)
+                        .and_then(|entry| entry.drain_slot.abort_keeping_handle())
+                };
+                if let Some(drain_handle) = drain_handle {
+                    // Far above realistic cancel latency (a parked drain unwinds in
+                    // sub-ms once aborted) and far below caller shutdown budgets. On
+                    // elapse the task is already aborted and will unwind on its own;
+                    // we stop waiting rather than wedge the caller on a drain that is
+                    // not observing cooperative cancellation promptly (e.g. an
+                    // external transport drain parked in a syscall).
+                    const COMMS_DRAIN_ABORT_GRACE: std::time::Duration =
+                        std::time::Duration::from_secs(2);
+                    if crate::tokio::time::timeout(COMMS_DRAIN_ABORT_GRACE, drain_handle)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            "comms drain task did not quiesce within the abort grace window; proceeding (task already aborted)"
+                        );
+                    }
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }

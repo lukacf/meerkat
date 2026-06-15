@@ -1192,6 +1192,16 @@ struct MockSessionService {
     /// Sessions whose create_session should materialize live state but return
     /// the already-active comms identity error observed in the #37 deliver race.
     create_identity_already_active_sessions: RwLock<HashSet<SessionId>>,
+    /// Sessions whose create_session should fail with the "Session identity
+    /// already active" error WITHOUT registering a live session — the
+    /// production-faithful shape of the user-reported revival failure, where the
+    /// inproc comms-claim acquire fails inside `build_agent` (before the live
+    /// handle is registered) because a not-yet-dropped prior runtime still holds
+    /// the process-scoped claim, so `has_live_session` reads false at the
+    /// recovery re-check. Distinct from
+    /// `create_identity_already_active_sessions`, which leaves the session live
+    /// (the idempotent-success case).
+    create_identity_already_active_no_live_sessions: RwLock<HashSet<SessionId>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     fail_inject: std::sync::atomic::AtomicBool,
     disable_interaction_event_injector: std::sync::atomic::AtomicBool,
@@ -1255,6 +1265,7 @@ impl MockSessionService {
             archived_session_ids: RwLock::new(HashSet::new()),
             create_fail_sessions: RwLock::new(HashSet::new()),
             create_identity_already_active_sessions: RwLock::new(HashSet::new()),
+            create_identity_already_active_no_live_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             fail_inject: std::sync::atomic::AtomicBool::new(false),
             disable_interaction_event_injector: std::sync::atomic::AtomicBool::new(false),
@@ -1469,6 +1480,21 @@ impl MockSessionService {
 
     async fn set_create_session_identity_already_active(&self, session_id: &SessionId) {
         self.create_identity_already_active_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+    }
+
+    /// Inject the production-faithful revival failure: create_session fails with
+    /// the wrapped "Session identity already active" error and does NOT register
+    /// a live session, so `has_live_session` returns false at the actor's
+    /// recovery re-check (the leaked-claim-without-live-session terminal path the
+    /// user hit).
+    async fn set_create_session_identity_already_active_without_live_session(
+        &self,
+        session_id: &SessionId,
+    ) {
+        self.create_identity_already_active_no_live_sessions
             .write()
             .await
             .insert(session_id.clone());
@@ -1748,6 +1774,26 @@ impl SessionService for MockSessionService {
             return Err(SessionError::Store(Box::new(std::io::Error::other(
                 "mock create_session failure",
             ))));
+        }
+        // Production-faithful "already active" failure: the inproc comms-claim
+        // acquire fails INSIDE build_agent, before any live session handle is
+        // registered, so this returns the wrapped BuildError WITHOUT inserting
+        // into self.sessions — leaving has_live_session false at the actor's
+        // recovery re-check (the leaked-claim-without-live-session terminal path).
+        if self
+            .create_identity_already_active_no_live_sessions
+            .read()
+            .await
+            .contains(&session_id)
+        {
+            self.create_session_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::BuildError(format!(
+                    "Comms runtime failed: Failed to create inproc comms runtime: \
+                     Session identity already active: {session_id}"
+                )),
+            ));
         }
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
 
@@ -33632,6 +33678,117 @@ async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
             .await
             .expect("has_live_session"),
         "no shell retry may re-materialize a broken member's session"
+    );
+}
+
+/// Direct regression for the user-reported mob bridge failure
+/// ("...machine-authorized revival of bridge session '...' failed: ...Comms
+/// runtime failed: Failed to create inproc comms runtime: Session identity
+/// already active: ..."): on revival, the re-provision fails with the
+/// "Session identity already active" comms-claim error AND there is no live
+/// session (the discard already removed it), because a not-yet-dropped prior
+/// runtime still holds the process-scoped identity claim. The mob shell must
+/// surface the typed terminal `MemberRestoreFailed` (member Broken) — NOT
+/// silently treat it as idempotent success, which is what the
+/// `has_live_session` re-check guards.
+///
+/// This is the exact (already-active ∧ has_live_session=false) branch that no
+/// prior test could reach: the idempotent-success test leaves the session live
+/// (so `has_live_session` is true), and the generic terminal test injects a
+/// `Store` error that never matches the already-active classifier. Closing that
+/// fidelity gap is why the original failure shipped uncaught. The runtime-layer
+/// drain-task join (`detach_drops_drain_task_runtime_clone_so_identity_claim_is_released`)
+/// removes the race at its source; this pins the mob shell's recovery decision
+/// boundary as the fail-closed backstop.
+#[tokio::test]
+async fn test_revival_already_active_without_live_session_is_typed_terminal() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    let receipt = handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("has_live_session"),
+        "discard must remove the live materialization"
+    );
+    // Re-provision fails with the production-faithful already-active error and
+    // leaves NO live session — the leaked-claim-without-live-session shape.
+    service
+        .set_create_session_identity_already_active_without_live_session(&bridge_session_id)
+        .await;
+
+    let error = handle
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect_err(
+            "already-active with no live session must surface the typed terminal restore failure, \
+             not idempotent success",
+        );
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            reason,
+        } => {
+            assert_eq!(member_id, AgentIdentity::from("w-1"));
+            assert_eq!(session_id, Some(bridge_session_id.clone()));
+            assert!(
+                reason.contains("machine-authorized revival"),
+                "failure reason must carry the typed revival outcome: {reason}"
+            );
+            assert!(
+                reason.contains("Session identity already active"),
+                "failure reason must carry the underlying comms-claim cause: {reason}"
+            );
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+
+    // Machine state: terminal Broken, revival obligation resolved (no dangling
+    // pending revival, no retry loop).
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state");
+    let machine_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
+    let lifecycle = machine_state.member_lifecycle_for_identity(&machine_identity);
+    assert_eq!(
+        lifecycle.status,
+        crate::machines::mob_machine::MobMemberLifecycleStatus::Broken,
+        "already-active-with-no-live-session revival must resolve into Broken: {lifecycle:?}"
+    );
+    assert!(
+        !machine_state
+            .member_revival_pending
+            .contains(&machine_identity),
+        "failed revival must resolve the machine-owned revival obligation"
     );
 }
 

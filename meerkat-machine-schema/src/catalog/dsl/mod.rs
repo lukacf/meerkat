@@ -2158,6 +2158,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "SpawnExecPhase",
+                &["Opened", "MembershipCommitted", "Activated"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LoopIterationReducerCommandKind",
                 &[
                     "StartLoop",
@@ -2473,6 +2477,12 @@ runtime_internal_inputs!(
         AuthorizeFlowRunReducerCommand,
         AuthorizeLoopIterationReducerCommand,
         AuthorizeSpawnProfile,
+        // Spawn-exec ladder internal sub-steps driven by finalize_spawn_*; the
+        // membership-establishing `CommitSpawnMembership` is the surfaced spawn
+        // command target and is NOT runtime-internal.
+        BeginSpawnExec,
+        CommitSpawnActivation,
+        AbortSpawnExec,
         ClassifyFlowRunTerminality,
         ClassifyFlowStepTerminality,
         ClassifyFlowFrameTerminalStatus,

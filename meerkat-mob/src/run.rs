@@ -363,7 +363,10 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ClassifyFlowRunPublicResult { .. }
             | mob_dsl::MobMachineInput::ClassifyFlowStepTerminality { .. }
             | mob_dsl::MobMachineInput::ClassifyFlowFrameTerminalStatus { .. }
-            | mob_dsl::MobMachineInput::Spawn { .. }
+            | mob_dsl::MobMachineInput::BeginSpawnExec { .. }
+            | mob_dsl::MobMachineInput::CommitSpawnMembership { .. }
+            | mob_dsl::MobMachineInput::CommitSpawnActivation { .. }
+            | mob_dsl::MobMachineInput::AbortSpawnExec { .. }
             | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
             | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }
@@ -1547,7 +1550,10 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ClassifyFlowRunPublicResult { .. }
             | mob_dsl::MobMachineInput::ClassifyFlowStepTerminality { .. }
             | mob_dsl::MobMachineInput::ClassifyFlowFrameTerminalStatus { .. }
-            | mob_dsl::MobMachineInput::Spawn { .. }
+            | mob_dsl::MobMachineInput::BeginSpawnExec { .. }
+            | mob_dsl::MobMachineInput::CommitSpawnMembership { .. }
+            | mob_dsl::MobMachineInput::CommitSpawnActivation { .. }
+            | mob_dsl::MobMachineInput::AbortSpawnExec { .. }
             | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
             | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }

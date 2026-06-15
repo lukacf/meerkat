@@ -1106,7 +1106,11 @@ fn mob_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs
         "RunFlow",
         "CancelFlow",
         "FlowStatus",
-        "Spawn",
+        // `Spawn` was decomposed into the machine-driven spawn-exec ladder.
+        "BeginSpawnExec",
+        "CommitSpawnMembership",
+        "CommitSpawnActivation",
+        "AbortSpawnExec",
         "EnsureMember",
         "Reconcile",
         "Retire",
@@ -1211,7 +1215,12 @@ fn every_mutating_mob_runtime_command_has_transition_coverage() {
     for required in [
         "RunFlow",
         "CancelFlow",
-        "Spawn",
+        // `Spawn` was decomposed into the machine-driven spawn-exec ladder;
+        // each sub-step is modeled by its own transition(s).
+        "BeginSpawnExec",
+        "CommitSpawnMembership",
+        "CommitSpawnActivation",
+        "AbortSpawnExec",
         "EnsureMember",
         "Reconcile",
         "Retire",

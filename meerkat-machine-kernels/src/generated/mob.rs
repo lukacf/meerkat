@@ -4046,6 +4046,60 @@ impl std::fmt::Display for SessionId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SpawnExecPhase {
+    #[default]
+    #[serde(rename = "Opened")]
+    Opened,
+    #[serde(rename = "MembershipCommitted")]
+    MembershipCommitted,
+    #[serde(rename = "Activated")]
+    Activated,
+}
+impl SpawnExecPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Opened => "Opened",
+            Self::MembershipCommitted => "MembershipCommitted",
+            Self::Activated => "Activated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SpawnExecPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Opened" => Ok(Self::Opened),
+            "MembershipCommitted" => Ok(Self::MembershipCommitted),
+            "Activated" => Ok(Self::Activated),
+            other => Err(format!("invalid SpawnExecPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SpawnExecPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SpawnExecPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SpawnPolicyRuntimeMode {
     #[default]
     #[serde(rename = "AutonomousHost")]
@@ -4756,6 +4810,7 @@ pub struct State {
     pub member_kickoff_error: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_restore_failures: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_revival_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub spawn_exec_phase: std::collections::BTreeMap<AgentIdentity, SpawnExecPhase>,
     pub member_state_markers: std::collections::BTreeMap<AgentRuntimeId, MobMemberState>,
     pub wiring_edges: std::collections::BTreeSet<WiringEdge>,
     pub external_peer_edges: std::collections::BTreeSet<ExternalPeerEdge>,
@@ -5033,7 +5088,7 @@ pub mod inputs {
         pub status: FlowRunStatus,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct Spawn {
+    pub struct BeginSpawnExec {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
@@ -5043,6 +5098,26 @@ pub mod inputs {
         pub runtime_mode: SpawnPolicyRuntimeMode,
         pub bridge_session_id: Option<SessionId>,
         pub replacing: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitSpawnMembership {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub profile_material_digest: String,
+        pub external_addressable: bool,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub bridge_session_id: Option<SessionId>,
+        pub replacing: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitSpawnActivation {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortSpawnExec {
+        pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeSpawnProfile {
@@ -5700,7 +5775,10 @@ pub enum Input {
     ClassifyFlowStepTerminality(inputs::ClassifyFlowStepTerminality),
     ClassifyFlowFrameTerminalStatus(inputs::ClassifyFlowFrameTerminalStatus),
     ClassifyFlowRunPublicResult(inputs::ClassifyFlowRunPublicResult),
-    Spawn(inputs::Spawn),
+    BeginSpawnExec(inputs::BeginSpawnExec),
+    CommitSpawnMembership(inputs::CommitSpawnMembership),
+    CommitSpawnActivation(inputs::CommitSpawnActivation),
+    AbortSpawnExec(inputs::AbortSpawnExec),
     AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
     ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
     ClassifyMemberWait(inputs::ClassifyMemberWait),
@@ -5845,7 +5923,10 @@ impl Input {
             Self::ClassifyFlowStepTerminality(_) => InputKind::ClassifyFlowStepTerminality,
             Self::ClassifyFlowFrameTerminalStatus(_) => InputKind::ClassifyFlowFrameTerminalStatus,
             Self::ClassifyFlowRunPublicResult(_) => InputKind::ClassifyFlowRunPublicResult,
-            Self::Spawn(_) => InputKind::Spawn,
+            Self::BeginSpawnExec(_) => InputKind::BeginSpawnExec,
+            Self::CommitSpawnMembership(_) => InputKind::CommitSpawnMembership,
+            Self::CommitSpawnActivation(_) => InputKind::CommitSpawnActivation,
+            Self::AbortSpawnExec(_) => InputKind::AbortSpawnExec,
             Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
             Self::ClassifySpawnManyFailure(_) => InputKind::ClassifySpawnManyFailure,
             Self::ClassifyMemberWait(_) => InputKind::ClassifyMemberWait,
@@ -6019,7 +6100,10 @@ pub enum InputKind {
     ClassifyFlowStepTerminality,
     ClassifyFlowFrameTerminalStatus,
     ClassifyFlowRunPublicResult,
-    Spawn,
+    BeginSpawnExec,
+    CommitSpawnMembership,
+    CommitSpawnActivation,
+    AbortSpawnExec,
     AuthorizeSpawnProfile,
     ClassifySpawnManyFailure,
     ClassifyMemberWait,
@@ -7631,9 +7715,26 @@ pub enum TransitionId {
     ClassifySpawnManyFailureInternalStopped,
     ClassifySpawnManyFailureInternalCompleted,
     ClassifySpawnManyFailureInternalDestroyed,
-    SpawnRunningFresh,
-    SpawnRunningFreshPeerOnly,
-    SpawnRunningReplacing,
+    CommitSpawnMembershipFresh,
+    CommitSpawnMembershipFreshPeerOnly,
+    CommitSpawnMembershipReplacing,
+    BeginSpawnExecFresh,
+    BeginSpawnExecFreshPeerOnly,
+    BeginSpawnExecReplacing,
+    CommitSpawnActivationFinalRunning,
+    CommitSpawnActivationFinalStopped,
+    CommitSpawnActivationFinalCompleted,
+    CommitSpawnActivationLateArrivalRunning,
+    CommitSpawnActivationLateArrivalStopped,
+    CommitSpawnActivationLateArrivalCompleted,
+    CommitSpawnActivationDestroyed,
+    AbortSpawnExecActiveRunning,
+    AbortSpawnExecActiveStopped,
+    AbortSpawnExecActiveCompleted,
+    AbortSpawnExecLateArrivalRunning,
+    AbortSpawnExecLateArrivalStopped,
+    AbortSpawnExecLateArrivalCompleted,
+    AbortSpawnExecDestroyed,
     AuthorizeSpawnProfileRunning,
     EnsureMemberRunningExisting,
     EnsureMemberRunningMissing,
@@ -8246,6 +8347,7 @@ pub fn initial_state() -> State {
         member_kickoff_error: Default::default(),
         member_restore_failures: Default::default(),
         member_revival_pending: Default::default(),
+        spawn_exec_phase: Default::default(),
         member_state_markers: Default::default(),
         wiring_edges: Default::default(),
         external_peer_edges: Default::default(),

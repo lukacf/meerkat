@@ -73,13 +73,13 @@ fn authorize_spawn_profile(
     .expect("spawn profile material must be authorized before Spawn");
 }
 
-fn spawn_input(
+fn begin_spawn_input(
     identity_name: &str,
     generation: u64,
     bridge_sid: &str,
     replacing: Option<SessionId>,
 ) -> MobMachineInput {
-    MobMachineInput::Spawn {
+    MobMachineInput::BeginSpawnExec {
         agent_identity: identity(identity_name),
         agent_runtime_id: runtime_id(identity_name, generation),
         fence_token: FenceToken(generation),
@@ -90,6 +90,60 @@ fn spawn_input(
         bridge_session_id: Some(session_id(bridge_sid)),
         replacing,
     }
+}
+
+fn commit_membership_input(
+    identity_name: &str,
+    generation: u64,
+    bridge_sid: &str,
+    replacing: Option<SessionId>,
+) -> MobMachineInput {
+    MobMachineInput::CommitSpawnMembership {
+        agent_identity: identity(identity_name),
+        agent_runtime_id: runtime_id(identity_name, generation),
+        fence_token: FenceToken(generation),
+        generation: Generation(generation),
+        profile_material_digest: profile_material_digest(identity_name, generation),
+        external_addressable: false,
+        runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+        bridge_session_id: Some(session_id(bridge_sid)),
+        replacing,
+    }
+}
+
+/// Drive the full machine-driven spawn ladder (`BeginSpawnExec` →
+/// `CommitSpawnMembership` → `CommitSpawnActivation`) the way the actor's
+/// `finalize_spawn_admit`/`finalize_spawn_activate` do, and return the
+/// membership-commit transition (which carries the `MemberSessionBindingChanged`
+/// effect). `CommitSpawnActivation` settles the per-identity spawn-exec phase so
+/// a later respawn of the same identity can open a fresh window. A rejected
+/// `BeginSpawnExec` (e.g. a fabricated `replacing` witness, which the opener's
+/// `replacing_matches_current` guard rejects) short-circuits with that error.
+fn apply_spawn_ladder(
+    authority: &mut MobMachineAuthority,
+    identity_name: &str,
+    generation: u64,
+    bridge_sid: &str,
+    replacing: Option<SessionId>,
+) -> Result<
+    meerkat_mob::machines::mob_machine::MobMachineTransition,
+    meerkat_mob::machines::mob_machine::MobMachineTransitionError,
+> {
+    MobMachineMutator::apply(
+        authority,
+        begin_spawn_input(identity_name, generation, bridge_sid, replacing.clone()),
+    )?;
+    let commit = MobMachineMutator::apply(
+        authority,
+        commit_membership_input(identity_name, generation, bridge_sid, replacing),
+    )?;
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::CommitSpawnActivation {
+            agent_identity: identity(identity_name),
+        },
+    )?;
+    Ok(commit)
 }
 
 fn retire_input(
@@ -245,11 +299,8 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
 fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, "alpha", 1);
-    let transition = MobMachineMutator::apply(
-        &mut authority,
-        spawn_input("alpha", 1, "bridge-a-gen1", None),
-    )
-    .expect("fresh spawn must be accepted");
+    let transition = apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+        .expect("fresh spawn must be accepted");
 
     let bindings = &authority.state().member_session_bindings;
     assert_eq!(
@@ -276,11 +327,8 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
     let mut authority = MobMachineAuthority::new();
     // Initial spawn — binds alpha to bridge-a-gen1.
     authorize_spawn_profile(&mut authority, "alpha", 1);
-    MobMachineMutator::apply(
-        &mut authority,
-        spawn_input("alpha", 1, "bridge-a-gen1", None),
-    )
-    .expect("initial spawn must be accepted");
+    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+        .expect("initial spawn must be accepted");
 
     // Simulate the actor's handle_respawn retire-half firing Retire with
     // `releasing = current binding`, then the replacement Spawn must
@@ -300,11 +348,8 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
         .get(&identity("alpha"))
         .cloned();
     authorize_spawn_profile(&mut authority, "alpha", 2);
-    let transition = MobMachineMutator::apply(
-        &mut authority,
-        spawn_input("alpha", 2, "bridge-a-gen2", prior),
-    )
-    .expect("respawn spawn must be accepted when replacing witnesses the prior session id");
+    let transition = apply_spawn_ladder(&mut authority, "alpha", 2, "bridge-a-gen2", prior)
+        .expect("respawn spawn must be accepted when replacing witnesses the prior session id");
 
     assert_eq!(
         authority
@@ -332,11 +377,8 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
 fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, "alpha", 1);
-    MobMachineMutator::apply(
-        &mut authority,
-        spawn_input("alpha", 1, "bridge-a-gen1", None),
-    )
-    .expect("spawn must be accepted");
+    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+        .expect("spawn must be accepted");
 
     let releasing = authority
         .state()
@@ -376,13 +418,17 @@ fn spawn_with_wrong_replacing_witness_is_rejected() {
     // the identity. Neither guard matches, so the transition is
     // rejected.
     authorize_spawn_profile(&mut authority, "ghost", 1);
-    let result = MobMachineMutator::apply(
+    let result = apply_spawn_ladder(
         &mut authority,
-        spawn_input("ghost", 1, "bridge-g-gen1", Some(session_id("fabricated"))),
+        "ghost",
+        1,
+        "bridge-g-gen1",
+        Some(session_id("fabricated")),
     );
     assert!(
         result.is_err(),
-        "DSL must reject a Spawn whose `replacing` does not match the binding map state",
+        "DSL must reject a spawn whose `replacing` does not match the binding map state \
+         (the `BeginSpawnExec` opener carries the `replacing_matches_current` guard)",
     );
     assert!(
         !authority
@@ -404,11 +450,8 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
     // No binding-change effect is emitted; the binding stays put.
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, "alpha", 1);
-    MobMachineMutator::apply(
-        &mut authority,
-        spawn_input("alpha", 1, "bridge-a-gen1", None),
-    )
-    .expect("spawn must be accepted");
+    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+        .expect("spawn must be accepted");
 
     let session_id_for_route = authority
         .state()
@@ -446,11 +489,8 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
 fn retire_with_some_releasing_but_wrong_value_is_rejected() {
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, "alpha", 1);
-    MobMachineMutator::apply(
-        &mut authority,
-        spawn_input("alpha", 1, "bridge-a-gen1", None),
-    )
-    .expect("spawn must be accepted");
+    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+        .expect("spawn must be accepted");
 
     let error = MobMachineMutator::apply(
         &mut authority,
@@ -481,11 +521,8 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
     // relation holds through the whole lifecycle.
     let mut authority = MobMachineAuthority::new();
     authorize_spawn_profile(&mut authority, "alpha", 1);
-    MobMachineMutator::apply(
-        &mut authority,
-        spawn_input("alpha", 1, "bridge-a-gen1", None),
-    )
-    .expect("spawn must be accepted");
+    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+        .expect("spawn must be accepted");
 
     let check_invariant = |state: &meerkat_mob::machines::mob_machine::MobMachineState| {
         for key in state.member_session_bindings.keys() {

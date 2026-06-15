@@ -77,6 +77,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `unregister_comms_drain_exit_pending`: `Bool`
 - `unregister_completion_waiter_drain_pending`: `Bool`
 - `unregister_teardown_retains_snapshot`: `Bool`
+- `unregister_runtime_loop_forced_abort`: `Bool`
+- `unregister_comms_drain_forced_abort`: `Bool`
 - `staged_session_phase`: `StagedSessionPhase`
 - `staged_session_id`: `Option<SessionId>`
 - `staged_session_keep_alive`: `Option<Bool>`
@@ -326,8 +328,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Runtime-Internal Inputs
 - `BeginUnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
-- `RuntimeLoopStoppedForUnregister`(session_id: SessionId)
-- `CommsDrainExitedForUnregister`(session_id: SessionId)
+- `RuntimeLoopStoppedForUnregister`(session_id: SessionId, forced_abort: Bool)
+- `CommsDrainExitedForUnregister`(session_id: SessionId, forced_abort: Bool)
 - `CompletionWaitersResolvedForUnregister`(session_id: SessionId)
 - `ResolveRuntimeOpsLifecycleDurability`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `HydrateSessionLlmState`(current_identity: SessionLlmIdentity, current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter)
@@ -1087,7 +1089,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RuntimeLoopStoppedForUnregisterIdle`
 - From: `Idle`
-- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- On: `RuntimeLoopStoppedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1096,7 +1098,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RuntimeLoopStoppedForUnregisterAttached`
 - From: `Attached`
-- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- On: `RuntimeLoopStoppedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1105,7 +1107,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RuntimeLoopStoppedForUnregisterRunning`
 - From: `Running`
-- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- On: `RuntimeLoopStoppedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1114,7 +1116,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RuntimeLoopStoppedForUnregisterRetired`
 - From: `Retired`
-- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- On: `RuntimeLoopStoppedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1123,7 +1125,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RuntimeLoopStoppedForUnregisterStopped`
 - From: `Stopped`
-- On: `RuntimeLoopStoppedForUnregister`(session_id)
+- On: `RuntimeLoopStoppedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1132,7 +1134,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommsDrainExitedForUnregisterIdle`
 - From: `Idle`
-- On: `CommsDrainExitedForUnregister`(session_id)
+- On: `CommsDrainExitedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1141,7 +1143,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommsDrainExitedForUnregisterAttached`
 - From: `Attached`
-- On: `CommsDrainExitedForUnregister`(session_id)
+- On: `CommsDrainExitedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1150,7 +1152,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommsDrainExitedForUnregisterRunning`
 - From: `Running`
-- On: `CommsDrainExitedForUnregister`(session_id)
+- On: `CommsDrainExitedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1159,7 +1161,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommsDrainExitedForUnregisterRetired`
 - From: `Retired`
-- On: `CommsDrainExitedForUnregister`(session_id)
+- On: `CommsDrainExitedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`
@@ -1168,7 +1170,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommsDrainExitedForUnregisterStopped`
 - From: `Stopped`
-- On: `CommsDrainExitedForUnregister`(session_id)
+- On: `CommsDrainExitedForUnregister`(session_id, forced_abort)
 - Guards:
   - `session_matches_current`
   - `unregister_draining`

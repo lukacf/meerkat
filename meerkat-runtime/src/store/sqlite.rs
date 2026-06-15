@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
 CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
     id TEXT PRIMARY KEY,
     state_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
+    runtime_id TEXT PRIMARY KEY
 )";
 
     fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
@@ -134,6 +137,37 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             ON CONFLICT(runtime_id) DO UPDATE SET session_snapshot = excluded.session_snapshot
             ",
             params![runtime_id_text(runtime_id), snapshot],
+        )
+        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        // A live snapshot write clears any standing projection-quarantine marker
+        // in the same atomic boundary: the runtime snapshot is authoritative
+        // again, so a store-only projection fallback is no longer permitted.
+        clear_runtime_projection_quarantine(tx, runtime_id)?;
+        Ok(())
+    }
+
+    fn set_runtime_projection_quarantine(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        tx.execute(
+            r"
+            INSERT OR REPLACE INTO runtime_projection_quarantine (runtime_id)
+            VALUES (?1)
+            ",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        Ok(())
+    }
+
+    fn clear_runtime_projection_quarantine(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        tx.execute(
+            "DELETE FROM runtime_projection_quarantine WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
         )
         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         Ok(())
@@ -656,9 +690,32 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                     params![runtime_id_text(&runtime_id)],
                 )
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                // Record the durable quarantine marker in the SAME transaction
+                // that deletes the rejected runtime snapshot, so the fact
+                // survives a process restart.
+                set_runtime_projection_quarantine(&tx, &runtime_id)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 Ok(true)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn is_runtime_projection_quarantined(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_projection_quarantine WHERE runtime_id = ?1)",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -1759,6 +1816,100 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
                 err.to_string().contains("stored_input_state_version"),
                 "unexpected error: {err}"
             );
+        }
+
+        /// The projection-quarantine marker recorded by
+        /// `clear_session_snapshot_if_current` is durable: a FRESH store opened
+        /// on the same path (simulating a process restart) still reports the
+        /// runtime as quarantined. A subsequent live snapshot write clears it.
+        #[tokio::test]
+        async fn projection_quarantine_marker_survives_restart_and_clears_on_write() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let runtime_id = runtime_id();
+
+            let rejected = session_with_user("rejected runtime turn");
+            let rejected_snapshot = serde_json::to_vec(&rejected).unwrap();
+
+            // Commit the snapshot, then conditionally clear it: this is the
+            // fail-closed quarantine path.
+            {
+                let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+                assert!(
+                    !store
+                        .is_runtime_projection_quarantined(&runtime_id)
+                        .await
+                        .unwrap(),
+                    "a fresh runtime must not start quarantined"
+                );
+                store
+                    .commit_session_snapshot(
+                        &runtime_id,
+                        SessionDelta {
+                            session_snapshot: rejected_snapshot.clone(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .clear_session_snapshot_if_current(&runtime_id, &rejected_snapshot)
+                        .await
+                        .unwrap(),
+                    "matching snapshot must be cleared"
+                );
+                assert!(
+                    store
+                        .is_runtime_projection_quarantined(&runtime_id)
+                        .await
+                        .unwrap(),
+                    "clearing the rejected snapshot must record the quarantine marker"
+                );
+            }
+
+            // Reopen on the same path: the durable marker must still be present.
+            {
+                let restarted = SqliteRuntimeStore::new(path.clone()).unwrap();
+                assert!(
+                    restarted
+                        .is_runtime_projection_quarantined(&runtime_id)
+                        .await
+                        .unwrap(),
+                    "quarantine marker must survive a simulated process restart"
+                );
+
+                // A live snapshot write reclaims runtime authority and clears
+                // the marker atomically.
+                let revived = session_with_user("revived runtime turn");
+                restarted
+                    .commit_session_snapshot(
+                        &runtime_id,
+                        SessionDelta {
+                            session_snapshot: serde_json::to_vec(&revived).unwrap(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    !restarted
+                        .is_runtime_projection_quarantined(&runtime_id)
+                        .await
+                        .unwrap(),
+                    "a live snapshot write must clear the quarantine marker"
+                );
+            }
+
+            // And the cleared state is itself durable across another restart.
+            {
+                let restarted_again = SqliteRuntimeStore::new(path).unwrap();
+                assert!(
+                    !restarted_again
+                        .is_runtime_projection_quarantined(&runtime_id)
+                        .await
+                        .unwrap(),
+                    "cleared quarantine marker must stay cleared across restart"
+                );
+            }
         }
     }
 }

@@ -122,6 +122,39 @@ fn register_null_clears_resolver() {
     assert!(!has_external_auth_resolver());
 }
 
+/// `clear_external_auth_resolver()` clears the registration directly —
+/// runtime lifecycle owns resolver lifecycle (single owner).
+#[wasm_bindgen_test]
+fn clear_external_auth_resolver_clears_registration() {
+    let cb = js_sys::eval("(function (_) { return Promise.resolve('x'); })")
+        .unwrap()
+        .dyn_into::<Function>()
+        .unwrap();
+    register_external_auth_resolver(JsValue::from(cb)).expect("install");
+    assert!(has_external_auth_resolver());
+    meerkat_web_runtime::external_auth::clear_external_auth_resolver();
+    assert!(!has_external_auth_resolver());
+}
+
+/// Tearing down the runtime clears the host-registered resolver so a
+/// later runtime in the same WASM module never inherits a stale auth
+/// callback. Without this, `destroy_runtime` would only clear
+/// subscriptions + `RUNTIME_STATE` and leave the resolver dangling.
+#[wasm_bindgen_test]
+fn destroy_runtime_clears_external_auth_resolver() {
+    let cb = js_sys::eval("(function (_) { return Promise.resolve('x'); })")
+        .unwrap()
+        .dyn_into::<Function>()
+        .unwrap();
+    register_external_auth_resolver(JsValue::from(cb)).expect("install");
+    assert!(has_external_auth_resolver());
+    meerkat_web_runtime::destroy_runtime().expect("destroy runtime");
+    assert!(
+        !has_external_auth_resolver(),
+        "destroy_runtime must clear the external auth resolver"
+    );
+}
+
 /// Passing a non-function value returns an error — the handle is
 /// type-checked at registration time, not at invocation time.
 #[wasm_bindgen_test]

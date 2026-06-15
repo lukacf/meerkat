@@ -473,6 +473,14 @@ impl HookOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct HookExecutionReport {
+    /// Hook ids the engine actually began executing — foreground entries it ran
+    /// and background entries it acquired a permit for and spawned. This is the
+    /// authoritative basis for `HookStarted` events: a hook only appears here
+    /// once execution began, never merely because it matched the invocation
+    /// point (a foreground deny short-circuit and a saturated background queue
+    /// both leave later/skipped hooks absent).
+    #[serde(default)]
+    pub started: Vec<HookId>,
     #[serde(default)]
     pub outcomes: Vec<HookOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

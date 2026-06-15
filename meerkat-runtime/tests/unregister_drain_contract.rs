@@ -79,13 +79,15 @@ fn unregister_input() -> MeerkatMachineInput {
     }
 }
 
-fn drain_feedback_inputs() -> [MeerkatMachineInput; 3] {
+fn drain_feedback_inputs(forced_abort: bool) -> [MeerkatMachineInput; 3] {
     [
         MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
             session_id: mm_dsl::SessionId::from(TEST_SESSION),
+            forced_abort,
         },
         MeerkatMachineInput::CommsDrainExitedForUnregister {
             session_id: mm_dsl::SessionId::from(TEST_SESSION),
+            forced_abort,
         },
         MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
             session_id: mm_dsl::SessionId::from(TEST_SESSION),
@@ -99,7 +101,7 @@ fn drained_unregistered_authority() -> MeerkatMachineAuthority {
     let mut authority = registered_authority();
     MeerkatMachineMutator::apply(&mut authority, begin_unregister_input())
         .expect("BeginUnregisterSession input");
-    for feedback in drain_feedback_inputs() {
+    for feedback in drain_feedback_inputs(false) {
         MeerkatMachineMutator::apply(&mut authority, feedback)
             .expect("drain feedback input must close its obligation");
     }
@@ -190,7 +192,7 @@ fn unregister_session_rejected_until_all_drain_obligations_closed() {
     MeerkatMachineMutator::apply(&mut authority, begin_unregister_input())
         .expect("BeginUnregisterSession");
 
-    let [loop_stopped, drain_exited, waiters_resolved] = drain_feedback_inputs();
+    let [loop_stopped, drain_exited, waiters_resolved] = drain_feedback_inputs(false);
 
     assert!(
         MeerkatMachineMutator::apply(&mut authority, unregister_input()).is_err(),
@@ -232,7 +234,7 @@ fn unregister_session_rejected_until_all_drain_obligations_closed() {
 #[test]
 fn drain_feedback_rejected_outside_drain_window() {
     let mut authority = registered_authority();
-    for feedback in drain_feedback_inputs() {
+    for feedback in drain_feedback_inputs(false) {
         assert!(
             MeerkatMachineMutator::apply(&mut authority, feedback).is_err(),
             "drain feedback without an open drain window must be rejected"
@@ -245,12 +247,51 @@ fn drain_feedback_rejected_when_obligation_already_closed() {
     let mut authority = registered_authority();
     MeerkatMachineMutator::apply(&mut authority, begin_unregister_input())
         .expect("BeginUnregisterSession");
-    let [loop_stopped, _, _] = drain_feedback_inputs();
+    let [loop_stopped, _, _] = drain_feedback_inputs(false);
     MeerkatMachineMutator::apply(&mut authority, loop_stopped.clone())
         .expect("first RuntimeLoopStoppedForUnregister");
     assert!(
         MeerkatMachineMutator::apply(&mut authority, loop_stopped).is_err(),
         "an obligation closes exactly once; duplicate feedback must be rejected"
+    );
+}
+
+#[test]
+fn forced_abort_disposition_is_recorded_and_still_completes_teardown() {
+    // A producer that fails to quiesce within its drain grace window is
+    // force-aborted by the shell, which reports `forced_abort: true`. The
+    // machine must record that disposition (rather than launder it as clean
+    // quiescence) while still allowing the teardown to complete — teardown
+    // must never stall on a stuck producer.
+    let mut authority = registered_authority();
+    MeerkatMachineMutator::apply(&mut authority, begin_unregister_input())
+        .expect("BeginUnregisterSession");
+
+    let [loop_stopped, drain_exited, waiters_resolved] = drain_feedback_inputs(true);
+
+    MeerkatMachineMutator::apply(&mut authority, loop_stopped)
+        .expect("RuntimeLoopStoppedForUnregister (forced) must close its obligation");
+    assert!(
+        authority.state().unregister_runtime_loop_forced_abort,
+        "a forced runtime-loop teardown must be recorded, not laundered as clean quiescence"
+    );
+
+    MeerkatMachineMutator::apply(&mut authority, drain_exited)
+        .expect("CommsDrainExitedForUnregister (forced) must close its obligation");
+    assert!(
+        authority.state().unregister_comms_drain_forced_abort,
+        "a forced comms-drain teardown must be recorded, not laundered as clean quiescence"
+    );
+
+    MeerkatMachineMutator::apply(&mut authority, waiters_resolved)
+        .expect("CompletionWaitersResolvedForUnregister");
+    MeerkatMachineMutator::apply(&mut authority, unregister_input())
+        .expect("teardown must still commit even when producers were force-aborted");
+
+    assert_eq!(
+        authority.state().session_id,
+        None,
+        "forced teardown must still clear the session"
     );
 }
 
@@ -272,7 +313,7 @@ fn runtime_executor_exit_preserves_drain_window() {
     );
 
     // The full drain still completes from the post-exit phase.
-    for feedback in drain_feedback_inputs() {
+    for feedback in drain_feedback_inputs(false) {
         MeerkatMachineMutator::apply(&mut authority, feedback).expect("drain feedback");
     }
     MeerkatMachineMutator::apply(&mut authority, unregister_input())

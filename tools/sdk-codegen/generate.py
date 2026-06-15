@@ -477,6 +477,23 @@ def _promote_nested_schema_def(name: str) -> bool:
         # / `to_provider` carry the typed enum shape into SDK codegen instead
         # of being widened to `unknown` / `Any`.
         "WireProvider",
+        # FIX-9: promote the live-config propagation report and every nested
+        # type transitively reachable from it so `ConfigWriteResult.live_propagation`
+        # carries the typed per-channel swap/refresh/close outcome into SDK codegen
+        # instead of being erased to `Record<string, unknown>` / `dict[str, Any]`.
+        # These are registered as schema-local `$defs` on `ConfigWriteResult`;
+        # without promotion the codegen treats them as private nested types and
+        # widens the field. The set is the exact transitive closure of refs from
+        # `WireLiveConfigPropagationReport` (skip/swap/refresh/close failure rows
+        # plus their `*Failure` / `*Reason` discriminated-union shapes).
+        "WireLiveConfigPropagationReport",
+        "WireLiveHotSwapSkip",
+        "WireLiveHotSwapSkipReason",
+        "WireLiveSwapFailure",
+        "WireLiveRefreshFailure",
+        "WireLiveChannelRefreshFailure",
+        "WireLiveCloseFailure",
+        "WireLiveChannelCloseFailure",
         *MCP_CONFIG_HELPER_TYPES,
         *MCP_CONFIG_ALIAS_TYPES,
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
@@ -2129,6 +2146,25 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_alias(name, wire_schema, f"Canonical typed tool identity {name}.")
     for name in SKILL_LIST_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
+    # FIX-9: emit the live-config propagation report wire mirrors **before**
+    # `ConfigWriteResult` (in the K20 catalog loop) so its `live_propagation`
+    # field references them as named typed shapes instead of being widened to
+    # `dict[str, Any]`. The skip/refresh/close reason discriminators are
+    # `oneOf` unions (aliases); the per-channel rows and the report itself are
+    # objects (dataclasses). Emitted reason-first so the rows that reference
+    # them resolve to named types.
+    append_python_alias("WireLiveHotSwapSkipReason", wire_schema, "Wire reason a live-channel hot-swap was skipped.")
+    append_python_alias("WireLiveChannelRefreshFailure", wire_schema, "Wire reason a live-channel refresh failed.")
+    append_python_alias("WireLiveChannelCloseFailure", wire_schema, "Wire reason a live-channel close failed.")
+    append_python_dataclass("WireLiveHotSwapSkip", wire_schema, "Wire record of a skipped live-channel hot-swap.")
+    append_python_dataclass("WireLiveSwapFailure", wire_schema, "Wire record of a failed live-channel swap.")
+    append_python_dataclass("WireLiveRefreshFailure", wire_schema, "Wire record of a failed live-channel refresh.")
+    append_python_dataclass("WireLiveCloseFailure", wire_schema, "Wire record of a failed live-channel close.")
+    append_python_dataclass(
+        "WireLiveConfigPropagationReport",
+        wire_schema,
+        "Typed per-channel live-config propagation outcome carried by ConfigWriteResult.",
+    )
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
     # `config/set` accepts a bare config object or a wrapped
@@ -2670,6 +2706,18 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_alias(name, wire_schema)
     for name in SKILL_LIST_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)
+    # FIX-9: typed wire mirrors for `ConfigWriteResult.live_propagation`,
+    # emitted before the K20 catalog loop so the field references them as named
+    # typed shapes. Reason discriminators are `oneOf` unions (aliases); the
+    # per-channel rows and the report are interfaces. Reason-first ordering.
+    append_typescript_alias("WireLiveHotSwapSkipReason", wire_schema)
+    append_typescript_alias("WireLiveChannelRefreshFailure", wire_schema)
+    append_typescript_alias("WireLiveChannelCloseFailure", wire_schema)
+    append_typescript_interface("WireLiveHotSwapSkip", wire_schema)
+    append_typescript_interface("WireLiveSwapFailure", wire_schema)
+    append_typescript_interface("WireLiveRefreshFailure", wire_schema)
+    append_typescript_interface("WireLiveCloseFailure", wire_schema)
+    append_typescript_interface("WireLiveConfigPropagationReport", wire_schema)
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_alias("ConfigSetParams", wire_schema)

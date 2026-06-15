@@ -327,6 +327,7 @@ impl HookEngine for DenyNextPreLlmHookEngine {
         );
 
         Ok(HookExecutionReport {
+            started: vec![HookId::new("deny-pre-llm")],
             outcomes: vec![HookOutcome {
                 hook_id: HookId::new("deny-pre-llm"),
                 point: HookPoint::PreLlmRequest,

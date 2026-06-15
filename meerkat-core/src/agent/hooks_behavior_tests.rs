@@ -294,8 +294,15 @@ impl HookEngine for TestHookEngine {
                 duration_ms: Some(0),
             }]
         };
+        // The engine only produces an outcome when "test-hook" actually ran for
+        // this point, so the started ids mirror the outcomes.
+        let started = outcomes.iter().map(|o| o.hook_id.clone()).collect();
 
-        Ok(HookExecutionReport { outcomes, decision })
+        Ok(HookExecutionReport {
+            started,
+            outcomes,
+            decision,
+        })
     }
 }
 

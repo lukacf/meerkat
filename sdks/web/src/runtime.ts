@@ -302,7 +302,14 @@ export class MeerkatRuntime {
     wasm.clear_tool_callbacks();
   }
 
-  /** Tear down the embedded runtime and invalidate browser-side handles. */
+  /**
+   * Tear down the embedded runtime and invalidate browser-side handles.
+   *
+   * `destroy_runtime` also clears any host-registered external-auth
+   * resolver in the WASM module, so a later runtime never inherits a
+   * stale auth callback. Resolver state lives solely in the WASM module
+   * (no TS-side flag to reset), keeping TS and Rust consistent.
+   */
   destroy(): void {
     if (this.destroyed) return;
     this.wasm.destroy_runtime();

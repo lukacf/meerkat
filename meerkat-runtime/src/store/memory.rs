@@ -3,7 +3,7 @@
 //! Uses `tokio::sync::Mutex` per the in-memory concurrency rule.
 //! All mutations complete inside one lock acquisition (no lock held across .await).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
@@ -39,6 +39,13 @@ struct Inner {
     receipts: HashMap<ReceiptKey, RunBoundaryReceipt>,
     /// Runtime session snapshots keyed by canonical runtime id.
     sessions: HashMap<String, Vec<u8>>,
+    /// Canonical runtime ids whose projection fallback is quarantined.
+    ///
+    /// Mirrors the durable SQLite `runtime_projection_quarantine` table: set
+    /// when a rejected runtime snapshot is cleared via
+    /// `clear_session_snapshot_if_current`, cleared whenever a live snapshot is
+    /// written for the runtime.
+    projection_quarantine: HashSet<String>,
     /// Persisted machine lifecycle snapshots.
     runtime_lifecycle: HashMap<String, MachineLifecycleSnapshot>,
     /// Persisted ops lifecycle snapshots.
@@ -138,6 +145,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         inner
             .sessions
             .insert(runtime_id.0.clone(), session_delta.session_snapshot);
+        inner.projection_quarantine.remove(&runtime_id.0);
         Ok(())
     }
 
@@ -172,6 +180,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         inner
             .sessions
             .insert(runtime_id.0.clone(), session_delta.session_snapshot);
+        inner.projection_quarantine.remove(&runtime_id.0);
         Ok(())
     }
 
@@ -249,6 +258,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             }
             if persist_session_snapshot {
                 inner.sessions.insert(rid.clone(), delta.session_snapshot);
+                inner.projection_quarantine.remove(&rid);
             }
         }
 
@@ -339,6 +349,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             return Ok(false);
         }
         *current = replacement;
+        inner.projection_quarantine.remove(&runtime_id.0);
         Ok(true)
     }
 
@@ -355,7 +366,18 @@ impl RuntimeStore for InMemoryRuntimeStore {
             return Ok(false);
         }
         inner.sessions.remove(&runtime_id.0);
+        // Record the in-memory quarantine marker atomically with the snapshot
+        // removal, mirroring the durable SQLite path.
+        inner.projection_quarantine.insert(runtime_id.0.clone());
         Ok(true)
+    }
+
+    async fn is_runtime_projection_quarantined(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        Ok(inner.projection_quarantine.contains(&runtime_id.0))
     }
 
     async fn persist_input_state(
@@ -1128,6 +1150,49 @@ mod tests {
                 .await
                 .unwrap(),
             Some(RuntimeState::Retired)
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_session_snapshot_if_current_sets_quarantine_marker_cleared_on_write() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-quarantine");
+        let rejected = serde_json::to_vec(&session_with_user("rejected")).unwrap();
+
+        assert!(!store.is_runtime_projection_quarantined(&rid).await.unwrap());
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: rejected.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .clear_session_snapshot_if_current(&rid, &rejected)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store.is_runtime_projection_quarantined(&rid).await.unwrap(),
+            "clearing the rejected snapshot must record the in-memory quarantine marker"
+        );
+
+        // A live snapshot write reclaims runtime authority and clears the marker.
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session_with_user("revived")).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store.is_runtime_projection_quarantined(&rid).await.unwrap(),
+            "a live snapshot write must clear the in-memory quarantine marker"
         );
     }
 }

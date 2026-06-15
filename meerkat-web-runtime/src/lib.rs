@@ -560,6 +560,11 @@ fn clear_subscription_registry() {
 
 fn install_runtime_state(state: RuntimeState) {
     clear_subscription_registry();
+    // Runtime lifecycle owns external-auth-resolver lifecycle: a fresh
+    // runtime in the same WASM module must never inherit the previous
+    // host's auth callback.
+    #[cfg(target_arch = "wasm32")]
+    crate::external_auth::clear_external_auth_resolver();
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(state);
     });
@@ -568,10 +573,13 @@ fn install_runtime_state(state: RuntimeState) {
 /// Tear down the embedded runtime and release all local handles/subscriptions.
 ///
 /// Existing `Session`, `Mob`, and subscription handles become invalid after
-/// this call.
+/// this call. Also clears any registered external-auth resolver so a later
+/// runtime never inherits a stale host auth callback.
 #[wasm_bindgen]
 pub fn destroy_runtime() -> Result<(), JsValue> {
     clear_subscription_registry();
+    #[cfg(target_arch = "wasm32")]
+    crate::external_auth::clear_external_auth_resolver();
     RUNTIME_STATE.with(|cell| {
         cell.borrow_mut().take();
     });

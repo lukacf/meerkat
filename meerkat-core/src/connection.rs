@@ -147,6 +147,21 @@ slug_newtype!(
 /// realm" fact by comparing a raw `"env_default"` string.
 pub const ENV_DEFAULT_REALM_SLUG: &str = "env_default";
 
+/// The single owner of the reserved global-realm slug. The `global` realm is
+/// the durable root of the default inheritance chain: a realm with no explicit
+/// `parent` edge that is not itself `global` implicitly parents to it. Unlike
+/// [`ENV_DEFAULT_REALM_SLUG`] (the ephemeral synthetic env-var fallback),
+/// `global` is a normal `Configured` realm that may hold persisted credentials
+/// and publish durable leases. Recognized via [`RealmId::is_global`], never by
+/// raw string comparison elsewhere.
+pub const GLOBAL_REALM_SLUG: &str = "global";
+
+/// Hard cap on realm parent-chain length. A finite config is already bounded by
+/// the `seen` dedup set; this is a belt-and-suspenders guard that bounds work
+/// and stack independently of config size, and yields a typed error instead of
+/// looping. 16 is far beyond any plausible org→team→user→global nesting.
+pub const MAX_REALM_CHAIN_DEPTH: usize = 16;
+
 impl RealmId {
     /// True when this realm is the synthetic env-var-default realm (the realm
     /// [`RealmConnectionSet::synthesize_env_default`] mints). Routing/selection
@@ -155,6 +170,21 @@ impl RealmId {
     #[must_use]
     pub fn is_env_default(&self) -> bool {
         self.as_str() == ENV_DEFAULT_REALM_SLUG
+    }
+
+    /// True when this realm is the reserved `global` root of the inheritance
+    /// chain. Consulted via this typed predicate, never by a raw
+    /// `== "global"` comparison.
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        self.as_str() == GLOBAL_REALM_SLUG
+    }
+
+    /// Mint the reserved `global` [`RealmId`]. Infallible: the slug is a
+    /// compile-time-valid constant.
+    #[must_use]
+    pub fn global() -> RealmId {
+        RealmId::from_known_valid(GLOBAL_REALM_SLUG)
     }
 }
 
@@ -653,6 +683,130 @@ pub enum ConnectionTargetError {
         backend: Provider,
         auth: Provider,
     },
+    #[error(transparent)]
+    RealmChain(#[from] RealmChainError),
+}
+
+/// Fail-closed errors from resolving a realm parent chain.
+///
+/// The chain walk is fully typed and panic-free: every malformed topology
+/// yields one of these variants rather than looping, unwrapping, or silently
+/// truncating. Internal to resolution (not a wire type).
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum RealmChainError {
+    /// A `parent` edge re-enters an already-visited realm (includes a realm
+    /// naming itself as parent). The captured path is for diagnostics.
+    #[error("realm parent chain has a cycle: {}", .chain.join(" -> "))]
+    Cycle { chain: Vec<String> },
+    /// The chain exceeded [`MAX_REALM_CHAIN_DEPTH`].
+    #[error("realm parent chain from '{head}' exceeds max depth {max}")]
+    DepthExceeded { head: String, max: usize },
+    /// A `parent` edge names a realm absent from config (and it is not the
+    /// reserved `global` root, which is allowed to be implicit).
+    #[error("realm '{realm}' names parent '{parent}' which is not configured")]
+    MissingParent { realm: String, parent: String },
+    /// The reserved `global` realm declares a `parent`; it must be the root.
+    #[error("the reserved 'global' realm (via '{realm}') must not declare a parent")]
+    GlobalHasParent { realm: String },
+    /// A `parent` edge targets the synthetic env-var-default slug, which may
+    /// never be a chain node.
+    #[error("realm '{realm}' names the reserved env_default slug as its parent")]
+    ParentIsEnvDefault { realm: String },
+}
+
+/// An ordered realm inheritance chain, most-derived first.
+///
+/// `realms()[0]` is the head (consuming) realm; the last element is the
+/// reserved `global` root when one participates. Built only via the fallible
+/// [`RealmChain::resolve`]; the field is private so the only way to obtain a
+/// chain is through the validated walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealmChain {
+    realms: Vec<RealmId>,
+}
+
+impl RealmChain {
+    /// Resolve the parent chain for `head`, walking `parent` edges to the root.
+    ///
+    /// Ordering is `[head, parent, .., global?]` — fully determined by the
+    /// linear `parent` edges, with zero dependence on map iteration order. A
+    /// realm with no explicit `parent` that is not itself `global` implicitly
+    /// appends `global` IFF `global` is configured and not already visited.
+    ///
+    /// Absent head: if `head` is not in `config.realm`, the chain is `[head]`
+    /// alone (it contributes no section) plus the implicit-global tail when
+    /// applicable — it is NOT a hard error. Callers that require an explicit
+    /// realm to exist enforce that separately (see the explicit-ref path in
+    /// the connection resolvers). Fails closed on cycle, depth, missing
+    /// parent, a parent pointing at `global`-with-a-parent, or a parent that
+    /// is the env_default slug. Iterative (no recursion) — wasm stack-safe.
+    pub fn resolve(config: &Config, head: &RealmId) -> Result<RealmChain, RealmChainError> {
+        let mut ordered: Vec<RealmId> = Vec::new();
+        let mut seen: BTreeSet<RealmId> = BTreeSet::new();
+
+        // Seed with the head so a realm naming itself as parent is a 1-cycle.
+        ordered.push(head.clone());
+        seen.insert(head.clone());
+
+        let mut current = head.clone();
+        loop {
+            if ordered.len() > MAX_REALM_CHAIN_DEPTH {
+                return Err(RealmChainError::DepthExceeded {
+                    head: head.as_str().to_string(),
+                    max: MAX_REALM_CHAIN_DEPTH,
+                });
+            }
+
+            // A `global` node must be the root: it may not declare a parent.
+            let current_section = config.realm.get(current.as_str());
+            if current.is_global() && current_section.and_then(|s| s.parent.as_ref()).is_some() {
+                return Err(RealmChainError::GlobalHasParent {
+                    realm: current.as_str().to_string(),
+                });
+            }
+
+            let Some(parent) = current_section.and_then(|s| s.parent.clone()) else {
+                // No explicit parent: terminate. Append the implicit `global`
+                // tail when the current terminal is not already `global`, the
+                // global realm is configured, and it has not been visited.
+                if !current.is_global() && config.realm.contains_key(GLOBAL_REALM_SLUG) {
+                    let global = RealmId::global();
+                    if seen.insert(global.clone()) {
+                        ordered.push(global);
+                    }
+                }
+                return Ok(RealmChain { realms: ordered });
+            };
+
+            if parent.is_env_default() {
+                return Err(RealmChainError::ParentIsEnvDefault {
+                    realm: current.as_str().to_string(),
+                });
+            }
+            // A parent edge must resolve to a configured realm, except the
+            // reserved `global` root which is allowed to be implicit/absent.
+            if !parent.is_global() && !config.realm.contains_key(parent.as_str()) {
+                return Err(RealmChainError::MissingParent {
+                    realm: current.as_str().to_string(),
+                    parent: parent.as_str().to_string(),
+                });
+            }
+            if !seen.insert(parent.clone()) {
+                let mut chain: Vec<String> =
+                    ordered.iter().map(|r| r.as_str().to_string()).collect();
+                chain.push(parent.as_str().to_string());
+                return Err(RealmChainError::Cycle { chain });
+            }
+            ordered.push(parent.clone());
+            current = parent;
+        }
+    }
+
+    /// The resolved chain, most-derived (head) first, root (`global`) last.
+    #[must_use]
+    pub fn realms(&self) -> &[RealmId] {
+        &self.realms
+    }
 }
 
 /// Resolve a connection target from config-owned identity facts.
@@ -1278,6 +1432,14 @@ pub struct RealmConfigSection {
     pub binding: BTreeMap<String, ProviderBindingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_binding: Option<String>,
+    /// Optional parent realm for config inheritance. Resolved into an ordered
+    /// chain by [`RealmChain::resolve`]. Schema-invisible: `Config.realm` is
+    /// wire-projected as an opaque `BTreeMap<String, Value>`, so this typed
+    /// field never reaches the emitted schemas. A realm with no `parent` that
+    /// is not itself `global` implicitly inherits from the reserved `global`
+    /// realm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<RealmId>,
 }
 
 impl RealmConfigSection {
@@ -1371,6 +1533,7 @@ impl RealmConfigSection {
             auth,
             binding,
             default_binding,
+            parent: None,
         }
     }
 }
@@ -1542,6 +1705,186 @@ pub struct ProviderBindingConfig {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    // ---- Realm inheritance RCTs (parent chain + reserved global) ----------
+
+    fn rid(s: &str) -> RealmId {
+        RealmId::parse(s).expect("valid realm slug")
+    }
+
+    /// Build a Config whose `realm` map holds the given `(id, parent)` pairs.
+    fn config_with(realms: &[(&str, Option<&str>)]) -> Config {
+        let mut cfg = Config::default();
+        for (id, parent) in realms {
+            cfg.realm.insert(
+                (*id).to_string(),
+                RealmConfigSection {
+                    parent: parent.map(rid),
+                    ..Default::default()
+                },
+            );
+        }
+        cfg
+    }
+
+    fn chain_ids(chain: &RealmChain) -> Vec<&str> {
+        chain.realms().iter().map(RealmId::as_str).collect()
+    }
+
+    // RCT-01
+    #[test]
+    fn realm_config_section_parent_roundtrips_and_defaults_none() {
+        let with_parent = RealmConfigSection {
+            parent: Some(RealmId::global()),
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&with_parent).expect("serialize section");
+        let back: RealmConfigSection = toml::from_str(&serialized).expect("parse section");
+        assert_eq!(back.parent, Some(RealmId::global()));
+
+        let bare: RealmConfigSection = toml::from_str("").expect("parse empty section");
+        assert_eq!(bare.parent, None, "absent parent must default to None");
+    }
+
+    // RCT-02
+    #[test]
+    fn global_realm_is_typed_and_distinct_from_env_default() {
+        let global = RealmId::global();
+        assert!(global.is_global());
+        assert!(!global.is_env_default());
+        assert_eq!(global.as_str(), GLOBAL_REALM_SLUG);
+
+        let env = RealmId::from_known_valid(ENV_DEFAULT_REALM_SLUG);
+        assert!(env.is_env_default());
+        assert!(!env.is_global());
+
+        let other = rid("prod");
+        assert!(!other.is_global());
+        assert!(!other.is_env_default());
+    }
+
+    // RCT-03
+    #[test]
+    fn realm_chain_resolves_linear_order_with_implicit_global_tail() {
+        // child -> team (no parent) ; global configured -> implicit tail.
+        let cfg = config_with(&[("child", Some("team")), ("team", None), ("global", None)]);
+        let chain = RealmChain::resolve(&cfg, &rid("child")).expect("resolve");
+        assert_eq!(chain_ids(&chain), ["child", "team", "global"]);
+
+        // explicit parent==global terminates without double-visiting global.
+        let cfg = config_with(&[("child", Some("global")), ("global", None)]);
+        let chain = RealmChain::resolve(&cfg, &rid("child")).expect("resolve");
+        assert_eq!(chain_ids(&chain), ["child", "global"]);
+
+        // head==global terminates as a single node (no self-tail).
+        let cfg = config_with(&[("global", None)]);
+        let chain = RealmChain::resolve(&cfg, &rid("global")).expect("resolve");
+        assert_eq!(chain_ids(&chain), ["global"]);
+    }
+
+    // RCT-04
+    #[test]
+    fn realm_chain_detects_cycle_depth_missing_global_and_env_default() {
+        // self-parent -> Cycle
+        let cfg = config_with(&[("a", Some("a"))]);
+        assert!(matches!(
+            RealmChain::resolve(&cfg, &rid("a")),
+            Err(RealmChainError::Cycle { .. })
+        ));
+
+        // A -> B -> A -> Cycle
+        let cfg = config_with(&[("a", Some("b")), ("b", Some("a"))]);
+        assert!(matches!(
+            RealmChain::resolve(&cfg, &rid("a")),
+            Err(RealmChainError::Cycle { .. })
+        ));
+
+        // parent not configured (and not global) -> MissingParent
+        let cfg = config_with(&[("a", Some("ghost"))]);
+        assert!(matches!(
+            RealmChain::resolve(&cfg, &rid("a")),
+            Err(RealmChainError::MissingParent { .. })
+        ));
+
+        // global with a parent -> GlobalHasParent
+        let cfg = config_with(&[("global", Some("x")), ("x", None)]);
+        assert!(matches!(
+            RealmChain::resolve(&cfg, &rid("global")),
+            Err(RealmChainError::GlobalHasParent { .. })
+        ));
+
+        // a child reaching a global-that-has-a-parent also fails closed
+        let cfg = config_with(&[
+            ("child", Some("global")),
+            ("global", Some("x")),
+            ("x", None),
+        ]);
+        assert!(matches!(
+            RealmChain::resolve(&cfg, &rid("child")),
+            Err(RealmChainError::GlobalHasParent { .. })
+        ));
+
+        // parent == env_default slug -> ParentIsEnvDefault
+        let cfg = config_with(&[("a", Some(ENV_DEFAULT_REALM_SLUG))]);
+        assert!(matches!(
+            RealmChain::resolve(&cfg, &rid("a")),
+            Err(RealmChainError::ParentIsEnvDefault { .. })
+        ));
+
+        // chain longer than MAX_REALM_CHAIN_DEPTH -> DepthExceeded
+        let mut pairs: Vec<(String, Option<String>)> = Vec::new();
+        let n = MAX_REALM_CHAIN_DEPTH + 4;
+        for i in 0..n {
+            let parent = if i + 1 < n {
+                Some(format!("r{}", i + 1))
+            } else {
+                None
+            };
+            pairs.push((format!("r{i}"), parent));
+        }
+        let mut cfg = Config::default();
+        for (id, parent) in &pairs {
+            cfg.realm.insert(
+                id.clone(),
+                RealmConfigSection {
+                    parent: parent.as_deref().map(rid),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(matches!(
+            RealmChain::resolve(&cfg, &rid("r0")),
+            Err(RealmChainError::DepthExceeded { .. })
+        ));
+    }
+
+    // RCT-05
+    #[test]
+    fn realm_chain_omits_absent_global_and_terminates_at_explicit_root() {
+        // No [realm.global] configured -> no implicit tail appended.
+        let cfg = config_with(&[("a", Some("b")), ("b", None)]);
+        let chain = RealmChain::resolve(&cfg, &rid("a")).expect("resolve");
+        assert_eq!(
+            chain_ids(&chain),
+            ["a", "b"],
+            "no global must not be invented"
+        );
+    }
+
+    // RCT-26
+    #[test]
+    fn absent_head_realm_yields_single_node_chain_then_implicit_tail() {
+        // Head absent from config, global present -> [head, global].
+        let cfg = config_with(&[("global", None)]);
+        let chain = RealmChain::resolve(&cfg, &rid("missing")).expect("resolve");
+        assert_eq!(chain_ids(&chain), ["missing", "global"]);
+
+        // Head absent, no global -> [head] alone (contributes nothing; resolver
+        // falls through to env_default downstream).
+        let cfg = Config::default();
+        let chain = RealmChain::resolve(&cfg, &rid("missing")).expect("resolve");
+        assert_eq!(chain_ids(&chain), ["missing"]);
+    }
 
     #[test]
     fn member_comms_name_round_trips_through_display_and_from_str() {

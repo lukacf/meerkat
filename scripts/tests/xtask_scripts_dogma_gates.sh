@@ -166,6 +166,20 @@ if printf '%s' "$sdk_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-co
 else
   bad "buildbuddy-agent-gate dry-run did not route SDK generated artifacts"
 fi
+surface_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-mcp/src/router.rs meerkat-mob-mcp/src/agent_tools.rs docs/api/mcp.mdx sdks/typescript/README.md 2>&1 || true)
+if printf '%s' "$surface_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
+  && ! printf '%s' "$surface_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
+  ok "cargo-agent-gate dry-run routes public surface docs/router/mob-mcp changes to generated contract ratchets"
+else
+  bad "cargo-agent-gate dry-run did not route public surface docs/router/mob-mcp changes"
+fi
+rest_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- meerkat-rest/src/lib.rs meerkat-rpc/src/session_runtime.rs 2>&1 || true)
+if printf '%s' "$rest_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
+  && ! printf '%s' "$rest_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
+  ok "buildbuddy-agent-gate dry-run routes RPC/REST surface changes to generated contract ratchets"
+else
+  bad "buildbuddy-agent-gate dry-run did not route RPC/REST surface changes"
+fi
 
 # ── #266: dogma doctrine mirror is a CI gate ─────────────────────────────────
 echo "#266 dogma skill doctrine mirror is gated in CI:"

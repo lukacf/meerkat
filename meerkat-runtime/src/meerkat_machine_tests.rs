@@ -1279,14 +1279,14 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
             })
         }
 
-        async fn cancel_after_boundary(
+        async fn stop_runtime_executor(
             &mut self,
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
 
-        async fn stop_runtime_executor(
+        async fn cancel_after_boundary(
             &mut self,
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
@@ -2552,6 +2552,42 @@ async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot
             .is_some(),
         "failed DeleteSnapshot teardown must not hide the stale durable snapshot"
     );
+    let post_failure_accept = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        &adapter,
+        &session_id,
+        make_prompt("must not enter drained runtime"),
+    )
+    .await;
+    match post_failure_accept {
+        Err(_) => {}
+        Ok(outcome) => panic!(
+            "failed DeleteSnapshot rollback must leave the retained entry retry-only, got {outcome:?}"
+        ),
+    }
+    let post_failure_progress_accept = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        &adapter,
+        &session_id,
+        make_progress_input("must-not-enter-drained-runtime"),
+    )
+    .await;
+    match post_failure_progress_accept {
+        Err(_) => {}
+        Ok(outcome) => panic!(
+            "failed DeleteSnapshot rollback must reject wake-effect peer progress too, got {outcome:?}"
+        ),
+    }
+    let post_failure_without_wake_accept = adapter
+        .accept_input_without_wake(
+            &session_id,
+            make_progress_input("must-not-enter-drained-runtime-without-wake"),
+        )
+        .await;
+    match post_failure_without_wake_accept {
+        Err(_) => {}
+        Ok(outcome) => panic!(
+            "failed DeleteSnapshot rollback must reject no-wake ingress too, got {outcome:?}"
+        ),
+    }
 
     adapter.unregister_session(&session_id).await;
     assert!(
@@ -2564,6 +2600,116 @@ async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot
             .expect("store should load")
             .is_none(),
         "successful retry must delete stale ops lifecycle snapshot"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_drain_finishes() {
+    struct BlockingExecutor {
+        apply_started: Arc<Notify>,
+        allow_finish: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish
+                .take()
+                .expect("blocking executor should only apply once")
+                .await
+                .expect("test release sender should stay alive until apply is released");
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let (allow_finish_tx, allow_finish_rx) = tokio::sync::oneshot::channel();
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Some(allow_finish_rx),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+    adapter
+        .accept_input(&session_id, make_prompt("block unregister drain"))
+        .await
+        .expect("prompt should start attached runtime");
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("runtime should enter blocking apply");
+
+    let first_unregister = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        async move { adapter.unregister_session(&session_id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let state = adapter
+                .session_dsl_state(&session_id)
+                .await
+                .expect("session should still have DSL state");
+            if state.registration_phase == mm_dsl::RegistrationPhase::Draining {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first unregister should open the drain window");
+
+    adapter.unregister_session(&session_id).await;
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "concurrent unregister retry must not fabricate drain feedback or remove the entry"
+    );
+
+    allow_finish_tx
+        .send(())
+        .expect("blocking executor should still be awaiting release");
+    first_unregister
+        .await
+        .expect("first unregister task should not panic");
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "original unregister should remove the entry after the real drain finishes"
     );
 }
 

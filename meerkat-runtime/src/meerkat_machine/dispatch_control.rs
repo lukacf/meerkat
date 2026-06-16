@@ -184,6 +184,11 @@ impl MeerkatMachine {
                                     &effects,
                                 )
                                 .map_err(RuntimeControlPlaneError::Internal)?;
+                            if signal.should_wake() && wake_tx.is_none() {
+                                return Err(RuntimeControlPlaneError::InvalidState {
+                                    state: RuntimeState::Destroyed,
+                                });
+                            }
                             (signal, runtime_effect, Some(effects))
                         }
                         AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => (

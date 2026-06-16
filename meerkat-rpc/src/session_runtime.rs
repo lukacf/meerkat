@@ -8426,15 +8426,58 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
+    struct RuntimeTerminationFixtureExecutor;
+
+    #[async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for RuntimeTerminationFixtureExecutor {
+        async fn apply(
+            &mut self,
+            run_id: meerkat_core::lifecycle::RunId,
+            primitive: meerkat_core::lifecycle::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::CoreExecutorError,
+        > {
+            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+    }
+
     async fn runtime_terminated_completion_handle(
-        adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,
+        adapter: &Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
         session_id: &SessionId,
         reason: &str,
     ) -> meerkat_runtime::CompletionHandle {
         adapter
-            .prepare_bindings(session_id.clone())
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(RuntimeTerminationFixtureExecutor),
+            )
             .await
-            .expect("test machine should prepare runtime bindings");
+            .expect("test machine should attach runtime executor");
         let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
             "pending completion fixture",
             None,
@@ -14989,7 +15032,7 @@ mod tests {
             .expect("insert pre-admission");
 
         let handle = runtime_terminated_completion_handle(
-            runtime.runtime_adapter.as_ref(),
+            &runtime.runtime_adapter,
             &session_id,
             "executor never took pre-admission",
         )
@@ -15037,7 +15080,7 @@ mod tests {
             .expect("insert pre-admission");
 
         let handle = runtime_terminated_completion_handle(
-            runtime.runtime_adapter.as_ref(),
+            &runtime.runtime_adapter,
             &session_id,
             "runtime stopped during cleanup",
         )
@@ -15183,7 +15226,7 @@ mod tests {
             .expect("insert second pre-admission");
 
         let stale_handle = runtime_terminated_completion_handle(
-            runtime.runtime_adapter.as_ref(),
+            &runtime.runtime_adapter,
             &session_id,
             "stale cleanup for first input",
         )

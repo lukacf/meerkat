@@ -2759,6 +2759,46 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_policy_preserves_already_canonical_namespaced_tool_allowlists() {
+        let pack = AdaptivePolicy {
+            limits: limits(7),
+            allowed_tool_classes: BTreeSet::from([
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+            ]),
+            allowed_skill_classes: BTreeSet::from(["lint-review".to_string()]),
+            ..AdaptivePolicy::default()
+        };
+        let host = AdaptivePolicy {
+            limits: limits(5),
+            allowed_tool_classes: BTreeSet::from([
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+                "builtins".to_string(),
+            ]),
+            allowed_skill_classes: BTreeSet::from([
+                "lint-review".to_string(),
+                "docs-review".to_string(),
+            ]),
+            ..AdaptivePolicy::default()
+        };
+
+        let composed = AdaptivePolicy::compose(&pack, &host).unwrap();
+        let runtime_limits = adaptive_run_limits_from_policy(&composed, 1_000).unwrap();
+        assert_eq!(
+            runtime_limits.allowed_tool_classes,
+            BTreeSet::from([
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+            ])
+        );
+        assert_eq!(
+            runtime_limits.allowed_skill_identities,
+            BTreeSet::from(["lint-review".to_string()])
+        );
+    }
+
+    #[test]
     fn adaptive_layer_evidence_canonicalizes_profile_tools_and_skills() {
         let mut context = compile_context();
         let verifier = context

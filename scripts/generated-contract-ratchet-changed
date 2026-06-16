@@ -5,9 +5,10 @@ usage() {
   cat <<'EOF'
 usage: generated-contract-ratchet-changed [--base <rev> --head <rev>] [changed-path ...]
 
-Exits 0 when any changed path can affect generated public contract ratchets
-(schemas, SDK generated types/wrappers, or SDK codegen tooling). Exits 1 when
-the supplied or diffed paths are unrelated.
+Exits 0 when any changed path can affect generated public contract ratchets or
+surface alignment ratchets (schemas, SDK generated types/wrappers, SDK codegen
+tooling, RPC/REST/MCP public surfaces, and surface docs). Exits 1 when the
+supplied or diffed paths are unrelated.
 EOF
 }
 
@@ -89,6 +90,24 @@ generated_contract_path() {
       return 0
       ;;
     meerkat-contracts/src/emit.rs|meerkat-contracts/src/rpc_catalog.rs|meerkat-contracts/src/rest_catalog.rs|meerkat-contracts/src/wire/*)
+      return 0
+      ;;
+    meerkat-rpc/src/*|meerkat-rpc/src/**/*)
+      return 0
+      ;;
+    meerkat-rest/src/*|meerkat-rest/src/**/*)
+      return 0
+      ;;
+    meerkat-mcp/src/router.rs)
+      return 0
+      ;;
+    meerkat-mob-mcp/src/*|meerkat-mob-mcp/src/**/*)
+      return 0
+      ;;
+    docs/api/*|docs/api/**/*)
+      return 0
+      ;;
+    sdks/python/README.md|sdks/typescript/README.md|sdks/web/README.md)
       return 0
       ;;
     xtask/src/public_contracts.rs|xtask/tests/protocol_codegen_drift.rs)

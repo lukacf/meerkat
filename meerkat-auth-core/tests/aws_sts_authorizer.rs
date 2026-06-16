@@ -96,7 +96,7 @@ async fn sigv4_adds_required_headers_for_bedrock() {
 }
 
 #[tokio::test]
-async fn sigv4_without_auth_lease_observer_fails_closed_before_signing() {
+async fn sigv4_direct_public_authorizer_signs_without_runtime_observer() {
     let authorizer = AwsStsAuthorizer::new("us-east-1", static_provider());
     let mut headers = vec![(
         "host".to_string(),
@@ -104,16 +104,13 @@ async fn sigv4_without_auth_lease_observer_fails_closed_before_signing() {
     )];
     let mut req = bedrock_request(&mut headers);
 
-    let err = authorizer.authorize(&mut req).await.unwrap_err();
+    authorizer.authorize(&mut req).await.unwrap();
     assert!(
-        matches!(err, AuthError::HostOwnedUnavailable),
-        "unobserved SigV4 signing must fail closed, got {err:?}"
-    );
-    assert!(
-        !headers
+        headers
             .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
-        "unobserved SigV4 signing must not add authorization headers"
+            .any(|(k, v)| k.eq_ignore_ascii_case("authorization")
+                && v.starts_with("AWS4-HMAC-SHA256 ")),
+        "direct public authorizer should remain usable for standalone SigV4 signing"
     );
 }
 
@@ -178,6 +175,102 @@ async fn env_provider_reads_sigv4_credentials_from_env_lookup() {
         .unwrap();
     assert!(auth.1.contains("Credential=AKIAFROMENV00000000/"));
     assert!(auth.1.contains("/us-west-2/bedrock/aws4_request"));
+}
+
+#[tokio::test]
+async fn sigv4_env_session_token_without_expiry_does_not_acquire_no_expiry_lease() {
+    let provider = AwsCredentialProvider::from_env(|k| match k {
+        "AWS_ACCESS_KEY_ID" => Some("AKIAFROMENV00000000".into()),
+        "AWS_SECRET_ACCESS_KEY" => Some("secretfromenvsecretfromenvsecretfromenv".into()),
+        "AWS_SESSION_TOKEN" => Some("FQoGZXIvYXdzEJr//////////wEaENVSESSION".into()),
+        _ => None,
+    });
+    let authorizer = with_test_observer(AwsStsAuthorizer::new("us-west-2", provider));
+    let mut headers = vec![(
+        "host".into(),
+        "bedrock-runtime.us-west-2.amazonaws.com".into(),
+    )];
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/x/invoke",
+        headers: &mut headers,
+    };
+
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::RefreshRequired),
+        "env STS credentials without expiry must fail closed, got {err:?}"
+    );
+    assert!(
+        !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+        "missing-expiry STS credentials must not sign"
+    );
+}
+
+#[tokio::test]
+async fn sigv4_env_session_token_with_expiry_signs_with_session_token() {
+    let provider = AwsCredentialProvider::from_env(|k| match k {
+        "AWS_ACCESS_KEY_ID" => Some("AKIAFROMENV00000000".into()),
+        "AWS_SECRET_ACCESS_KEY" => Some("secretfromenvsecretfromenvsecretfromenv".into()),
+        "AWS_SESSION_TOKEN" => Some("FQoGZXIvYXdzEJr//////////wEaENVSESSION".into()),
+        "AWS_CREDENTIAL_EXPIRATION" => Some("2999-01-01T00:00:00Z".into()),
+        _ => None,
+    });
+    let authorizer = with_test_observer(AwsStsAuthorizer::new("us-west-2", provider));
+    let mut headers = vec![(
+        "host".into(),
+        "bedrock-runtime.us-west-2.amazonaws.com".into(),
+    )];
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/x/invoke",
+        headers: &mut headers,
+    };
+
+    authorizer.authorize(&mut req).await.unwrap();
+    assert!(headers.iter().any(
+        |(k, v)| k.eq_ignore_ascii_case("authorization") && v.starts_with("AWS4-HMAC-SHA256 ")
+    ));
+    assert!(
+        headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-amz-security-token") && v.starts_with("FQoG"))
+    );
+}
+
+#[tokio::test]
+async fn sigv4_env_session_token_with_expired_expiry_fails_before_first_use_signing() {
+    let provider = AwsCredentialProvider::from_env(|k| match k {
+        "AWS_ACCESS_KEY_ID" => Some("AKIAFROMENV00000000".into()),
+        "AWS_SECRET_ACCESS_KEY" => Some("secretfromenvsecretfromenvsecretfromenv".into()),
+        "AWS_SESSION_TOKEN" => Some("FQoGZXIvYXdzEJr//////////wEaENVSESSION".into()),
+        "AWS_CREDENTIAL_EXPIRATION" => Some("2000-01-01T00:00:00Z".into()),
+        _ => None,
+    });
+    let authorizer = with_test_observer(AwsStsAuthorizer::new("us-west-2", provider));
+    let mut headers = vec![(
+        "host".into(),
+        "bedrock-runtime.us-west-2.amazonaws.com".into(),
+    )];
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/x/invoke",
+        headers: &mut headers,
+    };
+
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Expired),
+        "expired env STS credentials must fail before first-use signing, got {err:?}"
+    );
+    assert!(
+        !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+        "expired env STS credentials must not sign"
+    );
 }
 
 #[tokio::test]

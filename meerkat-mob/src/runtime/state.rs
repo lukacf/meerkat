@@ -405,6 +405,7 @@ pub(super) enum MobCommand {
     },
     FlowCanceledCleanup {
         run_id: RunId,
+        terminalized: bool,
     },
     #[cfg(test)]
     FlowTrackerCounts {

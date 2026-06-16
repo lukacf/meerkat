@@ -73,6 +73,37 @@ type AppliedModelFallbackSwitch = (
     Message,
 );
 
+struct MachineAcceptedModelFallbackActivation {
+    switch: AgentLlmFallbackSwitch,
+    retry_attempt: u32,
+}
+
+impl MachineAcceptedModelFallbackActivation {
+    fn authorize(
+        switch: AgentLlmFallbackSwitch,
+        recovery_transition: &TurnExecutionTransition,
+        retry_schedule: &crate::retry::LlmRetrySchedule,
+    ) -> Result<Self, AgentError> {
+        if recovery_transition.prev_phase != TurnPhase::CallingLlm {
+            return Err(AgentError::InternalError(format!(
+                "model fallback activation requires machine-accepted RecoverableFailure from an \
+                 LLM phase, got {:?}",
+                recovery_transition.prev_phase
+            )));
+        }
+        if switch.request_policy.model != switch.new_identity.model {
+            return Err(AgentError::ConfigError(format!(
+                "model fallback activation target '{}' does not match request policy model '{}'",
+                switch.new_identity.model, switch.request_policy.model
+            )));
+        }
+        Ok(Self {
+            switch,
+            retry_attempt: retry_schedule.plan.attempt,
+        })
+    }
+}
+
 fn turn_input_failure_source(input: &TurnExecutionInput) -> Option<&TurnFailureSource> {
     match input {
         TurnExecutionInput::FatalFailure { failure, .. } => Some(failure),
@@ -270,10 +301,11 @@ where
 
     fn apply_model_fallback_switch(
         &mut self,
-        switch: AgentLlmFallbackSwitch,
+        activation: MachineAcceptedModelFallbackActivation,
         failure: &AgentError,
         previous_tools: &[Arc<ToolDef>],
     ) -> Result<AppliedModelFallbackSwitch, AgentError> {
+        let switch = activation.switch;
         self.rotate_auth_lease_auth_binding(
             switch.previous_identity.auth_binding.as_ref(),
             switch.new_identity.auth_binding.as_ref(),
@@ -355,6 +387,7 @@ where
         );
         let payload = serde_json::json!({
             "event": "model_fallback",
+            "retry_attempt": activation.retry_attempt,
             "from": {
                 "model": switch.previous_identity.model,
                 "provider": switch.previous_identity.provider.as_str(),
@@ -721,22 +754,15 @@ where
                         )?;
                         if let LlmFailureRecoveryKind::Recover = recovery {
                             // P0 Dogma Invariant 1: the MeerkatMachine
-                            // `RecoverableFailure` gate must commit BEFORE any
-                            // durable/client mutation. `prepare_model_fallback`
-                            // is non-mutating, so we only *compute* the pending
-                            // switch here; activation (auth-lease rotation,
-                            // durable metadata persistence, client active-index
-                            // commit) is deferred until the machine accepts the
-                            // recovery.
-                            let pending_switch: Option<AgentLlmFallbackSwitch> =
-                                if fallback_activation_is_pre_stream_safe(
-                                    &error,
-                                    self.client.stream_output_observed(),
-                                ) {
-                                    self.client.prepare_model_fallback(&error)
-                                } else {
-                                    None
-                                };
+                            // `RecoverableFailure` gate must commit BEFORE the
+                            // fallback target is selected or any durable/client
+                            // mutation happens. Keep this as a boolean
+                            // precondition only; the actual candidate proposal
+                            // is requested after the machine accepts recovery.
+                            let may_activate_fallback = fallback_activation_is_pre_stream_safe(
+                                &error,
+                                self.client.stream_output_observed(),
+                            );
                             let retry_schedule = self
                                 .retry_policy
                                 .schedule_retry(&error, attempt, self.budget.remaining_duration())
@@ -757,14 +783,23 @@ where
                                     run_id: run_id.clone(),
                                     retry: retry_schedule.clone(),
                                 })?;
-                            // Machine accepted the recovery: only now activate
-                            // the fallback switch (rotate auth lease, persist
-                            // identity, commit the client active index).
-                            if let Some(switch) = pending_switch {
-                                let new_identity = switch.new_identity.clone();
+                            // Machine accepted the recovery: only now ask the
+                            // client for a fallback proposal, wrap it in the
+                            // machine-accepted activation authority, then
+                            // mutate identity/policy/tool visibility atomically
+                            // for the retry attempt.
+                            if may_activate_fallback
+                                && let Some(switch) = self.client.prepare_model_fallback(&error)
+                            {
+                                let activation = MachineAcceptedModelFallbackActivation::authorize(
+                                    switch,
+                                    &recover,
+                                    &retry_schedule,
+                                )?;
+                                let new_identity = activation.switch.new_identity.clone();
                                 let (next_tools, next_params, next_max_tokens, notice) = self
                                     .apply_model_fallback_switch(
-                                        switch,
+                                        activation,
                                         &error,
                                         current_tools.as_ref(),
                                     )?;
@@ -819,21 +854,15 @@ where
                     )?;
                     if let LlmFailureRecoveryKind::Recover = recovery {
                         // P0 Dogma Invariant 1: the MeerkatMachine
-                        // `RecoverableFailure` gate must commit BEFORE any
-                        // durable/client mutation. `prepare_model_fallback` is
-                        // non-mutating, so we only *compute* the pending switch
-                        // here; activation (auth-lease rotation, durable
-                        // metadata persistence, client active-index commit) is
-                        // deferred until the machine accepts the recovery.
-                        let pending_switch: Option<AgentLlmFallbackSwitch> =
-                            if fallback_activation_is_pre_stream_safe(
-                                &e,
-                                self.client.stream_output_observed(),
-                            ) {
-                                self.client.prepare_model_fallback(&e)
-                            } else {
-                                None
-                            };
+                        // `RecoverableFailure` gate must commit BEFORE the
+                        // fallback target is selected or any durable/client
+                        // mutation happens. Keep this as a boolean precondition
+                        // only; the actual candidate proposal is requested
+                        // after the machine accepts recovery.
+                        let may_activate_fallback = fallback_activation_is_pre_stream_safe(
+                            &e,
+                            self.client.stream_output_observed(),
+                        );
                         let retry_schedule = self
                             .retry_policy
                             .schedule_retry(&e, attempt, self.budget.remaining_duration())
@@ -855,13 +884,26 @@ where
                                 run_id: run_id.clone(),
                                 retry: retry_schedule.clone(),
                             })?;
-                        // Machine accepted the recovery: only now activate the
-                        // fallback switch (rotate auth lease, persist identity,
-                        // commit the client active index).
-                        if let Some(switch) = pending_switch {
-                            let new_identity = switch.new_identity.clone();
+                        // Machine accepted the recovery: only now ask the client
+                        // for a fallback proposal, wrap it in the
+                        // machine-accepted activation authority, then mutate
+                        // identity/policy/tool visibility atomically for the
+                        // retry attempt.
+                        if may_activate_fallback
+                            && let Some(switch) = self.client.prepare_model_fallback(&e)
+                        {
+                            let activation = MachineAcceptedModelFallbackActivation::authorize(
+                                switch,
+                                &recover,
+                                &retry_schedule,
+                            )?;
+                            let new_identity = activation.switch.new_identity.clone();
                             let (next_tools, next_params, next_max_tokens, notice) = self
-                                .apply_model_fallback_switch(switch, &e, current_tools.as_ref())?;
+                                .apply_model_fallback_switch(
+                                    activation,
+                                    &e,
+                                    current_tools.as_ref(),
+                                )?;
                             let next_params = Self::apply_extraction_request_overrides(
                                 new_identity.provider,
                                 next_params,
@@ -8958,6 +9000,7 @@ mod tests {
 
     struct FallbackActivatingClient {
         active: std::sync::atomic::AtomicUsize,
+        fallback_proposals: std::sync::atomic::AtomicUsize,
         seen_tools: Mutex<Vec<Vec<String>>>,
         seen_notice_bodies: Mutex<Vec<Vec<String>>>,
         seen_max_tokens: Mutex<Vec<u32>>,
@@ -8969,6 +9012,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 active: std::sync::atomic::AtomicUsize::new(0),
+                fallback_proposals: std::sync::atomic::AtomicUsize::new(0),
                 seen_tools: Mutex::new(Vec::new()),
                 seen_notice_bodies: Mutex::new(Vec::new()),
                 seen_max_tokens: Mutex::new(Vec::new()),
@@ -8992,6 +9036,11 @@ mod tests {
             &self,
         ) -> Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>> {
             self.seen_provider_params.lock().unwrap().clone()
+        }
+
+        fn fallback_proposals(&self) -> usize {
+            self.fallback_proposals
+                .load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -9066,6 +9115,8 @@ mod tests {
             &self,
             _failure: &AgentError,
         ) -> Option<crate::AgentLlmFallbackSwitch> {
+            self.fallback_proposals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.active.load(std::sync::atomic::Ordering::SeqCst) != 0 {
                 return None;
             }
@@ -9827,6 +9878,11 @@ mod tests {
             client.seen_tools().len(),
             1,
             "exactly one (primary) stream call should have run before the rejected gate"
+        );
+        assert_eq!(
+            client.fallback_proposals(),
+            0,
+            "fallback target selection must happen only after the machine accepts recovery"
         );
     }
 

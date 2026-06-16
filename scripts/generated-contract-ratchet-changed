@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: generated-contract-ratchet-changed [--base <rev> --head <rev>] [changed-path ...]
+
+Exits 0 when any changed path can affect generated public contract ratchets
+(schemas, SDK generated types/wrappers, or SDK codegen tooling). Exits 1 when
+the supplied or diffed paths are unrelated.
+EOF
+}
+
+base=""
+head=""
+paths=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --base requires a revision" >&2
+        usage >&2
+        exit 2
+      fi
+      base="$2"
+      shift 2
+      ;;
+    --head)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --head requires a revision" >&2
+        usage >&2
+        exit 2
+      fi
+      head="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        paths+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      paths+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "${base}" || -n "${head}" ]]; then
+  if [[ -z "${base}" || -z "${head}" ]]; then
+    echo "error: --base and --head must be supplied together" >&2
+    usage >&2
+    exit 2
+  fi
+  diff_output="$(git diff --name-only "${base}" "${head}" --)" || {
+    echo "error: cannot diff ${base}..${head}" >&2
+    exit 2
+  }
+  paths=()
+  if [[ -n "${diff_output}" ]]; then
+    while IFS= read -r path; do
+      paths+=("${path}")
+    done <<<"${diff_output}"
+  fi
+fi
+
+generated_contract_path() {
+  local path="${1#./}"
+  case "${path}" in
+    artifacts/schemas/*.json)
+      return 0
+      ;;
+    sdks/python/meerkat/generated/*|sdks/typescript/src/generated/*|sdks/web/src/generated/*)
+      return 0
+      ;;
+    tools/sdk-codegen/*|tools/sdk-codegen/**/*)
+      return 0
+      ;;
+    meerkat-contracts/src/emit.rs|meerkat-contracts/src/rpc_catalog.rs|meerkat-contracts/src/rest_catalog.rs|meerkat-contracts/src/wire/*)
+      return 0
+      ;;
+    xtask/src/public_contracts.rs|xtask/tests/protocol_codegen_drift.rs)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+for path in "${paths[@]}"; do
+  if generated_contract_path "${path}"; then
+    echo "generated-contract ratchet changed: ${path}"
+    exit 0
+  fi
+done
+
+echo "generated-contract ratchet unchanged"
+exit 1

@@ -149,23 +149,16 @@ is_rust_relevant_path() {
 # "no build-relevant changes". These are matched separately from Rust paths so
 # they escalate to `make` governance targets instead of package-scoped nextest.
 is_governance_path() {
-  case "${1#./}" in
-    specs/machines/*|specs/compositions/*)
+  local path="${1#./}"
+  if scripts/machine-authority-changed -- "${path}" >/dev/null 2>&1; then
+    return 0
+  fi
+  case "${path}" in
+    .claude/skills/meerkat-dogma-inquisition/*|docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs-internal/dogma-audits/*)
       return 0
-      ;;
-    xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs|docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md)
-      return 0
-      ;;
-    .claude/skills/meerkat-dogma-inquisition/*)
-      return 0
-      ;;
-    docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs-internal/dogma-audits/*)
-      return 0
-      ;;
-    *)
-      return 1
       ;;
   esac
+  return 1
 }
 
 is_global_path() {
@@ -215,6 +208,7 @@ done < <(collect_changed_paths | awk 'NF' | sort -u)
 
 relevant=()
 governance=()
+generated_contract=()
 global=0
 if [[ "${#changed[@]}" -gt 0 ]]; then
   for path in "${changed[@]}"; do
@@ -227,10 +221,13 @@ if [[ "${#changed[@]}" -gt 0 ]]; then
     if is_governance_path "${path}"; then
       governance+=("${path}")
     fi
+    if scripts/generated-contract-ratchet-changed -- "${path}" >/dev/null 2>&1; then
+      generated_contract+=("${path}")
+    fi
   done
 fi
 
-if [[ "${#relevant[@]}" -eq 0 && "${#governance[@]}" -eq 0 ]]; then
+if [[ "${#relevant[@]}" -eq 0 && "${#governance[@]}" -eq 0 && "${#generated_contract[@]}" -eq 0 ]]; then
   echo "Cargo agent gate: no Rust build-relevant changes detected."
   exit 0
 fi
@@ -250,8 +247,19 @@ if [[ "${#governance[@]}" -gt 0 ]]; then
   run_governance_gate
 fi
 
+if [[ "${#generated_contract[@]}" -gt 0 ]]; then
+  printf 'Cargo agent gate generated contract paths:\n'
+  printf '  %s\n' "${generated_contract[@]}"
+  echo "Generated schemas/SDK contracts changed; running freshness and surface ratchets."
+  if [[ "${dry_run}" -eq 1 ]]; then
+    echo "DRY-RUN make verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment"
+  else
+    make verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment
+  fi
+fi
+
 if [[ "${#relevant[@]}" -eq 0 ]]; then
-  echo "Cargo agent gate: no Rust build-relevant changes detected (governance checks ran above)."
+  echo "Cargo agent gate: no Rust build-relevant changes detected (non-Rust ratchets ran above)."
   exit 0
 fi
 

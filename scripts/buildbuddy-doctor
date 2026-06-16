@@ -604,7 +604,7 @@ if grep -Fq '//xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &
   grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib' xtask/BUILD.bazel &&
   grep -Fq '"RUSTFMT": "$(rootpath tests/rustfmt_host.sh)"' xtask/BUILD.bazel &&
   grep -Fq 'export RUSTFMT' xtask/tests/machine_verify_all_tlc_test.sh; then
-  pass "BuildBuddy machine-authority lane runs hermetic machine-verify with hermetic rustfmt, bounded adaptive witness, broad-composition structural guards, and fail-closed missing-TLC behavior"
+  pass "BuildBuddy machine-authority lane runs hermetic machine-verify with hermetic rustfmt, bounded adaptive witness, broad-composition structural guards, and fails closed when tlc is absent"
 else
   bad "BuildBuddy machine-authority lane does not run hermetic machine-verify, lacks the bounded adaptive witness/broad-composition structural guards, or still launders a silent no-TLC drift fallback as TLC verification"
 fi

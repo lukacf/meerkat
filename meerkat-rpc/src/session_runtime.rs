@@ -3394,23 +3394,7 @@ impl SessionRuntime {
     ) -> Result<SessionLlmIdentity, RpcError> {
         let registry = self.model_registry().await?;
         let model = build_config.model.clone();
-        let provider = if let Some(provider) = build_config.provider {
-            if let Some(reason) =
-                registered_model_provider_mismatch_reason(&registry, provider, &model)
-            {
-                return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: reason,
-                    data: None,
-                });
-            }
-            provider
-        } else {
-            registry
-                .entry(&model)
-                .map(|entry| entry.provider)
-                .unwrap_or(meerkat_core::Provider::Other)
-        };
+        let provider = self.resolve_create_provider(build_config).await?;
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
             if let Some(server_id) = build_config.self_hosted_server_id.clone() {
                 Some(server_id)
@@ -8851,6 +8835,45 @@ mod tests {
             .await
             .expect_err("explicit provider contradicting the catalog owner must be rejected");
         assert_eq!(err.code, error::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn pending_build_identity_rejects_unknown_model_without_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        let build_config = AgentBuildConfig::new("totally-unregistered-model-xyz");
+
+        let err = runtime
+            .llm_identity_from_pending_build(&build_config)
+            .await
+            .expect_err("pending staging identity must fail closed for unknown owner");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message
+                .contains("explicit provider or a registered model owner"),
+            "error should name the missing registry owner contract: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_unknown_model_before_staging_slot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        let build_config = AgentBuildConfig::new("totally-unregistered-model-xyz");
+
+        let err = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect_err("deferred create must reject before reserving a pending session");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert_eq!(
+            runtime.staged_sessions.len().await,
+            0,
+            "unknown-model create must not leave a staged session behind"
+        );
     }
 
     /// B19 helper sanity: realtime capability lookup must round-trip the

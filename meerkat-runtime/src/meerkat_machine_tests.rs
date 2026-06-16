@@ -2514,6 +2514,60 @@ async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
 }
 
 #[tokio::test]
+async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::fail_delete_ops_lifecycle_once(
+        Arc::clone(&inner),
+    ));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    let stale_epoch = meerkat_core::RuntimeEpochId::new();
+    let stale_cursor = meerkat_core::EpochCursorState::new();
+    let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+        .capture_persistence_snapshot(stale_epoch, &stale_cursor)
+        .unwrap();
+
+    crate::store::RuntimeStore::persist_ops_lifecycle(inner.as_ref(), &runtime_id, &stale_snapshot)
+        .await
+        .expect("test snapshot should persist");
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.unregister_session(&session_id).await;
+
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "failed DeleteSnapshot teardown must retain the live entry instead of forgetting it"
+    );
+    assert!(
+        crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .expect("store should load")
+            .is_some(),
+        "failed DeleteSnapshot teardown must not hide the stale durable snapshot"
+    );
+
+    adapter.unregister_session(&session_id).await;
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "second unregister should remove the entry after delete succeeds"
+    );
+    assert!(
+        crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .expect("store should load")
+            .is_none(),
+        "successful retry must delete stale ops lifecycle snapshot"
+    );
+}
+
+#[tokio::test]
 async fn unregister_session_retains_terminal_machine_lifecycle_snapshot() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let adapter = Arc::new(MeerkatMachine::persistent(
@@ -15425,6 +15479,7 @@ struct RuntimeCommitAtomicityStore {
     inner: Arc<crate::store::InMemoryRuntimeStore>,
     fail_atomic_apply: AtomicBool,
     fail_commit_machine_lifecycle: AtomicBool,
+    fail_delete_ops_lifecycle: AtomicBool,
     commit_machine_lifecycle_calls: AtomicUsize,
 }
 
@@ -15434,6 +15489,7 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_delete_ops_lifecycle: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
         }
     }
@@ -15443,6 +15499,7 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(true),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_delete_ops_lifecycle: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
         }
     }
@@ -15452,6 +15509,17 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(true),
+            fail_delete_ops_lifecycle: AtomicBool::new(false),
+            commit_machine_lifecycle_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn fail_delete_ops_lifecycle_once(inner: Arc<crate::store::InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_atomic_apply: AtomicBool::new(false),
+            fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_delete_ops_lifecycle: AtomicBool::new(true),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
         }
     }
@@ -15614,6 +15682,11 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<(), crate::store::RuntimeStoreError> {
+        if self.fail_delete_ops_lifecycle.swap(false, Ordering::SeqCst) {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "synthetic delete_ops_lifecycle failure".into(),
+            ));
+        }
         self.inner.delete_ops_lifecycle(runtime_id).await
     }
 }

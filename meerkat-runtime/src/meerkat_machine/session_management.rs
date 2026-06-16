@@ -1330,29 +1330,28 @@ impl MeerkatMachine {
 
     async fn finalize_unregistered_session(
         &self,
-        entry: RuntimeSessionEntry,
+        runtime_id: LogicalRuntimeId,
+        driver: SharedDriver,
         durability_authority: RuntimeOpsLifecycleDurabilityAuthority,
-    ) {
-        let runtime_id = entry.runtime_id.clone();
-        let mut driver = entry.driver.lock().await;
+    ) -> Result<(), RuntimeDriverError> {
+        let mut driver = driver.lock().await;
         driver.sync_control_projection_from_dsl_authority();
         drop(driver);
 
         if durability_authority.action
             != crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
         {
-            return;
+            return Ok(());
         }
         let Some(store) = self.store.as_ref() else {
-            return;
+            return Ok(());
         };
-        if let Err(err) = store.delete_ops_lifecycle(&runtime_id).await {
-            tracing::warn!(
-                %runtime_id,
-                error = %err,
-                "failed to delete ops lifecycle snapshot for unregistered runtime"
-            );
-        }
+        store.delete_ops_lifecycle(&runtime_id).await.map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "failed to delete ops lifecycle snapshot for unregistered runtime {runtime_id}: {err}"
+            ))
+        })?;
+        Ok(())
     }
 
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
@@ -1426,14 +1425,16 @@ impl MeerkatMachine {
         // machine records whether teardown intent should retain the durable
         // runtime snapshot before the drain can advance lifecycle state.
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized beginning drain window");
-        match self
+        let unregister_retry_snapshot = match self
             .stage_begin_unregister_session_authority(session_id)
             .await
         {
             Ok(staged) => {
+                let retry_snapshot = staged.previous_snapshot.clone();
                 self.commit_session_dsl_transition(session_id, staged, "BeginUnregisterSession")
                     .await
                     .map_err(RuntimeDriverError::Internal)?;
+                Some(retry_snapshot)
             }
             Err(reason) => {
                 let already_draining =
@@ -1452,7 +1453,7 @@ impl MeerkatMachine {
                     .classify_session_dsl_rejection(session_id, reason)
                     .await);
             }
-        }
+        };
 
         // Phase 2: discharge the runtime-loop-stop and comms-drain-abort
         // obligations, retaining both JoinHandles to await below. The live
@@ -1645,6 +1646,8 @@ impl MeerkatMachine {
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized staging unregister");
         let (staged, durability_authority) =
             self.stage_unregister_session_authority(session_id).await?;
+        let unregister_rollback_snapshot =
+            unregister_retry_snapshot.unwrap_or_else(|| staged.previous_snapshot.clone());
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committing unregister");
         self.commit_session_dsl_transition(session_id, staged, "UnregisterSession")
             .await
@@ -1659,6 +1662,41 @@ impl MeerkatMachine {
                 .persist_current_machine_lifecycle("unregister")
                 .await?;
         }
+        let finalize_target = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .map(|entry| (entry.runtime_id.clone(), Arc::clone(&entry.driver)))
+        };
+        if let Some((runtime_id, driver)) = finalize_target {
+            tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized finalizing durable unregister");
+            if let Err(err) = self
+                .finalize_unregistered_session(
+                    runtime_id,
+                    Arc::clone(&driver),
+                    durability_authority,
+                )
+                .await
+            {
+                self.restore_session_dsl_state(session_id, unregister_rollback_snapshot)
+                    .await;
+                driver
+                    .lock()
+                    .await
+                    .sync_control_projection_from_dsl_authority();
+                if let Err(rollback_error) = driver
+                    .lock()
+                    .await
+                    .persist_current_machine_lifecycle("unregister rollback")
+                    .await
+                {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "{err}; additionally failed to persist unregister rollback: {rollback_error}"
+                    )));
+                }
+                return Err(err);
+            }
+        }
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized removing entry");
         let entry = {
             let mut sessions = self.sessions.write().await;
@@ -1672,12 +1710,7 @@ impl MeerkatMachine {
             }
             sessions.remove(session_id)
         };
-
-        if let Some(entry) = entry {
-            tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized finalizing entry");
-            self.finalize_unregistered_session(entry, durability_authority)
-                .await;
-        }
+        drop(entry);
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized complete");
         Ok(())
     }
@@ -1854,14 +1887,26 @@ impl MeerkatMachine {
         let Some(entry) = entry else {
             return false;
         };
-        self.finalize_unregistered_session(
-            entry,
+        let runtime_id = entry.runtime_id.clone();
+        let driver = Arc::clone(&entry.driver);
+        if let Err(err) = self
+            .finalize_unregistered_session(
+                runtime_id,
+                driver,
             RuntimeOpsLifecycleDurabilityAuthority {
                 action:
                     crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::RetainSnapshot,
             },
         )
-        .await;
+            .await
+        {
+            tracing::warn!(
+                %session_id,
+                error = %err,
+                "failed to finalize storeless WASM session discard"
+            );
+            return false;
+        }
         true
     }
 

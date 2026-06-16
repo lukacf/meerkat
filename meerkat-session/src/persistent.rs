@@ -130,16 +130,43 @@ pub struct EventProjectionHalted {
     cause: Arc<SessionError>,
 }
 
+/// Typed source carried by a durable halt marker after process restart.
+#[derive(Debug, thiserror::Error)]
+#[error("durable event projection halt marker for session {session_id}: {reason}")]
+pub struct DurableEventProjectionHaltMarker {
+    session_id: SessionId,
+    reason: String,
+}
+
+fn event_projection_halted_error(session_id: &SessionId, cause: Arc<SessionError>) -> SessionError {
+    SessionError::Store(Box::new(EventProjectionHalted {
+        session_id: session_id.clone(),
+        cause,
+    }))
+}
+
 async fn record_event_projection_fault(
     faults: &EventProjectionFaultRegistry,
+    event_store: &Arc<dyn EventStore>,
     session_id: &SessionId,
     error: SessionError,
 ) {
+    let cause = Arc::new(error);
+    if let Err(marker_error) = event_store
+        .record_projection_halt(session_id, &cause.to_string())
+        .await
+    {
+        tracing::error!(
+            session_id = %session_id,
+            error = %marker_error,
+            "failed to persist durable event projection halt marker"
+        );
+    }
     faults
         .lock()
         .await
         .entry(session_id.clone())
-        .or_insert_with(|| Arc::new(error));
+        .or_insert(cause);
 }
 
 async fn append_and_project_event(
@@ -230,7 +257,13 @@ async fn project_create_time_events(
                             error = %error,
                             "create-time event projection halted: durable event append failed"
                         );
-                        record_event_projection_fault(&projection_faults, session_id, error).await;
+                        record_event_projection_fault(
+                            &projection_faults,
+                            &event_store,
+                            session_id,
+                            error,
+                        )
+                        .await;
                         break;
                     }
                 } else {
@@ -251,7 +284,13 @@ async fn project_create_time_events(
                         error = %error,
                         "create-time event projection halted: durable event append failed"
                     );
-                    record_event_projection_fault(&projection_faults, session_id, error).await;
+                    record_event_projection_fault(
+                        &projection_faults,
+                        &event_store,
+                        session_id,
+                        error,
+                    )
+                    .await;
                     break;
                 }
             }
@@ -267,7 +306,7 @@ async fn project_create_time_events(
             error = %error,
             "final create-time event projection flush failed: durable event append failed"
         );
-        record_event_projection_fault(&projection_faults, session_id, error).await;
+        record_event_projection_fault(&projection_faults, &event_store, session_id, error).await;
     }
 }
 
@@ -3768,14 +3807,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(event_store) = self.event_store.as_ref() else {
             return Ok(None);
         };
+        if let Some(marker) = event_store
+            .projection_halt(id)
+            .await
+            .map_err(|err| SessionError::Store(Box::new(err)))?
+        {
+            return Err(event_projection_halted_error(
+                id,
+                Arc::new(SessionError::Store(Box::new(
+                    DurableEventProjectionHaltMarker {
+                        session_id: marker.session_id,
+                        reason: marker.reason,
+                    },
+                ))),
+            ));
+        }
         // Fail closed if this session's projection task halted on a durable
         // append failure: the log has a sequence hole from the halt point, so
         // serving it as replay truth would launder the recorded typed fault.
         if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
-            return Err(SessionError::Store(Box::new(EventProjectionHalted {
-                session_id: id.clone(),
-                cause: Arc::clone(cause),
-            })));
+            return Err(event_projection_halted_error(id, Arc::clone(cause)));
         }
         event_store
             .read_from(id, from_seq)
@@ -3843,7 +3894,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         error = %error,
                         "event projection halted: durable event append failed"
                     );
-                    record_event_projection_fault(&projection_faults, &session_id, error).await;
+                    record_event_projection_fault(
+                        &projection_faults,
+                        &event_store,
+                        &session_id,
+                        error,
+                    )
+                    .await;
                     break;
                 }
             }
@@ -6637,6 +6694,54 @@ mod tests {
                 .await?
                 .is_some_and(|events| events.is_empty())
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_event_projection_halt_marker_fails_replay_after_restart()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Gate: the replay stop condition must not be only process-local. A
+        // restarted service over the same file event store must observe the
+        // durable halt marker before it serves any event-log replay.
+        let dir = tempfile::tempdir()?;
+        let event_root = dir.path().join("events");
+        let session_id = SessionId::new();
+        let initial_store = crate::event_store::FileEventStore::new(&event_root);
+        initial_store
+            .record_projection_halt(&session_id, "injected durable append failure")
+            .await?;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let restarted_event_store: Arc<dyn EventStore> =
+            Arc::new(crate::event_store::FileEventStore::new(&event_root));
+        let projector = Arc::new(SessionProjector::new(dir.path().join(".rkat")));
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        )
+        .with_event_projection(restarted_event_store, projector);
+
+        let err = restarted
+            .event_log_read_from(&session_id, 0)
+            .await
+            .expect_err("durable halt marker must fail replay after restart");
+        match err {
+            SessionError::Store(source) => {
+                let halted = source
+                    .downcast_ref::<EventProjectionHalted>()
+                    .expect("expected typed EventProjectionHalted replay error");
+                let cause = halted.cause.as_ref();
+                assert!(
+                    matches!(cause, SessionError::Store(marker)
+                        if marker.downcast_ref::<DurableEventProjectionHaltMarker>().is_some()),
+                    "expected durable marker source, got: {cause}"
+                );
+            }
+            other => panic!("expected SessionError::Store, got: {other}"),
+        }
         Ok(())
     }
 

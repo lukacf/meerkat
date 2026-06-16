@@ -107,11 +107,9 @@ pub struct AwsStsAuthorizer {
     service: String,
     provider: AwsCredentialProvider,
     label: String,
-    /// AuthMachine freshness owner. When wired, the authorizer consults the
-    /// per-binding lease for a credential-use verdict before signing rather
-    /// than implicitly treating its resolved credential material as
-    /// always-fresh. Optional so hermetic tests and surfaces without a runtime
-    /// lease handle still construct the authorizer.
+    /// AuthMachine freshness owner. SigV4 signing fails closed unless this is
+    /// wired, so credential material is never treated as implicitly fresh outside
+    /// the generated AuthMachine lease lifecycle.
     lease_observer: Option<LeaseFreshnessObserver>,
 }
 
@@ -218,6 +216,9 @@ impl HttpAuthorizer for AwsStsAuthorizer {
                 Ok(())
             }
             other => {
+                let Some(observer) = &self.lease_observer else {
+                    return Err(AuthError::HostOwnedUnavailable);
+                };
                 // Single authoritative `now`: the same instant feeds the
                 // AuthMachine freshness verdict and the SigV4 signing time, so
                 // a request is never signed against a clock the lease did not
@@ -226,16 +227,13 @@ impl HttpAuthorizer for AwsStsAuthorizer {
                 // owns whether they are still usable.
                 let now = Utc::now();
                 let creds = other.resolve_sigv4().map_err(AuthError::from)?;
-                if let Some(observer) = &self.lease_observer {
-                    // Fail closed: expired/missing/refresh-needed creds surface
-                    // a typed reauth/refresh disposition rather than silently
-                    // signing with stale or absent material. Env/Static creds
-                    // carry no expiry, so the lease holds them as an explicit
-                    // `Valid` (no-expiry) phase rather than implicit
-                    // always-fresh.
-                    let credential_expiry = creds.expiry().map(DateTime::<Utc>::from);
-                    observer.ensure_valid_for_signing(&self.label, now, credential_expiry)?;
-                }
+                // Fail closed: expired/missing/refresh-needed creds surface a
+                // typed reauth/refresh disposition rather than silently signing
+                // with stale or absent material. Env/Static creds carry no
+                // expiry, so the lease holds them as an explicit `Valid`
+                // (no-expiry) phase rather than implicit always-fresh.
+                let credential_expiry = creds.expiry().map(DateTime::<Utc>::from);
+                observer.ensure_valid_for_signing(&self.label, now, credential_expiry)?;
                 let signed = self.sign_sigv4(&creds, req, now).map_err(AuthError::from)?;
                 for (k, v) in signed {
                     req.headers.push((k, v));

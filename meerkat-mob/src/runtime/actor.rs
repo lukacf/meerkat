@@ -7536,7 +7536,17 @@ impl MobActor {
                         tracing::error!(error = %error, "flow finished cleanup failed");
                     }
                 }
-                MobCommand::FlowCanceledCleanup { run_id } => {
+                MobCommand::FlowCanceledCleanup {
+                    run_id,
+                    terminalized,
+                } => {
+                    if !terminalized {
+                        tracing::error!(
+                            %run_id,
+                            "flow canceled cleanup refused: spawned cancellation path did not prove persisted terminalization"
+                        );
+                        continue;
+                    }
                     if let Err(error) = self
                         .handle_flow_cleanup(run_id, "flow canceled cleanup")
                         .await
@@ -18710,7 +18720,9 @@ impl MobActor {
                 () = tokio::time::sleep(cancel_grace_timeout) => false,
             };
             if completed {
+                let mut terminalized = true;
                 if let Err(error) = flow_engine.cancel_unfinished_steps(&run_id).await {
+                    terminalized = false;
                     tracing::error!(
                         error = %error,
                         "failed to settle dispatched steps after flow task completion during cancellation"
@@ -18720,6 +18732,7 @@ impl MobActor {
                     .terminalize_canceled(run_id.clone(), flow_id)
                     .await
                 {
+                    terminalized = false;
                     tracing::error!(
                         error = %error,
                         "failed to apply canceled terminalization after flow task completion"
@@ -18728,6 +18741,7 @@ impl MobActor {
                 if cleanup_tx
                     .send(MobCommand::FlowCanceledCleanup {
                         run_id: cleanup_run_id,
+                        terminalized,
                     })
                     .await
                     .is_err()
@@ -18740,13 +18754,19 @@ impl MobActor {
             }
 
             handle.abort();
+            let mut terminalized = true;
             if let Err(error) = flow_engine.cancel_unfinished_steps(&run_id).await {
+                terminalized = false;
                 tracing::error!(
                     error = %error,
                     "failed to settle dispatched steps before flow cancellation terminalization"
                 );
             }
-            if let Err(error) = flow_engine.terminalize_canceled(run_id, flow_id).await {
+            if let Err(error) = flow_engine
+                .terminalize_canceled(run_id.clone(), flow_id)
+                .await
+            {
+                terminalized = false;
                 tracing::error!(
                     error = %error,
                     "failed flow-run kernel cancellation terminalization"
@@ -18755,6 +18775,7 @@ impl MobActor {
             if cleanup_tx
                 .send(MobCommand::FlowCanceledCleanup {
                     run_id: cleanup_run_id,
+                    terminalized,
                 })
                 .await
                 .is_err()

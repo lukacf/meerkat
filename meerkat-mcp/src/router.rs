@@ -1991,6 +1991,12 @@ impl McpRouter {
         }
     }
 
+    fn tool_definitions_equivalent(left: &ToolDef, right: &ToolDef) -> bool {
+        left.description == right.description
+            && left.input_schema == right.input_schema
+            && left.provenance == right.provenance
+    }
+
     fn publish_projection_snapshot(&mut self) -> bool {
         let epoch = self.surface_owner.snapshot_epoch();
         let server_names: BTreeSet<String> = self
@@ -2014,10 +2020,34 @@ impl McpRouter {
                 complete = false;
                 continue;
             };
+            let mut server_tools: BTreeMap<String, Arc<ToolDef>> = BTreeMap::new();
+            let mut same_server_divergent: BTreeSet<String> = BTreeSet::new();
+
             for tool in &entry.tools {
+                let tool_name = tool.name.to_string();
+                if let Some(existing) = server_tools.get(&tool_name) {
+                    if !Self::tool_definitions_equivalent(existing, tool) {
+                        tracing::warn!(
+                            tool = %tool.name,
+                            server = %server_name,
+                            "MCP projection saw divergent duplicate tool definitions from one server; excluding the tool from the published catalog (ambiguous => denied)"
+                        );
+                        same_server_divergent.insert(tool_name);
+                        complete = false;
+                    }
+                    continue;
+                }
+                server_tools.insert(tool_name, Arc::clone(tool));
+            }
+
+            for name in &same_server_divergent {
+                server_tools.remove(name);
+                collided.insert(name.clone());
+            }
+
+            for tool in server_tools.values() {
                 // Fail closed by exclusion: a tool name owned by two different
                 // servers is ambiguous, so it must be dispatchable from NEITHER.
-                // A same-name-same-server re-entry is not a collision.
                 if let Some(existing_owner) = tool_to_server.get(tool.name.as_str())
                     && existing_owner != &server_name
                 {
@@ -3197,6 +3227,23 @@ mod tests {
         );
     }
 
+    fn insert_entry_with_tool_defs(router: &mut McpRouter, server_name: &str, tools: Vec<ToolDef>) {
+        router.servers.insert(
+            server_name.to_string(),
+            ServerEntry {
+                config: McpServerConfig::stdio(
+                    server_name,
+                    "noop".to_string(),
+                    vec![],
+                    HashMap::new(),
+                ),
+                connection: None,
+                tools: tools.into_iter().map(Arc::new).collect(),
+                active_calls: AtomicUsize::new(0),
+            },
+        );
+    }
+
     /// Gate for fixes #6: a tool name exposed by two different servers is
     /// ambiguous and must be dispatchable from NEITHER. The OLD behavior was
     /// last-wins (silently route to an arbitrary owner). The published
@@ -3268,10 +3315,10 @@ mod tests {
         );
     }
 
-    /// Same-name-same-server re-entry (the same tool listed twice by one server)
-    /// is NOT a collision; the tool stays routable and the projection complete.
+    /// Same-name-same-server re-entry with identical definitions is NOT a
+    /// collision; the tool stays routable and the projection complete.
     #[test]
-    fn duplicate_tool_name_within_single_server_is_not_a_collision() {
+    fn same_server_identical_duplicate_definitions_collapse_once() {
         let mut router = generated_handle_owner_router();
         complete_add(&mut router, "solo");
         insert_entry_with_tools(&mut router, "solo", &["dup", "dup", "unique"]);
@@ -3279,7 +3326,7 @@ mod tests {
         let complete = router.publish_projection_snapshot();
         assert!(
             complete,
-            "a same-server duplicate is not a collision; projection stays complete"
+            "an identical same-server duplicate is not a collision; projection stays complete"
         );
 
         let projection = Arc::clone(&router.projection);
@@ -3289,8 +3336,121 @@ mod tests {
             "same-server duplicate tool name remains routable"
         );
         assert_eq!(
+            projection
+                .catalog_entries
+                .iter()
+                .filter(|entry| entry.tool.name.as_str() == "dup")
+                .count(),
+            1,
+            "identical same-server duplicates collapse to one exact catalog entry"
+        );
+        assert_eq!(
             projection.tool_to_server.get("unique").map(String::as_str),
             Some("solo")
+        );
+    }
+
+    #[tokio::test]
+    async fn same_server_divergent_duplicate_definitions_are_excluded_from_projection() {
+        let mut router = generated_handle_owner_router();
+        complete_add(&mut router, "solo");
+        insert_entry_with_tool_defs(
+            &mut router,
+            "solo",
+            vec![
+                ToolDef::new(
+                    "dup",
+                    "first definition",
+                    serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+                ),
+                ToolDef::new(
+                    "dup",
+                    "first definition",
+                    serde_json::json!({"type": "object", "properties": {"b": {"type": "number"}}}),
+                ),
+                ToolDef::new("unique", "unique", serde_json::json!({"type": "object"})),
+            ],
+        );
+
+        let complete = router.publish_projection_snapshot();
+        assert!(
+            !complete,
+            "divergent same-server duplicate definitions make the projection incomplete"
+        );
+
+        let projection = Arc::clone(&router.projection);
+        assert!(
+            !projection.tool_to_server.contains_key("dup"),
+            "divergent same-server duplicate must not be routable"
+        );
+        assert!(
+            projection
+                .catalog_entries
+                .iter()
+                .all(|entry| entry.tool.name.as_str() != "dup"),
+            "divergent same-server duplicate must be excluded from the exact catalog"
+        );
+        assert!(
+            projection
+                .visible_tools
+                .iter()
+                .all(|tool| tool.name.as_str() != "dup"),
+            "divergent same-server duplicate must be excluded from visible tools"
+        );
+        assert_eq!(
+            projection.tool_to_server.get("unique").map(String::as_str),
+            Some("solo"),
+            "non-ambiguous tools from the same server remain routable"
+        );
+
+        let err = router
+            .call_tool("dup", &serde_json::json!({}))
+            .await
+            .expect_err("divergent same-server duplicate must not dispatch");
+        assert!(
+            matches!(err, McpError::ToolNotFound(_)),
+            "ambiguous same-server tool name must be denied as not_found, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn same_server_duplicate_description_mismatch_is_divergent() {
+        let mut router = generated_handle_owner_router();
+        complete_add(&mut router, "solo");
+        insert_entry_with_tool_defs(
+            &mut router,
+            "solo",
+            vec![
+                ToolDef::new(
+                    "dup",
+                    "first definition",
+                    serde_json::json!({"type": "object"}),
+                ),
+                ToolDef::new(
+                    "dup",
+                    "second definition",
+                    serde_json::json!({"type": "object"}),
+                ),
+            ],
+        );
+
+        let complete = router.publish_projection_snapshot();
+        assert!(
+            !complete,
+            "same-server duplicate description drift makes the projection incomplete"
+        );
+
+        let projection = Arc::clone(&router.projection);
+        assert!(
+            !projection.tool_to_server.contains_key("dup"),
+            "description-divergent duplicate must not be routable"
+        );
+        assert!(
+            projection
+                .catalog_entries
+                .iter()
+                .all(|entry| entry.tool.name.as_str() != "dup"),
+            "description-divergent duplicate must be excluded from catalog"
         );
     }
 

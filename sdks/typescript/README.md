@@ -266,18 +266,18 @@ Returns a config envelope: `{ config, generation, realmId?, instanceId?, backend
 ### setConfig(config)
 
 ```ts
-async setConfig(config: Record<string, unknown>): Promise<ConfigEnvelope>
+async setConfig(config: Record<string, unknown>): Promise<ConfigWriteResult>
 ```
 
-Replaces the entire runtime configuration and returns the updated envelope.
+Replaces the entire runtime configuration and returns the updated envelope plus any live-propagation report.
 
 ### patchConfig(patch)
 
 ```ts
-async patchConfig(patch: Record<string, unknown>): Promise<ConfigEnvelope>
+async patchConfig(patch: Record<string, unknown>): Promise<ConfigWriteResult>
 ```
 
-Merge-patches the runtime configuration and returns the updated envelope.
+Merge-patches the runtime configuration and returns the updated envelope plus any live-propagation report.
 
 ## Public Types
 

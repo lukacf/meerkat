@@ -46,6 +46,7 @@ rust_library(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -96,6 +97,7 @@ rust_library(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -164,6 +166,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -234,6 +237,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/dispatcher_rule_synthetic_injection.rs",
@@ -307,6 +311,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/flow_frame_recovery_tests.rs",
@@ -378,6 +383,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/kickoff_spawn_teardown_quiesce.rs",
@@ -449,6 +455,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/member_session_bindings.rs",
@@ -520,6 +527,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/mob_orchestrator_kernel.rs",
@@ -591,6 +599,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/shadow_state_absent.rs",
@@ -662,6 +671,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/smoke_mob_flow_runtime.rs",
@@ -733,6 +743,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/smoke_mob_generated_image_comms.rs",
@@ -804,6 +815,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/smoke_mob_pictionary.rs",
@@ -875,6 +887,7 @@ rust_test(
         "src/runtime/builder.rs",
         "src/runtime/flow_frame_engine.rs",
         "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
     ],
     srcs = [
         "tests/smoke_mob_resume.rs",

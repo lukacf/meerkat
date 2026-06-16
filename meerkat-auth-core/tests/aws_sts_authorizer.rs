@@ -48,9 +48,14 @@ fn static_provider() -> AwsCredentialProvider {
     }
 }
 
+fn with_test_observer(authorizer: AwsStsAuthorizer) -> AwsStsAuthorizer {
+    let handle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+    authorizer.with_auth_lease_observer(generated_auth_lease_handle_for_test(handle), lease_key())
+}
+
 #[tokio::test]
 async fn sigv4_adds_required_headers_for_bedrock() {
-    let authorizer = AwsStsAuthorizer::new("us-east-1", static_provider());
+    let authorizer = with_test_observer(AwsStsAuthorizer::new("us-east-1", static_provider()));
     let mut headers = vec![(
         "host".to_string(),
         "bedrock-runtime.us-east-1.amazonaws.com".to_string(),
@@ -91,6 +96,28 @@ async fn sigv4_adds_required_headers_for_bedrock() {
 }
 
 #[tokio::test]
+async fn sigv4_without_auth_lease_observer_fails_closed_before_signing() {
+    let authorizer = AwsStsAuthorizer::new("us-east-1", static_provider());
+    let mut headers = vec![(
+        "host".to_string(),
+        "bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+    )];
+    let mut req = bedrock_request(&mut headers);
+
+    let err = authorizer.authorize(&mut req).await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::HostOwnedUnavailable),
+        "unobserved SigV4 signing must fail closed, got {err:?}"
+    );
+    assert!(
+        !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+        "unobserved SigV4 signing must not add authorization headers"
+    );
+}
+
+#[tokio::test]
 async fn bearer_token_mode_emits_bearer_header_and_skips_sigv4() {
     let authorizer = AwsStsAuthorizer::new(
         "us-east-1",
@@ -113,7 +140,7 @@ async fn bearer_token_mode_emits_bearer_header_and_skips_sigv4() {
 #[tokio::test]
 async fn env_provider_missing_keys_returns_missing_secret() {
     let provider = AwsCredentialProvider::from_env(|_| None);
-    let authorizer = AwsStsAuthorizer::new("us-east-1", provider);
+    let authorizer = with_test_observer(AwsStsAuthorizer::new("us-east-1", provider));
     let mut headers = Vec::new();
     let mut req = HttpAuthorizationRequest {
         method: "POST",
@@ -134,7 +161,7 @@ async fn env_provider_reads_sigv4_credentials_from_env_lookup() {
         "AWS_SECRET_ACCESS_KEY" => Some("secretfromenvsecretfromenvsecretfromenv".into()),
         _ => None,
     });
-    let authorizer = AwsStsAuthorizer::new("us-west-2", provider);
+    let authorizer = with_test_observer(AwsStsAuthorizer::new("us-west-2", provider));
     let mut headers = vec![(
         "host".into(),
         "bedrock-runtime.us-west-2.amazonaws.com".into(),

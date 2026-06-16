@@ -81,9 +81,9 @@ Both use integer unix timestamps for `created_at` and `updated_at`.
 
 `DeferredSession.start_turn(...)` supports the same override set.
 
-### Config APIs return envelopes
+### Config APIs return config write results
 
-`get_config`, `set_config`, and `patch_config` return a `ConfigEnvelope`:
+`get_config` returns a `ConfigEnvelope`:
 
 ```python
 {
@@ -95,6 +95,9 @@ Both use integer unix timestamps for `created_at` and `updated_at`.
   "resolved_paths": {...} | None,
 }
 ```
+
+`set_config` and `patch_config` return the same envelope fields plus optional
+`live_propagation` when a write fans out to live channels.
 
 Example:
 

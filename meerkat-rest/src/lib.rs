@@ -6925,6 +6925,43 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
 
+    struct RuntimeTerminationFixtureExecutor;
+
+    #[async_trait]
+    impl CoreExecutor for RuntimeTerminationFixtureExecutor {
+        async fn apply(
+            &mut self,
+            run_id: meerkat_core::RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
     /// Test-side view of the canonical create-session default model: resolved
     /// per call from the state's current config (the `AppState` no longer
     /// carries a default-model mirror).
@@ -6971,14 +7008,17 @@ mod tests {
     }
 
     async fn runtime_terminated_completion_handle(
-        adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,
+        adapter: &Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
         session_id: &SessionId,
         reason: &str,
     ) -> meerkat_runtime::CompletionHandle {
         adapter
-            .prepare_bindings(session_id.clone())
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(RuntimeTerminationFixtureExecutor),
+            )
             .await
-            .expect("test machine should prepare runtime bindings");
+            .expect("test machine should attach runtime executor");
         let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
             "pending completion fixture",
             None,
@@ -11501,7 +11541,7 @@ mod tests {
         let state = load_rest_state_with_capacity(&temp, 1).await;
         let session_id = SessionId::new();
         let handle = runtime_terminated_completion_handle(
-            state.runtime_adapter.as_ref(),
+            &state.runtime_adapter,
             &session_id,
             "cleanup preserves outcome",
         )
@@ -11545,7 +11585,7 @@ mod tests {
         .expect("insert runtime pre-admission");
 
         let handle = runtime_terminated_completion_handle(
-            state.runtime_adapter.as_ref(),
+            &state.runtime_adapter,
             &session_id,
             "runtime stopped during cleanup",
         )

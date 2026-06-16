@@ -809,6 +809,17 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
+        // Build spawn identity before any implicit-mob mutation. The tool
+        // surface must not create durable mob state for a request that has not
+        // supplied its substrate-owned member identity.
+        let Some(member_id) = args.member_id else {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                "delegate requires member_id; the tool surface does not allocate member identity",
+            ));
+        };
+        let identity = AgentIdentity::from(member_id);
+
         let (mob_id, first_delegate) = self
             .ensure_implicit_mob()
             .await
@@ -842,13 +853,6 @@ impl AgentMobToolSurface {
         // missing `member_id` fails closed with typed invalid-arguments rather
         // than fabricating a synthetic `helper-{uuid}` on the runtime identity
         // path — identity allocation is the mob substrate's responsibility.
-        let Some(member_id) = args.member_id else {
-            return Err(ToolError::invalid_arguments(
-                call.name,
-                "delegate requires member_id; the tool surface does not allocate member identity",
-            ));
-        };
-        let identity = AgentIdentity::from(member_id);
         // Implicit mob always uses the "delegate" profile.
         let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), identity.clone());
         spec.initial_message = Some(ContentInput::Text(args.task));
@@ -3679,6 +3683,47 @@ mod tests {
         // is part of the ToolDispatchOutcome which is only produced on success.
         // This is correct: the turn owner should not widen authority for a
         // failed tool call.
+    }
+
+    #[tokio::test]
+    async fn test_delegate_missing_member_id_does_not_create_implicit_mob() {
+        let state = MobMcpState::new_in_memory();
+        let session_id = SessionId::new();
+        let session_key = session_id.to_string();
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            session_id,
+            None,
+            None,
+            None,
+        );
+
+        let delegate_args =
+            serde_json::value::RawValue::from_string(json!({ "task": "say hi" }).to_string())
+                .unwrap();
+        let delegate_error = surface
+            .dispatch(ToolCallView {
+                id: "delegate-missing-member",
+                name: "delegate",
+                args: &delegate_args,
+            })
+            .await
+            .expect_err("delegate without member_id must fail before mob creation");
+        assert!(
+            matches!(delegate_error, ToolError::InvalidArguments { .. }),
+            "unexpected delegate error: {delegate_error:?}"
+        );
+
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session(&session_key)
+                .await
+                .is_none(),
+            "invalid delegate args must not create an implicit mob"
+        );
     }
 
     #[tokio::test]

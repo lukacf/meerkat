@@ -36,6 +36,23 @@ impl MeerkatMachine {
         }
     }
 
+    async fn reject_unregistration_drain_ingress(
+        &self,
+        session_id: &SessionId,
+        state: RuntimeState,
+    ) -> Result<(), RuntimeDriverError> {
+        let dsl_state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::Internal(format!(
+                "failed to read generated registration phase for ingress admission: {reason}"
+            ))
+        })?;
+        if dsl_state.registration_phase == crate::meerkat_machine::dsl::RegistrationPhase::Draining
+        {
+            return Err(RuntimeDriverError::NotReady { state });
+        }
+        Ok(())
+    }
+
     pub(super) async fn observe_active_turn_boundary_available(
         session_id: &SessionId,
         boundary_handle: Option<
@@ -215,6 +232,8 @@ impl MeerkatMachine {
                     "MeerkatMachine::AcceptWithCompletion read runtime state"
                 );
                 Self::reject_visible_terminal_ingress(visible_state)?;
+                self.reject_unregistration_drain_ingress(&session_id, state)
+                    .await?;
 
                 let active_turn_boundary_available = Self::observe_active_turn_boundary_available(
                     &session_id,
@@ -553,14 +572,18 @@ impl MeerkatMachine {
                 })
             }
             MeerkatMachineCommand::AcceptWithoutWake { session_id, input } => {
-                let (driver, boundary_handle) = {
+                let (driver, boundary_handle, has_live_attachment) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
                         .get(&session_id)
                         .ok_or(RuntimeDriverError::NotReady {
                             state: RuntimeState::Destroyed,
                         })?;
-                    (entry.driver.clone(), entry.boundary_handle())
+                    (
+                        entry.driver.clone(),
+                        entry.boundary_handle(),
+                        entry.has_live_attachment(),
+                    )
                 };
 
                 let gate = self.session_mutation_gate(&session_id).await;
@@ -578,6 +601,11 @@ impl MeerkatMachine {
                     .await
                     .unwrap_or(RuntimeState::Destroyed);
                 Self::reject_visible_terminal_ingress(visible_state)?;
+                self.reject_unregistration_drain_ingress(&session_id, state)
+                    .await?;
+                if !has_live_attachment {
+                    return Err(RuntimeDriverError::NotReady { state });
+                }
                 let active_turn_boundary_available = Self::observe_active_turn_boundary_available(
                     &session_id,
                     boundary_handle.as_ref(),

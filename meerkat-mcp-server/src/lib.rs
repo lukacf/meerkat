@@ -4507,10 +4507,48 @@ mod tests {
         CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
     };
     use meerkat::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::{Duration, timeout};
+
+    struct RuntimeTerminationFixtureExecutor;
+
+    #[async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for RuntimeTerminationFixtureExecutor {
+        async fn apply(
+            &mut self,
+            run_id: meerkat_core::RunId,
+            primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<CoreApplyOutput, meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+    }
 
     struct MockLlmClient;
 
@@ -6140,9 +6178,12 @@ mod tests {
         let runtime_state_existed = state.runtime_sessions.read().await.contains_key(&parsed);
         state
             .runtime_adapter
-            .prepare_bindings(parsed.clone())
+            .ensure_session_with_executor(
+                parsed.clone(),
+                Box::new(RuntimeTerminationFixtureExecutor),
+            )
             .await
-            .expect("prepare runtime bindings");
+            .expect("attach runtime executor");
 
         let input = Input::ExternalEvent(ExternalEventInput {
             header: InputHeader {

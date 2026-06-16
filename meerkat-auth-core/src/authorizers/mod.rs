@@ -70,6 +70,11 @@ impl LeaseFreshnessObserver {
         now: DateTime<Utc>,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), AuthError> {
+        if let Some(expires_at) = expires_at
+            && expires_at <= now
+        {
+            return Err(AuthError::Expired);
+        }
         self.handle
             .observe_credential_freshness(
                 &self.lease_key,

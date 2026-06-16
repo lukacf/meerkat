@@ -1279,14 +1279,14 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
             })
         }
 
-        async fn cancel_after_boundary(
+        async fn stop_runtime_executor(
             &mut self,
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
 
-        async fn stop_runtime_executor(
+        async fn cancel_after_boundary(
             &mut self,
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
@@ -2510,6 +2510,206 @@ async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
     assert_ne!(
         rebound_epoch, stale_epoch,
         "durable rebind must mint a fresh epoch after unregister"
+    );
+}
+
+#[tokio::test]
+async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::fail_delete_ops_lifecycle_once(
+        Arc::clone(&inner),
+    ));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    let stale_epoch = meerkat_core::RuntimeEpochId::new();
+    let stale_cursor = meerkat_core::EpochCursorState::new();
+    let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+        .capture_persistence_snapshot(stale_epoch, &stale_cursor)
+        .unwrap();
+
+    crate::store::RuntimeStore::persist_ops_lifecycle(inner.as_ref(), &runtime_id, &stale_snapshot)
+        .await
+        .expect("test snapshot should persist");
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.unregister_session(&session_id).await;
+
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "failed DeleteSnapshot teardown must retain the live entry instead of forgetting it"
+    );
+    assert!(
+        crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .expect("store should load")
+            .is_some(),
+        "failed DeleteSnapshot teardown must not hide the stale durable snapshot"
+    );
+    let post_failure_accept = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        &adapter,
+        &session_id,
+        make_prompt("must not enter drained runtime"),
+    )
+    .await;
+    match post_failure_accept {
+        Err(_) => {}
+        Ok(outcome) => panic!(
+            "failed DeleteSnapshot rollback must leave the retained entry retry-only, got {outcome:?}"
+        ),
+    }
+    let post_failure_progress_accept = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        &adapter,
+        &session_id,
+        make_progress_input("must-not-enter-drained-runtime"),
+    )
+    .await;
+    match post_failure_progress_accept {
+        Err(_) => {}
+        Ok(outcome) => panic!(
+            "failed DeleteSnapshot rollback must reject wake-effect peer progress too, got {outcome:?}"
+        ),
+    }
+    let post_failure_without_wake_accept = adapter
+        .accept_input_without_wake(
+            &session_id,
+            make_progress_input("must-not-enter-drained-runtime-without-wake"),
+        )
+        .await;
+    match post_failure_without_wake_accept {
+        Err(_) => {}
+        Ok(outcome) => panic!(
+            "failed DeleteSnapshot rollback must reject no-wake ingress too, got {outcome:?}"
+        ),
+    }
+
+    adapter.unregister_session(&session_id).await;
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "second unregister should remove the entry after delete succeeds"
+    );
+    assert!(
+        crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .expect("store should load")
+            .is_none(),
+        "successful retry must delete stale ops lifecycle snapshot"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_drain_finishes() {
+    struct BlockingExecutor {
+        apply_started: Arc<Notify>,
+        allow_finish: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish
+                .take()
+                .expect("blocking executor should only apply once")
+                .await
+                .expect("test release sender should stay alive until apply is released");
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let (allow_finish_tx, allow_finish_rx) = tokio::sync::oneshot::channel();
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Some(allow_finish_rx),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+    adapter
+        .accept_input(&session_id, make_prompt("block unregister drain"))
+        .await
+        .expect("prompt should start attached runtime");
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("runtime should enter blocking apply");
+
+    let first_unregister = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        async move { adapter.unregister_session(&session_id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let state = adapter
+                .session_dsl_state(&session_id)
+                .await
+                .expect("session should still have DSL state");
+            if state.registration_phase == mm_dsl::RegistrationPhase::Draining {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first unregister should open the drain window");
+
+    adapter.unregister_session(&session_id).await;
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "concurrent unregister retry must not fabricate drain feedback or remove the entry"
+    );
+
+    allow_finish_tx
+        .send(())
+        .expect("blocking executor should still be awaiting release");
+    first_unregister
+        .await
+        .expect("first unregister task should not panic");
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "original unregister should remove the entry after the real drain finishes"
     );
 }
 
@@ -15425,6 +15625,7 @@ struct RuntimeCommitAtomicityStore {
     inner: Arc<crate::store::InMemoryRuntimeStore>,
     fail_atomic_apply: AtomicBool,
     fail_commit_machine_lifecycle: AtomicBool,
+    fail_delete_ops_lifecycle: AtomicBool,
     commit_machine_lifecycle_calls: AtomicUsize,
 }
 
@@ -15434,6 +15635,7 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_delete_ops_lifecycle: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
         }
     }
@@ -15443,6 +15645,7 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(true),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_delete_ops_lifecycle: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
         }
     }
@@ -15452,6 +15655,17 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(true),
+            fail_delete_ops_lifecycle: AtomicBool::new(false),
+            commit_machine_lifecycle_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn fail_delete_ops_lifecycle_once(inner: Arc<crate::store::InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_atomic_apply: AtomicBool::new(false),
+            fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_delete_ops_lifecycle: AtomicBool::new(true),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
         }
     }
@@ -15614,6 +15828,11 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<(), crate::store::RuntimeStoreError> {
+        if self.fail_delete_ops_lifecycle.swap(false, Ordering::SeqCst) {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "synthetic delete_ops_lifecycle failure".into(),
+            ));
+        }
         self.inner.delete_ops_lifecycle(runtime_id).await
     }
 }

@@ -95,6 +95,19 @@ impl StoredEvent {
 /// any row whose `schema_version` does not match this constant.
 pub const EVENT_SCHEMA_VERSION: u32 = 2;
 
+/// Durable marker that a session's detached event projection halted.
+///
+/// The event log remains the replay authority, but a projection task that
+/// observes an append failure has no caller to return to. File-backed stores
+/// persist this marker beside the log so restarted services keep failing replay
+/// closed instead of forgetting the halt in a process-local map.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventProjectionHaltMarker {
+    pub session_id: SessionId,
+    pub reason: String,
+    pub recorded_at: SystemTime,
+}
+
 /// Append-only event log.
 ///
 /// The canonical append surface is [`EventStore::append_envelopes`], which
@@ -142,6 +155,23 @@ pub trait EventStore: Send + Sync {
             })
             .collect();
         self.append_envelopes(session_id, &envelopes).await
+    }
+
+    /// Persist a fail-closed marker after detached event projection halts.
+    async fn record_projection_halt(
+        &self,
+        _session_id: &SessionId,
+        _reason: &str,
+    ) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+
+    /// Read a durable projection-halt marker, if this store supports one.
+    async fn projection_halt(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<EventProjectionHaltMarker>, EventStoreError> {
+        Ok(None)
     }
 
     /// Read events from a given sequence number onward.
@@ -218,6 +248,15 @@ impl FileEventStore {
 
     fn sequence_lock_path(&self, session_id: &SessionId) -> PathBuf {
         self.sequence_dir().join(format!("{session_id}.lock"))
+    }
+
+    fn projection_halt_dir(&self) -> PathBuf {
+        self.root.join(".projection-halts")
+    }
+
+    fn projection_halt_path(&self, session_id: &SessionId) -> PathBuf {
+        self.projection_halt_dir()
+            .join(format!("{session_id}.json"))
     }
 
     async fn acquire_sequence_lock(
@@ -395,6 +434,50 @@ impl EventStore for FileEventStore {
         Ok(last_allocated_seq)
     }
 
+    async fn record_projection_halt(
+        &self,
+        session_id: &SessionId,
+        reason: &str,
+    ) -> Result<(), EventStoreError> {
+        let marker = EventProjectionHaltMarker {
+            session_id: session_id.clone(),
+            reason: reason.to_string(),
+            recorded_at: SystemTime::now(),
+        };
+        let path = self.projection_halt_path(session_id);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let bytes = serde_json::to_vec_pretty(&marker)
+            .map_err(|err| EventStoreError::Serialization(err.to_string()))?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .await?;
+        file.write_all(&bytes).await?;
+        file.write_all(b"\n").await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        Ok(())
+    }
+
+    async fn projection_halt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<EventProjectionHaltMarker>, EventStoreError> {
+        let path = self.projection_halt_path(session_id);
+        let contents = match tokio::fs::read_to_string(path).await {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(EventStoreError::Io(err)),
+        };
+        serde_json::from_str::<EventProjectionHaltMarker>(&contents)
+            .map(Some)
+            .map_err(|err| EventStoreError::Serialization(err.to_string()))
+    }
+
     async fn read_from(
         &self,
         session_id: &SessionId,
@@ -471,6 +554,28 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].event, AgentEvent::TextComplete { .. }));
         assert!(store.root().join(format!("{session_id}.jsonl")).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_event_store_persists_projection_halt_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+
+        store
+            .record_projection_halt(&session_id, "synthetic append failure")
+            .await?;
+
+        let restarted = FileEventStore::new(&root);
+        let marker = restarted
+            .projection_halt(&session_id)
+            .await?
+            .expect("halt marker should survive store restart");
+        assert_eq!(marker.session_id, session_id);
+        assert_eq!(marker.reason, "synthetic append failure");
         Ok(())
     }
 

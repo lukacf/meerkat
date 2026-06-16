@@ -30,6 +30,10 @@ use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 pub enum AwsAuthError {
     #[error("missing AWS env var: {0}")]
     MissingEnv(&'static str),
+    #[error("AWS_SESSION_TOKEN requires AWS_CREDENTIAL_EXPIRATION")]
+    MissingSessionTokenExpiry,
+    #[error("invalid AWS_CREDENTIAL_EXPIRATION: {0}")]
+    InvalidCredentialExpiration(String),
     #[error("sigv4 signing failed: {0}")]
     Sign(String),
     #[error("invalid URL: {0}")]
@@ -40,6 +44,10 @@ impl From<AwsAuthError> for AuthError {
     fn from(e: AwsAuthError) -> Self {
         match e {
             AwsAuthError::MissingEnv(_) => AuthError::MissingSecret,
+            AwsAuthError::MissingSessionTokenExpiry => AuthError::RefreshRequired,
+            AwsAuthError::InvalidCredentialExpiration(msg) => {
+                AuthError::Other(format!("aws credential expiration: {msg}"))
+            }
             AwsAuthError::Sign(msg) => AuthError::Other(format!("aws sigv4: {msg}")),
             AwsAuthError::InvalidUrl(msg) => AuthError::Other(format!("aws url: {msg}")),
         }
@@ -95,7 +103,17 @@ impl AwsCredentialProvider {
                 let sk = lookup("AWS_SECRET_ACCESS_KEY")
                     .ok_or(AwsAuthError::MissingEnv("AWS_SECRET_ACCESS_KEY"))?;
                 let tok = lookup("AWS_SESSION_TOKEN");
-                Ok(SdkCredentials::new(ak, sk, tok, None, "meerkat-env"))
+                let expires_at = if tok.is_some() {
+                    let raw = lookup("AWS_CREDENTIAL_EXPIRATION")
+                        .ok_or(AwsAuthError::MissingSessionTokenExpiry)?;
+                    let parsed = DateTime::parse_from_rfc3339(&raw)
+                        .map_err(|err| AwsAuthError::InvalidCredentialExpiration(err.to_string()))?
+                        .with_timezone(&Utc);
+                    Some(std::time::SystemTime::from(parsed))
+                } else {
+                    None
+                };
+                Ok(SdkCredentials::new(ak, sk, tok, expires_at, "meerkat-env"))
             }
             Self::BearerToken(_) => Err(AwsAuthError::MissingEnv("<bearer mode active>")),
         }
@@ -107,12 +125,46 @@ pub struct AwsStsAuthorizer {
     service: String,
     provider: AwsCredentialProvider,
     label: String,
-    /// AuthMachine freshness owner. When wired, the authorizer consults the
-    /// per-binding lease for a credential-use verdict before signing rather
-    /// than implicitly treating its resolved credential material as
-    /// always-fresh. Optional so hermetic tests and surfaces without a runtime
-    /// lease handle still construct the authorizer.
-    lease_observer: Option<LeaseFreshnessObserver>,
+    /// Explicit SigV4 freshness authority. Runtime-backed provider resolution
+    /// upgrades this to the generated AuthMachine observer; direct public
+    /// construction remains a standalone user-owned credential authority so the
+    /// API stays usable outside Meerkat runtime sessions.
+    freshness_authority: AwsSigV4FreshnessAuthority,
+}
+
+enum AwsSigV4FreshnessAuthority {
+    StandaloneDirect,
+    RuntimeLease(LeaseFreshnessObserver),
+}
+
+impl AwsSigV4FreshnessAuthority {
+    fn ensure_valid_for_signing(
+        &self,
+        label: &str,
+        now: DateTime<Utc>,
+        credential_expiry: Option<DateTime<Utc>>,
+    ) -> Result<(), AuthError> {
+        match self {
+            Self::RuntimeLease(observer) => {
+                observer.ensure_valid_for_signing(label, now, credential_expiry)
+            }
+            Self::StandaloneDirect => {
+                if let Some(expires_at) = credential_expiry
+                    && expires_at <= now
+                {
+                    return Err(AuthError::Expired);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn expires_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::RuntimeLease(observer) => observer.expires_at(),
+            Self::StandaloneDirect => None,
+        }
+    }
 }
 
 impl AwsStsAuthorizer {
@@ -134,7 +186,7 @@ impl AwsStsAuthorizer {
             service,
             provider,
             label,
-            lease_observer: None,
+            freshness_authority: AwsSigV4FreshnessAuthority::StandaloneDirect,
         }
     }
 
@@ -146,7 +198,9 @@ impl AwsStsAuthorizer {
         handle: GeneratedAuthLeaseHandle,
         lease_key: LeaseKey,
     ) -> Self {
-        self.lease_observer = Some(LeaseFreshnessObserver::new(handle, lease_key));
+        self.freshness_authority = AwsSigV4FreshnessAuthority::RuntimeLease(
+            LeaseFreshnessObserver::new(handle, lease_key),
+        );
         self
     }
 
@@ -219,23 +273,19 @@ impl HttpAuthorizer for AwsStsAuthorizer {
             }
             other => {
                 // Single authoritative `now`: the same instant feeds the
-                // AuthMachine freshness verdict and the SigV4 signing time, so
-                // a request is never signed against a clock the lease did not
-                // admit. SigV4 credentials (especially STS session tokens) are
-                // time-bound; the lease — not a buried `SystemTime::now()` —
-                // owns whether they are still usable.
+                // freshness verdict and the SigV4 signing time. Runtime-backed
+                // authorizers delegate that verdict to the AuthMachine lease;
+                // direct public authorizers use their explicit standalone
+                // credential owner and fail closed only when credential expiry
+                // metadata is present and already expired.
                 let now = Utc::now();
                 let creds = other.resolve_sigv4().map_err(AuthError::from)?;
-                if let Some(observer) = &self.lease_observer {
-                    // Fail closed: expired/missing/refresh-needed creds surface
-                    // a typed reauth/refresh disposition rather than silently
-                    // signing with stale or absent material. Env/Static creds
-                    // carry no expiry, so the lease holds them as an explicit
-                    // `Valid` (no-expiry) phase rather than implicit
-                    // always-fresh.
-                    let credential_expiry = creds.expiry().map(DateTime::<Utc>::from);
-                    observer.ensure_valid_for_signing(&self.label, now, credential_expiry)?;
-                }
+                let credential_expiry = creds.expiry().map(DateTime::<Utc>::from);
+                self.freshness_authority.ensure_valid_for_signing(
+                    &self.label,
+                    now,
+                    credential_expiry,
+                )?;
                 let signed = self.sign_sigv4(&creds, req, now).map_err(AuthError::from)?;
                 for (k, v) in signed {
                     req.headers.push((k, v));
@@ -250,8 +300,6 @@ impl HttpAuthorizer for AwsStsAuthorizer {
     }
 
     fn expires_at(&self) -> Option<DateTime<Utc>> {
-        self.lease_observer
-            .as_ref()
-            .and_then(LeaseFreshnessObserver::expires_at)
+        self.freshness_authority.expires_at()
     }
 }

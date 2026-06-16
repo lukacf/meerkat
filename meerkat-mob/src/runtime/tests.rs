@@ -25728,6 +25728,29 @@ fn test_flow_cleanup_uses_terminal_projection_not_authority_clone_probe() {
 }
 
 #[test]
+fn test_flow_canceled_cleanup_requires_terminalization_proof() {
+    let actor = include_str!("actor.rs");
+    let state = include_str!("state.rs");
+    assert!(
+        state
+            .contains("FlowCanceledCleanup {\n        run_id: RunId,\n        terminalized: bool,"),
+        "FlowCanceledCleanup must carry spawned-path terminalization proof"
+    );
+    assert!(
+        actor.contains("if !terminalized"),
+        "actor must fail closed before cleanup when terminalization proof is false"
+    );
+    assert!(
+        actor.contains("terminalized = false"),
+        "spawned cancellation path must downgrade the proof on settle/terminalization errors"
+    );
+    assert!(
+        actor.contains("terminalized,"),
+        "FlowCanceledCleanup sends must include the proof field"
+    );
+}
+
+#[test]
 fn test_lifecycle_commands_admit_on_live_authority_not_clone_probe() {
     let source = include_str!("actor.rs");
     let start = source

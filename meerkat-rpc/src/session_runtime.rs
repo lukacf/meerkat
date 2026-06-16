@@ -3394,23 +3394,7 @@ impl SessionRuntime {
     ) -> Result<SessionLlmIdentity, RpcError> {
         let registry = self.model_registry().await?;
         let model = build_config.model.clone();
-        let provider = if let Some(provider) = build_config.provider {
-            if let Some(reason) =
-                registered_model_provider_mismatch_reason(&registry, provider, &model)
-            {
-                return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: reason,
-                    data: None,
-                });
-            }
-            provider
-        } else {
-            registry
-                .entry(&model)
-                .map(|entry| entry.provider)
-                .unwrap_or(meerkat_core::Provider::Other)
-        };
+        let provider = self.resolve_create_provider(build_config).await?;
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
             if let Some(server_id) = build_config.self_hosted_server_id.clone() {
                 Some(server_id)
@@ -8442,15 +8426,58 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
+    struct RuntimeTerminationFixtureExecutor;
+
+    #[async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for RuntimeTerminationFixtureExecutor {
+        async fn apply(
+            &mut self,
+            run_id: meerkat_core::lifecycle::RunId,
+            primitive: meerkat_core::lifecycle::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::CoreExecutorError,
+        > {
+            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+    }
+
     async fn runtime_terminated_completion_handle(
-        adapter: &meerkat_runtime::meerkat_machine::MeerkatMachine,
+        adapter: &Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
         session_id: &SessionId,
         reason: &str,
     ) -> meerkat_runtime::CompletionHandle {
         adapter
-            .prepare_bindings(session_id.clone())
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(RuntimeTerminationFixtureExecutor),
+            )
             .await
-            .expect("test machine should prepare runtime bindings");
+            .expect("test machine should attach runtime executor");
         let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
             "pending completion fixture",
             None,
@@ -8851,6 +8878,45 @@ mod tests {
             .await
             .expect_err("explicit provider contradicting the catalog owner must be rejected");
         assert_eq!(err.code, error::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn pending_build_identity_rejects_unknown_model_without_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        let build_config = AgentBuildConfig::new("totally-unregistered-model-xyz");
+
+        let err = runtime
+            .llm_identity_from_pending_build(&build_config)
+            .await
+            .expect_err("pending staging identity must fail closed for unknown owner");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message
+                .contains("explicit provider or a registered model owner"),
+            "error should name the missing registry owner contract: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_unknown_model_before_staging_slot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        let build_config = AgentBuildConfig::new("totally-unregistered-model-xyz");
+
+        let err = runtime
+            .create_session(build_config, None, None)
+            .await
+            .expect_err("deferred create must reject before reserving a pending session");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert_eq!(
+            runtime.staged_sessions.len().await,
+            0,
+            "unknown-model create must not leave a staged session behind"
+        );
     }
 
     /// B19 helper sanity: realtime capability lookup must round-trip the
@@ -14966,7 +15032,7 @@ mod tests {
             .expect("insert pre-admission");
 
         let handle = runtime_terminated_completion_handle(
-            runtime.runtime_adapter.as_ref(),
+            &runtime.runtime_adapter,
             &session_id,
             "executor never took pre-admission",
         )
@@ -15014,7 +15080,7 @@ mod tests {
             .expect("insert pre-admission");
 
         let handle = runtime_terminated_completion_handle(
-            runtime.runtime_adapter.as_ref(),
+            &runtime.runtime_adapter,
             &session_id,
             "runtime stopped during cleanup",
         )
@@ -15160,7 +15226,7 @@ mod tests {
             .expect("insert second pre-admission");
 
         let stale_handle = runtime_terminated_completion_handle(
-            runtime.runtime_adapter.as_ref(),
+            &runtime.runtime_adapter,
             &session_id,
             "stale cleanup for first input",
         )

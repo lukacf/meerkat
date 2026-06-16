@@ -939,7 +939,10 @@ impl ShellState {
     /// push generated-authorized CompletionEntry rows, retain in FIFO, evict
     /// as needed. Called AFTER the DSL transition has already persisted the
     /// terminal status + outcome.
-    fn finalize_terminal(&mut self, id: &OperationId) -> Result<(), OpsLifecycleError> {
+    fn finalize_terminal(
+        &mut self,
+        id: &OperationId,
+    ) -> Result<Option<CompletionEntry>, OpsLifecycleError> {
         let outcome = self.terminal_outcome(id)?.ok_or_else(|| {
             OpsLifecycleError::Internal(format!(
                 "generated op terminal transition did not mint terminal outcome for {id}"
@@ -963,9 +966,10 @@ impl ShellState {
             )?;
             self.records.remove(id);
             self.completed_order.retain(|queued| queued != id);
-            return Ok(());
+            return Ok(None);
         }
 
+        let mut completion_entry = None;
         if Self::operation_completion_feed_class(id, kind)?
             == mm_dsl::OperationCompletionFeedClass::Emit
         {
@@ -1001,7 +1005,7 @@ impl ShellState {
                 .records
                 .get(id)
                 .and_then(|r| r.completed_at.map(|i| r.epoch_millis_for_instant(i)));
-            self.feed_buffer.push(CompletionEntry {
+            completion_entry = Some(CompletionEntry {
                 seq: feed_authority.seq,
                 operation_id: id.clone(),
                 kind: feed_authority.kind,
@@ -1030,7 +1034,13 @@ impl ShellState {
         // drops the barrier oneshot so the waiter resolves to Err) instead of
         // reporting the op terminal with a silently-hung barrier.
         self.maybe_satisfy_wait()?;
-        Ok(())
+        Ok(completion_entry)
+    }
+
+    fn publish_completion_entry(&self, entry: Option<CompletionEntry>) {
+        if let Some(entry) = entry {
+            self.feed_buffer.push(entry);
+        }
     }
 
     /// Read barrier membership from DSL state (sole owner).
@@ -2568,6 +2578,21 @@ fn apply_op_transition(
         .map_err(|err| classify_generated_op_rejection(state, err, id, action))
 }
 
+fn apply_terminal_op_transition_and_persist(
+    state: &mut ShellState,
+    id: &OperationId,
+    input: mm_dsl::MeerkatMachineInput,
+    action: mm_dsl::OpLifecycleActionKind,
+) -> Result<(), OpsLifecycleError> {
+    let previous_snapshot = state.dsl.0.snapshot();
+    apply_op_transition(state, id, input, action)?;
+    if let Err(err) = state.maybe_persist() {
+        state.dsl.0.restore_snapshot(previous_snapshot);
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn op_registration_error_from_effects(
     id: &OperationId,
     effects: &[mm_dsl::MeerkatMachineEffect],
@@ -2711,7 +2736,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
-        apply_op_transition(
+        apply_terminal_op_transition_and_persist(
             &mut state,
             id,
             mm_dsl::MeerkatMachineInput::FailOp {
@@ -2722,8 +2747,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::OpLifecycleActionKind::Fail,
         )?;
 
-        state.finalize_terminal(id)?;
-        state.maybe_persist()?;
+        let completion_entry = state.finalize_terminal(id)?;
+        state.publish_completion_entry(completion_entry);
         Ok(())
     }
 
@@ -2801,7 +2826,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
         let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
-        apply_op_transition(
+        apply_terminal_op_transition_and_persist(
             &mut state,
             id,
             mm_dsl::MeerkatMachineInput::CompleteOp {
@@ -2812,8 +2837,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::OpLifecycleActionKind::Complete,
         )?;
 
-        state.finalize_terminal(id)?;
-        state.maybe_persist()?;
+        let completion_entry = state.finalize_terminal(id)?;
+        state.publish_completion_entry(completion_entry);
         Ok(())
     }
 
@@ -2823,7 +2848,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
-        apply_op_transition(
+        apply_terminal_op_transition_and_persist(
             &mut state,
             id,
             mm_dsl::MeerkatMachineInput::FailOp {
@@ -2834,8 +2859,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::OpLifecycleActionKind::Fail,
         )?;
 
-        state.finalize_terminal(id)?;
-        state.maybe_persist()?;
+        let completion_entry = state.finalize_terminal(id)?;
+        state.publish_completion_entry(completion_entry);
         Ok(())
     }
 
@@ -2849,7 +2874,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
         let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
-        apply_op_transition(
+        apply_terminal_op_transition_and_persist(
             &mut state,
             id,
             mm_dsl::MeerkatMachineInput::AbortOp {
@@ -2860,8 +2885,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::OpLifecycleActionKind::Abort,
         )?;
 
-        state.finalize_terminal(id)?;
-        state.maybe_persist()?;
+        let completion_entry = state.finalize_terminal(id)?;
+        state.publish_completion_entry(completion_entry);
         Ok(())
     }
 
@@ -2875,7 +2900,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
         let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
-        apply_op_transition(
+        apply_terminal_op_transition_and_persist(
             &mut state,
             id,
             mm_dsl::MeerkatMachineInput::CancelOp {
@@ -2886,8 +2911,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::OpLifecycleActionKind::Cancel,
         )?;
 
-        state.finalize_terminal(id)?;
-        state.maybe_persist()?;
+        let completion_entry = state.finalize_terminal(id)?;
+        state.publish_completion_entry(completion_entry);
         Ok(())
     }
 
@@ -2911,7 +2936,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let terminal_outcome = OperationTerminalOutcome::Retired;
         let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
-        apply_op_transition(
+        apply_terminal_op_transition_and_persist(
             &mut state,
             id,
             mm_dsl::MeerkatMachineInput::RetireCompletedOp {
@@ -2922,8 +2947,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             mm_dsl::OpLifecycleActionKind::RetireCompleted,
         )?;
 
-        state.finalize_terminal(id)?;
-        state.maybe_persist()?;
+        let completion_entry = state.finalize_terminal(id)?;
+        state.publish_completion_entry(completion_entry);
         Ok(())
     }
 
@@ -3016,7 +3041,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             };
             let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
 
-            apply_op_transition(
+            apply_terminal_op_transition_and_persist(
                 &mut state,
                 op_id,
                 mm_dsl::MeerkatMachineInput::TerminateOp {
@@ -3027,11 +3052,9 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 mm_dsl::OpLifecycleActionKind::Terminate,
             )?;
 
-            state.finalize_terminal(op_id)?;
-        }
-
-        if !to_terminate.is_empty() {
-            state.maybe_persist()?;
+            if let Some(entry) = state.finalize_terminal(op_id)? {
+                state.publish_completion_entry(Some(entry));
+            }
         }
         Ok(())
     }
@@ -3712,6 +3735,94 @@ mod tests {
             [(returned_id, OperationTerminalOutcome::Completed(_))] if *returned_id == op_id
         ));
         assert!(registry.read_state().unwrap().wait_request_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_transition_rolls_back_publication_when_persistence_fails() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let (tx, mut rx) = crate::tokio::sync::mpsc::unbounded_channel();
+        registry.set_persistence_channel(
+            tx,
+            meerkat_core::RuntimeEpochId::new(),
+            Arc::new(meerkat_core::EpochCursorState::new()),
+        );
+        let worker = std::thread::spawn(move || {
+            let request = rx.blocking_recv().expect("persistence request");
+            let _ = request.result_tx.send(Err(OpsLifecycleError::Internal(
+                "injected persistence failure".to_string(),
+            )));
+        });
+
+        let spec = background_spec("feed-after-persist");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        let watch = registry.register_watcher(&op_id).unwrap();
+
+        let err = registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect_err("persistence failure must fail the terminal transition");
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("injected persistence failure")),
+            "unexpected persistence error: {err:?}"
+        );
+        worker.join().expect("persistence worker");
+
+        let feed = registry.completion_feed_handle();
+        let batch = feed.list_since(0);
+        assert!(
+            batch.entries.is_empty(),
+            "completion feed must not publish entries before durable snapshot success"
+        );
+        assert_eq!(batch.watermark, 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), watch)
+                .await
+                .is_err(),
+            "watchers must not resolve before durable terminal snapshot success"
+        );
+        assert_eq!(
+            registry.snapshot(&op_id).unwrap().unwrap().status,
+            OperationStatus::Running,
+            "failed persistence must roll the generated terminal transition back"
+        );
+
+        let (tx, mut rx) = crate::tokio::sync::mpsc::unbounded_channel();
+        registry.set_persistence_channel(
+            tx,
+            meerkat_core::RuntimeEpochId::new(),
+            Arc::new(meerkat_core::EpochCursorState::new()),
+        );
+        let worker = std::thread::spawn(move || {
+            let request = rx.blocking_recv().expect("second persistence request");
+            let _ = request.result_tx.send(Ok(()));
+        });
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect("rolled-back terminal transition should remain retryable");
+        worker.join().expect("second persistence worker");
+
+        let batch = feed.list_since(0);
+        assert_eq!(batch.entries.len(), 1);
+        assert_eq!(batch.entries[0].operation_id, op_id);
     }
 
     #[tokio::test]

@@ -446,6 +446,67 @@ pub struct LayerPolicyEvidence {
     pub used_auth_binding_refs: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdaptiveToolIdentity {
+    Class(String),
+    McpServer(String),
+    RustBundle(String),
+}
+
+impl AdaptiveToolIdentity {
+    fn parse(raw: &str) -> Result<Self, AdaptiveError> {
+        if let Some(name) = raw.strip_prefix("mcp:") {
+            validate_adaptive_identity_component("adaptive tool mcp server", name)?;
+            return Ok(Self::McpServer(name.to_string()));
+        }
+        if let Some(name) = raw.strip_prefix("rust_bundle:") {
+            validate_adaptive_identity_component("adaptive tool rust bundle", name)?;
+            return Ok(Self::RustBundle(name.to_string()));
+        }
+        validate_adaptive_identity_component("adaptive tool class", raw)?;
+        Ok(Self::Class(raw.to_string()))
+    }
+
+    fn mcp_server(name: &str) -> Result<Self, AdaptiveError> {
+        validate_adaptive_identity_component("adaptive tool mcp server", name)?;
+        Ok(Self::McpServer(name.to_string()))
+    }
+
+    fn rust_bundle(name: &str) -> Result<Self, AdaptiveError> {
+        validate_adaptive_identity_component("adaptive tool rust bundle", name)?;
+        Ok(Self::RustBundle(name.to_string()))
+    }
+
+    fn into_canonical(self) -> String {
+        match self {
+            Self::Class(name) => name,
+            Self::McpServer(name) => format!("mcp:{name}"),
+            Self::RustBundle(name) => format!("rust_bundle:{name}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdaptiveSkillIdentity(String);
+
+impl AdaptiveSkillIdentity {
+    fn parse(raw: &str) -> Result<Self, AdaptiveError> {
+        validate_adaptive_identity_component("adaptive skill identity", raw)?;
+        if raw.starts_with("mcp:") || raw.starts_with("rust_bundle:") {
+            return Err(AdaptiveError::InvalidAdaptiveIdentity {
+                field: "adaptive skill identity",
+                value: raw.to_string(),
+                reason: "reserved tool-identity prefix".to_string(),
+            });
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    fn into_canonical(self) -> String {
+        self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct AdaptiveDriver {
     control_mob: MobHandle,
@@ -1309,8 +1370,14 @@ pub fn adaptive_run_limits_from_policy(
         max_aggregate_tokens: policy.limits.max_aggregate_tokens,
         max_aggregate_tool_calls: policy.limits.max_aggregate_tool_calls,
         allowed_model_classes: policy.allowed_model_classes.clone(),
-        allowed_tool_classes: policy.allowed_tool_classes.clone(),
-        allowed_skill_identities: policy.allowed_skill_classes.clone(),
+        allowed_tool_classes: canonical_adaptive_tool_set(
+            "allowed_tool_classes",
+            &policy.allowed_tool_classes,
+        )?,
+        allowed_skill_identities: canonical_adaptive_skill_set(
+            "allowed_skill_classes",
+            &policy.allowed_skill_classes,
+        )?,
         allowed_auth_binding_refs: policy.allowed_auth_bindings.clone(),
         deadline_ms: started_at_ms.saturating_add(policy.limits.max_wall_clock_ms),
     })
@@ -1342,7 +1409,7 @@ pub fn compile_layer(
         profile: plan.collector.profile.clone(),
     });
     definition.profiles = compile_profiles(plan, context, policy)?;
-    let policy_evidence = collect_layer_policy_evidence(&definition.profiles, &spawn_specs);
+    let policy_evidence = collect_layer_policy_evidence(&definition.profiles, &spawn_specs)?;
     definition.wiring = compile_wiring(plan);
     definition.flows.insert(
         FlowId::from("layer-flow"),
@@ -1440,7 +1507,7 @@ fn compile_profiles(
 fn collect_layer_policy_evidence(
     profiles: &BTreeMap<ProfileName, ProfileBinding>,
     spawn_specs: &[LayerSpawnSpec],
-) -> LayerPolicyEvidence {
+) -> Result<LayerPolicyEvidence, AdaptiveError> {
     let mut evidence = LayerPolicyEvidence::default();
     for spec in spawn_specs {
         let Some(profile) = profiles
@@ -1450,15 +1517,20 @@ fn collect_layer_policy_evidence(
             continue;
         };
         evidence.used_model_classes.insert(profile.model.clone());
-        collect_profile_tool_classes(profile, &mut evidence.used_tool_classes);
-        evidence
-            .used_skill_identities
-            .extend(profile.skills.iter().cloned());
+        collect_profile_tool_classes(profile, &mut evidence.used_tool_classes)?;
+        for skill in &profile.skills {
+            evidence
+                .used_skill_identities
+                .insert(AdaptiveSkillIdentity::parse(skill)?.into_canonical());
+        }
     }
-    evidence
+    Ok(evidence)
 }
 
-fn collect_profile_tool_classes(profile: &Profile, out: &mut BTreeSet<String>) {
+fn collect_profile_tool_classes(
+    profile: &Profile,
+    out: &mut BTreeSet<String>,
+) -> Result<(), AdaptiveError> {
     if profile.tools.builtins {
         out.insert("builtins".to_string());
     }
@@ -1483,14 +1555,13 @@ fn collect_profile_tool_classes(profile: &Profile, out: &mut BTreeSet<String>) {
     if profile.tools.image_generation {
         out.insert("image_generation".to_string());
     }
-    out.extend(profile.tools.mcp.iter().map(|name| format!("mcp:{name}")));
-    out.extend(
-        profile
-            .tools
-            .rust_bundles
-            .iter()
-            .map(|name| format!("rust_bundle:{name}")),
-    );
+    for name in &profile.tools.mcp {
+        out.insert(AdaptiveToolIdentity::mcp_server(name)?.into_canonical());
+    }
+    for name in &profile.tools.rust_bundles {
+        out.insert(AdaptiveToolIdentity::rust_bundle(name)?.into_canonical());
+    }
+    Ok(())
 }
 
 fn compile_wiring(plan: &LayerPlan) -> WiringRules {
@@ -1730,6 +1801,80 @@ fn parse_path(raw: &str) -> Result<Vec<&str>, AdaptiveError> {
     Ok(segments)
 }
 
+fn validate_adaptive_identity_component(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AdaptiveError> {
+    if value.is_empty() {
+        return Err(AdaptiveError::InvalidAdaptiveIdentity {
+            field,
+            value: value.to_string(),
+            reason: "empty component".to_string(),
+        });
+    }
+    if value.trim() != value {
+        return Err(AdaptiveError::InvalidAdaptiveIdentity {
+            field,
+            value: value.to_string(),
+            reason: "leading or trailing whitespace".to_string(),
+        });
+    }
+    if value.contains(':') {
+        return Err(AdaptiveError::InvalidAdaptiveIdentity {
+            field,
+            value: value.to_string(),
+            reason: "colon is reserved for adaptive identity namespaces".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn canonical_adaptive_tool_set(
+    field: &'static str,
+    values: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, AdaptiveError> {
+    values
+        .iter()
+        .map(|value| {
+            AdaptiveToolIdentity::parse(value)
+                .map(AdaptiveToolIdentity::into_canonical)
+                .map_err(|error| match error {
+                    AdaptiveError::InvalidAdaptiveIdentity { value, reason, .. } => {
+                        AdaptiveError::InvalidAdaptiveIdentity {
+                            field,
+                            value,
+                            reason,
+                        }
+                    }
+                    other => other,
+                })
+        })
+        .collect()
+}
+
+fn canonical_adaptive_skill_set(
+    field: &'static str,
+    values: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, AdaptiveError> {
+    values
+        .iter()
+        .map(|value| {
+            AdaptiveSkillIdentity::parse(value)
+                .map(AdaptiveSkillIdentity::into_canonical)
+                .map_err(|error| match error {
+                    AdaptiveError::InvalidAdaptiveIdentity { value, reason, .. } => {
+                        AdaptiveError::InvalidAdaptiveIdentity {
+                            field,
+                            value,
+                            reason,
+                        }
+                    }
+                    other => other,
+                })
+        })
+        .collect()
+}
+
 fn sanitize_identifier(raw: &str) -> Result<String, AdaptiveError> {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
@@ -1784,6 +1929,12 @@ pub enum AdaptiveError {
     IncompletePolicy { owner: String, field: &'static str },
     #[error("invalid {field} identifier: {value}")]
     InvalidFieldIdentifier { field: &'static str, value: String },
+    #[error("invalid {field}: {value} ({reason})")]
+    InvalidAdaptiveIdentity {
+        field: &'static str,
+        value: String,
+        reason: String,
+    },
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
     #[error("invalid adaptive ref: {0}")]
@@ -2577,6 +2728,136 @@ mod tests {
         policy.allow_inline_profiles = true;
         compile_layer(&plan, &compile_context(), &policy)
             .expect("inline profile should compile with explicit adaptive policy authority");
+    }
+
+    #[test]
+    fn adaptive_policy_canonicalizes_tool_and_skill_allowlists() {
+        let policy = AdaptivePolicy {
+            limits: limits(7),
+            allowed_tool_classes: BTreeSet::from([
+                "builtins".to_string(),
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+            ]),
+            allowed_skill_classes: BTreeSet::from(["lint-review".to_string()]),
+            ..AdaptivePolicy::default()
+        };
+
+        let runtime_limits = adaptive_run_limits_from_policy(&policy, 1_000).unwrap();
+        assert_eq!(
+            runtime_limits.allowed_tool_classes,
+            BTreeSet::from([
+                "builtins".to_string(),
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+            ])
+        );
+        assert_eq!(
+            runtime_limits.allowed_skill_identities,
+            BTreeSet::from(["lint-review".to_string()])
+        );
+    }
+
+    #[test]
+    fn adaptive_policy_preserves_already_canonical_namespaced_tool_allowlists() {
+        let pack = AdaptivePolicy {
+            limits: limits(7),
+            allowed_tool_classes: BTreeSet::from([
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+            ]),
+            allowed_skill_classes: BTreeSet::from(["lint-review".to_string()]),
+            ..AdaptivePolicy::default()
+        };
+        let host = AdaptivePolicy {
+            limits: limits(5),
+            allowed_tool_classes: BTreeSet::from([
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+                "builtins".to_string(),
+            ]),
+            allowed_skill_classes: BTreeSet::from([
+                "lint-review".to_string(),
+                "docs-review".to_string(),
+            ]),
+            ..AdaptivePolicy::default()
+        };
+
+        let composed = AdaptivePolicy::compose(&pack, &host).unwrap();
+        let runtime_limits = adaptive_run_limits_from_policy(&composed, 1_000).unwrap();
+        assert_eq!(
+            runtime_limits.allowed_tool_classes,
+            BTreeSet::from([
+                "mcp:filesystem".to_string(),
+                "rust_bundle:review-tools".to_string(),
+            ])
+        );
+        assert_eq!(
+            runtime_limits.allowed_skill_identities,
+            BTreeSet::from(["lint-review".to_string()])
+        );
+    }
+
+    #[test]
+    fn adaptive_layer_evidence_canonicalizes_profile_tools_and_skills() {
+        let mut context = compile_context();
+        let verifier = context
+            .profile_templates
+            .get_mut(&ProfileName::from("verifier"))
+            .expect("verifier profile");
+        verifier.tools.mcp = vec!["filesystem".to_string()];
+        verifier.tools.rust_bundles = vec!["review-tools".to_string()];
+        verifier.skills = vec!["lint-review".to_string()];
+
+        let compiled = compile_layer(&layer_plan(), &context, &compile_policy()).unwrap();
+        assert!(
+            compiled
+                .policy_evidence
+                .used_tool_classes
+                .contains("mcp:filesystem")
+        );
+        assert!(
+            compiled
+                .policy_evidence
+                .used_tool_classes
+                .contains("rust_bundle:review-tools")
+        );
+        assert!(
+            compiled
+                .policy_evidence
+                .used_skill_identities
+                .contains("lint-review")
+        );
+    }
+
+    #[test]
+    fn adaptive_layer_rejects_ambiguous_profile_tool_and_skill_identities() {
+        let mut context = compile_context();
+        context
+            .profile_templates
+            .get_mut(&ProfileName::from("verifier"))
+            .expect("verifier profile")
+            .tools
+            .mcp = vec!["mcp:filesystem".to_string()];
+        let denied = compile_layer(&layer_plan(), &context, &compile_policy()).unwrap_err();
+        assert!(matches!(
+            denied,
+            AdaptiveError::InvalidAdaptiveIdentity { field, .. }
+                if field == "adaptive tool mcp server"
+        ));
+
+        let mut context = compile_context();
+        context
+            .profile_templates
+            .get_mut(&ProfileName::from("verifier"))
+            .expect("verifier profile")
+            .skills = vec!["mcp:filesystem".to_string()];
+        let denied = compile_layer(&layer_plan(), &context, &compile_policy()).unwrap_err();
+        assert!(matches!(
+            denied,
+            AdaptiveError::InvalidAdaptiveIdentity { field, reason, .. }
+                if field == "adaptive skill identity" && reason.contains("reserved")
+        ));
     }
 
     #[test]

@@ -151,6 +151,62 @@ rust_test(
 )
 
 rust_test(
+    name = "live_video_uri_smoke_test",
+    aliases = aliases(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "live_video_uri_smoke",
+    crate_root = "tests/live_video_uri_smoke.rs",
+    crate_features = [
+        "adc",
+        "oauth",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/live_video_uri_smoke.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.5",
+        "CARGO_BIN_NAME": "live_video_uri_smoke",
+        "CARGO_MANIFEST_DIR": "./meerkat-gemini",
+    },
+    tags = [
+        "live",
+    ],
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-gemini:meerkat_gemini",
+        "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "oauth_resolve_test",
     aliases = aliases(
         package_name = "meerkat-gemini",

@@ -2322,6 +2322,23 @@ def test_parse_inline_video_content_block():
     assert block["data"] == "AAAA"
 
 
+def test_parse_uri_video_content_block():
+    block = MeerkatClient._parse_content_block(  # type: ignore[attr-defined]
+        {
+            "type": "video",
+            "media_type": "video/mp4",
+            "duration_ms": 12000,
+            "source": "uri",
+            "uri": "gs://example-bucket/timeline.mp4",
+        }
+    )
+    assert block["type"] == "video"
+    assert block["media_type"] == "video/mp4"
+    assert block["duration_ms"] == 12000
+    assert block["source"] == "uri"
+    assert block["uri"] == "gs://example-bucket/timeline.mp4"
+
+
 @pytest.mark.asyncio
 async def test_client_comms_send_and_peers_call_expected_rpc_methods():
     client = MeerkatClient()

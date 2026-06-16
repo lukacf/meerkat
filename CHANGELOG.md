@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Gemini video inputs can now be passed by provider-readable URI as
+  `VideoData::Uri` / `WireVideoData::Uri`. Vertex accepts `gs://` references
+  directly. Gemini API clients use public or already-registered file URIs as
+  `fileData`, and can register `gs://` references through the Files API before
+  generation when Google bearer auth is available.
+
 ## [0.7.3] - 2026-06-14
 
 Meerkat 0.7.3 is a follow-up to 0.7.2 fixing two mob-teardown regressions

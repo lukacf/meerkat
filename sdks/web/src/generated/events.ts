@@ -125,6 +125,9 @@ export type ContentBlock = {
   data: string;
   source: "inline";
 } | {
+  source: "uri";
+  uri: string;
+} | {
   data: unknown;
   type: "structured";
 } | {

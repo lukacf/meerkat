@@ -652,11 +652,19 @@ const sdkCommsImageBlock: ContentBlock = {
   data: "AAAA",
 };
 
+const sdkCommsVideoUriBlock: ContentBlock = {
+  type: "video",
+  media_type: "video/mp4",
+  duration_ms: 12000,
+  source: "uri",
+  uri: "gs://example-bucket/timeline.mp4",
+};
+
 const sdkCommsPeerMessageWithBlocks: CommsCommand = {
   kind: "peer_message",
   to: "agent-a",
   body: "describe",
-  blocks: [{ type: "text", text: "describe" }, sdkCommsImageBlock],
+  blocks: [{ type: "text", text: "describe" }, sdkCommsImageBlock, sdkCommsVideoUriBlock],
 };
 
 const sdkCommsPeerRequestWithBlocks: CommsCommand = {

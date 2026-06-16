@@ -61,6 +61,8 @@ impl From<&str> for ImageData {
 pub enum VideoData {
     /// Base64-encoded inline bytes used for ingress and live execution.
     Inline { data: String },
+    /// Provider-readable media URI used for by-reference video input.
+    Uri { uri: String },
 }
 
 impl From<String> for VideoData {
@@ -222,6 +224,17 @@ impl ContentBlock {
             _ => None,
         }
     }
+
+    pub fn video_uri(&self) -> Option<(&str, u64, &str)> {
+        match self {
+            ContentBlock::Video {
+                media_type,
+                duration_ms,
+                data: VideoData::Uri { uri },
+            } => Some((media_type, *duration_ms, uri)),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ContentBlock {
@@ -342,6 +355,12 @@ pub fn validate_inline_video_blocks(blocks: &[ContentBlock]) -> Result<(), Strin
                     ));
                 }
                 VideoData::Inline { .. } => {}
+                VideoData::Uri { uri } if uri.trim().is_empty() => {
+                    return Err(format!(
+                        "video block uri must not be empty for {media_type}"
+                    ));
+                }
+                VideoData::Uri { .. } => {}
             }
         }
     }

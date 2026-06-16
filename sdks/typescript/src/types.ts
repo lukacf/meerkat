@@ -130,12 +130,22 @@ export interface InlineVideoBlock {
   readonly data: string;
 }
 
+/** URI-referenced video content accepted by input-bearing APIs. */
+export interface UriVideoBlock {
+  readonly type: "video";
+  readonly media_type: string;
+  readonly duration_ms: number;
+  readonly source: "uri";
+  readonly uri: string;
+}
+
 /** A content block in a multimodal prompt. */
 export type ContentBlock =
   | { type: "text"; text: string }
   | InlineImageBlock
   | BlobImageBlock
-  | InlineVideoBlock;
+  | InlineVideoBlock
+  | UriVideoBlock;
 
 /** Canonical content input returned by history surfaces and accepted by input-bearing APIs. */
 export type ContentInput = string | readonly ContentBlock[];

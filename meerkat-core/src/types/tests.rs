@@ -1648,6 +1648,25 @@ mod content_block_tests {
     }
 
     #[test]
+    fn content_block_video_uri_roundtrip() {
+        let block = ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: crate::types::VideoData::Uri {
+                uri: "gs://bucket/camera-timeline.mp4".to_string(),
+            },
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "video");
+        assert_eq!(json["media_type"], "video/mp4");
+        assert_eq!(json["duration_ms"], 12000);
+        assert_eq!(json["source"], "uri");
+        assert_eq!(json["uri"], "gs://bucket/camera-timeline.mp4");
+        let parsed: ContentBlock = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
     fn text_projection_text_returns_text() {
         let block = ContentBlock::Text {
             text: "hello".to_string(),

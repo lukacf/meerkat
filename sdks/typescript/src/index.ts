@@ -85,6 +85,7 @@ export type {
   HelpRequest,
   InlineImageBlock,
   InlineVideoBlock,
+  UriVideoBlock,
   ModelProfile,
   ModelsCatalog,
   MobCreateOptions,

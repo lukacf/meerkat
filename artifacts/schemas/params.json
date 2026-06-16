@@ -1710,6 +1710,23 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -2662,6 +2679,23 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -4611,6 +4645,23 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -5897,6 +5948,22 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -6510,6 +6577,23 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -9115,6 +9199,22 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -9769,6 +9869,22 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -10295,6 +10411,22 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -10743,6 +10875,22 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -12730,6 +12878,22 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -12998,6 +13162,22 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -13393,6 +13573,22 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -13896,6 +14092,22 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -15067,6 +15279,22 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -15574,6 +15802,22 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -16780,6 +17024,23 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -18116,6 +18377,22 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -19054,6 +19331,23 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }
@@ -20981,6 +21275,23 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }

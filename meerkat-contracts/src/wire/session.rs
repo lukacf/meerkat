@@ -458,6 +458,7 @@ impl From<&str> for WireImageData {
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum WireVideoData {
     Inline { data: String },
+    Uri { uri: String },
 }
 
 impl From<String> for WireVideoData {
@@ -523,6 +524,7 @@ impl From<ContentBlock> for WireContentBlock {
                 duration_ms,
                 data: match data {
                     VideoData::Inline { data } => WireVideoData::Inline { data },
+                    VideoData::Uri { uri } => WireVideoData::Uri { uri },
                 },
             },
             ContentBlock::Structured { data } => WireContentBlock::Structured {
@@ -560,6 +562,7 @@ impl TryFrom<WireContentBlock> for ContentBlock {
                 duration_ms,
                 data: match data {
                     WireVideoData::Inline { data } => VideoData::Inline { data },
+                    WireVideoData::Uri { uri } => VideoData::Uri { uri },
                 },
             }),
             WireContentBlock::Structured { data } => Ok(ContentBlock::Structured {
@@ -1998,6 +2001,20 @@ mod tests {
     }
 
     #[test]
+    fn test_wire_content_block_video_uri_roundtrip() {
+        let block = WireContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: WireVideoData::Uri {
+                uri: "https://example.com/timeline.mp4".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: WireContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
     fn test_wire_content_block_unknown_forward_compat() {
         let json = r#"{"type":"hologram","url":"https://example.com/v.mp4"}"#;
         let parsed: WireContentBlock = serde_json::from_str(json).unwrap();
@@ -2036,6 +2053,30 @@ mod tests {
                 media_type: "video/mp4".to_string(),
                 duration_ms: 12_000,
                 data: "base64video".into(),
+            }
+        );
+        let restored = ContentBlock::try_from(wire).unwrap();
+        assert_eq!(restored, core_block);
+    }
+
+    #[test]
+    fn test_wire_content_block_from_core_video_uri_roundtrip() {
+        let core_block = ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: VideoData::Uri {
+                uri: "gs://bucket/object.mp4".to_string(),
+            },
+        };
+        let wire: WireContentBlock = core_block.clone().into();
+        assert_eq!(
+            wire,
+            WireContentBlock::Video {
+                media_type: "video/mp4".to_string(),
+                duration_ms: 12_000,
+                data: WireVideoData::Uri {
+                    uri: "gs://bucket/object.mp4".to_string(),
+                },
             }
         );
         let restored = ContentBlock::try_from(wire).unwrap();

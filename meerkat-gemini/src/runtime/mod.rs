@@ -728,7 +728,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         )
                     })?;
             let mut client = crate::GeminiClient::new_with_base_url(String::new(), base_url)
-                .with_authorizer(authorizer);
+                .with_authorizer(authorizer)
+                .with_google_backend_kind(backend_kind);
             if matches!(backend_kind, GoogleBackendKind::GoogleCodeAssist) {
                 client = client.with_code_assist_wire().with_code_assist_project_id(
                     code_assist_project_id_from_metadata(connection.auth_lease.metadata()),
@@ -753,7 +754,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     Some(url) => crate::GeminiClient::new_with_base_url(secret, url.clone()),
                     None => crate::GeminiClient::new(secret),
                 };
-                Ok(Arc::new(client))
+                Ok(Arc::new(client.with_google_backend_kind(backend_kind)))
             }
             GoogleBackendKind::VertexAi => {
                 // VertexAi `api_key_express` + `bearer_api_key` use the
@@ -774,7 +775,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                 .to_string(),
                         )
                     })?;
-                let client = crate::GeminiClient::new_with_base_url(secret, base_url);
+                let client = crate::GeminiClient::new_with_base_url(secret, base_url)
+                    .with_google_backend_kind(backend_kind);
                 Ok(Arc::new(client))
             }
             GoogleBackendKind::GoogleCodeAssist => {
@@ -807,6 +809,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         );
                     let client = crate::GeminiClient::new_with_base_url(String::new(), base_url)
                         .with_authorizer(authorizer)
+                        .with_google_backend_kind(backend_kind)
                         .with_code_assist_wire()
                         .with_code_assist_project_id(code_assist_project_id_from_metadata(
                             connection.auth_lease.metadata(),
@@ -846,7 +849,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         )
                     })?;
             let mut client = crate::GeminiClient::new_with_base_url(String::new(), base_url)
-                .with_authorizer(authorizer);
+                .with_authorizer(authorizer)
+                .with_google_backend_kind(backend_kind);
             if matches!(backend_kind, GoogleBackendKind::GoogleCodeAssist) {
                 client = client.with_code_assist_wire().with_code_assist_project_id(
                     code_assist_project_id_from_metadata(connection.auth_lease.metadata()),
@@ -878,7 +882,8 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                     .to_string(),
                             )
                         })?;
-                let client = crate::GeminiClient::new_with_base_url(secret, base_url);
+                let client = crate::GeminiClient::new_with_base_url(secret, base_url)
+                    .with_google_backend_kind(backend_kind);
                 if matches!(backend_kind, GoogleBackendKind::GoogleCodeAssist) {
                     client.with_code_assist_wire().with_code_assist_project_id(
                         code_assist_project_id_from_metadata(connection.auth_lease.metadata()),
@@ -888,7 +893,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
                 }
             }
         };
-        Ok(Some(Arc::new(client)))
+        Ok(Some(Arc::new(
+            client.with_google_backend_kind(backend_kind),
+        )))
     }
 
     fn image_generation_profile(

@@ -1735,8 +1735,13 @@ enum AuthCommands {
 
     /// Print auth profile status — reports realm config shape and the
     /// observed AuthMachine lease lifecycle state.
+    ///
+    /// The positional argument is an auth *profile* id, not a realm. The
+    /// realm is selected with the global `--realm` flag; without it the sole
+    /// configured realm (or `dev`, if present) is used. Run `rkat auth
+    /// profiles` to list the profile ids for a realm.
     Status {
-        /// Auth profile id.
+        /// Auth profile id (see `rkat auth profiles`).
         profile_id: String,
     },
 
@@ -4000,8 +4005,39 @@ async fn handle_models_catalog(scope: &RuntimeScope) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn auth_config_realm_or_default(config_realm_override: Option<&str>) -> String {
-    config_realm_override.unwrap_or("dev").to_string()
+/// Resolve which realm an `auth` subcommand operates on.
+///
+/// An explicit `--realm` override always wins. Without one, we derive the
+/// target from the active config instead of blindly assuming a `dev` realm:
+/// prefer `dev` when it exists (back-compat with `auth login`, which writes
+/// there), otherwise fall back to the sole configured realm. When the choice
+/// is ambiguous (multiple realms, no `dev`) or impossible (no realms) we fail
+/// with an actionable message rather than reporting `Unknown realm 'dev'`.
+fn resolve_auth_realm(
+    config: &Config,
+    config_realm_override: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(realm) = config_realm_override {
+        return Ok(realm.to_string());
+    }
+    if config.realm.contains_key("dev") {
+        return Ok("dev".to_string());
+    }
+    let mut realms = config.realm.keys();
+    match (realms.next(), realms.next()) {
+        (None, _) => anyhow::bail!(
+            "No realms configured. Add a [realm.<id>] section to your config, \
+             or continue using env-var auth (ANTHROPIC_API_KEY etc.)."
+        ),
+        (Some(only), None) => Ok(only.clone()),
+        (Some(_), Some(_)) => {
+            let ids: Vec<&str> = config.realm.keys().map(String::as_str).collect();
+            anyhow::bail!(
+                "Multiple realms configured ({}). Pass --realm <id> to choose one.",
+                ids.join(", ")
+            )
+        }
+    }
 }
 
 async fn handle_auth_command(
@@ -4019,10 +4055,30 @@ async fn handle_auth_command(
                 );
                 return Ok(());
             }
-            println!("REALM_ID          DEFAULT_BINDING    BACKENDS  AUTH_PROFILES  BINDINGS");
+            // Size the variable-length columns to their widest value so long
+            // realm ids (e.g. `ws-<16 hex>`, 19 chars) don't overrun the next
+            // column and collide with the default-binding text.
+            let realm_w = config
+                .realm
+                .keys()
+                .map(String::len)
+                .chain(std::iter::once("REALM_ID".len()))
+                .max()
+                .unwrap_or("REALM_ID".len());
+            let binding_w = config
+                .realm
+                .values()
+                .map(|section| section.default_binding.as_deref().unwrap_or("-").len())
+                .chain(std::iter::once("DEFAULT_BINDING".len()))
+                .max()
+                .unwrap_or("DEFAULT_BINDING".len());
+            println!(
+                "{:<realm_w$}  {:<binding_w$}  {:<8}  {:<13}  BINDINGS",
+                "REALM_ID", "DEFAULT_BINDING", "BACKENDS", "AUTH_PROFILES",
+            );
             for (realm_id, section) in &config.realm {
                 println!(
-                    "{:<18}{:<20}{:<10}{:<15}{}",
+                    "{:<realm_w$}  {:<binding_w$}  {:<8}  {:<13}  {}",
                     realm_id,
                     section.default_binding.as_deref().unwrap_or("-"),
                     section.backend.len(),
@@ -4032,7 +4088,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Profiles => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = resolve_auth_realm(&config, config_realm_override)?;
             let section = config.realm.get(&realm).ok_or_else(|| {
                 anyhow::anyhow!("Unknown realm '{realm}' — check your config file")
             })?;
@@ -4071,7 +4127,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Profile { profile_id } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = resolve_auth_realm(&config, config_realm_override)?;
             let section = config
                 .realm
                 .get(&realm)
@@ -4098,7 +4154,7 @@ async fn handle_auth_command(
                 InMemoryCoordinator, TokenStore, TokenStoreBackend,
             };
 
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = resolve_auth_realm(&config, config_realm_override)?;
             let section = config
                 .realm
                 .get(&realm)
@@ -4140,7 +4196,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Status { profile_id } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = resolve_auth_realm(&config, config_realm_override)?;
             let section = config
                 .realm
                 .get(&realm)
@@ -4197,7 +4253,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::ProfileDelete { profile_id, yes } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = resolve_auth_realm(&config, config_realm_override)?;
             let section = config
                 .realm
                 .get(&realm)
@@ -4275,9 +4331,17 @@ async fn handle_auth_command(
                 );
                 return Ok(());
             }
-            println!(
-                "REALM              BINDING              BACKEND_PROFILE      AUTH_PROFILE         DEFAULT_MODEL"
-            );
+            // Collect rows first so the columns can be sized to their widest
+            // value — fixed widths overrun on long realm/binding ids and run
+            // adjacent columns together.
+            struct BindingRow {
+                realm: String,
+                binding: String,
+                backend_profile: String,
+                auth_profile: String,
+                default_model: String,
+            }
+            let mut rows: Vec<BindingRow> = Vec::new();
             for (realm_id, section) in &config.realm {
                 if let Some(filter) = realm_filter
                     && filter != realm_id
@@ -4293,15 +4357,56 @@ async fn handle_auth_command(
                         }
                     };
                 for (binding_id, binding) in &realm_set.bindings {
-                    println!(
-                        "{:<19}{:<21}{:<21}{:<21}{}",
-                        realm_id,
-                        binding_id,
-                        binding.backend_profile,
-                        binding.auth_profile,
-                        binding.default_model.as_deref().unwrap_or("(inherit)"),
-                    );
+                    rows.push(BindingRow {
+                        realm: realm_id.clone(),
+                        binding: binding_id.clone(),
+                        backend_profile: binding.backend_profile.clone(),
+                        auth_profile: binding.auth_profile.clone(),
+                        default_model: binding
+                            .default_model
+                            .as_deref()
+                            .unwrap_or("(inherit)")
+                            .to_string(),
+                    });
                 }
+            }
+            let realm_w = rows
+                .iter()
+                .map(|r| r.realm.len())
+                .chain(std::iter::once("REALM".len()))
+                .max()
+                .unwrap_or("REALM".len());
+            let binding_w = rows
+                .iter()
+                .map(|r| r.binding.len())
+                .chain(std::iter::once("BINDING".len()))
+                .max()
+                .unwrap_or("BINDING".len());
+            let backend_w = rows
+                .iter()
+                .map(|r| r.backend_profile.len())
+                .chain(std::iter::once("BACKEND_PROFILE".len()))
+                .max()
+                .unwrap_or("BACKEND_PROFILE".len());
+            let auth_w = rows
+                .iter()
+                .map(|r| r.auth_profile.len())
+                .chain(std::iter::once("AUTH_PROFILE".len()))
+                .max()
+                .unwrap_or("AUTH_PROFILE".len());
+            println!(
+                "{:<realm_w$}  {:<binding_w$}  {:<backend_w$}  {:<auth_w$}  DEFAULT_MODEL",
+                "REALM", "BINDING", "BACKEND_PROFILE", "AUTH_PROFILE",
+            );
+            for row in &rows {
+                println!(
+                    "{:<realm_w$}  {:<binding_w$}  {:<backend_w$}  {:<auth_w$}  {}",
+                    row.realm,
+                    row.binding,
+                    row.backend_profile,
+                    row.auth_profile,
+                    row.default_model,
+                );
             }
         }
         AuthCommands::Login {
@@ -4351,7 +4456,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Refresh { profile_id } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = resolve_auth_realm(&config, config_realm_override)?;
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
                 refresh_auth_profile(&realm, &profile_id, &config, scope).await?;
@@ -14019,6 +14124,69 @@ mod tests {
         assert_eq!(target.auth_binding.realm.as_str(), "dev");
         assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
         assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
+    }
+
+    fn config_with_realms(realm_ids: &[&str]) -> Config {
+        let mut config = Config::default();
+        for id in realm_ids {
+            config.realm.insert(
+                (*id).to_string(),
+                meerkat_core::RealmConfigSection::default(),
+            );
+        }
+        config
+    }
+
+    #[test]
+    fn resolve_auth_realm_prefers_explicit_override() {
+        let config = config_with_realms(&["dev", "ws-abc"]);
+        let realm = resolve_auth_realm(&config, Some("ws-abc")).expect("override is honored");
+        assert_eq!(realm, "ws-abc");
+    }
+
+    #[test]
+    fn resolve_auth_realm_override_wins_even_when_unconfigured() {
+        // The override is passed through verbatim; downstream lookup reports the
+        // miss with the realm the caller actually asked for.
+        let config = config_with_realms(&["dev"]);
+        let realm = resolve_auth_realm(&config, Some("nope")).expect("override is passed through");
+        assert_eq!(realm, "nope");
+    }
+
+    #[test]
+    fn resolve_auth_realm_defaults_to_sole_configured_realm() {
+        let config = config_with_realms(&["ws-694176940c94c8b1"]);
+        let realm = resolve_auth_realm(&config, None).expect("single realm is the default");
+        assert_eq!(realm, "ws-694176940c94c8b1");
+    }
+
+    #[test]
+    fn resolve_auth_realm_prefers_dev_when_present() {
+        let config = config_with_realms(&["dev", "ws-abc"]);
+        let realm = resolve_auth_realm(&config, None).expect("dev wins when present");
+        assert_eq!(realm, "dev");
+    }
+
+    #[test]
+    fn resolve_auth_realm_errors_when_ambiguous() {
+        let config = config_with_realms(&["ws-abc", "ws-def"]);
+        let err = resolve_auth_realm(&config, None).expect_err("ambiguous realms must error");
+        let msg = err.to_string();
+        assert!(msg.contains("Multiple realms"), "unexpected message: {msg}");
+        assert!(
+            msg.contains("ws-abc") && msg.contains("ws-def"),
+            "lists ids: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_auth_realm_errors_when_none_configured() {
+        let config = config_with_realms(&[]);
+        let err = resolve_auth_realm(&config, None).expect_err("no realms must error");
+        assert!(
+            err.to_string().contains("No realms configured"),
+            "unexpected message: {err}"
+        );
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

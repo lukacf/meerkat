@@ -745,7 +745,7 @@ family = "gemma-4"
         let gpt = find_profile("openai", "gpt-5.4");
         assert!(gpt.vision);
         assert!(gpt.image_input);
-        assert!(!gpt.image_tool_results);
+        assert!(gpt.image_tool_results);
         assert!(!gpt.inline_video);
         assert!(!gpt.realtime);
         assert!(gpt.supports_web_search);

@@ -20823,10 +20823,10 @@ mod tests {
         AgentFactory::new(temp.path().join("sessions")).builtins(true)
     }
 
-    /// After hot-swapping from an Anthropic model to an OpenAI model, the
-    /// machine-owned capability filter should hide `view_image`.
+    /// After hot-swapping from an Anthropic model to an OpenAI Responses model,
+    /// the machine-owned capability filter should keep `view_image` available.
     #[tokio::test]
-    async fn hot_swap_to_openai_hides_view_image() {
+    async fn hot_swap_to_openai_keeps_view_image() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -20852,7 +20852,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Hot-swap to an OpenAI model (does NOT support image_tool_results).
+        // Hot-swap to an OpenAI Responses model (supports image_tool_results).
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
@@ -20885,14 +20885,14 @@ mod tests {
         assert!(capabilities.vision);
         assert!(capabilities.image_input);
         assert!(
-            !capabilities.image_tool_results,
+            capabilities.image_tool_results,
             "OpenAI hot-swap should update resolved image tool-result support"
         );
         assert!(capabilities.web_search);
         assert!(capabilities.image_generation);
 
         // Export the session and check that the capability-owned visibility
-        // state blocks view_image without mutating the external overlay.
+        // state keeps view_image available without mutating the external overlay.
         let session = runtime
             .service
             .export_live_session(&session_id)
@@ -20901,8 +20901,8 @@ mod tests {
         let visibility_state = exported_tool_visibility_state(&session);
         assert_eq!(
             visibility_state.capability_base_filter,
-            meerkat_core::capability_base_filter_for_image_tool_results(false),
-            "hot-swap to OpenAI should deny view_image via the capability base filter"
+            meerkat_core::ToolFilter::All,
+            "hot-swap to OpenAI Responses should keep view_image available"
         );
         assert_eq!(
             visibility_state.staged_filter,
@@ -20912,7 +20912,7 @@ mod tests {
     }
 
     /// After hot-swapping from OpenAI back to Anthropic, the tool filter should
-    /// be cleared (set to All).
+    /// remain open for `view_image`.
     #[tokio::test]
     async fn hot_swap_to_anthropic_clears_view_image_deny() {
         let temp = tempfile::tempdir().unwrap();
@@ -20939,7 +20939,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Hot-swap to OpenAI (deny view_image).
+        // Hot-swap to OpenAI (allow view_image).
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
@@ -20989,7 +20989,7 @@ mod tests {
         assert_eq!(
             visibility_state.capability_base_filter,
             meerkat_core::ToolFilter::All,
-            "hot-swap back to Anthropic should clear the capability-owned view_image deny"
+            "hot-swap back to Anthropic should keep view_image available"
         );
         assert_eq!(
             visibility_state.staged_filter,
@@ -20998,8 +20998,8 @@ mod tests {
         );
     }
 
-    /// Hot-swapping preserves pre-existing session-local denies while adding
-    /// capability-owned model gating on top.
+    /// Hot-swapping preserves pre-existing session-local denies while keeping
+    /// capability-owned model gating open for image-capable models.
     #[tokio::test]
     async fn hot_swap_preserves_preexisting_deny_filter() {
         let temp = tempfile::tempdir().unwrap();
@@ -21036,7 +21036,7 @@ mod tests {
             .await
             .expect("staging deny filter for datetime should succeed");
 
-        // Hot-swap to OpenAI — should add view_image to the deny set, not replace it.
+        // Hot-swap to OpenAI — should leave the capability base open.
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
@@ -21064,8 +21064,8 @@ mod tests {
         let visibility_state = exported_tool_visibility_state(&session);
         assert_eq!(
             visibility_state.capability_base_filter,
-            meerkat_core::capability_base_filter_for_image_tool_results(false),
-            "hot-swap should deny view_image via the capability base filter"
+            meerkat_core::ToolFilter::All,
+            "hot-swap should keep view_image available via the capability base filter"
         );
         assert_eq!(
             visibility_state.staged_filter,
@@ -21074,8 +21074,8 @@ mod tests {
         );
     }
 
-    /// Hot-swapping back to a capable model clears only the capability-owned
-    /// `view_image` denial, keeping user-owned denies.
+    /// Hot-swapping between capable models keeps user-owned denies without
+    /// adding a capability-owned `view_image` denial.
     #[tokio::test]
     async fn hot_swap_back_preserves_other_denied_tools() {
         let temp = tempfile::tempdir().unwrap();
@@ -21139,8 +21139,8 @@ mod tests {
         );
         assert_eq!(
             visibility_state.capability_base_filter,
-            meerkat_core::capability_base_filter_for_image_tool_results(false),
-            "OpenAI setup should deny view_image through generated authority"
+            meerkat_core::ToolFilter::All,
+            "OpenAI setup should keep view_image available through generated authority"
         );
         assert_eq!(
             visibility_state.staged_filter,
@@ -21148,7 +21148,7 @@ mod tests {
             "OpenAI setup should preserve the user-owned deny filter"
         );
 
-        // Hot-swap to Anthropic — should clear only the capability-owned deny.
+        // Hot-swap to Anthropic — should preserve only the user-owned deny.
         let overrides = crate::handlers::turn::TurnOverrides {
             model: Some("claude-sonnet-4-5".to_string()),
             provider: Some("anthropic".to_string()),
@@ -21178,7 +21178,7 @@ mod tests {
         assert_eq!(
             visibility_state.capability_base_filter,
             meerkat_core::ToolFilter::All,
-            "hot-swap to Anthropic should clear the capability-owned view_image deny"
+            "hot-swap to Anthropic should keep view_image available"
         );
         assert_eq!(
             visibility_state.staged_filter,

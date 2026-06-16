@@ -121,15 +121,25 @@ fn project_openai_content_blocks(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
         .collect()
 }
 
-fn project_openai_tool_result(result: &ToolResult) -> Result<ToolResult, LlmError> {
+fn project_openai_tool_result(
+    result: &ToolResult,
+    image_tool_results: bool,
+) -> Result<ToolResult, LlmError> {
     if result.has_video() {
         return Err(invalid_replay(
             "video blocks are not supported in OpenAI tool results",
         ));
     }
-    Ok(ToolResult::new(
+    if !image_tool_results {
+        return Ok(ToolResult::new(
+            result.tool_use_id.clone(),
+            result.text_content(),
+            result.is_error,
+        ));
+    }
+    Ok(ToolResult::with_blocks(
         result.tool_use_id.clone(),
-        result.text_content(),
+        project_openai_content_blocks(&result.content),
         result.is_error,
     ))
 }
@@ -253,8 +263,23 @@ pub(crate) fn project_openai_replay_messages(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
 ) -> Result<Vec<Message>, LlmError> {
+    project_openai_replay_messages_for_capabilities(messages, mode, true)
+}
+
+pub(crate) fn project_openai_replay_messages_for_capabilities(
+    messages: &[Message],
+    mode: OpenAiReplayProjectionMode,
+    image_tool_results: bool,
+) -> Result<Vec<Message>, LlmError> {
     let mut projected = Vec::with_capacity(messages.len());
     let mut pending_tool_ids: Option<HashSet<String>> = None;
+    // Responses can now accept image parts in `function_call_output.output`.
+    // This projection intentionally preserves inline tool-result images across
+    // the replayed history for capable models, matching Anthropic semantics.
+    // Callers that need cheaper historical replay should add an explicit
+    // fresh-vs-historical projection policy instead of changing this default.
+    let image_tool_results =
+        matches!(mode, OpenAiReplayProjectionMode::Responses) && image_tool_results;
 
     for message in messages {
         if let Message::ToolResults {
@@ -270,7 +295,7 @@ pub(crate) fn project_openai_replay_messages(
             validate_tool_results("OpenAI", pending, results)?;
             let results = results
                 .iter()
-                .map(project_openai_tool_result)
+                .map(|result| project_openai_tool_result(result, image_tool_results))
                 .collect::<Result<Vec<_>, _>>()?;
             projected.push(Message::ToolResults {
                 results,
@@ -651,6 +676,26 @@ impl OpenAiClient {
         }
     }
 
+    fn tool_result_responses_output(result: &ToolResult) -> Result<Value, LlmError> {
+        if result.has_video() {
+            return Err(LlmError::InvalidRequest {
+                message: "video blocks are not supported in OpenAI tool results".to_string(),
+            });
+        }
+
+        if result.has_images() {
+            Ok(Value::Array(
+                result
+                    .content
+                    .iter()
+                    .map(Self::content_block_to_responses_part)
+                    .collect(),
+            ))
+        } else {
+            Ok(Value::String(result.text_content()))
+        }
+    }
+
     fn system_notice_responses_content(notice: &SystemNoticeMessage) -> Value {
         let rendered = notice.model_projection_text();
         let mut parts = Vec::new();
@@ -809,19 +854,12 @@ impl OpenAiClient {
                     }
                 }
                 Message::ToolResults { results, .. } => {
-                    // OpenAI function_call_output only accepts strings; images
-                    // degrade to text projection via text_content().
                     for r in results {
-                        if r.has_video() {
-                            return Err(LlmError::InvalidRequest {
-                                message: "video blocks are not supported in OpenAI tool results"
-                                    .to_string(),
-                            });
-                        }
+                        let output = Self::tool_result_responses_output(r)?;
                         items.push(serde_json::json!({
                             "type": "function_call_output",
                             "call_id": r.tool_use_id,
-                            "output": r.text_content()
+                            "output": output
                         }));
                     }
                 }
@@ -2442,10 +2480,19 @@ mod tests {
             panic!("expected tool results");
         };
         assert!(
-            !results[0].has_images(),
-            "OpenAI tool results should be text-only replay"
+            results[0].has_images(),
+            "OpenAI Responses replay intentionally retains historical inline image tool results"
         );
         assert!(results[0].text_content().contains("[image: image/png]"));
+        let tool_output = input
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+            .expect("function_call_output item");
+        let output = tool_output["output"].as_array().expect("output array");
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[0]["text"], "tool text");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(output[1]["image_url"], "data:image/png;base64,CCCC");
         Ok(())
     }
 
@@ -5596,9 +5643,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_tool_result_with_image_degrades_to_text() {
-        use meerkat_core::ContentBlock;
-
+    fn openai_tool_result_with_inline_image_emits_responses_parts_array() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
             "gpt-5.4",
@@ -5631,18 +5676,51 @@ mod tests {
         assert_eq!(tool_output["type"], "function_call_output");
         assert_eq!(tool_output["call_id"], "call_1");
 
-        // OpenAI tool results only accept strings -- images degrade to text projection
         let output = tool_output["output"]
-            .as_str()
-            .expect("output should be string");
-        assert!(
-            output.contains("screenshot taken"),
-            "text content should be preserved"
+            .as_array()
+            .expect("output should be an array when images are present");
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[0]["text"], "screenshot taken");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(output[1]["image_url"], "data:image/png;base64,iVBOR...");
+    }
+
+    #[test]
+    fn openai_tool_result_with_blob_image_uses_text_projection_part() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![
+                Message::User(UserMessage::text("Take a screenshot")),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::with_blocks(
+                        "call_1".to_string(),
+                        vec![
+                            ContentBlock::Text {
+                                text: "screenshot stored".to_string(),
+                            },
+                            ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: ImageData::Blob {
+                                    blob_id: "sha256:abc".into(),
+                                },
+                            },
+                        ],
+                        false,
+                    )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                },
+            ],
         );
-        assert!(
-            output.contains("[image: image/png]"),
-            "image should degrade to text projection: got {output}"
-        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input array");
+        let output = input[1]["output"].as_array().expect("output array");
+
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[0]["text"], "screenshot stored");
+        assert_eq!(output[1]["type"], "input_text");
+        assert_eq!(output[1]["text"], "[image: image/png]");
     }
 
     // =========================================================================

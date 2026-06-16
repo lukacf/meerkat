@@ -498,16 +498,26 @@ fn claude_profile_vision_and_image_tool_results_true() {
 }
 
 #[test]
-fn gpt_profile_vision_true_image_tool_results_false() {
+fn gpt_profile_vision_and_image_tool_results_true() {
     let profile = profile_for(Provider::OpenAI, "gpt-5.4").expect("gpt-5.4 must have a profile");
     assert!(profile.vision, "OpenAI models must support vision");
     assert!(
-        !profile.image_tool_results,
-        "OpenAI models must NOT support image tool results"
+        profile.image_tool_results,
+        "OpenAI Responses models must support image tool results"
     );
     assert!(
         !profile.inline_video,
         "OpenAI models must NOT support inline video"
+    );
+
+    let pro =
+        profile_for(Provider::OpenAI, "gpt-5.5-pro").expect("gpt-5.5-pro must have a profile");
+    assert!(pro.image_tool_results);
+    let realtime = profile_for(Provider::OpenAI, "gpt-realtime-2")
+        .expect("gpt-realtime-2 must have a profile");
+    assert!(
+        !realtime.image_tool_results,
+        "OpenAI realtime uses a separate tool-result wire path"
     );
 }
 

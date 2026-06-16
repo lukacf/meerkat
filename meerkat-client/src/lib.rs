@@ -40,7 +40,7 @@ pub use meerkat_openai::live::{
     pump_openai_live_session,
 };
 #[cfg(feature = "openai")]
-pub use meerkat_openai::{OpenAiClient, OpenAiCompatibleClient};
+pub use meerkat_openai::{OpenAiClient, OpenAiCompatibleClient, OpenAiCompatibleClientOptions};
 
 #[cfg(feature = "gemini")]
 pub use meerkat_gemini::GeminiClient;

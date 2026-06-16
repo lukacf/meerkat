@@ -575,7 +575,7 @@ Use `rkat blob get <BLOB-ID> --json` or the model-facing `blob_inspect` tool to 
 | Provider | `vision` | `image_tool_results` | `inline_video` |
 |----------|----------|---------------------|----------------|
 | Anthropic | Yes | Yes | No |
-| OpenAI | Yes | No | No |
+| OpenAI | Yes | Yes for Responses models; no for realtime and Chat Completions-compatible paths | No |
 | Gemini | Yes | Yes | Yes |
 
 ### Sessions

@@ -58,6 +58,17 @@ pub(crate) fn resolve_profile_mob_operator_access(
     )
 }
 
+fn stamp_standard_mob_member_labels(
+    peer_meta: PeerMeta,
+    binding: &meerkat_core::MobMemberBinding,
+) -> PeerMeta {
+    peer_meta
+        .with_label("mob_id", binding.mob_id.as_str())
+        .with_label("role", binding.role.as_str())
+        .with_label("meerkat_id", binding.member.as_str())
+        .with_label("agent_identity", binding.member.as_str())
+}
+
 /// Open profile tool categories for an already-witnessed inherited filter.
 ///
 /// `SpawnTooling::InheritParent` and `SpawnTooling::Minimal` derive the actual
@@ -173,10 +184,7 @@ pub async fn build_agent_config(
         }
     }
     // Mob standard labels overwrite app labels on conflict
-    peer_meta = peer_meta
-        .with_label("mob_id", mob_id.as_str())
-        .with_label("role", profile_name.as_str())
-        .with_label("meerkat_id", agent_identity.as_str());
+    peer_meta = stamp_standard_mob_member_labels(peer_meta, &member_binding);
 
     let realm_id = mob_realm_id(mob_id)?;
 
@@ -407,6 +415,10 @@ fn apply_resumed_session_metadata(
     // (determined by runtime_mode == AutonomousHost). §1: one owner.
     config.comms_name = Some(current_comms_name);
     config.peer_meta = metadata.peer_meta.clone();
+    if let Some(binding) = config.mob_member_binding.clone() {
+        let peer_meta = config.peer_meta.take().unwrap_or_default();
+        config.peer_meta = Some(stamp_standard_mob_member_labels(peer_meta, &binding));
+    }
     Ok(())
 }
 
@@ -469,7 +481,7 @@ pub fn to_create_session_request(
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build_options),
-        labels: None,
+        labels: config.peer_meta.as_ref().map(|meta| meta.labels.clone()),
     }
 }
 
@@ -927,6 +939,10 @@ mod tests {
         assert_eq!(meta.labels.get("role").map(String::as_str), Some("worker"));
         assert_eq!(
             meta.labels.get("meerkat_id").map(String::as_str),
+            Some("w-1")
+        );
+        assert_eq!(
+            meta.labels.get("agent_identity").map(String::as_str),
             Some("w-1")
         );
         assert_eq!(meta.description.as_deref(), Some("Does work"));
@@ -1877,6 +1893,8 @@ mod tests {
         let lead = def.profiles[&ProfileName::from("lead")]
             .as_inline()
             .unwrap();
+        let mut labels = BTreeMap::new();
+        labels.insert("faction".to_string(), "north".to_string());
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
@@ -1885,7 +1903,7 @@ mod tests {
             definition: &def,
             external_tools: None,
             context: None,
-            labels: None,
+            labels: Some(labels),
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
@@ -1904,6 +1922,17 @@ mod tests {
             meerkat_core::service::InitialTurnPolicy::Defer
         );
         assert_eq!(req.deferred_prompt_policy, DeferredPromptPolicy::Discard);
+        {
+            let labels = req.labels.as_ref().expect("request labels");
+            assert_eq!(labels.get("mob_id").map(String::as_str), Some("test-mob"));
+            assert_eq!(labels.get("role").map(String::as_str), Some("lead"));
+            assert_eq!(labels.get("meerkat_id").map(String::as_str), Some("lead-1"));
+            assert_eq!(
+                labels.get("agent_identity").map(String::as_str),
+                Some("lead-1")
+            );
+            assert_eq!(labels.get("faction").map(String::as_str), Some("north"));
+        }
 
         let build = req.build.expect("build options should be set");
         assert_eq!(build.comms_name.as_deref(), Some("test-mob/lead/lead-1"));
@@ -1962,6 +1991,59 @@ mod tests {
         assert_eq!(
             build.override_shell,
             meerkat_core::ToolCategoryOverride::Disable
+        );
+    }
+
+    #[tokio::test]
+    async fn test_to_create_session_request_preserves_resumed_labels() {
+        let def = sample_definition();
+        let lead_key = ProfileName::from("lead");
+        let lead = def.profiles[&lead_key].as_inline().unwrap();
+        let session_id = SessionId::new();
+        let mut resumed_session = resumed_session_with_metadata(session_id.clone());
+        let mut persisted_meta = resumed_session
+            .session_metadata()
+            .expect("session metadata");
+        persisted_meta.peer_meta = Some(
+            PeerMeta::default()
+                .with_label("mob_id", "test-mob")
+                .with_label("role", "lead")
+                .with_label("meerkat_id", "lead-1"),
+        );
+        resumed_session
+            .set_session_metadata(persisted_meta)
+            .expect("session metadata");
+
+        let config = build_resumed_agent_config(BuildResumedAgentConfigParams {
+            base: BuildAgentConfigParams {
+                mob_id: &def.id,
+                profile_name: &lead_key,
+                agent_identity: &AgentIdentity::from("lead-1"),
+                profile: lead,
+                definition: &def,
+                external_tools: None,
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                shell_env: None,
+                mob_tool_authority_context: None,
+                inherited_tool_filter: None,
+                system_prompt_override: None,
+            },
+            expected_session_id: &session_id,
+            resumed_session,
+        })
+        .await
+        .expect("build_resumed_agent_config");
+
+        let req = to_create_session_request(&config, "Resume mob".to_string().into());
+        let labels = req.labels.as_ref().expect("request labels");
+        assert_eq!(labels.get("mob_id").map(String::as_str), Some("test-mob"));
+        assert_eq!(labels.get("role").map(String::as_str), Some("lead"));
+        assert_eq!(labels.get("meerkat_id").map(String::as_str), Some("lead-1"));
+        assert_eq!(
+            labels.get("agent_identity").map(String::as_str),
+            Some("lead-1")
         );
     }
 
@@ -2478,6 +2560,10 @@ mod tests {
         assert_eq!(meta.labels.get("role").map(String::as_str), Some("worker"));
         assert_eq!(
             meta.labels.get("meerkat_id").map(String::as_str),
+            Some("w-1")
+        );
+        assert_eq!(
+            meta.labels.get("agent_identity").map(String::as_str),
             Some("w-1")
         );
     }

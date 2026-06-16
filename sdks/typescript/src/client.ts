@@ -4097,6 +4097,16 @@ export class MeerkatClient {
       };
     }
     if (type === "video") {
+      const source = String(data.source ?? "inline");
+      if (source === "uri") {
+        return {
+          type: "video",
+          media_type: String(data.media_type ?? ""),
+          duration_ms: Number(data.duration_ms ?? 0),
+          source: "uri",
+          uri: String(data.uri ?? ""),
+        };
+      }
       return {
         type: "video",
         media_type: String(data.media_type ?? ""),

@@ -127,7 +127,7 @@ example, `meerkat-schedule` owns the Schedule policy declaration,
 |------------|-------------|-----------|--------|--------|
 | `vision` | Model can process image content in user messages | Yes | Yes | Yes |
 | `image_tool_results` | Model can process image content in tool results | Yes | No | Yes |
-| `inline_video` | Model can process inline video content in user messages | No | No | Yes |
+| `inline_video` | Model can process video content in user messages, including inline bytes and provider-readable URI references | No | No | Yes |
 | `realtime` | Model can back a caller-initiated live channel | No | `gpt-realtime-2` only | No current catalog row |
 | `supports_web_search` | Model supports provider-native web search tools | Yes | Yes for chat catalog rows; not `gpt-realtime-2` / Codex | Yes |
 
@@ -139,6 +139,8 @@ These fields are set in `meerkat-models/src/capabilities/**` (the types live in 
 - **Provider-native web search** -- injected by default when `supports_web_search` is `true` and the corresponding `provider_tools.*` config is enabled.
 
 Image generation uses provider-owned image profiles rather than `ModelProfile` chat-model flags. OpenAI and Gemini provider crates advertise image targets, supported backend plans, dimensions/aspect ratios, and provider-specific `provider_params`; the runtime exposes one model-facing `generate_image` tool and commits generated outputs as blob-backed assistant image blocks.
+
+Gemini video URI support follows the active Google backend. Vertex Gemini accepts `gs://` references directly. Gemini API sessions pass public or already-registered file URIs as `fileData`, and register `gs://` references through the Files API only when Google bearer auth is available; API-key-only sessions should use public/pre-registered file URIs or Vertex for direct GCS references.
 
 ## Provider-native web search
 

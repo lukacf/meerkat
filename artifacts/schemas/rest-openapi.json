@@ -2324,6 +2324,23 @@
                   "data"
                 ],
                 "type": "object"
+              },
+              {
+                "description": "Provider-readable media URI used for by-reference video input.",
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
+                ],
+                "type": "object"
               }
             ],
             "properties": {
@@ -8811,6 +8828,22 @@
                 "required": [
                   "source",
                   "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "uri",
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "uri"
                 ],
                 "type": "object"
               }

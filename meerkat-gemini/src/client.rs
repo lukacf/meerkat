@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
+use meerkat_core::provider_matrix::google::GoogleBackendKind;
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, GeminiImageMetadata, ImageData,
@@ -13,6 +14,8 @@ use meerkat_core::{
     SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::LlmError;
+#[cfg(target_arch = "wasm32")]
+use meerkat_llm_core::tokio::time as async_time;
 use meerkat_llm_core::{
     ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream,
     ProviderGeneratedImage, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
@@ -22,6 +25,9 @@ use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::time as async_time;
 
 use crate::image_generation::{
     GeminiImageGenerationProfile, GeminiImageOutputOptions, GeminiImageTurnPlan,
@@ -42,6 +48,7 @@ pub struct GeminiClient {
     base_url: String,
     http: reqwest::Client,
     wire_mode: GeminiWireMode,
+    google_backend_kind: GoogleBackendKind,
     code_assist_project_id: Option<String>,
     /// Dynamic authorizer — when set, replaces the `x-goog-api-key`
     /// header path with `HttpAuthorizer::authorize` invocation (used
@@ -54,6 +61,16 @@ pub struct GeminiClient {
 enum GeminiWireMode {
     PublicGenerateContent,
     CodeAssist,
+}
+
+const GEMINI_FILE_POLL_ATTEMPTS: usize = 60;
+
+fn gemini_file_poll_interval() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(1)
+    } else {
+        Duration::from_secs(2)
+    }
 }
 
 fn code_assist_model(model: &str) -> &str {
@@ -254,6 +271,7 @@ impl GeminiClient {
             base_url,
             http,
             wire_mode: GeminiWireMode::PublicGenerateContent,
+            google_backend_kind: GoogleBackendKind::GoogleGenAi,
             code_assist_project_id: None,
             authorizer: None,
         }
@@ -282,6 +300,12 @@ impl GeminiClient {
 
     pub fn with_code_assist_wire(mut self) -> Self {
         self.wire_mode = GeminiWireMode::CodeAssist;
+        self.google_backend_kind = GoogleBackendKind::GoogleCodeAssist;
+        self
+    }
+
+    pub fn with_google_backend_kind(mut self, backend_kind: GoogleBackendKind) -> Self {
+        self.google_backend_kind = backend_kind;
         self
     }
 
@@ -312,6 +336,16 @@ impl GeminiClient {
                 "inlineData": {
                     "mimeType": media_type,
                     "data": data
+                }
+            }),
+            ContentBlock::Video {
+                media_type,
+                duration_ms: _,
+                data: meerkat_core::VideoData::Uri { uri },
+            } => serde_json::json!({
+                "fileData": {
+                    "mimeType": media_type,
+                    "fileUri": uri
                 }
             }),
             _ => serde_json::json!({
@@ -755,6 +789,211 @@ impl GeminiClient {
             .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })
     }
 
+    fn files_register_url(&self) -> String {
+        format!(
+            "{}/v1beta/files:register",
+            self.base_url.trim_end_matches('/')
+        )
+    }
+
+    fn files_get_url(&self, name: &str) -> String {
+        format!("{}/v1beta/{}", self.base_url.trim_end_matches('/'), name)
+    }
+
+    async fn post_gemini_authorized_json(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        let Some(authorizer) = &self.authorizer else {
+            return Err(LlmError::InvalidRequest {
+                message: "Gemini API gs:// video references require Google bearer auth for Files API registration; use the vertex_ai backend for direct gs:// references or pass a pre-registered file URI".to_string(),
+            });
+        };
+        let mut req = self
+            .http
+            .post(endpoint)
+            .header("Content-Type", "application/json");
+        let mut extra: Vec<(String, String)> = Vec::new();
+        let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+            method: "POST",
+            url: endpoint,
+            headers: &mut extra,
+        };
+        authorizer
+            .authorize(&mut auth_req)
+            .await
+            .map_err(|e| LlmError::AuthenticationFailed {
+                message: format!("gemini authorizer failed: {e}"),
+            })?;
+        for (name, value) in extra {
+            req = req.header(name, value);
+        }
+        req.json(body)
+            .send()
+            .await
+            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })
+    }
+
+    async fn get_gemini_authorized_json(
+        &self,
+        endpoint: &str,
+    ) -> Result<reqwest::Response, LlmError> {
+        let Some(authorizer) = &self.authorizer else {
+            return Err(LlmError::InvalidRequest {
+                message: "Gemini API gs:// video references require Google bearer auth for Files API registration; use the vertex_ai backend for direct gs:// references or pass a pre-registered file URI".to_string(),
+            });
+        };
+        let mut req = self.http.get(endpoint);
+        let mut extra: Vec<(String, String)> = Vec::new();
+        let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+            method: "GET",
+            url: endpoint,
+            headers: &mut extra,
+        };
+        authorizer
+            .authorize(&mut auth_req)
+            .await
+            .map_err(|e| LlmError::AuthenticationFailed {
+                message: format!("gemini authorizer failed: {e}"),
+            })?;
+        for (name, value) in extra {
+            req = req.header(name, value);
+        }
+        req.send()
+            .await
+            .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })
+    }
+
+    async fn read_response_text_or_error(
+        response: reqwest::Response,
+        context: &str,
+    ) -> Result<String, LlmError> {
+        let status_code = response.status().as_u16();
+        let headers = response.headers().clone();
+        let text = response.text().await.unwrap_or_default();
+        if !(200..=299).contains(&status_code) {
+            return Err(LlmError::from_http_response(status_code, text, &headers));
+        }
+        if text.trim().is_empty() {
+            return Err(LlmError::StreamParseError {
+                message: format!("empty Gemini {context} response"),
+            });
+        }
+        Ok(text)
+    }
+
+    async fn register_gcs_file(&self, uri: &str) -> Result<String, LlmError> {
+        let response = self
+            .post_gemini_authorized_json(&self.files_register_url(), &json!({ "uris": [uri] }))
+            .await?;
+        let text = Self::read_response_text_or_error(response, "files.register").await?;
+        let parsed: GeminiFilesRegisterResponse =
+            serde_json::from_str(&text).map_err(|error| LlmError::StreamParseError {
+                message: format!("invalid Gemini files.register response JSON: {error}"),
+            })?;
+        let file = parsed
+            .files
+            .into_iter()
+            .next()
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "Gemini files.register response did not include a file".to_string(),
+            })?;
+        self.wait_for_registered_file(file).await
+    }
+
+    async fn get_gemini_file(&self, name: &str) -> Result<GeminiFileResource, LlmError> {
+        let response = self
+            .get_gemini_authorized_json(&self.files_get_url(name))
+            .await?;
+        let text = Self::read_response_text_or_error(response, "files.get").await?;
+        parse_gemini_file_resource(&text, "files.get")
+    }
+
+    async fn wait_for_registered_file(
+        &self,
+        mut file: GeminiFileResource,
+    ) -> Result<String, LlmError> {
+        let name = file.name.clone().ok_or_else(|| LlmError::InvalidRequest {
+            message: "Gemini files.register response did not include a file name".to_string(),
+        })?;
+
+        for attempt in 0..GEMINI_FILE_POLL_ATTEMPTS {
+            match file.state.as_deref() {
+                Some("ACTIVE") => {
+                    return file.uri.ok_or_else(|| LlmError::InvalidRequest {
+                        message: "Gemini registered file did not include a file URI".to_string(),
+                    });
+                }
+                Some("FAILED") => {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!("Gemini registered file {name} failed processing"),
+                    });
+                }
+                _ => {}
+            }
+
+            if attempt + 1 == GEMINI_FILE_POLL_ATTEMPTS {
+                break;
+            }
+
+            async_time::sleep(gemini_file_poll_interval()).await;
+            file = self.get_gemini_file(&name).await?;
+        }
+
+        Err(LlmError::NetworkTimeout {
+            duration_ms: (gemini_file_poll_interval().as_millis() as u64)
+                * (GEMINI_FILE_POLL_ATTEMPTS as u64),
+        })
+    }
+
+    async fn prepare_referenced_videos(&self, messages: &mut [Message]) -> Result<(), LlmError> {
+        for message in messages {
+            match message {
+                Message::User(user) => {
+                    self.prepare_referenced_video_blocks(&mut user.content)
+                        .await?;
+                }
+                Message::SystemNotice(notice) => {
+                    for block in &mut notice.blocks {
+                        match block {
+                            SystemNoticeBlock::Comms { content, .. }
+                            | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                                self.prepare_referenced_video_blocks(content).await?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Message::System(_) | Message::BlockAssistant(_) | Message::ToolResults { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn prepare_referenced_video_blocks(
+        &self,
+        blocks: &mut [ContentBlock],
+    ) -> Result<(), LlmError> {
+        for block in blocks {
+            let ContentBlock::Video {
+                media_type: _,
+                duration_ms: _,
+                data: meerkat_core::VideoData::Uri { uri },
+            } = block
+            else {
+                continue;
+            };
+            if matches!(self.google_backend_kind, GoogleBackendKind::GoogleGenAi)
+                && uri.starts_with("gs://")
+            {
+                let registered_uri = self.register_gcs_file(uri).await?;
+                *uri = registered_uri;
+            }
+        }
+        Ok(())
+    }
+
     fn build_image_request_body(
         &self,
         request: &ProviderImageGenerationRequest,
@@ -829,9 +1068,11 @@ impl GeminiClient {
 
     async fn execute_native_image(
         &self,
-        request: ProviderImageGenerationRequest,
+        mut request: ProviderImageGenerationRequest,
         plan: GeminiImageTurnPlan,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        self.prepare_referenced_videos(&mut request.projected_messages)
+            .await?;
         let body = self.build_image_request_body(&request, &plan.output)?;
         let url = format!(
             "{}/v1beta/models/{}:generateContent",
@@ -1491,6 +1732,7 @@ impl LlmClient for GeminiClient {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
+            self.prepare_referenced_videos(&mut projected_request.messages).await?;
             let request = &projected_request;
             let body = self.build_stream_request_body(request)?;
             let url = self.stream_generate_content_url(&request.model);
@@ -1699,6 +1941,30 @@ struct InlineData {
     data: String,
 }
 
+fn parse_gemini_file_resource(text: &str, context: &str) -> Result<GeminiFileResource, LlmError> {
+    let value: Value = serde_json::from_str(text).map_err(|error| LlmError::StreamParseError {
+        message: format!("invalid Gemini {context} response JSON: {error}"),
+    })?;
+    let file_value = value.get("file").cloned().unwrap_or(value);
+    serde_json::from_value(file_value).map_err(|error| LlmError::StreamParseError {
+        message: format!("invalid Gemini {context} file resource JSON: {error}"),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFilesRegisterResponse {
+    files: Vec<GeminiFileResource>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFileResource {
+    name: Option<String>,
+    uri: Option<String>,
+    state: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct FunctionCall {
     name: String,
@@ -1721,14 +1987,21 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
-    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use axum::{
+        Json, Router,
+        extract::{Path as AxumPath, State},
+        http::HeaderMap,
+        response::IntoResponse,
+        routing::{get, post},
+    };
     use meerkat_core::lifecycle::run_primitive::{
         GeminiThinkingLevel, OpenAiProviderTag, ReasoningEffort,
     };
     use meerkat_core::{
-        AssistantBlock, AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ContentBlock,
-        ImageData, MediaType, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
-        ToolResult, UserMessage, VideoData,
+        AssistantBlock, AssistantImageId, AuthError, BlobId, BlobRef, BlockAssistantMessage,
+        ContentBlock, HttpAuthorizationRequest, HttpAuthorizer, ImageData, MediaType,
+        ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition, ToolResult, UserMessage,
+        VideoData,
     };
     use meerkat_llm_core::ImageGenerationExecutor;
     use std::sync::{Arc, Mutex};
@@ -1761,6 +2034,54 @@ mod tests {
         seen: Arc<Mutex<Vec<Value>>>,
     }
 
+    #[derive(Clone)]
+    struct GeminiRegisteringStreamStubState {
+        payload: String,
+        register_response: Value,
+        get_responses: Arc<Mutex<Vec<Value>>>,
+        seen_generate: Arc<Mutex<Vec<Value>>>,
+        seen_register: Arc<Mutex<Vec<Value>>>,
+        seen_get: Arc<Mutex<Vec<String>>>,
+        seen_register_authorization: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[derive(Clone)]
+    struct GeminiRegisteringImageStubState {
+        response: Value,
+        register_response: Value,
+        get_responses: Arc<Mutex<Vec<Value>>>,
+        seen_generate: Arc<Mutex<Vec<Value>>>,
+        seen_register: Arc<Mutex<Vec<Value>>>,
+        seen_get: Arc<Mutex<Vec<String>>>,
+        seen_register_authorization: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    struct GeminiRegisteringStreamStubConfig {
+        model: &'static str,
+        payload: String,
+        register_response: Value,
+        get_responses: Arc<Mutex<Vec<Value>>>,
+        seen_generate: Arc<Mutex<Vec<Value>>>,
+        seen_register: Arc<Mutex<Vec<Value>>>,
+        seen_get: Arc<Mutex<Vec<String>>>,
+        seen_register_authorization: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    struct TestBearerAuthorizer;
+
+    #[async_trait::async_trait]
+    impl HttpAuthorizer for TestBearerAuthorizer {
+        async fn authorize(&self, req: &mut HttpAuthorizationRequest<'_>) -> Result<(), AuthError> {
+            req.headers
+                .push(("Authorization".to_string(), "Bearer test-token".to_string()));
+            Ok(())
+        }
+
+        fn label(&self) -> &'static str {
+            "test-bearer"
+        }
+    }
+
     async fn gemini_image_stub(
         State(state): State<GeminiImageStubState>,
         Json(body): Json<Value>,
@@ -1775,6 +2096,117 @@ mod tests {
     ) -> impl IntoResponse {
         state.seen.lock().expect("seen mutex").push(body);
         ([("content-type", "text/event-stream")], state.payload)
+    }
+
+    async fn gemini_registering_stream_stub(
+        State(state): State<GeminiRegisteringStreamStubState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state
+            .seen_generate
+            .lock()
+            .expect("seen generate mutex")
+            .push(body);
+        ([("content-type", "text/event-stream")], state.payload)
+    }
+
+    async fn gemini_registering_image_stub(
+        State(state): State<GeminiRegisteringImageStubState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state
+            .seen_generate
+            .lock()
+            .expect("seen generate mutex")
+            .push(body);
+        Json(state.response)
+    }
+
+    async fn gemini_files_register_stub(
+        State(state): State<GeminiRegisteringStreamStubState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state
+            .seen_register
+            .lock()
+            .expect("seen register mutex")
+            .push(body);
+        state
+            .seen_register_authorization
+            .lock()
+            .expect("seen auth mutex")
+            .push(
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToString::to_string),
+            );
+        Json(state.register_response)
+    }
+
+    async fn gemini_image_files_register_stub(
+        State(state): State<GeminiRegisteringImageStubState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state
+            .seen_register
+            .lock()
+            .expect("seen register mutex")
+            .push(body);
+        state
+            .seen_register_authorization
+            .lock()
+            .expect("seen auth mutex")
+            .push(
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToString::to_string),
+            );
+        Json(state.register_response)
+    }
+
+    async fn gemini_files_get_stub(
+        State(state): State<GeminiRegisteringStreamStubState>,
+        AxumPath(file): AxumPath<String>,
+    ) -> impl IntoResponse {
+        state
+            .seen_get
+            .lock()
+            .expect("seen get mutex")
+            .push(format!("files/{file}"));
+        let mut responses = state.get_responses.lock().expect("get responses mutex");
+        let response = if responses.len() > 1 {
+            responses.remove(0)
+        } else {
+            responses.first().cloned().unwrap_or_else(|| {
+                json!({
+                    "name": format!("files/{file}"),
+                    "uri": format!("https://generativelanguage.googleapis.com/v1beta/files/{file}"),
+                    "state": "ACTIVE"
+                })
+            })
+        };
+        Json(response)
+    }
+
+    async fn gemini_image_files_get_stub(
+        State(state): State<GeminiRegisteringImageStubState>,
+        AxumPath(file): AxumPath<String>,
+    ) -> impl IntoResponse {
+        state
+            .seen_get
+            .lock()
+            .expect("seen get mutex")
+            .push(format!("files/{file}"));
+        let response = state
+            .get_responses
+            .lock()
+            .expect("get responses mutex")
+            .remove(0);
+        Json(response)
     }
 
     #[test]
@@ -1977,6 +2409,81 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    async fn spawn_gemini_registering_stream_stub(
+        config: GeminiRegisteringStreamStubConfig,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let GeminiRegisteringStreamStubConfig {
+            model,
+            payload,
+            register_response,
+            get_responses,
+            seen_generate,
+            seen_register,
+            seen_get,
+            seen_register_authorization,
+        } = config;
+        let route = format!("/v1beta/models/{model}:streamGenerateContent");
+        let state = GeminiRegisteringStreamStubState {
+            payload,
+            register_response,
+            get_responses,
+            seen_generate,
+            seen_register,
+            seen_get,
+            seen_register_authorization,
+        };
+        let app = Router::new()
+            .route(&route, post(gemini_registering_stream_stub))
+            .route("/v1beta/files:register", post(gemini_files_register_stub))
+            .route("/v1beta/files/{file}", get(gemini_files_get_stub))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn spawn_gemini_registering_image_stub(
+        model: &'static str,
+        response: Value,
+        register_response: Value,
+        seen_generate: Arc<Mutex<Vec<Value>>>,
+        seen_register: Arc<Mutex<Vec<Value>>>,
+        seen_get: Arc<Mutex<Vec<String>>>,
+        seen_register_authorization: Arc<Mutex<Vec<Option<String>>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let route = format!("/v1beta/models/{model}:generateContent");
+        let state = GeminiRegisteringImageStubState {
+            response,
+            register_response,
+            get_responses: Arc::new(Mutex::new(Vec::new())),
+            seen_generate,
+            seen_register,
+            seen_get,
+            seen_register_authorization,
+        };
+        let app = Router::new()
+            .route(&route, post(gemini_registering_image_stub))
+            .route(
+                "/v1beta/files:register",
+                post(gemini_image_files_register_stub),
+            )
+            .route("/v1beta/files/{file}", get(gemini_image_files_get_stub))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
     fn gemini_image_executor_request_json() -> ProviderImageGenerationRequest {
         serde_json::from_value(serde_json::json!({
             "operation_id": "00000000-0000-0000-0000-000000000201",
@@ -2093,6 +2600,56 @@ mod tests {
         assert!(
             body.get("contents").is_none(),
             "Code Assist must not send public generateContent fields at top level",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn code_assist_preserves_uri_video_inside_internal_wrapper()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"response":{"candidates":[{"content":{"parts":[{"text":"saw uri"}]},"finishReason":"STOP"}]}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, handle) = spawn_code_assist_stream_stub(payload, seen.clone()).await;
+        let client =
+            GeminiClient::new_with_base_url(String::new(), base_url).with_code_assist_wire();
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: VideoData::Uri {
+                        uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            if matches!(event?, LlmEvent::Done { .. }) {
+                break;
+            }
+        }
+        handle.abort();
+
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured Code Assist request");
+        assert_eq!(
+            body["request"]["contents"][0]["parts"][0]["fileData"]["fileUri"],
+            "gs://bucket/camera-timeline.mp4"
+        );
+        assert_eq!(
+            body["request"]["contents"][0]["parts"][0]["fileData"]["mimeType"],
+            "video/mp4"
+        );
+        assert!(
+            body.get("contents").is_none(),
+            "Code Assist must keep generateContent fields under `request`",
         );
         Ok(())
     }
@@ -2795,6 +3352,368 @@ mod tests {
         let parts = contents[0]["parts"].as_array().ok_or("missing parts")?;
         assert_eq!(parts[0]["inlineData"]["mimeType"], "video/mp4");
         assert_eq!(parts[0]["inlineData"]["data"], "AAAA");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_serializes_uri_video_user_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.5-flash",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Uri {
+                        uri: "https://example.com/timeline.mp4".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let parts = contents[0]["parts"].as_array().ok_or("missing parts")?;
+        assert_eq!(parts[0]["fileData"]["mimeType"], "video/mp4");
+        assert_eq!(
+            parts[0]["fileData"]["fileUri"],
+            "https://example.com/timeline.mp4"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn google_genai_registers_gcs_video_refs_before_stream()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen_generate = Arc::new(Mutex::new(Vec::new()));
+        let seen_register = Arc::new(Mutex::new(Vec::new()));
+        let seen_get = Arc::new(Mutex::new(Vec::new()));
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"saw video"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4}}"#,
+            "",
+        ]
+        .join("\n");
+        let register_response = json!({
+            "files": [{
+                "name": "files/registered-video",
+                "uri": "https://generativelanguage.googleapis.com/v1beta/files/registered-video",
+                "mimeType": "video/mp4",
+                "state": "ACTIVE"
+            }]
+        });
+        let (base_url, handle) =
+            spawn_gemini_registering_stream_stub(GeminiRegisteringStreamStubConfig {
+                model: "gemini-3.5-flash",
+                payload,
+                register_response,
+                get_responses: Arc::new(Mutex::new(Vec::new())),
+                seen_generate: seen_generate.clone(),
+                seen_register: seen_register.clone(),
+                seen_get: seen_get.clone(),
+                seen_register_authorization: seen_auth.clone(),
+            })
+            .await;
+        let client = GeminiClient::new_with_base_url(String::new(), base_url)
+            .with_authorizer(Arc::new(TestBearerAuthorizer))
+            .with_google_backend_kind(GoogleBackendKind::GoogleGenAi);
+        let request = LlmRequest::new(
+            "gemini-3.5-flash",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Uri {
+                        uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            if matches!(event?, LlmEvent::Done { .. }) {
+                break;
+            }
+        }
+        handle.abort();
+
+        let register_bodies = seen_register.lock().expect("register mutex");
+        assert_eq!(register_bodies.len(), 1);
+        assert_eq!(
+            register_bodies[0]["uris"][0],
+            "gs://bucket/camera-timeline.mp4"
+        );
+        let auth_headers = seen_auth.lock().expect("auth mutex");
+        assert_eq!(auth_headers[0].as_deref(), Some("Bearer test-token"));
+        assert!(
+            seen_get.lock().expect("seen get mutex").is_empty(),
+            "ACTIVE register response should not require files.get polling"
+        );
+
+        let generate_bodies = seen_generate.lock().expect("generate mutex");
+        let parts = generate_bodies[0]["contents"][0]["parts"]
+            .as_array()
+            .ok_or("missing generate parts")?;
+        assert_eq!(
+            parts[0]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/registered-video"
+        );
+        assert_eq!(parts[0]["fileData"]["mimeType"], "video/mp4");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn google_genai_api_key_rejects_gcs_video_refs_without_bearer_registration_auth()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"should not be called"}]},"finishReason":"STOP"}]}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, handle) =
+            spawn_gemini_stream_stub("gemini-3.5-flash", payload, seen.clone()).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url)
+            .with_google_backend_kind(GoogleBackendKind::GoogleGenAi);
+        let request = LlmRequest::new(
+            "gemini-3.5-flash",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Uri {
+                        uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let mut stream = client.stream(&request);
+        let event = stream
+            .next()
+            .await
+            .ok_or("stream ended without terminal error event")??;
+        handle.abort();
+
+        match event {
+            LlmEvent::Done {
+                outcome:
+                    LlmDoneOutcome::Error {
+                        error: LlmError::InvalidRequest { message },
+                    },
+                ..
+            } => {
+                assert!(message.contains("require Google bearer auth"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            seen.lock().expect("seen mutex").is_empty(),
+            "generateContent should not be called when registration auth is missing"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn google_genai_polls_registered_gcs_video_until_active()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen_generate = Arc::new(Mutex::new(Vec::new()));
+        let seen_register = Arc::new(Mutex::new(Vec::new()));
+        let seen_get = Arc::new(Mutex::new(Vec::new()));
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"saw video after polling"}]},"finishReason":"STOP"}]}"#,
+            "",
+        ]
+        .join("\n");
+        let register_response = json!({
+            "files": [{
+                "name": "files/registered-video",
+                "uri": "https://generativelanguage.googleapis.com/v1beta/files/registered-video",
+                "mimeType": "video/mp4",
+                "state": "PROCESSING"
+            }]
+        });
+        let get_responses = Arc::new(Mutex::new(vec![json!({
+            "name": "files/registered-video",
+            "uri": "https://generativelanguage.googleapis.com/v1beta/files/registered-video",
+            "mimeType": "video/mp4",
+            "state": "ACTIVE"
+        })]));
+        let (base_url, handle) =
+            spawn_gemini_registering_stream_stub(GeminiRegisteringStreamStubConfig {
+                model: "gemini-3.5-flash",
+                payload,
+                register_response,
+                get_responses,
+                seen_generate: seen_generate.clone(),
+                seen_register: seen_register.clone(),
+                seen_get: seen_get.clone(),
+                seen_register_authorization: seen_auth,
+            })
+            .await;
+        let client = GeminiClient::new_with_base_url(String::new(), base_url)
+            .with_authorizer(Arc::new(TestBearerAuthorizer))
+            .with_google_backend_kind(GoogleBackendKind::GoogleGenAi);
+        let request = LlmRequest::new(
+            "gemini-3.5-flash",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Uri {
+                        uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            if matches!(event?, LlmEvent::Done { .. }) {
+                break;
+            }
+        }
+        handle.abort();
+
+        assert_eq!(seen_register.lock().expect("register mutex").len(), 1);
+        assert_eq!(
+            seen_get.lock().expect("seen get mutex").as_slice(),
+            &["files/registered-video".to_string()]
+        );
+        let generate_bodies = seen_generate.lock().expect("generate mutex");
+        assert_eq!(
+            generate_bodies[0]["contents"][0]["parts"][0]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/registered-video"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn google_genai_image_generation_registers_gcs_projected_video_refs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen_generate = Arc::new(Mutex::new(Vec::new()));
+        let seen_register = Arc::new(Mutex::new(Vec::new()));
+        let seen_get = Arc::new(Mutex::new(Vec::new()));
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let response = json!({
+            "responseId": "gem_resp_1",
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": "aGVsbG8="
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        let register_response = json!({
+            "files": [{
+                "name": "files/registered-video",
+                "uri": "https://generativelanguage.googleapis.com/v1beta/files/registered-video",
+                "mimeType": "video/mp4",
+                "state": "ACTIVE"
+            }]
+        });
+        let (base_url, handle) = spawn_gemini_registering_image_stub(
+            "gemini-2.5-flash-image",
+            response,
+            register_response,
+            seen_generate.clone(),
+            seen_register.clone(),
+            seen_get.clone(),
+            seen_auth.clone(),
+        )
+        .await;
+        let client = GeminiClient::new_with_base_url(String::new(), base_url)
+            .with_authorizer(Arc::new(TestBearerAuthorizer))
+            .with_google_backend_kind(GoogleBackendKind::GoogleGenAi);
+        let mut request = gemini_image_executor_request_json();
+        request.projected_messages = vec![Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Video {
+                media_type: "video/mp4".to_string(),
+                duration_ms: 12_000,
+                data: meerkat_core::VideoData::Uri {
+                    uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                },
+            },
+            ContentBlock::Text {
+                text: "Use this video as context.".to_string(),
+            },
+        ]))];
+
+        let output = client.execute_image_generation(request).await?;
+        handle.abort();
+
+        assert!(matches!(
+            output.terminal_observation,
+            ImageProviderTerminalObservation::Generated
+        ));
+        assert_eq!(seen_register.lock().expect("register mutex").len(), 1);
+        assert_eq!(
+            seen_register.lock().expect("register mutex")[0]["uris"][0],
+            "gs://bucket/camera-timeline.mp4"
+        );
+        assert_eq!(
+            seen_auth.lock().expect("auth mutex")[0].as_deref(),
+            Some("Bearer test-token")
+        );
+        assert!(
+            seen_get.lock().expect("seen get mutex").is_empty(),
+            "ACTIVE register response should not require files.get polling"
+        );
+        let generate_bodies = seen_generate.lock().expect("generate mutex");
+        assert_eq!(
+            generate_bodies[0]["contents"][0]["parts"][0]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/registered-video"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vertex_gcs_video_refs_stream_without_files_registration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"saw vertex video"}]},"finishReason":"STOP"}]}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, handle) =
+            spawn_gemini_stream_stub("gemini-3.5-flash", payload, seen.clone()).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url)
+            .with_google_backend_kind(GoogleBackendKind::VertexAi);
+        let request = LlmRequest::new(
+            "gemini-3.5-flash",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Uri {
+                        uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            if matches!(event?, LlmEvent::Done { .. }) {
+                break;
+            }
+        }
+        handle.abort();
+
+        let bodies = seen.lock().expect("seen mutex");
+        assert_eq!(
+            bodies[0]["contents"][0]["parts"][0]["fileData"]["fileUri"],
+            "gs://bucket/camera-timeline.mp4"
+        );
         Ok(())
     }
 

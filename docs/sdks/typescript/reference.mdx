@@ -224,7 +224,8 @@ type ContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; media_type: string; data: string; source?: "inline" }
   | { type: "image"; media_type: string; source: "blob"; blob_id: string }
-  | { type: "video"; media_type: string; duration_ms: number; data: string; source?: "inline" };
+  | { type: "video"; media_type: string; duration_ms: number; data: string; source?: "inline" }
+  | { type: "video"; media_type: string; duration_ms: number; source: "uri"; uri: string };
 ```
 
 | Variant | Fields | Description |

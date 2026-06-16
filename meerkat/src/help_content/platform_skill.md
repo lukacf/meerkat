@@ -546,14 +546,14 @@ Prompts and tool results support multimodal content (text, images, and video). T
 **Content block types:**
 - `ContentBlock::Text { text }` — plain text
 - `ContentBlock::Image { media_type, data }` — base64-encoded image with `ImageData::Inline` or `ImageData::Blob`
-- `ContentBlock::Video { media_type, duration_ms, data }` — base64-encoded inline video with `VideoData::Inline`
+- `ContentBlock::Video { media_type, duration_ms, data }` — video input with `VideoData::Inline` for base64 bytes or `VideoData::Uri` for provider-readable references
 
 **SDK prompt types:**
-- Python: `prompt: str | list[dict]` — dicts with `{"type": "text", "text": "..."}`, `{"type": "image", "media_type": "...", "data": "<base64>"}`, or `{"type": "video", "media_type": "video/mp4", "duration_ms": 12000, "data": "<base64>"}`
-- TypeScript: `prompt: string | ContentBlock[]` — `{type: "text", text: "..."}`, `{type: "image", mediaType: "...", data: "<base64>"}`, or `{type: "video", media_type: "video/mp4", duration_ms: 12000, data: "<base64>"}`
+- Python: `prompt: str | list[dict]` — dicts with `{"type": "text", "text": "..."}`, `{"type": "image", "media_type": "...", "data": "<base64>"}`, `{"type": "video", "media_type": "video/mp4", "duration_ms": 12000, "source": "inline", "data": "<base64>"}`, or `{"type": "video", "media_type": "video/mp4", "duration_ms": 12000, "source": "uri", "uri": "gs://bucket/object.mp4"}`
+- TypeScript: `prompt: string | ContentBlock[]` — `{type: "text", text: "..."}`, `{type: "image", mediaType: "...", data: "<base64>"}`, `{type: "video", media_type: "video/mp4", duration_ms: 12000, source: "inline", data: "<base64>"}`, or `{type: "video", media_type: "video/mp4", duration_ms: 12000, source: "uri", uri: "https://example.com/video.mp4"}`
 - Rust: `prompt: ContentInput` — `ContentInput::Text(s)` or `ContentInput::Blocks(vec![...])`; implements `From<&str>` and `From<String>`
 
-**Video support:** Inline video is Gemini-only. Supported media types: `video/mp4`, `video/webm`, `video/quicktime`. Non-Gemini providers degrade replayed video to `[video: media_type]` text placeholders. Video in tool results is rejected at all providers. Ingress validation rejects video input for non-Gemini models at RPC, REST, and session boundaries.
+**Video support:** Video input is Gemini-only. Supported media types: `video/mp4`, `video/webm`, `video/quicktime`. URI references lower to Gemini `fileData`; Vertex can consume `gs://` directly, while Gemini API sessions use public or already-registered file URIs and register `gs://` references through the Files API only when bearer auth is available. API-key-only Gemini API sessions should use public/pre-registered file URIs or Vertex for direct GCS references. Non-Gemini providers degrade replayed video to `[video: media_type]` text placeholders. Video in tool results is rejected at all providers. Ingress validation rejects video input for non-Gemini models at RPC, REST, and session boundaries.
 
 **view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Path sandboxed to project root. 5 MB limit. Hidden on non-vision-capable models via `ToolScope` based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
 

@@ -146,7 +146,7 @@ Tools can return rich content beyond plain text. The injected runtime shape is `
 
 - `ContentBlock::Text { text }` -- plain text content.
 - `ContentBlock::Image { media_type, ... }` -- inline or blob-backed image content.
-- `ContentBlock::Video { media_type, duration_ms, ... }` -- inline video content.
+- `ContentBlock::Video { media_type, duration_ms, ... }` -- inline or URI-referenced video content. Video blocks are accepted only on Gemini user-message input paths and are rejected in tool results. Vertex Gemini can consume `gs://` references directly; Gemini API sessions can consume public or already-registered file URIs, and register `gs://` references first when the session has Google bearer auth.
 
 The built-in `view_image` tool reads an image file from disk and returns a result containing image content blocks. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via capability-aware tool visibility.
 

@@ -70,6 +70,9 @@ fn estimate_content_block_tokens(blocks: &[crate::types::ContentBlock]) -> u64 {
                 tokens += estimate_inline_video_tokens(data)
                     .max(estimate_video_duration_tokens(*duration_ms));
             }
+            crate::types::ContentBlock::Video { duration_ms, .. } => {
+                tokens += estimate_video_duration_tokens(*duration_ms);
+            }
             _ => {
                 let len = block.text_projection().len() as u64;
                 tokens += if len > 0 { (len / 4).max(1) } else { 0 };

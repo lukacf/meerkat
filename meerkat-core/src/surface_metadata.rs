@@ -13,8 +13,8 @@ pub const MEERKAT_METADATA_PREFIX: &str = "meerkat.";
 /// Bare Meerkat namespace token (the prefix without the trailing dot).
 const MEERKAT_NAMESPACE_TOKEN: &str = "meerkat";
 
-/// Legacy mob discovery labels that are stamped by the mob runtime.
-pub const RESERVED_MOB_LABEL_KEYS: [&str; 3] = ["mob_id", "role", "meerkat_id"];
+/// Mob discovery labels that are stamped by the mob runtime.
+pub const RESERVED_MOB_LABEL_KEYS: [&str; 4] = ["mob_id", "role", "meerkat_id", "agent_identity"];
 
 /// Typed classification of *why* a metadata key is reserved for Meerkat.
 ///
@@ -32,8 +32,8 @@ pub enum ReservedMetadataKey {
     /// The bare `meerkat` token or any `meerkat.`-prefixed key. Reserved so
     /// callers cannot spoof Meerkat-owned runtime facts.
     MeerkatNamespace,
-    /// A legacy mob discovery label (`mob_id`/`role`/`meerkat_id`) stamped by
-    /// the mob runtime.
+    /// A mob discovery label (`mob_id`/`role`/`meerkat_id`/`agent_identity`)
+    /// stamped by the mob runtime.
     MobDiscoveryLabel,
     /// A canonical session-authority metadata key (the `session_*` state keys
     /// owned by generated authority).
@@ -262,6 +262,7 @@ mod tests {
             "mob_id",
             "role",
             "meerkat_id",
+            "agent_identity",
             "meerkat.runtime_id",
             "Meerkat.Runtime_Id",
             "ROLE",
@@ -308,6 +309,10 @@ mod tests {
             Some(ReservedMetadataKey::MobDiscoveryLabel)
         );
         assert_eq!(
+            ReservedMetadataKey::classify("agent_identity"),
+            Some(ReservedMetadataKey::MobDiscoveryLabel)
+        );
+        assert_eq!(
             ReservedMetadataKey::classify(crate::session::SESSION_BUILD_STATE_KEY),
             Some(ReservedMetadataKey::SessionAuthority)
         );
@@ -324,6 +329,7 @@ mod tests {
         // Mob labels are NOT meerkat-namespace; they are only reserved as labels.
         assert!(!is_reserved_meerkat_metadata_key("mob_id"));
         assert!(is_reserved_meerkat_label_key("mob_id"));
+        assert!(is_reserved_meerkat_label_key("agent_identity"));
         assert!(is_reserved_meerkat_label_key("meerkat.foo"));
         assert!(!is_reserved_meerkat_label_key("client.thread_id"));
     }

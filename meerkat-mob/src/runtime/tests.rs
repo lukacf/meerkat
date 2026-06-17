@@ -13251,6 +13251,52 @@ async fn test_wait_for_members_ready_returns_for_autonomous_members_after_startu
 }
 
 #[tokio::test]
+async fn test_wait_for_members_ready_marks_missing_bridge_session_broken() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(250);
+
+    let member = AgentIdentity::from("worker-ready-missing-session");
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn autonomous worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+
+    service
+        .archive(&bridge_session_id)
+        .await
+        .expect("test should remove the live bridge session");
+
+    let snapshots = handle
+        .wait_for_members_ready(
+            &[AgentIdentity::from(member.as_str())],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("missing bridge session should resolve ready wait as broken");
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].0, AgentIdentity::from(member.as_str()));
+    assert_eq!(
+        snapshots[0].1.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert_eq!(snapshots[0].1.current_session_id, Some(bridge_session_id));
+    assert!(
+        snapshots[0]
+            .1
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("missing bridge session")),
+        "broken member should surface missing bridge-session reason: {:?}",
+        snapshots[0].1
+    );
+}
+
+#[tokio::test]
 async fn test_wait_for_members_kickoff_complete_excludes_later_spawns() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);

@@ -36,7 +36,10 @@ use meerkat_contracts::{
 };
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
-use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
+use meerkat_core::agent::{
+    AgentToolDispatcher, BindOutcome, CommsRuntime as CoreCommsRuntime, DispatcherCapabilities,
+    OpsLifecycleBindError,
+};
 use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationResult,
     GeneratedCommsTrustAuthoritySourceKind, PeerId, PeerName, SendError, SendReceipt,
@@ -44,6 +47,8 @@ use meerkat_core::comms::{
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
+use meerkat_core::ops::{AsyncOpRef, OperationId, OperationResult};
+use meerkat_core::ops_lifecycle::{OperationKind, OperationSpec, OpsLifecycleRegistry};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
@@ -2887,6 +2892,8 @@ impl<T> Pipe for T {}
 pub struct MobMcpDispatcher {
     state: Arc<MobMcpState>,
     tools: Arc<[Arc<ToolDef>]>,
+    ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
+    owner_bridge_session_id: Option<SessionId>,
 }
 
 impl MobMcpDispatcher {
@@ -3076,7 +3083,7 @@ impl MobMcpDispatcher {
             tool(
                 "mob_wait_ready",
                 &format!(
-                    "Wait until mob startup readiness (members bound but kickoff not required). Optional: member_ids (subset), timeout_ms. Returns member snapshots. {COMMON}"
+                    "Wait until mob startup readiness (members bound but kickoff not required). Optional: member_ids (subset), timeout_ms. Returns member snapshots; in session-bound agent turns this may detach and return status plus operation_id. {COMMON}"
                 ),
                 json!({
                     "type":"object",
@@ -3090,7 +3097,109 @@ impl MobMcpDispatcher {
             ),
         ]
         .into();
-        Self { state, tools }
+        Self {
+            state,
+            tools,
+            ops_registry: None,
+            owner_bridge_session_id: None,
+        }
+    }
+
+    fn dispatch_detached_wait_ready(
+        &self,
+        call: ToolCallView<'_>,
+        mob_id: MobId,
+        member_ids: Option<Vec<AgentIdentity>>,
+        timeout_ms: Option<u64>,
+    ) -> Option<Result<meerkat_core::ToolDispatchOutcome, ToolError>> {
+        let registry = self.ops_registry.as_ref()?.clone();
+        let owner_bridge_session_id = self.owner_bridge_session_id.clone()?;
+        let operation_id = OperationId::new();
+        let spec = OperationSpec {
+            id: operation_id.clone(),
+            kind: OperationKind::BackgroundToolOp,
+            owner_session_id: owner_bridge_session_id,
+            display_name: format!("mob_wait_ready {}", mob_id.as_str()),
+            source_label: "mob_wait_ready".to_string(),
+            operation_source: None,
+            child_session_id: None,
+            expect_peer_channel: false,
+        };
+
+        if let Err(error) = registry.register_operation(spec) {
+            return Some(Err(ToolError::execution_failed(format!(
+                "register mob_wait_ready background operation: {error}"
+            ))));
+        }
+        if let Err(error) = registry.provisioning_succeeded(&operation_id) {
+            return Some(Err(ToolError::execution_failed(format!(
+                "start mob_wait_ready background operation: {error}"
+            ))));
+        }
+
+        let state = Arc::clone(&self.state);
+        let registry_for_task = Arc::clone(&registry);
+        let operation_id_for_task = operation_id.clone();
+        let mob_id_for_task = mob_id.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            match state
+                .mob_wait_ready(&mob_id_for_task, member_ids, timeout_ms)
+                .await
+            {
+                Ok(members) => {
+                    let content = match serde_json::to_string(&json!({ "members": members })) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            let _ = registry_for_task.fail_operation(
+                                &operation_id_for_task,
+                                format!("encode mob_wait_ready background result: {error}"),
+                            );
+                            return;
+                        }
+                    };
+                    let duration_ms =
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let result = OperationResult {
+                        id: operation_id_for_task.clone(),
+                        content,
+                        is_error: false,
+                        duration_ms,
+                        tokens_used: 0,
+                    };
+                    let _ = registry_for_task.complete_operation(&operation_id_for_task, result);
+                }
+                Err(error) => {
+                    let _ =
+                        registry_for_task.fail_operation(&operation_id_for_task, error.to_string());
+                }
+            }
+        });
+
+        Some(Self::encode_detached_wait_result(
+            call,
+            mob_id,
+            operation_id,
+        ))
+    }
+
+    fn encode_detached_wait_result(
+        call: ToolCallView<'_>,
+        mob_id: MobId,
+        operation_id: OperationId,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let content = serde_json::to_string(&json!({
+            "status": "waiting",
+            "mob_id": mob_id,
+            "operation_id": operation_id,
+            "wait_policy": "detached"
+        }))
+        .map_err(|error| ToolError::execution_failed(format!("encode tool result: {error}")))?;
+        Ok(meerkat_core::ToolDispatchOutcome::new(
+            ToolResult::new(call.id.to_string(), content, false),
+            vec![AsyncOpRef::detached(operation_id)],
+            vec![],
+        ))
     }
 }
 
@@ -3755,9 +3864,24 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .map(|id| AgentIdentity::from(id.as_str()))
                         .collect::<Vec<_>>()
                 });
+                let mob_id = MobId::from(args.mob_id);
+                if self.ops_registry.is_some() && self.owner_bridge_session_id.is_some() {
+                    self.state
+                        .handle_for(&mob_id)
+                        .await
+                        .map_err(|e| map_mob_err(call, e))?;
+                }
+                if let Some(result) = self.dispatch_detached_wait_ready(
+                    call,
+                    mob_id.clone(),
+                    member_ids.clone(),
+                    args.timeout_ms,
+                ) {
+                    return result;
+                }
                 let members = self
                     .state
-                    .mob_wait_ready(&MobId::from(args.mob_id), member_ids, args.timeout_ms)
+                    .mob_wait_ready(&mob_id, member_ids, args.timeout_ms)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"members": members}))
@@ -3780,6 +3904,29 @@ impl AgentToolDispatcher for MobMcpDispatcher {
             ),
         }
         result.map(Into::into)
+    }
+
+    fn capabilities(&self) -> DispatcherCapabilities {
+        DispatcherCapabilities {
+            ops_lifecycle: true,
+        }
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_bridge_session_id: SessionId,
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
+        if Arc::strong_count(&self) != 1 {
+            return Err(OpsLifecycleBindError::SharedOwnership);
+        }
+        let this = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        Ok(BindOutcome::Bound(Arc::new(Self {
+            state: this.state,
+            tools: this.tools,
+            ops_registry: Some(registry),
+            owner_bridge_session_id: Some(owner_bridge_session_id),
+        })))
     }
 }
 
@@ -6247,6 +6394,64 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(members[0]["agent_identity"], "lead-kickoff");
         assert_eq!(members[1]["agent_identity"], "worker-kickoff");
+    }
+
+    #[tokio::test]
+    async fn test_bound_mob_wait_ready_returns_detached_operation() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(Arc::clone(&state));
+
+        let created = call_tool(
+            &d,
+            "mob_create",
+            json!({"definition":{"id":"test_ready_detached","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+        )
+        .await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new());
+        let dispatcher = Arc::new(MobMcpDispatcher::new(state));
+        let bound = AgentToolDispatcher::bind_ops_lifecycle(
+            dispatcher,
+            Arc::clone(&registry),
+            SessionId::new(),
+        )
+        .expect("dispatcher should bind ops lifecycle")
+        .into_dispatcher();
+
+        let args = json!({
+            "mob_id": mob_id,
+            "timeout_ms": 60_000
+        });
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+        let outcome = bound
+            .dispatch(mk_call("mob_wait_ready", &raw))
+            .await
+            .expect("bound wait_ready dispatch should return detached op");
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("tool json");
+
+        assert_eq!(payload["status"], "waiting");
+        assert_eq!(payload["wait_policy"], "detached");
+        assert!(payload.get("members").is_none());
+        assert_eq!(outcome.async_ops.len(), 1);
+        assert_eq!(
+            outcome.async_ops[0].wait_policy,
+            meerkat_core::ops::WaitPolicy::Detached
+        );
+        assert_eq!(
+            payload["operation_id"].as_str(),
+            Some(outcome.async_ops[0].operation_id.to_string().as_str())
+        );
+        assert!(
+            registry
+                .snapshot(&outcome.async_ops[0].operation_id)
+                .expect("registry snapshot should succeed")
+                .is_some(),
+            "detached wait operation should be registered before dispatch returns"
+        );
     }
 
     #[tokio::test]

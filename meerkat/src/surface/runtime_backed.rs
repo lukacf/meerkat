@@ -25,7 +25,8 @@ use crate::JsonlStore;
 use crate::MachineSessionArchiveProtocol;
 use crate::{
     CreateSessionRequest, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
-    PersistentSessionService, RunResult, Session, SessionError, SessionId, WorkGraphService,
+    PersistentSessionService, RunResult, Session, SessionAgentBuilder, SessionError, SessionId,
+    WorkGraphService,
 };
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use meerkat_store::MemoryBlobStore;
@@ -159,8 +160,8 @@ fn start_turn_request_from_initial_turn(
     }
 }
 
-async fn materialize_error_preserves_runtime_session(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+async fn materialize_error_preserves_runtime_session<B: SessionAgentBuilder + 'static>(
+    service: &Arc<PersistentSessionService<B>>,
     session_id: &SessionId,
     error: &SurfaceRuntimeMaterializeError,
 ) -> bool {
@@ -174,8 +175,8 @@ async fn materialize_error_preserves_runtime_session(
     }
 }
 
-pub async fn run_runtime_backed_initial_turn_with_machine(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub async fn run_runtime_backed_initial_turn_with_machine<B: SessionAgentBuilder + 'static>(
+    service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
     initial_turn: RuntimeBackedInitialTurn,
@@ -193,8 +194,8 @@ pub async fn run_runtime_backed_initial_turn_with_machine(
     result.map_err(|(error, _admission)| SurfaceRuntimeMaterializeError::Session(error))
 }
 
-pub async fn materialize_session<F>(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub async fn materialize_session<F, B: SessionAgentBuilder + 'static>(
+    service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session: Session,
     mut request: CreateSessionRequest,
@@ -306,8 +307,8 @@ where
     Ok(result)
 }
 
-pub async fn materialize_session_with_reserved_admission<F>(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub async fn materialize_session_with_reserved_admission<F, B: SessionAgentBuilder + 'static>(
+    service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session: Session,
     mut request: CreateSessionRequest,
@@ -419,8 +420,8 @@ where
     Ok(result)
 }
 
-pub async fn install_prepared_runtime_interrupt_handle(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub async fn install_prepared_runtime_interrupt_handle<B: SessionAgentBuilder + 'static>(
+    service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
 ) -> Result<(), RuntimeDriverError> {
@@ -437,9 +438,9 @@ pub async fn install_prepared_runtime_interrupt_handle(
 }
 
 #[cfg(feature = "comms")]
-pub async fn configure_peer_ingress(
+pub async fn configure_peer_ingress<B: SessionAgentBuilder + 'static>(
     adapter: &Arc<MeerkatMachine>,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    service: &Arc<PersistentSessionService<B>>,
     session_id: &SessionId,
     keep_alive: bool,
 ) -> Result<(), RuntimeDriverError> {
@@ -450,16 +451,33 @@ pub async fn configure_peer_ingress(
         .map(|_spawned| ())
 }
 
-pub fn default_persistent_executor(
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub fn default_persistent_executor<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
 ) -> Box<dyn CoreExecutor> {
     Box::new(PersistentRuntimeExecutor::new(service, adapter, session_id))
 }
 
-pub fn default_persistent_executor_with_workgraph_service(
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+/// Compile-time guard that the runtime-backed executor + schedule-host layer
+/// stay generic over the session-agent builder `B` (not re-pinned to a concrete
+/// `FactoryAgentBuilder`). Embedders with a custom builder — e.g. mobkit's
+/// callback builder that materializes/resumes sessions through their host SDK —
+/// must be able to drive runtime-backed sessions and scheduled firing through
+/// their own build path. If these are ever re-pinned to a concrete builder this
+/// fails to compile.
+#[cfg(test)]
+#[allow(dead_code)]
+fn assert_runtime_backed_is_builder_generic<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
+    adapter: Arc<MeerkatMachine>,
+    session_id: SessionId,
+) -> Box<dyn CoreExecutor> {
+    default_persistent_executor::<B>(service, adapter, session_id)
+}
+
+pub fn default_persistent_executor_with_workgraph_service<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
     workgraph_service: WorkGraphService,
@@ -472,21 +490,23 @@ pub fn default_persistent_executor_with_workgraph_service(
     ))
 }
 
-pub struct PersistentRuntimeExecutor {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub struct PersistentRuntimeExecutor<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
     workgraph_service: Option<WorkGraphService>,
 }
 
-struct PersistentRuntimeBoundaryHandle {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+struct PersistentRuntimeBoundaryHandle<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
 }
 
 #[async_trait::async_trait]
-impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
+impl<B: SessionAgentBuilder + 'static> CoreExecutorBoundaryHandle
+    for PersistentRuntimeBoundaryHandle<B>
+{
     async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
             .cancel_after_boundary_with_machine_authority(
@@ -542,14 +562,16 @@ impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
     }
 }
 
-struct PersistentRuntimeInterruptHandle {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+struct PersistentRuntimeInterruptHandle<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
 }
 
 #[async_trait::async_trait]
-impl CoreExecutorInterruptHandle for PersistentRuntimeInterruptHandle {
+impl<B: SessionAgentBuilder + 'static> CoreExecutorInterruptHandle
+    for PersistentRuntimeInterruptHandle<B>
+{
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
             .interrupt_with_machine_authority(
@@ -565,9 +587,9 @@ impl CoreExecutorInterruptHandle for PersistentRuntimeInterruptHandle {
     }
 }
 
-impl PersistentRuntimeExecutor {
+impl<B: SessionAgentBuilder + 'static> PersistentRuntimeExecutor<B> {
     pub fn new(
-        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        service: Arc<PersistentSessionService<B>>,
         adapter: Arc<MeerkatMachine>,
         session_id: SessionId,
     ) -> Self {
@@ -580,7 +602,7 @@ impl PersistentRuntimeExecutor {
     }
 
     pub fn new_with_workgraph_service(
-        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        service: Arc<PersistentSessionService<B>>,
         adapter: Arc<MeerkatMachine>,
         session_id: SessionId,
         workgraph_service: WorkGraphService,
@@ -663,7 +685,7 @@ fn start_turn_request_from_primitive(
 }
 
 #[async_trait::async_trait]
-impl CoreExecutor for PersistentRuntimeExecutor {
+impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecutor<B> {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(PersistentRuntimeBoundaryHandle {
             service: Arc::clone(&self.service),

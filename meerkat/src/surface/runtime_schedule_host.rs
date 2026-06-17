@@ -12,17 +12,17 @@ use super::{
     spawn_schedule_host,
 };
 use crate::{
-    Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
-    ScheduleDomainError, ScheduleService, Session, SessionMaterializationSpec, SessionService,
-    SessionTargetBinding, TargetProbeOutcome,
+    Config, CreateSessionRequest, PersistentSessionService, ScheduleDomainError, ScheduleService,
+    Session, SessionAgentBuilder, SessionMaterializationSpec, SessionService, SessionTargetBinding,
+    TargetProbeOutcome,
 };
 use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::MeerkatMachine;
 use meerkat_schedule::DeliveryFailureReason;
 
-pub fn spawn_runtime_backed_schedule_host(
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
     runtime_adapter: Arc<MeerkatMachine>,
     config: Config,
     schedule_service: ScheduleService,
@@ -49,8 +49,8 @@ pub fn spawn_runtime_backed_schedule_host(
 /// [`SurfaceScheduleMobHost`] here, for example the `meerkat-mob-mcp`
 /// schedule host adapter. The default [`spawn_runtime_backed_schedule_host`]
 /// remains session-only and reports explicit mob target failures.
-pub fn spawn_runtime_backed_schedule_host_with_mobs(
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub fn spawn_runtime_backed_schedule_host_with_mobs<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
     runtime_adapter: Arc<MeerkatMachine>,
     _config: Config,
     schedule_service: ScheduleService,
@@ -73,8 +73,8 @@ pub fn spawn_runtime_backed_schedule_host_with_mobs(
     Some(spawn_schedule_host(schedule_service, adapter, owner_id))
 }
 
-struct RuntimeBackedScheduleSessionHost {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+struct RuntimeBackedScheduleSessionHost<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
     runtime_adapter: Arc<MeerkatMachine>,
     build_template: SessionBuildOptions,
 }
@@ -185,9 +185,9 @@ fn runtime_delivery_dispatch(
     }
 }
 
-impl RuntimeBackedScheduleSessionHost {
+impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
     fn new(
-        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        service: Arc<PersistentSessionService<B>>,
         runtime_adapter: Arc<MeerkatMachine>,
         build_template: SessionBuildOptions,
     ) -> Self {
@@ -296,7 +296,9 @@ impl RuntimeBackedScheduleSessionHost {
 }
 
 #[async_trait]
-impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
+impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
+    for RuntimeBackedScheduleSessionHost<B>
+{
     async fn probe_session_target(
         &self,
         binding: &SessionTargetBinding,

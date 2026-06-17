@@ -15854,7 +15854,12 @@ async fn persistent_staged_run_driver(
         .contract_begin_run_authority(run_id.clone())
         .expect("runtime run authority should begin through generated DSL");
     driver
-        .machine_realize_stage_batch(std::slice::from_ref(&input_id), &run_id)
+        .machine_realize_authorized_stage_batch(
+            crate::meerkat_machine::driver::test_authorized_stage_for_run(
+                vec![input_id.clone()],
+                run_id.clone(),
+            ),
+        )
         .expect("input should stage for the run");
 
     (

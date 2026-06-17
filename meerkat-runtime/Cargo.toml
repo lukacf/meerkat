@@ -16,6 +16,7 @@ categories.workspace = true
 meerkat-core = { workspace = true, features = ["__meerkat-generated-authority-bridge"] }
 meerkat-live = { workspace = true, optional = true, features = ["__meerkat-generated-authority-bridge"] }
 meerkat-machine-dsl = { workspace = true }
+meerkat-machine-kernels = { workspace = true }
 meerkat-machine-schema = { workspace = true }
 meerkat-contracts = { workspace = true }
 serde = { workspace = true }

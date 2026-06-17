@@ -8,6 +8,23 @@
 # wrappers left behind explicit `cargo e2e-*` aliases.
 default-filter = 'not binary(e2e_auth_lane) and not binary(e2e_build_lane) and not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)'
 
+[[profile.fast.overrides]]
+# Dense mob-topology materialization is intentionally a high-blast stress test:
+# it spawns 300 local members and installs 45k directional trust writes while
+# asserting a wall-clock budget. Keep the test concurrent internally, but do
+# not run other nextest cases beside it.
+filter = 'test(test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'
+threads-required = "num-cpus"
+
+[[profile.fast.overrides]]
+# Branch-winner mob flow tests drive full in-memory runtimes and wait on
+# scheduler progress, so running them beside codegen canaries or parity audits
+# can consume their terminal-state wait budget without surfacing a product
+# failure. Keep each case isolated in the fast profile; the tests still execute
+# their branch/join concurrency internally.
+filter = 'test(test_branch_winner_and_join_any_behavior) or test(test_branch_winner_is_selected_only_after_success_allowing_fallback)'
+threads-required = "num-cpus"
+
 [[profile.default.overrides]]
 # System-lane tests spawn nested cargo invocations and copy binaries into
 # scenario-specific target directories. Running them concurrently under a broad

@@ -891,8 +891,6 @@ type MeerkatMachineCommandFuture<'a> = Pin<
     Box<dyn Future<Output = Result<MeerkatMachineCommandResult, MeerkatMachineCommandError>> + 'a>,
 >;
 
-#[cfg(test)]
-pub(crate) use driver::machine_select_runtime_loop_batch;
 pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, cancel_runtime_loop_run,
     commit_runtime_loop_run, fail_machine_run, fail_runtime_loop_run,

@@ -15,12 +15,14 @@ use crate::input_state::{
     InputLifecycleState, InputState, InputStateHistoryEntry, InputStateSeed, InputTerminalOutcome,
     StoredInputState,
 };
+use crate::meerkat_machine::dsl::command_capabilities as generated_command_capabilities;
 use crate::runtime_state::RuntimeState;
 use crate::tokio::sync::Mutex;
 use crate::traits::{
     DestroyReport, RecoveryReport, ResetReport, RetireReport, RuntimeDriver, RuntimeDriverError,
 };
 use chrono::Utc;
+use meerkat_machine_kernels::generated::meerkat::command_capabilities as generated_kernel_command_capabilities;
 
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
@@ -33,6 +35,7 @@ pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
 #[must_use = "runtime completion authority must be consumed by waiter resolution"]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeCompletionResultAuthority {
+    generated_plan: generated_kernel_command_capabilities::CommandPlanKind,
     session_id: SessionId,
     agent_runtime_id: Option<crate::meerkat_machine::dsl::AgentRuntimeId>,
     fence_token: Option<crate::meerkat_machine::dsl::FenceToken>,
@@ -40,6 +43,28 @@ pub(crate) struct RuntimeCompletionResultAuthority {
     runtime_epoch_id: Option<crate::meerkat_machine::dsl::RuntimeEpochId>,
     result_class: crate::meerkat_machine::dsl::RuntimeCompletionResultClass,
     cleanup_observation: crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome,
+}
+
+/// Attempted local closure of a generated runtime-completion result effect.
+///
+/// This is the runtime-facing phase view for the
+/// `Authorized -> Attempted -> Realized | Failed | Abandoned` closure declared
+/// by the generated `AuthorizedRuntimeCompletionResultClosure` command plan.
+#[must_use = "attempted runtime completion closure must be realized, failed, or abandoned"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeCompletionResultAttempt {
+    authority: RuntimeCompletionResultAuthority,
+}
+
+/// Realized local closure of a generated runtime-completion result effect.
+///
+/// Completion waiter delivery and cleanup observations are minted only from
+/// this consumed phase, so payload alignment failures cannot still surface a
+/// public waiter result.
+#[must_use = "realized runtime completion closure must mint a completion cleanup observation"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeCompletionResultRealized {
+    authority: RuntimeCompletionResultAuthority,
 }
 
 impl RuntimeCompletionResultAuthority {
@@ -53,6 +78,8 @@ impl RuntimeCompletionResultAuthority {
         cleanup_observation: crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome,
     ) -> Self {
         Self {
+            generated_plan:
+                generated_kernel_command_capabilities::CommandPlanKind::AuthorizedRuntimeCompletionResultClosure,
             session_id,
             agent_runtime_id,
             fence_token,
@@ -63,41 +90,67 @@ impl RuntimeCompletionResultAuthority {
         }
     }
 
-    pub(crate) fn session_id(&self) -> &SessionId {
-        &self.session_id
+    pub(crate) fn begin_surface_resolution(self) -> RuntimeCompletionResultAttempt {
+        debug_assert_eq!(
+            self.generated_plan,
+            generated_kernel_command_capabilities::CommandPlanKind::AuthorizedRuntimeCompletionResultClosure
+        );
+        RuntimeCompletionResultAttempt { authority: self }
     }
+}
 
-    pub(crate) fn agent_runtime_id(&self) -> Option<&crate::meerkat_machine::dsl::AgentRuntimeId> {
-        self.agent_runtime_id.as_ref()
-    }
-
-    pub(crate) fn fence_token(&self) -> Option<crate::meerkat_machine::dsl::FenceToken> {
-        self.fence_token
-    }
-
-    pub(crate) fn runtime_generation(&self) -> Option<crate::meerkat_machine::dsl::Generation> {
-        self.runtime_generation
-    }
-
-    pub(crate) fn runtime_epoch_id(&self) -> Option<&crate::meerkat_machine::dsl::RuntimeEpochId> {
-        self.runtime_epoch_id.as_ref()
-    }
-
+impl RuntimeCompletionResultAttempt {
     pub(crate) fn class(&self) -> crate::meerkat_machine::dsl::RuntimeCompletionResultClass {
-        self.result_class
+        self.authority.result_class
     }
 
     pub(crate) fn allows(
         &self,
         expected: crate::meerkat_machine::dsl::RuntimeCompletionResultClass,
     ) -> bool {
-        self.result_class == expected
+        self.authority.result_class == expected
+    }
+
+    pub(crate) fn realize(self) -> RuntimeCompletionResultRealized {
+        RuntimeCompletionResultRealized {
+            authority: self.authority,
+        }
+    }
+
+    pub(crate) fn fail(self) {
+        drop(self);
+    }
+
+    pub(crate) fn abandon(self) {
+        drop(self);
+    }
+}
+
+impl RuntimeCompletionResultRealized {
+    pub(crate) fn session_id(&self) -> &SessionId {
+        &self.authority.session_id
+    }
+
+    pub(crate) fn agent_runtime_id(&self) -> Option<&crate::meerkat_machine::dsl::AgentRuntimeId> {
+        self.authority.agent_runtime_id.as_ref()
+    }
+
+    pub(crate) fn fence_token(&self) -> Option<crate::meerkat_machine::dsl::FenceToken> {
+        self.authority.fence_token
+    }
+
+    pub(crate) fn runtime_generation(&self) -> Option<crate::meerkat_machine::dsl::Generation> {
+        self.authority.runtime_generation
+    }
+
+    pub(crate) fn runtime_epoch_id(&self) -> Option<&crate::meerkat_machine::dsl::RuntimeEpochId> {
+        self.authority.runtime_epoch_id.as_ref()
     }
 
     pub(crate) fn cleanup_observation(
         &self,
     ) -> crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome {
-        self.cleanup_observation
+        self.authority.cleanup_observation
     }
 }
 
@@ -125,22 +178,49 @@ pub(crate) enum RuntimeLoopBatchSource {
     Steer,
 }
 
+impl From<generated_command_capabilities::RuntimeLoopBatchSource> for RuntimeLoopBatchSource {
+    fn from(source: generated_command_capabilities::RuntimeLoopBatchSource) -> Self {
+        match source {
+            generated_command_capabilities::RuntimeLoopBatchSource::Queue => Self::Queue,
+            generated_command_capabilities::RuntimeLoopBatchSource::Steer => Self::Steer,
+        }
+    }
+}
+
+impl From<RuntimeLoopBatchSource> for generated_command_capabilities::RuntimeLoopBatchSource {
+    fn from(source: RuntimeLoopBatchSource) -> Self {
+        match source {
+            RuntimeLoopBatchSource::Queue => Self::Queue,
+            RuntimeLoopBatchSource::Steer => Self::Steer,
+        }
+    }
+}
+
 #[must_use = "runtime loop batch authority must be consumed by stage authorization"]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AuthorizedRuntimeLoopBatch {
     input_ids: Vec<InputId>,
     source: RuntimeLoopBatchSource,
+    generated: generated_command_capabilities::AuthorizedRuntimeLoopBatch,
 }
 
 impl AuthorizedRuntimeLoopBatch {
-    fn from_machine_selection(
-        input_ids: Vec<InputId>,
-        source: RuntimeLoopBatchSource,
+    fn from_generated_plan(
+        plan: generated_command_capabilities::RuntimeLoopBatchPlan,
     ) -> Option<Self> {
+        let (generated, raw_input_ids, generated_source) = plan.into_parts();
+        let input_ids = raw_input_ids
+            .into_iter()
+            .map(|raw| raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid))
+            .collect::<Option<Vec<_>>>()?;
         if input_ids.is_empty() {
             None
         } else {
-            Some(Self { input_ids, source })
+            Some(Self {
+                input_ids,
+                source: generated_source.into(),
+                generated,
+            })
         }
     }
 
@@ -148,12 +228,8 @@ impl AuthorizedRuntimeLoopBatch {
         &self.input_ids
     }
 
-    fn into_stage_for_run(self, run_id: RunId) -> AuthorizedStageForRun {
-        AuthorizedStageForRun {
-            input_ids: self.input_ids,
-            run_id,
-            source: self.source,
-        }
+    pub(crate) fn source(&self) -> RuntimeLoopBatchSource {
+        self.source
     }
 }
 
@@ -161,9 +237,19 @@ impl AuthorizedRuntimeLoopBatch {
 pub(crate) fn test_authorized_runtime_loop_batch(
     input_ids: Vec<InputId>,
 ) -> AuthorizedRuntimeLoopBatch {
+    test_authorized_runtime_loop_batch_from_source(input_ids, RuntimeLoopBatchSource::Queue)
+}
+
+#[cfg(test)]
+pub(crate) fn test_authorized_runtime_loop_batch_from_source(
+    input_ids: Vec<InputId>,
+    source: RuntimeLoopBatchSource,
+) -> AuthorizedRuntimeLoopBatch {
     AuthorizedRuntimeLoopBatch {
         input_ids,
-        source: RuntimeLoopBatchSource::Queue,
+        source,
+        generated:
+            generated_command_capabilities::AuthorizedRuntimeLoopBatch::mint_from_generated_command_plan(),
     }
 }
 
@@ -173,15 +259,58 @@ pub(crate) struct AuthorizedStageForRun {
     input_ids: Vec<InputId>,
     run_id: RunId,
     source: RuntimeLoopBatchSource,
+    generated: generated_command_capabilities::AuthorizedStageForRun,
 }
 
 impl AuthorizedStageForRun {
-    fn into_parts(self) -> (Vec<InputId>, RunId, RuntimeLoopBatchSource) {
-        (self.input_ids, self.run_id, self.source)
+    fn from_generated_plan(
+        run_id: RunId,
+        plan: generated_command_capabilities::StageForRunPlan,
+    ) -> Option<Self> {
+        let (generated, raw_input_ids, generated_source) = plan.into_parts();
+        let input_ids = raw_input_ids
+            .into_iter()
+            .map(|raw| raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid))
+            .collect::<Option<Vec<_>>>()?;
+        if input_ids.is_empty() {
+            None
+        } else {
+            Some(Self {
+                input_ids,
+                run_id,
+                source: generated_source.into(),
+                generated,
+            })
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<InputId>, RunId, RuntimeLoopBatchSource) {
+        let Self {
+            input_ids,
+            run_id,
+            source,
+            generated: _,
+        } = self;
+        (input_ids, run_id, source)
     }
 }
 
-#[derive(Debug, Clone)]
+#[cfg(test)]
+pub(crate) fn test_authorized_stage_for_run(
+    input_ids: Vec<InputId>,
+    run_id: RunId,
+) -> AuthorizedStageForRun {
+    AuthorizedStageForRun {
+        input_ids,
+        run_id,
+        source: RuntimeLoopBatchSource::Queue,
+        generated:
+            generated_command_capabilities::AuthorizedStageForRun::mint_from_generated_command_plan(
+            ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeLifecycleProjection {
     pub(crate) phase: RuntimeState,
     pub(crate) current_run_id: Option<RunId>,
@@ -395,6 +524,49 @@ impl DriverEntry {
 
     pub(crate) fn input_last_boundary_sequence(&self, input_id: &InputId) -> Option<u64> {
         self.as_driver().input_last_boundary_sequence(input_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_runtime_boundary(
+        &self,
+        input_id: &InputId,
+    ) -> Option<crate::meerkat_machine::dsl::RecoveredRunApplyBoundary> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.input_runtime_boundary(input_id),
+            DriverEntry::Persistent(d) => d.inner_ref().input_runtime_boundary(input_id),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_runtime_execution_kind(
+        &self,
+        input_id: &InputId,
+    ) -> Option<crate::meerkat_machine::dsl::RecoveredRuntimeExecutionKind> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.input_runtime_execution_kind(input_id),
+            DriverEntry::Persistent(d) => d.inner_ref().input_runtime_execution_kind(input_id),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_peer_response_terminal_apply_intent(
+        &self,
+        input_id: &InputId,
+    ) -> Option<crate::meerkat_machine::dsl::RecoveredPeerResponseTerminalApplyIntent> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.input_peer_response_terminal_apply_intent(input_id),
+            DriverEntry::Persistent(d) => d
+                .inner_ref()
+                .input_peer_response_terminal_apply_intent(input_id),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_is_prompt_for_batch(&self, input_id: &InputId) -> Option<bool> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.input_is_prompt_for_batch(input_id),
+            DriverEntry::Persistent(d) => d.inner_ref().input_is_prompt_for_batch(input_id),
+        }
     }
 
     pub(crate) fn input_terminal_outcome(
@@ -725,16 +897,28 @@ impl DriverEntry {
         input_ids: &[InputId],
         session_snapshot: Option<Vec<u8>>,
     ) -> Result<(), RuntimeDriverError> {
+        let stage_authority = machine_authorize_stage_for_run(
+            self,
+            run_id,
+            input_ids,
+            RuntimeLoopBatchSource::Steer,
+        )
+        .ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "generated machine did not authorize live-boundary StageForRun for run {run_id:?} and inputs {input_ids:?}"
+            ))
+        })?;
         match self {
             DriverEntry::Ephemeral(d) => {
                 let _ = session_snapshot;
-                d.machine_realize_live_boundary_context_injected(run_id, input_ids)
+                d.machine_realize_live_boundary_context_injected(run_id, input_ids, stage_authority)
                     .map(|_| ())
             }
             DriverEntry::Persistent(d) => {
                 d.machine_realize_live_boundary_context_injected(
                     run_id,
                     input_ids,
+                    stage_authority,
                     session_snapshot,
                 )
                 .await
@@ -743,14 +927,13 @@ impl DriverEntry {
     }
 
     /// Stage a batch of inputs atomically in a single `StageDrainSnapshot`.
-    pub(crate) fn machine_realize_stage_batch(
+    pub(crate) fn machine_realize_authorized_stage_batch(
         &mut self,
         authority: AuthorizedStageForRun,
     ) -> Result<(), crate::traits::RuntimeDriverError> {
-        let (input_ids, run_id, _source) = authority.into_parts();
         match self {
-            DriverEntry::Ephemeral(d) => d.machine_realize_stage_batch(&input_ids, &run_id),
-            DriverEntry::Persistent(d) => d.machine_realize_stage_batch(&input_ids, &run_id),
+            DriverEntry::Ephemeral(d) => d.machine_realize_authorized_stage_batch(authority),
+            DriverEntry::Persistent(d) => d.machine_realize_authorized_stage_batch(authority),
         }
     }
 
@@ -942,6 +1125,280 @@ impl std::fmt::Display for RuntimeLoopRunCommitError {
 }
 
 impl std::error::Error for RuntimeLoopRunCommitError {}
+
+#[must_use = "runtime-loop run commit authority must be consumed by commit realization"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AuthorizedRuntimeLoopRunCommit {
+    generated_plan: generated_kernel_command_capabilities::CommandPlanKind,
+    run_id: RunId,
+    consumed_input_ids: Vec<InputId>,
+    commit_input_id: InputId,
+    receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+    owner_session_id: Option<crate::meerkat_machine::dsl::SessionId>,
+    owner_agent_runtime_id: Option<crate::meerkat_machine::dsl::AgentRuntimeId>,
+    owner_fence_token: Option<crate::meerkat_machine::dsl::FenceToken>,
+    owner_runtime_generation: Option<crate::meerkat_machine::dsl::Generation>,
+    owner_runtime_epoch_id: Option<crate::meerkat_machine::dsl::RuntimeEpochId>,
+    commit_outcome: AuthorizedRuntimeLoopRunCommitOutcome,
+    effect_closure_obligations: Vec<RuntimeLoopRunCommitEffectObligation>,
+    return_projection: RuntimeLifecycleProjection,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AuthorizedRuntimeLoopRunCommitOutcome {
+    run_id: RunId,
+    outcome: crate::meerkat_machine::dsl::TurnTerminalOutcome,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeLoopRunCommitEffectObligation {
+    run_id: RunId,
+    effect: RuntimeLoopRunCommitEffect,
+    closure_policy: &'static str,
+    lifecycle: &'static [&'static str],
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeLoopRunCommitEffect {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl AuthorizedRuntimeLoopRunCommit {
+    fn authorize(
+        driver: &DriverEntry,
+        run_id: RunId,
+        consumed_input_ids: Vec<InputId>,
+        receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
+    ) -> Result<Self, RuntimeDriverError> {
+        // Dogma K10: mint the final receipt from the machine-owned per-run
+        // boundary counter — the executor's draft carries no sequence, so the
+        // durable receipt can never diverge from `RecordBoundarySeq`'s value.
+        let receipt = receipt.into_sequenced(driver.run_boundary_sequence(&run_id));
+        machine_validate_run_commit_receipt(driver, &run_id, &consumed_input_ids, &receipt)?;
+        let commit_input_id = consumed_input_ids.first().cloned().ok_or_else(|| {
+            RuntimeDriverError::Internal(
+                "runtime-loop run commit authority requires at least one terminal input"
+                    .to_string(),
+            )
+        })?;
+        let preview =
+            preview_authorized_runtime_loop_run_commit(driver, &run_id, &commit_input_id)?;
+        Ok(Self {
+            generated_plan:
+                generated_kernel_command_capabilities::CommandPlanKind::AuthorizedRuntimeLoopRunCommit,
+            run_id,
+            consumed_input_ids,
+            commit_input_id,
+            receipt,
+            owner_session_id: preview.owner_session_id,
+            owner_agent_runtime_id: preview.owner_agent_runtime_id,
+            owner_fence_token: preview.owner_fence_token,
+            owner_runtime_generation: preview.owner_runtime_generation,
+            owner_runtime_epoch_id: preview.owner_runtime_epoch_id,
+            commit_outcome: preview.commit_outcome,
+            effect_closure_obligations: preview.effect_closure_obligations,
+            return_projection: preview.return_projection,
+        })
+    }
+
+    fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    fn consumed_input_ids(&self) -> &[InputId] {
+        &self.consumed_input_ids
+    }
+
+    fn commit_input_id(&self) -> &InputId {
+        &self.commit_input_id
+    }
+
+    fn receipt(&self) -> &meerkat_core::lifecycle::RunBoundaryReceipt {
+        &self.receipt
+    }
+
+    fn commit_outcome(&self) -> &AuthorizedRuntimeLoopRunCommitOutcome {
+        &self.commit_outcome
+    }
+
+    fn return_projection(&self) -> &RuntimeLifecycleProjection {
+        &self.return_projection
+    }
+
+    fn effect_closure_obligations(&self) -> &[RuntimeLoopRunCommitEffectObligation] {
+        &self.effect_closure_obligations
+    }
+
+    fn generated_plan(&self) -> generated_kernel_command_capabilities::CommandPlanKind {
+        self.generated_plan
+    }
+
+    fn owner_session_id(&self) -> Option<&crate::meerkat_machine::dsl::SessionId> {
+        self.owner_session_id.as_ref()
+    }
+
+    fn owner_agent_runtime_id(&self) -> Option<&crate::meerkat_machine::dsl::AgentRuntimeId> {
+        self.owner_agent_runtime_id.as_ref()
+    }
+
+    fn owner_fence_token(&self) -> Option<crate::meerkat_machine::dsl::FenceToken> {
+        self.owner_fence_token
+    }
+
+    fn owner_runtime_generation(&self) -> Option<crate::meerkat_machine::dsl::Generation> {
+        self.owner_runtime_generation
+    }
+
+    fn owner_runtime_epoch_id(&self) -> Option<&crate::meerkat_machine::dsl::RuntimeEpochId> {
+        self.owner_runtime_epoch_id.as_ref()
+    }
+
+    fn into_receipt(self) -> meerkat_core::lifecycle::RunBoundaryReceipt {
+        self.receipt
+    }
+}
+
+impl AuthorizedRuntimeLoopRunCommitOutcome {
+    fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    fn outcome(&self) -> crate::meerkat_machine::dsl::TurnTerminalOutcome {
+        self.outcome
+    }
+}
+
+struct RuntimeLoopRunCommitPreview {
+    owner_session_id: Option<crate::meerkat_machine::dsl::SessionId>,
+    owner_agent_runtime_id: Option<crate::meerkat_machine::dsl::AgentRuntimeId>,
+    owner_fence_token: Option<crate::meerkat_machine::dsl::FenceToken>,
+    owner_runtime_generation: Option<crate::meerkat_machine::dsl::Generation>,
+    owner_runtime_epoch_id: Option<crate::meerkat_machine::dsl::RuntimeEpochId>,
+    commit_outcome: AuthorizedRuntimeLoopRunCommitOutcome,
+    effect_closure_obligations: Vec<RuntimeLoopRunCommitEffectObligation>,
+    return_projection: RuntimeLifecycleProjection,
+}
+
+fn preview_authorized_runtime_loop_run_commit(
+    driver: &DriverEntry,
+    run_id: &RunId,
+    commit_input_id: &InputId,
+) -> Result<RuntimeLoopRunCommitPreview, RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let state = {
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        authority.state().clone()
+    };
+    let owner_session_id = state.session_id.clone();
+    let owner_agent_runtime_id = state.active_runtime_id.clone();
+    let owner_fence_token = state.active_fence_token;
+    let owner_runtime_generation = state.active_runtime_generation;
+    let owner_runtime_epoch_id = state.active_runtime_epoch_id.clone();
+    let mut preview = crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
+        state,
+    )
+    .map_err(|err| {
+        RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+            err,
+            "AuthorizedRuntimeLoopRunCommit",
+        ))
+    })?;
+    let dsl_run_id = crate::meerkat_machine::dsl::RunId::from_domain(run_id);
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut preview,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::RunCompleted {
+            run_id: dsl_run_id.clone(),
+        },
+    )
+    .map_err(|err| RuntimeDriverError::ValidationFailed {
+        reason: crate::meerkat_machine::dsl_authority::map_error(err, "RunCompleted"),
+    })?;
+    if preview.state().runtime_completion_result_run_id.as_ref() != Some(&dsl_run_id) {
+        return Err(RuntimeDriverError::Internal(format!(
+            "RunCompleted did not bind runtime completion result to run {run_id}"
+        )));
+    }
+    let commit_outcome = match preview.state().terminal_outcome {
+        Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed) => {
+            AuthorizedRuntimeLoopRunCommitOutcome {
+                run_id: run_id.clone(),
+                outcome: crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed,
+            }
+        }
+        other => {
+            return Err(RuntimeDriverError::Internal(format!(
+                "RunCompleted produced unexpected terminal outcome {other:?} for run {run_id}"
+            )));
+        }
+    };
+    let effect_closure_obligations =
+        RuntimeLoopRunCommitEffectObligation::for_outcome(run_id, commit_outcome.outcome());
+
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut preview,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::Commit {
+            input_id: crate::meerkat_machine::dsl::InputId::from_domain(commit_input_id),
+            run_id: dsl_run_id,
+        },
+    )
+    .map_err(|err| RuntimeDriverError::ValidationFailed {
+        reason: crate::meerkat_machine::dsl_authority::map_error(err, "Commit"),
+    })?;
+
+    Ok(RuntimeLoopRunCommitPreview {
+        owner_session_id,
+        owner_agent_runtime_id,
+        owner_fence_token,
+        owner_runtime_generation,
+        owner_runtime_epoch_id,
+        commit_outcome,
+        effect_closure_obligations,
+        return_projection: RuntimeLifecycleProjection::from_authority(&preview),
+    })
+}
+
+impl RuntimeLoopRunCommitEffectObligation {
+    const LIFECYCLE: &'static [&'static str] = &[
+        "Authorized",
+        "Attempted",
+        "Realized",
+        "Failed",
+        "Cancelled",
+        "Abandoned",
+    ];
+
+    fn for_outcome(
+        run_id: &RunId,
+        outcome: crate::meerkat_machine::dsl::TurnTerminalOutcome,
+    ) -> Vec<Self> {
+        let effect = match outcome {
+            crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed => {
+                RuntimeLoopRunCommitEffect::Completed
+            }
+            crate::meerkat_machine::dsl::TurnTerminalOutcome::Cancelled => {
+                RuntimeLoopRunCommitEffect::Cancelled
+            }
+            _ => RuntimeLoopRunCommitEffect::Failed,
+        };
+        vec![Self {
+            run_id: run_id.clone(),
+            effect,
+            closure_policy: "RuntimeLoopRunCommitEffect",
+            lifecycle: Self::LIFECYCLE,
+        }]
+    }
+
+    fn is_satisfied_by(&self, run_id: &RunId, effect: RuntimeLoopRunCommitEffect) -> bool {
+        self.run_id == *run_id
+            && self.effect == effect
+            && self.closure_policy == "RuntimeLoopRunCommitEffect"
+            && self.lifecycle == Self::LIFECYCLE
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum RuntimeLoopRunFailError {
@@ -1232,49 +1689,43 @@ fn machine_apply_turn_run_cancelled(
     })
 }
 
-pub(crate) fn slice_starts_with(seq: &[InputId], prefix: &[InputId]) -> bool {
-    prefix.len() <= seq.len() && seq[..prefix.len()] == *prefix
-}
-
+#[cfg(test)]
 pub(crate) fn machine_input_boundary(
     driver: &DriverEntry,
     work_id: &InputId,
-) -> Option<meerkat_core::lifecycle::run_primitive::RunApplyBoundary> {
-    driver
-        .driver_ingress()
-        .runtime_semantics(work_id)
-        .map(|semantics| semantics.boundary)
+) -> Option<crate::meerkat_machine::dsl::RecoveredRunApplyBoundary> {
+    driver.input_runtime_boundary(work_id)
 }
 
+#[cfg(test)]
 pub(crate) fn machine_input_execution_kind(
     driver: &DriverEntry,
     work_id: &InputId,
-) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
-    driver
-        .driver_ingress()
-        .runtime_semantics(work_id)
-        .map(|semantics| semantics.execution_kind)
+) -> Option<crate::meerkat_machine::dsl::RecoveredRuntimeExecutionKind> {
+    driver.input_runtime_execution_kind(work_id)
 }
 
+#[cfg(test)]
 pub(crate) fn machine_input_peer_response_terminal_apply_intent(
     driver: &DriverEntry,
     work_id: &InputId,
-) -> Option<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent> {
-    driver
-        .driver_ingress()
-        .runtime_semantics(work_id)
-        .and_then(|semantics| semantics.peer_response_terminal_apply_intent)
+) -> Option<crate::meerkat_machine::dsl::RecoveredPeerResponseTerminalApplyIntent> {
+    driver.input_peer_response_terminal_apply_intent(work_id)
 }
 
 #[cfg(test)]
 pub(crate) fn machine_batch_execution_kind(
     driver: &DriverEntry,
     work_ids: &[InputId],
-) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
-    let mut semantics = machine_batch_runtime_semantics(driver, work_ids)?.into_iter();
-    let first = semantics.next()?.execution_kind;
+) -> Option<crate::meerkat_machine::dsl::RecoveredRuntimeExecutionKind> {
+    let mut semantics = work_ids
+        .iter()
+        .map(|id| machine_input_execution_kind(driver, id))
+        .collect::<Option<Vec<_>>>()?
+        .into_iter();
+    let first = semantics.next()?;
 
-    if semantics.all(|semantics| semantics.execution_kind == first) {
+    if semantics.all(|execution_kind| execution_kind == first) {
         Some(first)
     } else {
         None
@@ -1324,112 +1775,45 @@ pub(crate) fn machine_batch_primitive_projections(
         .collect()
 }
 
-pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<InputId> {
-    let ingress = driver.driver_ingress();
-    let steer = ingress.steer_queue();
-    if let Some(first) = steer.first() {
-        let Some(target_boundary) = machine_input_boundary(driver, first) else {
-            return vec![first.clone()];
-        };
-        let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
-            return vec![first.clone()];
-        };
-        let target_peer_response_terminal_apply_intent =
-            machine_input_peer_response_terminal_apply_intent(driver, first);
-        return steer
-            .iter()
-            .take_while(|id| {
-                machine_input_boundary(driver, id) == Some(target_boundary)
-                    && machine_input_execution_kind(driver, id) == Some(target_execution_kind)
-                    && machine_input_peer_response_terminal_apply_intent(driver, id)
-                        == target_peer_response_terminal_apply_intent
-            })
-            .cloned()
-            .collect();
-    }
-
-    let queue = ingress.queue();
-    if let Some(first) = queue.first() {
-        let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
-            return vec![first.clone()];
-        };
-        let target_peer_response_terminal_apply_intent =
-            machine_input_peer_response_terminal_apply_intent(driver, first);
-        let driver_is_prompt = ingress.is_prompt(first);
-        let mut selected = Vec::new();
-        for id in &queue {
-            if machine_input_execution_kind(driver, id) != Some(target_execution_kind)
-                || machine_input_peer_response_terminal_apply_intent(driver, id)
-                    != target_peer_response_terminal_apply_intent
-            {
-                break;
-            }
-            if !driver_is_prompt && ingress.is_prompt(id) {
-                break;
-            }
-            selected.push(id.clone());
-            if ingress.is_prompt(id) {
-                break;
-            }
-            if driver_is_prompt {
-                break;
-            }
-        }
-        return selected;
-    }
-
-    Vec::new()
-}
-
 pub(crate) fn machine_authorize_runtime_loop_batch(
     driver: &DriverEntry,
 ) -> Option<AuthorizedRuntimeLoopBatch> {
-    let ingress = driver.driver_ingress();
-    let source = if ingress.steer_queue().is_empty() {
-        RuntimeLoopBatchSource::Queue
-    } else {
-        RuntimeLoopBatchSource::Steer
-    };
-    AuthorizedRuntimeLoopBatch::from_machine_selection(
-        machine_select_runtime_loop_batch(driver),
-        source,
-    )
+    let authority = driver.shared_dsl_authority();
+    let plan = {
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        generated_command_capabilities::AuthorizedRuntimeLoopBatch::authorize_runtime_loop_batch_from_state(
+            authority.state(),
+        )
+    }?;
+    AuthorizedRuntimeLoopBatch::from_generated_plan(plan)
 }
 
-pub(crate) fn machine_validate_stage_drain_snapshot(
+pub(crate) fn machine_authorize_stage_for_run(
     driver: &DriverEntry,
-    contributing_work_ids: &[InputId],
-) -> Result<(), RuntimeDriverError> {
-    if contributing_work_ids.is_empty() {
-        return Err(RuntimeDriverError::Internal(
-            "stage drain snapshot requires at least one contributor".to_string(),
-        ));
-    }
-
-    for work_id in contributing_work_ids {
-        let lifecycle = driver.as_driver().input_phase(work_id);
-        if lifecycle != Some(InputLifecycleState::Queued) {
-            return Err(RuntimeDriverError::Internal(format!(
-                "stage drain snapshot requires queued contributors, but {work_id:?} is {lifecycle:?}"
-            )));
-        }
-    }
-
-    let ingress = driver.driver_ingress();
-    let steer = ingress.steer_queue();
-    let source_queue: Vec<InputId> = if steer.is_empty() {
-        ingress.queue()
-    } else {
-        steer
-    };
-    if !slice_starts_with(&source_queue, contributing_work_ids) {
-        return Err(RuntimeDriverError::Internal(
-            "stage drain snapshot contributors must match the current drain-source prefix"
-                .to_string(),
-        ));
-    }
-
-    Ok(())
+    run_id: &RunId,
+    input_ids: &[InputId],
+    source: RuntimeLoopBatchSource,
+) -> Option<AuthorizedStageForRun> {
+    let raw_input_ids = input_ids
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>();
+    let dsl_run_id = crate::meerkat_machine::dsl::RunId(run_id.to_string());
+    let authority = driver.shared_dsl_authority();
+    let plan = {
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        generated_command_capabilities::AuthorizedStageForRun::authorize_stage_for_run_from_state(
+            authority.state(),
+            &raw_input_ids,
+            &dsl_run_id,
+            source.into(),
+        )
+    }?;
+    AuthorizedStageForRun::from_generated_plan(run_id.clone(), plan)
 }
 
 pub(crate) fn machine_validate_boundary_applied(
@@ -2202,6 +2586,13 @@ mod tests {
             .expect("generated admission semantics")
     }
 
+    fn authorized_batch_input_ids(driver: &DriverEntry) -> Vec<InputId> {
+        machine_authorize_runtime_loop_batch(driver)
+            .expect("generated runtime-loop batch authority")
+            .input_ids()
+            .to_vec()
+    }
+
     #[test]
     fn machine_batch_execution_kind_requires_admitted_semantics() {
         let driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(
@@ -2259,7 +2650,7 @@ mod tests {
             other => panic!("expected accepted queued input, got {other:?}"),
         }
 
-        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+        let selected = authorized_batch_input_ids(&DriverEntry::Ephemeral(driver));
 
         assert_eq!(
             selected,
@@ -2394,15 +2785,13 @@ mod tests {
         driver.rebuild_queue_projections_after_recovery();
 
         let entry = DriverEntry::Ephemeral(driver);
-        let selected = machine_select_runtime_loop_batch(&entry);
+        let selected = authorized_batch_input_ids(&entry);
 
         assert_eq!(
             selected,
             vec![resume_id],
             "a later prompt may drive the queue, but selection must preserve the staged queue prefix when an older input has a different execution kind"
         );
-        machine_validate_stage_drain_snapshot(&entry, &selected)
-            .expect("selected incompatible prefix must satisfy staging invariants");
     }
 
     #[test]
@@ -2463,15 +2852,13 @@ mod tests {
         driver.clear_admitted_runtime_semantics_for_test(&prefix_id);
 
         let entry = DriverEntry::Ephemeral(driver);
-        let selected = machine_select_runtime_loop_batch(&entry);
+        let selected = authorized_batch_input_ids(&entry);
 
         assert_eq!(
             selected,
             vec![prefix_id],
             "an unstamped no-wake prefix entry must be selected before the later prompt so runtime-loop failure handling can consume the queue prefix"
         );
-        machine_validate_stage_drain_snapshot(&entry, &selected)
-            .expect("selected unstamped prefix must satisfy staging invariants");
         assert!(
             machine_batch_runtime_semantics(&entry, &selected).is_none(),
             "selected unstamped prefix must flow into the runtime-loop metadata conflict path"
@@ -2553,15 +2940,13 @@ mod tests {
         driver.rebuild_queue_projections_after_recovery();
 
         let entry = DriverEntry::Ephemeral(driver);
-        let selected = machine_select_runtime_loop_batch(&entry);
+        let selected = authorized_batch_input_ids(&entry);
 
         assert_eq!(
             selected,
             vec![event_id],
             "a non-prompt-driven batch must not absorb a following prompt into the same run"
         );
-        machine_validate_stage_drain_snapshot(&entry, &selected)
-            .expect("selected non-prompt batch must satisfy staging invariants");
     }
 
     #[test]
@@ -2598,7 +2983,7 @@ mod tests {
         driver.rebuild_queue_projections_after_recovery();
         driver.clear_admitted_runtime_semantics_for_test(&input_id);
 
-        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+        let selected = authorized_batch_input_ids(&DriverEntry::Ephemeral(driver));
 
         assert_eq!(
             selected,
@@ -2643,7 +3028,7 @@ mod tests {
         driver.rebuild_queue_projections_after_recovery();
         driver.clear_admitted_runtime_semantics_for_test(&input_id);
 
-        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+        let selected = authorized_batch_input_ids(&DriverEntry::Ephemeral(driver));
 
         assert_eq!(
             selected,
@@ -2717,13 +3102,22 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
 ) -> Result<(), RuntimeDriverError> {
     let mut driver = driver.lock().await;
     let staged_ids = batch.input_ids().to_vec();
-    machine_validate_stage_drain_snapshot(&driver, &staged_ids)?;
-    let stage_authority = batch.into_stage_for_run(run_id.clone());
+    let stage_source = batch.source();
     machine_begin_run(&mut driver, run_id.clone()).map_err(|err| {
         RuntimeDriverError::Internal(format!("failed to start runtime run: {err}"))
     })?;
 
-    if let Err(err) = driver.machine_realize_stage_batch(stage_authority) {
+    let stage_result = machine_authorize_stage_for_run(&driver, &run_id, &staged_ids, stage_source)
+        .ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "generated machine did not authorize StageForRun for run {run_id:?} and inputs {staged_ids:?}"
+            ))
+        })
+        .and_then(|stage_authority| {
+            driver.machine_realize_authorized_stage_batch(stage_authority)
+        });
+
+    if let Err(err) = stage_result {
         let _ = driver.rollback_staged(&staged_ids);
         if let Err(rollback_err) = machine_apply_run_return_projection(
             &mut driver,
@@ -2750,21 +3144,21 @@ pub(crate) async fn commit_runtime_loop_run(
     session_snapshot: Option<Vec<u8>>,
 ) -> Result<(), RuntimeLoopRunCommitError> {
     let mut driver = driver.lock().await;
-    // Pick the first consumed input as the DSL `Commit { input_id, run_id }`
-    // identifier. The DSL Commit transitions only read `run_id` in their
-    // guards (input_id is informational), so firing once with any
-    // contributing input is sufficient to flip `lifecycle_phase`.
-    let commit_input_id = consumed_input_ids.first().cloned();
-    // Dogma K10: mint the final receipt from the machine-owned per-run
-    // boundary counter — the executor's draft carries no sequence, so the
-    // durable receipt can never diverge from `RecordBoundarySeq`'s value.
-    let receipt = receipt.into_sequenced(driver.run_boundary_sequence(&run_id));
-    machine_validate_run_commit_receipt(&driver, &run_id, &consumed_input_ids, &receipt)
-        .map_err(RuntimeLoopRunCommitError::Rejected)?;
-    let completed_run_id = run_id.clone();
+    let commit_authority =
+        AuthorizedRuntimeLoopRunCommit::authorize(&driver, run_id, consumed_input_ids, receipt)
+            .map_err(RuntimeLoopRunCommitError::Rejected)?;
+    debug_assert_eq!(
+        commit_authority.generated_plan(),
+        generated_kernel_command_capabilities::CommandPlanKind::AuthorizedRuntimeLoopRunCommit
+    );
+    let completed_run_id = commit_authority.run_id().clone();
+    let receipt = commit_authority.receipt().clone();
+    let consumed_input_ids = commit_authority.consumed_input_ids().to_vec();
+    let commit_input_id = commit_authority.commit_input_id().clone();
 
     let terminal_checkpoint = driver.rollback_snapshot();
-    if let Err(err) = driver.machine_realize_boundary_applied_in_memory(&run_id, &receipt) {
+    if let Err(err) = driver.machine_realize_boundary_applied_in_memory(&completed_run_id, &receipt)
+    {
         driver.restore_rollback_snapshot(terminal_checkpoint);
         return Err(RuntimeLoopRunCommitError::BoundaryCommit(
             RuntimeDriverError::Internal(format!("runtime boundary realization failed: {err}")),
@@ -2783,22 +3177,73 @@ pub(crate) async fn commit_runtime_loop_run(
         driver.restore_rollback_snapshot(terminal_checkpoint);
         return Err(RuntimeLoopRunCommitError::Rejected(err));
     }
-    let disposition = match commit_input_id.as_ref() {
-        Some(input_id) => RunReturnDisposition::Commit { input_id },
-        None => RunReturnDisposition::Rollback,
+    if commit_authority.owner_session_id().is_none() {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::Rejected(
+            RuntimeDriverError::Internal(
+                "runtime-loop run commit authority carried no owner session".to_string(),
+            ),
+        ));
+    }
+    let _owner_runtime_binding = (
+        commit_authority.owner_agent_runtime_id(),
+        commit_authority.owner_fence_token(),
+        commit_authority.owner_runtime_generation(),
+        commit_authority.owner_runtime_epoch_id(),
+    );
+    if commit_authority.commit_outcome().run_id() != &completed_run_id
+        || commit_authority.commit_outcome().outcome()
+            != crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed
+    {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::Rejected(
+            RuntimeDriverError::Internal(
+                "runtime-loop run commit authority carried mismatched commit outcome".to_string(),
+            ),
+        ));
+    }
+    if !commit_authority
+        .effect_closure_obligations()
+        .iter()
+        .any(|obligation| {
+            obligation.is_satisfied_by(&completed_run_id, RuntimeLoopRunCommitEffect::Completed)
+        })
+    {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::Rejected(
+            RuntimeDriverError::Internal(
+                "runtime-loop run commit authority carried no completed-run effect closure obligation"
+                    .to_string(),
+            ),
+        ));
+    }
+    let return_projection = match machine_apply_run_return_projection(
+        &mut driver,
+        &completed_run_id,
+        RunReturnDisposition::Commit {
+            input_id: &commit_input_id,
+        },
+    ) {
+        Ok(projection) => projection,
+        Err(err) => {
+            driver.restore_rollback_snapshot(terminal_checkpoint);
+            return Err(RuntimeLoopRunCommitError::Rejected(
+                RuntimeDriverError::Internal(format!(
+                    "failed to apply runtime return projection after completion: {err}"
+                )),
+            ));
+        }
     };
-    let return_projection =
-        match machine_apply_run_return_projection(&mut driver, &completed_run_id, disposition) {
-            Ok(projection) => projection,
-            Err(err) => {
-                driver.restore_rollback_snapshot(terminal_checkpoint);
-                return Err(RuntimeLoopRunCommitError::Rejected(
-                    RuntimeDriverError::Internal(format!(
-                        "failed to apply runtime return projection after completion: {err}"
-                    )),
-                ));
-            }
-        };
+    if &return_projection != commit_authority.return_projection() {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::Rejected(
+            RuntimeDriverError::Internal(format!(
+                "runtime-loop run commit projection {:?} did not match generated authority {:?}",
+                return_projection,
+                commit_authority.return_projection()
+            )),
+        ));
+    }
     if let Err(err) =
         driver.machine_realize_run_completed_in_memory(&completed_run_id, &consumed_input_ids)
     {
@@ -2828,6 +3273,7 @@ pub(crate) async fn commit_runtime_loop_run(
         );
     }
 
+    let _receipt = commit_authority.into_receipt();
     Ok(())
 }
 
@@ -3175,6 +3621,17 @@ mod run_failed_cause_tests {
         DriverEntry::Ephemeral(driver)
     }
 
+    fn assert_runtime_completion_authority(
+        authority: RuntimeCompletionResultAuthority,
+        expected_class: crate::meerkat_machine::dsl::RuntimeCompletionResultClass,
+        expected_cleanup: crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome,
+    ) {
+        let attempt = authority.begin_surface_resolution();
+        assert_eq!(attempt.class(), expected_class);
+        let realized = attempt.realize();
+        assert_eq!(realized.cleanup_observation(), expected_cleanup);
+    }
+
     #[test]
     fn runtime_completion_result_authority_classifies_success_result() {
         let run_id = RunId::new();
@@ -3190,13 +3647,10 @@ mod run_failed_cause_tests {
         )
         .expect("generated completion result authority should resolve");
 
-        assert_eq!(
-            class.class(),
-            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::Completed
-        );
-        assert_eq!(
-            class.cleanup_observation(),
-            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::Completed
+        assert_runtime_completion_authority(
+            class,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::Completed,
+            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::Completed,
         );
     }
 
@@ -3215,13 +3669,10 @@ mod run_failed_cause_tests {
         )
         .expect("generated completion result authority should resolve");
 
-        assert_eq!(
-            class.class(),
-            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CompletedWithFinalizationFailure
-        );
-        assert_eq!(
-            class.cleanup_observation(),
-            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::FinalizationFailed
+        assert_runtime_completion_authority(
+            class,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CompletedWithFinalizationFailure,
+            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::FinalizationFailed,
         );
     }
 
@@ -3272,13 +3723,10 @@ mod run_failed_cause_tests {
         )
         .expect("generated completion result authority should resolve");
 
-        assert_eq!(
-            class.class(),
-            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError
-        );
-        assert_eq!(
-            class.cleanup_observation(),
-            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeApplyFailed
+        assert_runtime_completion_authority(
+            class,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError,
+            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeApplyFailed,
         );
     }
 
@@ -3297,13 +3745,10 @@ mod run_failed_cause_tests {
         )
         .expect("generated completion result authority should resolve");
 
-        assert_eq!(
-            class.class(),
-            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::Cancelled
-        );
-        assert_eq!(
-            class.cleanup_observation(),
-            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::Cancelled
+        assert_runtime_completion_authority(
+            class,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::Cancelled,
+            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::Cancelled,
         );
     }
 
@@ -3320,13 +3765,10 @@ mod run_failed_cause_tests {
         )
         .expect("generated completion result authority should resolve");
 
-        assert_eq!(
-            class.class(),
-            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::RuntimeTerminated
-        );
-        assert_eq!(
-            class.cleanup_observation(),
-            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeTerminated
+        assert_runtime_completion_authority(
+            class,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::RuntimeTerminated,
+            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeTerminated,
         );
     }
 
@@ -3449,13 +3891,10 @@ mod run_failed_cause_tests {
             crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
         )
         .expect("generated completion result authority should resolve runtime apply failure");
-        assert_eq!(
-            class.class(),
-            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError
-        );
-        assert_eq!(
-            class.cleanup_observation(),
-            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeApplyFailed
+        assert_runtime_completion_authority(
+            class,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError,
+            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeApplyFailed,
         );
     }
 

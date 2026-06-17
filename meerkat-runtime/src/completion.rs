@@ -20,7 +20,10 @@ use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{TurnErrorMetadata, TurnTerminalCauseKind, TurnTerminalOutcome};
 use serde_json::Value;
 
-use crate::meerkat_machine::driver::RuntimeCompletionResultAuthority;
+use crate::meerkat_machine::driver::{
+    RuntimeCompletionResultAttempt, RuntimeCompletionResultAuthority,
+    RuntimeCompletionResultRealized,
+};
 use crate::meerkat_machine::dsl::RuntimeCompletionResultClass;
 use crate::tokio::sync::oneshot;
 
@@ -105,14 +108,14 @@ pub struct CompletionCleanupObservation {
 }
 
 impl CompletionCleanupObservation {
-    fn from_authority(authority: RuntimeCompletionResultAuthority) -> Self {
+    fn from_realized_result(realized: RuntimeCompletionResultRealized) -> Self {
         Self {
-            owner_session_id: authority.session_id().clone(),
-            owner_agent_runtime_id: authority.agent_runtime_id().cloned(),
-            owner_fence_token: authority.fence_token(),
-            owner_runtime_generation: authority.runtime_generation(),
-            owner_runtime_epoch_id: authority.runtime_epoch_id().cloned(),
-            observed_outcome: authority.cleanup_observation(),
+            owner_session_id: realized.session_id().clone(),
+            owner_agent_runtime_id: realized.agent_runtime_id().cloned(),
+            owner_fence_token: realized.fence_token(),
+            owner_runtime_generation: realized.runtime_generation(),
+            owner_runtime_epoch_id: realized.runtime_epoch_id().cloned(),
+            observed_outcome: realized.cleanup_observation(),
         }
     }
 
@@ -284,12 +287,12 @@ impl CompletionHandle {
     #[cfg(test)]
     fn already_resolved_internal(
         outcome: CompletionOutcome,
-        authority: RuntimeCompletionResultAuthority,
+        realized: RuntimeCompletionResultRealized,
     ) -> Self {
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(Ok(CompletionDelivery {
             outcome,
-            cleanup_observation: CompletionCleanupObservation::from_authority(authority),
+            cleanup_observation: CompletionCleanupObservation::from_realized_result(realized),
         }));
         Self { rx }
     }
@@ -314,13 +317,15 @@ impl CompletionHandle {
                 terminal,
                 finalization,
             )?;
-        if !authority.allows(expected_class) {
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected_class) {
+            let generated_class = attempt.class();
+            attempt.fail();
             return Err(crate::RuntimeDriverError::Internal(format!(
-                "generated runtime completion authority returned {:?}, expected {expected_class:?}",
-                authority.class()
+                "generated runtime completion authority returned {generated_class:?}, expected {expected_class:?}",
             )));
         }
-        Ok(Self::already_resolved_internal(outcome, authority))
+        Ok(Self::already_resolved_internal(outcome, attempt.realize()))
     }
 
     #[cfg(test)]
@@ -488,7 +493,7 @@ impl CompletionRegistry {
     }
 
     fn authority_mismatch_error(
-        authority: &RuntimeCompletionResultAuthority,
+        authority: &RuntimeCompletionResultAttempt,
         expected: RuntimeCompletionResultClass,
     ) -> CompletionWaitError {
         CompletionWaitError::AuthorityUnavailable(format!(
@@ -500,11 +505,13 @@ impl CompletionRegistry {
     fn fail_input_authority_mismatch(
         &mut self,
         input_id: &InputId,
-        authority: &RuntimeCompletionResultAuthority,
+        authority: RuntimeCompletionResultAttempt,
         expected: RuntimeCompletionResultClass,
     ) {
+        let error = Self::authority_mismatch_error(&authority, expected);
+        authority.fail();
         if let Some(senders) = self.take_waiters(input_id) {
-            Self::send_error(senders, Self::authority_mismatch_error(authority, expected));
+            Self::send_error(senders, error);
         }
     }
 
@@ -512,15 +519,35 @@ impl CompletionRegistry {
     fn fail_inputs_authority_mismatch<I>(
         &mut self,
         input_ids: I,
-        authority: &RuntimeCompletionResultAuthority,
+        authority: RuntimeCompletionResultAttempt,
         expected: RuntimeCompletionResultClass,
     ) where
         I: IntoIterator<Item = InputId>,
     {
+        let error = Self::authority_mismatch_error(&authority, expected);
+        authority.fail();
+        self.fail_inputs(input_ids, error);
+    }
+
+    fn fail_inputs_authority_unavailable<I>(
+        &mut self,
+        input_ids: I,
+        authority: RuntimeCompletionResultAttempt,
+        reason: impl Into<String>,
+    ) where
+        I: IntoIterator<Item = InputId>,
+    {
+        authority.fail();
         self.fail_inputs(
             input_ids,
-            Self::authority_mismatch_error(authority, expected),
+            CompletionWaitError::AuthorityUnavailable(reason.into()),
         );
+    }
+
+    fn cleanup_from_realized_attempt(
+        authority: RuntimeCompletionResultAttempt,
+    ) -> CompletionCleanupObservation {
+        CompletionCleanupObservation::from_realized_result(authority.realize())
     }
 
     /// Register a waiter for an input. Returns the handle the caller will await.
@@ -557,14 +584,15 @@ impl CompletionRegistry {
         authority: RuntimeCompletionResultAuthority,
     ) {
         let expected = RuntimeCompletionResultClass::Completed;
-        if !authority.allows(expected) {
-            self.fail_input_authority_mismatch(input_id, &authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, attempt, expected);
             return;
         }
         self.resolve_completed(
             input_id,
             result,
-            CompletionCleanupObservation::from_authority(authority),
+            Self::cleanup_from_realized_attempt(attempt),
         );
     }
 
@@ -578,19 +606,18 @@ impl CompletionRegistry {
         I: IntoIterator<Item = InputId>,
     {
         let input_ids: Vec<InputId> = input_ids.into_iter().collect();
-        match authority.class() {
+        let attempt = authority.begin_surface_resolution();
+        match attempt.class() {
             RuntimeCompletionResultClass::Completed => {
                 let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved Completed without result payload"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved Completed without result payload",
                     );
                     return;
                 };
-                let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
                 for input_id in input_ids {
                     self.resolve_completed(
                         &input_id,
@@ -601,32 +628,28 @@ impl CompletionRegistry {
             }
             RuntimeCompletionResultClass::CompletedWithoutResult => {
                 if !matches!(terminal, Some(CoreApplyTerminal::NoPendingBoundary) | None) {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved CompletedWithoutResult with terminal payload"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved CompletedWithoutResult with terminal payload",
                     );
                     return;
                 }
-                let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
                 for input_id in input_ids {
                     self.resolve_without_result(&input_id, cleanup_observation.clone());
                 }
             }
             RuntimeCompletionResultClass::CallbackPending => {
                 let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal else {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved CallbackPending without callback payload"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved CallbackPending without callback payload",
                     );
                     return;
                 };
-                let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
                 for input_id in input_ids {
                     self.resolve_callback_pending(
                         &input_id,
@@ -638,38 +661,32 @@ impl CompletionRegistry {
             }
             RuntimeCompletionResultClass::Cancelled => {
                 if terminal.is_some() || finalization_error.is_some() {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved Cancelled with payload"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved Cancelled with payload",
                     );
                     return;
                 }
-                let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
                 for input_id in input_ids {
                     self.resolve_cancelled(&input_id, cleanup_observation.clone());
                 }
             }
             RuntimeCompletionResultClass::AbandonedWithError => {
                 if matches!(terminal, Some(CoreApplyTerminal::RunResult(_))) {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved AbandonedWithError with result payload"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved AbandonedWithError with result payload",
                     );
                     return;
                 }
                 let Some(error) = finalization_error else {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved AbandonedWithError without typed error"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved AbandonedWithError without typed error",
                     );
                     return;
                 };
@@ -677,7 +694,7 @@ impl CompletionRegistry {
                     .detail
                     .clone()
                     .unwrap_or_else(|| "runtime finalization failed".to_string());
-                let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
                 for input_id in input_ids {
                     self.resolve_abandoned_with_error(
                         &input_id,
@@ -689,26 +706,22 @@ impl CompletionRegistry {
             }
             RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
                 let Some(CoreApplyTerminal::RunResult(_result)) = terminal else {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved CompletedWithFinalizationFailure without result payload"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved CompletedWithFinalizationFailure without result payload",
                     );
                     return;
                 };
                 let Some(error) = finalization_error else {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved finalization failure without typed error"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved finalization failure without typed error",
                     );
                     return;
                 };
-                let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
                 for input_id in input_ids {
                     self.resolve_completed_with_finalization_failure(
                         &input_id,
@@ -719,16 +732,14 @@ impl CompletionRegistry {
             }
             RuntimeCompletionResultClass::RuntimeTerminated => {
                 if terminal.is_some() || finalization_error.is_some() {
-                    self.fail_inputs(
+                    self.fail_inputs_authority_unavailable(
                         input_ids,
-                        CompletionWaitError::AuthorityUnavailable(
-                            "runtime completion authority resolved RuntimeTerminated with payload"
-                                .to_string(),
-                        ),
+                        attempt,
+                        "runtime completion authority resolved RuntimeTerminated with payload",
                     );
                     return;
                 }
-                let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
                 for input_id in input_ids {
                     if let Some(senders) = self.take_waiters(&input_id) {
                         Self::send_outcome(
@@ -763,14 +774,12 @@ impl CompletionRegistry {
         authority: RuntimeCompletionResultAuthority,
     ) {
         let expected = RuntimeCompletionResultClass::CompletedWithoutResult;
-        if !authority.allows(expected) {
-            self.fail_input_authority_mismatch(input_id, &authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, attempt, expected);
             return;
         }
-        self.resolve_without_result(
-            input_id,
-            CompletionCleanupObservation::from_authority(authority),
-        );
+        self.resolve_without_result(input_id, Self::cleanup_from_realized_attempt(attempt));
     }
 
     /// Resolve all waiters for an input that reached a callback boundary.
@@ -799,15 +808,16 @@ impl CompletionRegistry {
         authority: RuntimeCompletionResultAuthority,
     ) {
         let expected = RuntimeCompletionResultClass::CallbackPending;
-        if !authority.allows(expected) {
-            self.fail_input_authority_mismatch(input_id, &authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, attempt, expected);
             return;
         }
         self.resolve_callback_pending(
             input_id,
             tool_name,
             args,
-            CompletionCleanupObservation::from_authority(authority),
+            Self::cleanup_from_realized_attempt(attempt),
         );
     }
 
@@ -829,14 +839,12 @@ impl CompletionRegistry {
         authority: RuntimeCompletionResultAuthority,
     ) {
         let expected = RuntimeCompletionResultClass::Cancelled;
-        if !authority.allows(expected) {
-            self.fail_input_authority_mismatch(input_id, &authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, attempt, expected);
             return;
         }
-        self.resolve_cancelled(
-            input_id,
-            CompletionCleanupObservation::from_authority(authority),
-        );
+        self.resolve_cancelled(input_id, Self::cleanup_from_realized_attempt(attempt));
     }
 
     /// Resolve all waiters for an abandoned input with typed failure metadata.
@@ -865,15 +873,16 @@ impl CompletionRegistry {
         authority: RuntimeCompletionResultAuthority,
     ) {
         let expected = RuntimeCompletionResultClass::AbandonedWithError;
-        if !authority.allows(expected) {
-            self.fail_input_authority_mismatch(input_id, &authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, attempt, expected);
             return;
         }
         self.resolve_abandoned_with_error(
             input_id,
             reason,
             error,
-            CompletionCleanupObservation::from_authority(authority),
+            Self::cleanup_from_realized_attempt(attempt),
         );
     }
 
@@ -902,14 +911,15 @@ impl CompletionRegistry {
         authority: RuntimeCompletionResultAuthority,
     ) {
         let expected = RuntimeCompletionResultClass::CompletedWithFinalizationFailure;
-        if !authority.allows(expected) {
-            self.fail_input_authority_mismatch(input_id, &authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            self.fail_input_authority_mismatch(input_id, attempt, expected);
             return;
         }
         self.resolve_completed_with_finalization_failure(
             input_id,
             error,
-            CompletionCleanupObservation::from_authority(authority),
+            Self::cleanup_from_realized_attempt(attempt),
         );
     }
 
@@ -924,12 +934,14 @@ impl CompletionRegistry {
         authority: RuntimeCompletionResultAuthority,
     ) {
         let expected = RuntimeCompletionResultClass::RuntimeTerminated;
-        if !authority.allows(expected) {
-            let error = Self::authority_mismatch_error(&authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            let error = Self::authority_mismatch_error(&attempt, expected);
+            attempt.fail();
             self.fail_all_waiters(error);
             return;
         }
-        let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+        let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
         for (_, senders) in self.waiters.drain() {
             Self::send_outcome(
                 senders,
@@ -950,11 +962,12 @@ impl CompletionRegistry {
     {
         let input_ids: Vec<InputId> = input_ids.into_iter().collect();
         let expected = RuntimeCompletionResultClass::RuntimeTerminated;
-        if !authority.allows(expected) {
-            self.fail_inputs_authority_mismatch(input_ids, &authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            self.fail_inputs_authority_mismatch(input_ids, attempt, expected);
             return;
         }
-        let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+        let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
         for input_id in input_ids {
             if let Some(senders) = self.take_waiters(&input_id) {
                 Self::send_outcome(
@@ -994,8 +1007,10 @@ impl CompletionRegistry {
         F: FnMut(&InputId) -> bool,
     {
         let expected = RuntimeCompletionResultClass::RuntimeTerminated;
-        if !authority.allows(expected) {
-            let error = Self::authority_mismatch_error(&authority, expected);
+        let attempt = authority.begin_surface_resolution();
+        if !attempt.allows(expected) {
+            let error = Self::authority_mismatch_error(&attempt, expected);
+            attempt.fail();
             self.waiters.retain(|input_id, senders| {
                 if is_still_pending(input_id) {
                     return true;
@@ -1006,19 +1021,28 @@ impl CompletionRegistry {
             });
             return;
         }
-        let cleanup_observation = CompletionCleanupObservation::from_authority(authority);
+
+        let mut ready = Vec::new();
         self.waiters.retain(|input_id, senders| {
             if is_still_pending(input_id) {
                 return true;
             }
 
+            ready.push(std::mem::take(senders));
+            false
+        });
+        if ready.is_empty() {
+            attempt.abandon();
+            return;
+        }
+        let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
+        for senders in ready {
             Self::send_outcome(
-                std::mem::take(senders),
+                senders,
                 CompletionOutcome::runtime_terminated(reason),
                 cleanup_observation.clone(),
             );
-            false
-        });
+        }
     }
 
     /// Snapshot the current waiter carrier without mutating it.

@@ -63,6 +63,7 @@ rust_library(
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-live:meerkat_live",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
@@ -126,6 +127,7 @@ rust_library(
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-live:meerkat_live",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
@@ -172,6 +174,7 @@ rust_library(
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
         "//meerkat:meerkat_live_agent_factory_build",
+        "//meerkat:meerkat_machine_kernels_agent_factory_build",
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
@@ -219,6 +222,7 @@ rust_library(
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
         "//meerkat:meerkat_live_agent_factory_build",
+        "//meerkat:meerkat_machine_kernels_agent_factory_build",
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(

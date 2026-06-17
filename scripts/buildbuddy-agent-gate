@@ -226,11 +226,12 @@ fi
 if [[ "${#governance[@]}" -gt 0 ]]; then
   printf 'BuildBuddy agent gate governance/spec paths:\n'
   printf '  %s\n' "${governance[@]}"
-  echo "Formal/governance artifacts changed; running machine-check-drift, seam-inventory, and rmat-audit."
+  echo "Formal/governance artifacts changed; running machine-check-drift, runtime-authority-bypass, seam-inventory, and rmat-audit."
   if [[ "${dry_run}" -eq 1 ]]; then
-    echo "DRY-RUN make machine-check-drift seam-inventory rmat-audit"
+    echo "DRY-RUN make machine-check-drift runtime-authority-bypass seam-inventory rmat-audit"
+    echo "DRY-RUN generated-artifact summary: make machine-check-drift seam-inventory rmat-audit"
   else
-    make machine-check-drift seam-inventory rmat-audit
+    make machine-check-drift runtime-authority-bypass seam-inventory rmat-audit
   fi
 fi
 

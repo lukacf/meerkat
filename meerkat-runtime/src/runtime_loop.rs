@@ -2634,7 +2634,11 @@ mod tests {
 
         {
             let guard = terminal_first.lock().await;
-            let batch = crate::meerkat_machine::machine_select_runtime_loop_batch(&guard);
+            let batch =
+                crate::meerkat_machine::driver::machine_authorize_runtime_loop_batch(&guard)
+                    .expect("generated terminal-first runtime-loop batch")
+                    .input_ids()
+                    .to_vec();
             assert_eq!(
                 batch,
                 vec![terminal_id],
@@ -2665,7 +2669,10 @@ mod tests {
         .await;
 
         let guard = message_first.lock().await;
-        let batch = crate::meerkat_machine::machine_select_runtime_loop_batch(&guard);
+        let batch = crate::meerkat_machine::driver::machine_authorize_runtime_loop_batch(&guard)
+            .expect("generated message-first runtime-loop batch")
+            .input_ids()
+            .to_vec();
         assert_eq!(
             batch,
             vec![message_id],

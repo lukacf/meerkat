@@ -64,6 +64,9 @@ pub struct MachineSchema {
     pub effects: EnumSchema,
     pub helpers: Vec<HelperSchema>,
     pub derived: Vec<HelperSchema>,
+    /// Generated command/capability plans that group existing inputs,
+    /// transitions, guards, and effects into an auditable authority surface.
+    pub command_plans: Vec<CommandPlanSchema>,
     pub invariants: Vec<InvariantSchema>,
     pub transitions: Vec<TransitionSchema>,
     pub effect_dispositions: Vec<EffectDispositionRule>,
@@ -110,6 +113,10 @@ impl MachineSchema {
                 .map(|helper| helper.name.as_str())
                 .chain(self.derived.iter().map(|helper| helper.name.as_str())),
             "helper/derived",
+        )?;
+        let _command_plan_names = unique_names(
+            self.command_plans.iter().map(|plan| plan.name.as_str()),
+            "command plan",
         )?;
 
         if !phase_names.contains(self.state.init.phase.as_str()) {
@@ -182,6 +189,65 @@ impl MachineSchema {
                 return Err(MachineSchemaError::UnknownRuntimeInternalInputVariant {
                     variant: runtime_internal_input.as_str().to_owned(),
                 });
+            }
+        }
+
+        for plan in &self.command_plans {
+            if plan.authority_type.is_empty() {
+                return Err(MachineSchemaError::EmptyName("command-plan authority type"));
+            }
+            for input in &plan.source_inputs {
+                if !input_variants.contains(input.as_str()) {
+                    return Err(MachineSchemaError::UnknownCommandPlanInput {
+                        plan: plan.name.clone(),
+                        input: input.as_str().to_owned(),
+                    });
+                }
+            }
+            for signal in &plan.source_signals {
+                if !signal_variants.contains(signal.as_str()) {
+                    return Err(MachineSchemaError::UnknownCommandPlanSignal {
+                        plan: plan.name.clone(),
+                        signal: signal.as_str().to_owned(),
+                    });
+                }
+            }
+            for effect in &plan.effects {
+                if !effect_variants.contains(effect.as_str()) {
+                    return Err(MachineSchemaError::UnknownCommandPlanEffect {
+                        plan: plan.name.clone(),
+                        effect: effect.as_str().to_owned(),
+                    });
+                }
+            }
+            for closure in &plan.effect_closures {
+                if closure.authority_type.is_empty() {
+                    return Err(MachineSchemaError::EmptyName(
+                        "command-plan effect-closure authority type",
+                    ));
+                }
+                if closure.closure_policy.is_empty() {
+                    return Err(MachineSchemaError::EmptyName(
+                        "command-plan effect-closure policy",
+                    ));
+                }
+                if closure.lifecycle.is_empty() || closure.lifecycle.iter().any(String::is_empty) {
+                    return Err(MachineSchemaError::EmptyName(
+                        "command-plan effect-closure lifecycle state",
+                    ));
+                }
+                if !effect_variants.contains(closure.effect.as_str()) {
+                    return Err(MachineSchemaError::UnknownCommandPlanEffect {
+                        plan: plan.name.clone(),
+                        effect: closure.effect.as_str().to_owned(),
+                    });
+                }
+                if !plan.effects.contains(&closure.effect) {
+                    return Err(MachineSchemaError::UnknownCommandPlanClosureEffect {
+                        plan: plan.name.clone(),
+                        effect: closure.effect.as_str().to_owned(),
+                    });
+                }
             }
         }
 
@@ -292,6 +358,22 @@ impl MachineSchema {
                         &helper_names,
                         &bindings,
                     )?;
+                }
+            }
+        }
+
+        let transition_names: IndexSet<&str> = self
+            .transitions
+            .iter()
+            .map(|transition| transition.name.as_str())
+            .collect();
+        for plan in &self.command_plans {
+            for transition in &plan.transitions {
+                if !transition_names.contains(transition.as_str()) {
+                    return Err(MachineSchemaError::UnknownCommandPlanTransition {
+                        plan: plan.name.clone(),
+                        transition: transition.as_str().to_owned(),
+                    });
                 }
             }
         }
@@ -540,6 +622,25 @@ pub struct HelperSchema {
 pub struct InvariantSchema {
     pub name: String,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandPlanSchema {
+    pub name: String,
+    pub authority_type: String,
+    pub source_inputs: Vec<InputVariantId>,
+    pub source_signals: Vec<SignalVariantId>,
+    pub transitions: Vec<TransitionId>,
+    pub effects: Vec<EffectVariantId>,
+    pub effect_closures: Vec<EffectClosureSchema>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectClosureSchema {
+    pub effect: EffectVariantId,
+    pub authority_type: String,
+    pub closure_policy: String,
+    pub lifecycle: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1787,6 +1888,11 @@ pub enum MachineSchemaError {
     MissingStringEnumBinding { name: String },
     UnknownStringEnumVariant { enum_name: String, variant: String },
     InvalidStringEnumBinding { name: String, reason: String },
+    UnknownCommandPlanInput { plan: String, input: String },
+    UnknownCommandPlanSignal { plan: String, signal: String },
+    UnknownCommandPlanTransition { plan: String, transition: String },
+    UnknownCommandPlanEffect { plan: String, effect: String },
+    UnknownCommandPlanClosureEffect { plan: String, effect: String },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -1877,6 +1983,36 @@ impl fmt::Display for MachineSchemaError {
                     "invalid string enum named-type binding `{name}`: {reason}"
                 )
             }
+            Self::UnknownCommandPlanInput { plan, input } => {
+                write!(
+                    f,
+                    "command plan `{plan}` references unknown input `{input}`"
+                )
+            }
+            Self::UnknownCommandPlanSignal { plan, signal } => {
+                write!(
+                    f,
+                    "command plan `{plan}` references unknown signal `{signal}`"
+                )
+            }
+            Self::UnknownCommandPlanTransition { plan, transition } => {
+                write!(
+                    f,
+                    "command plan `{plan}` references unknown transition `{transition}`"
+                )
+            }
+            Self::UnknownCommandPlanEffect { plan, effect } => {
+                write!(
+                    f,
+                    "command plan `{plan}` references unknown effect `{effect}`"
+                )
+            }
+            Self::UnknownCommandPlanClosureEffect { plan, effect } => {
+                write!(
+                    f,
+                    "command plan `{plan}` declares closure for `{effect}` without listing it as a command effect"
+                )
+            }
         }
     }
 }
@@ -1886,10 +2022,11 @@ impl std::error::Error for MachineSchemaError {}
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use crate::identity::{EnumTypeId, EnumVariantId, NamedTypeId};
+    use crate::identity::{EffectVariantId, EnumTypeId, EnumVariantId, NamedTypeId};
     use crate::{
         Expr, InvariantSchema, MachineSchema, MachineSchemaError, NamedTypeBinding, RustTypeAtom,
         Update, catalog::dsl::dsl_meerkat_machine as meerkat_machine,
+        catalog::dsl::dsl_mob_machine as mob_machine,
     };
 
     #[test]
@@ -1925,6 +2062,326 @@ mod tests {
             vec!["Destroyed".to_owned()]
         );
         assert_eq!(schema.validate(), Ok(()));
+    }
+
+    #[test]
+    fn meerkat_queue_to_run_command_plans_are_schema_owned() {
+        let schema = meerkat_machine();
+        let plan_names = schema
+            .command_plans
+            .iter()
+            .map(|plan| plan.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            plan_names,
+            vec![
+                "AuthorizedAcceptedInputMaterialization",
+                "AuthorizeRuntimeLoopBatch",
+                "AuthorizedStageForRun",
+                "AuthorizedRuntimeLoopRunCommit",
+                "AuthorizedRuntimeCompletionResultClosure"
+            ]
+        );
+        let stage_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "AuthorizedStageForRun")
+            .expect("stage command plan");
+        let stage_transitions = stage_plan
+            .transitions
+            .iter()
+            .map(|transition| transition.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stage_transitions,
+            vec![
+                "StageForRunIdle",
+                "StageForRunAttached",
+                "StageForRunRunning",
+                "StageForRunRetired",
+                "StageForRunStopped"
+            ]
+        );
+        let guard_names = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == "StageForRunIdle")
+            .expect("StageForRunIdle transition")
+            .guards
+            .iter()
+            .map(|guard| guard.name.as_str())
+            .collect::<Vec<_>>();
+        for required in [
+            "input_queued",
+            "input_lane_bound",
+            "input_sequence_bound",
+            "input_recovery_lane_bound",
+            "input_not_run_associated",
+            "current_run_matches",
+        ] {
+            assert!(
+                guard_names.contains(&required),
+                "StageForRun command-plan guard expansion must include {required}; got {guard_names:?}"
+            );
+        }
+
+        let run_commit_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "AuthorizedRuntimeLoopRunCommit")
+            .expect("runtime-loop run commit command plan");
+        let run_commit_transitions = run_commit_plan
+            .transitions
+            .iter()
+            .map(|transition| transition.as_str())
+            .collect::<Vec<_>>();
+        for required in [
+            "RunCompleted",
+            "RunFailed",
+            "RunCancelled",
+            "CommitRunningToIdle",
+            "CommitRunningToAttached",
+            "CommitRunningToRetired",
+            "FailRunningToIdle",
+            "CancelRunningToIdle",
+            "RollbackRunRunningToIdle",
+        ] {
+            assert!(
+                run_commit_transitions.contains(&required),
+                "run-commit command plan must include {required}; got {run_commit_transitions:?}"
+            );
+        }
+        let run_commit_effects = run_commit_plan
+            .effects
+            .iter()
+            .map(|effect| effect.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            run_commit_effects,
+            vec!["TurnRunCompleted", "TurnRunFailed", "TurnRunCancelled"]
+        );
+        let run_commit_closures = run_commit_plan
+            .effect_closures
+            .iter()
+            .map(|closure| closure.effect.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            run_commit_closures,
+            vec!["TurnRunCompleted", "TurnRunFailed", "TurnRunCancelled"]
+        );
+        for closure in &run_commit_plan.effect_closures {
+            assert_eq!(closure.authority_type, "AuthorizedRuntimeLoopRunCommit");
+            assert_eq!(closure.closure_policy, "RuntimeLoopRunCommitEffect");
+            assert_eq!(
+                closure.lifecycle,
+                vec![
+                    "Authorized",
+                    "Attempted",
+                    "Realized",
+                    "Failed",
+                    "Cancelled",
+                    "Abandoned"
+                ]
+            );
+        }
+
+        let completion_closure_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "AuthorizedRuntimeCompletionResultClosure")
+            .expect("runtime completion result closure command plan");
+        assert_eq!(
+            completion_closure_plan.effects,
+            vec![EffectVariantId::parse("RuntimeCompletionResultResolved").unwrap()]
+        );
+        assert_eq!(completion_closure_plan.effect_closures.len(), 1);
+        let closure = &completion_closure_plan.effect_closures[0];
+        assert_eq!(closure.effect.as_str(), "RuntimeCompletionResultResolved");
+        assert_eq!(closure.authority_type, "RuntimeCompletionResultAuthority");
+        assert_eq!(closure.closure_policy, "LocalSurfaceResultAlignment");
+        assert_eq!(
+            closure.lifecycle,
+            vec![
+                "Authorized",
+                "Attempted",
+                "Realized",
+                "Failed",
+                "Cancelled",
+                "Abandoned"
+            ]
+        );
+    }
+
+    #[test]
+    fn mob_spawn_command_plan_is_schema_owned() {
+        let schema = mob_machine();
+        let command_plan_names = schema
+            .command_plans
+            .iter()
+            .map(|plan| plan.name.as_str())
+            .collect::<Vec<_>>();
+        for required in [
+            "AuthorizedMobSpawnStart",
+            "CanStartSpawn",
+            "SpawnStarted",
+            "SpawnEffect",
+            "FailSpawn",
+        ] {
+            assert!(
+                command_plan_names.contains(&required),
+                "mob spawn command plans must include {required}; got {command_plan_names:?}"
+            );
+        }
+        let spawn_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "AuthorizedMobSpawnStart")
+            .expect("mob spawn command plan");
+
+        assert_eq!(
+            spawn_plan.authority_type,
+            "PendingSpawnOperationOwnerAuthorized"
+        );
+        assert_eq!(
+            spawn_plan
+                .source_signals
+                .iter()
+                .map(|signal| signal.as_str())
+                .collect::<Vec<_>>(),
+            vec!["StageSpawn", "CompleteSpawn"]
+        );
+        assert_eq!(
+            spawn_plan
+                .source_inputs
+                .iter()
+                .map(|input| input.as_str())
+                .collect::<Vec<_>>(),
+            vec!["CancelPendingSpawn"]
+        );
+
+        let transitions = spawn_plan
+            .transitions
+            .iter()
+            .map(|transition| transition.as_str())
+            .collect::<Vec<_>>();
+        for required in [
+            "StageSpawnRunning",
+            "CompleteSpawnRunning",
+            "CompleteSpawnLateArrivalRunning",
+            "CompleteSpawnLateArrivalStopped",
+            "CompleteSpawnLateArrivalCompleted",
+            "CompleteSpawnDestroyed",
+            "CancelPendingSpawnPresentRunning",
+            "CancelPendingSpawnPresentStopped",
+            "CancelPendingSpawnPresentCompleted",
+            "CancelPendingSpawnAbsentRunning",
+            "CancelPendingSpawnAbsentStopped",
+            "CancelPendingSpawnAbsentCompleted",
+            "CancelPendingSpawnDestroyed",
+        ] {
+            assert!(
+                transitions.contains(&required),
+                "mob spawn command plan must include {required}; got {transitions:?}"
+            );
+        }
+
+        let effects = spawn_plan
+            .effects
+            .iter()
+            .map(|effect| effect.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            effects,
+            vec![
+                "PendingSpawnOperationOwnerAuthorized",
+                "ExposePendingSpawn",
+                "EmitMemberLifecycleNotice"
+            ]
+        );
+        assert_eq!(spawn_plan.effect_closures.len(), 2);
+        for closure in &spawn_plan.effect_closures {
+            assert_eq!(
+                closure.lifecycle,
+                vec![
+                    "Authorized",
+                    "Attempted",
+                    "Realized",
+                    "Failed",
+                    "Cancelled",
+                    "Abandoned"
+                ]
+            );
+        }
+        assert!(
+            spawn_plan
+                .effect_closures
+                .iter()
+                .any(
+                    |closure| closure.effect.as_str() == "PendingSpawnOperationOwnerAuthorized"
+                        && closure.authority_type == "PendingSpawnOperationOwnerAuthorized"
+                        && closure.closure_policy == "LocalPendingSpawnOwner"
+                ),
+            "mob spawn plan must declare pending-owner closure metadata"
+        );
+        assert!(
+            spawn_plan
+                .effect_closures
+                .iter()
+                .any(
+                    |closure| closure.effect.as_str() == "EmitMemberLifecycleNotice"
+                        && closure.authority_type == "CompleteSpawn"
+                        && closure.closure_policy == "LocalSpawnCompletion"
+                ),
+            "mob spawn plan must declare completion closure metadata"
+        );
+        let start_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "CanStartSpawn")
+            .expect("CanStartSpawn command plan");
+        assert_eq!(start_plan.authority_type, "CanStartSpawn");
+        assert_eq!(
+            start_plan
+                .source_signals
+                .iter()
+                .map(|signal| signal.as_str())
+                .collect::<Vec<_>>(),
+            vec!["StageSpawn"]
+        );
+        let started_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "SpawnStarted")
+            .expect("SpawnStarted command plan");
+        assert_eq!(started_plan.authority_type, "SpawnStarted");
+        assert_eq!(
+            started_plan
+                .effects
+                .iter()
+                .map(|effect| effect.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ExposePendingSpawn"]
+        );
+        let spawn_effect_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "SpawnEffect")
+            .expect("SpawnEffect command plan");
+        assert_eq!(spawn_effect_plan.authority_type, "SpawnEffect");
+        let fail_spawn_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "FailSpawn")
+            .expect("FailSpawn command plan");
+        assert_eq!(fail_spawn_plan.authority_type, "FailSpawn");
+        assert_eq!(
+            fail_spawn_plan
+                .source_inputs
+                .iter()
+                .map(|input| input.as_str())
+                .collect::<Vec<_>>(),
+            vec!["CancelPendingSpawn"]
+        );
     }
 
     #[test]

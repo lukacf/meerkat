@@ -82,6 +82,9 @@ fn schema_shape_mismatches_for_schemas(
     if catalog.derived != production.derived {
         mismatches.push("derived helpers".to_owned());
     }
+    if catalog.command_plans != production.command_plans {
+        mismatches.push("command plans".to_owned());
+    }
     if catalog.invariants != production.invariants {
         mismatches.push("invariants".to_owned());
     }
@@ -96,6 +99,36 @@ fn schema_shape_mismatches_for_schemas(
     }
 
     mismatches
+}
+
+#[test]
+fn command_plan_capability_types_are_generated_for_runtime_and_mob_pilots() {
+    let meerkat = include_str!("../../meerkat-machine-kernels/src/generated/meerkat.rs");
+    let mob = include_str!("../../meerkat-machine-kernels/src/generated/mob.rs");
+
+    for expected in [
+        "pub mod command_capabilities",
+        "pub struct AuthorizedAcceptedInputMaterialization",
+        "pub struct AuthorizedRuntimeLoopBatch",
+        "pub struct AuthorizedStageForRun",
+        "pub struct RuntimeCompletionResultAuthority",
+        "pub struct AuthorizedRuntimeLoopRunCommit",
+    ] {
+        assert!(
+            meerkat.contains(expected),
+            "MeerkatMachine generated kernel should contain `{expected}`"
+        );
+    }
+
+    for expected in [
+        "pub mod command_capabilities",
+        "pub struct PendingSpawnOperationOwnerAuthorized",
+    ] {
+        assert!(
+            mob.contains(expected),
+            "MobMachine generated kernel should contain `{expected}`"
+        );
+    }
 }
 
 fn phase1_schema_parity_cases() -> Vec<SchemaParityCase> {
@@ -813,6 +846,11 @@ fn production_schema_exports_include_metadata_without_catalog_schema_splicing() 
         assert_eq!(
             production.runtime_internal_inputs, catalog.runtime_internal_inputs,
             "{} production export must carry runtime-internal input metadata before parity comparison",
+            case.machine
+        );
+        assert_eq!(
+            production.command_plans, catalog.command_plans,
+            "{} production export must carry command-plan metadata before parity comparison",
             case.machine
         );
     }

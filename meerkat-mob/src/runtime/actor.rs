@@ -25,6 +25,7 @@ use meerkat_core::comms::{
     PeerLifecycleKind, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
 };
 use meerkat_core::time_compat::SystemTime;
+use meerkat_machine_kernels::generated::mob::command_capabilities as generated_mob_command_capabilities;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
@@ -1016,6 +1017,71 @@ pub(super) struct PendingSpawn {
 pub(super) struct PendingSpawnProgress {
     pub(super) bridge_session_id: Option<meerkat_core::types::SessionId>,
     pub(super) operation_id: Option<meerkat_core::ops::OperationId>,
+}
+
+#[must_use = "mob spawn start authority must be consumed by pending spawn insertion"]
+struct AuthorizedMobSpawnStart {
+    generated_can_start: generated_mob_command_capabilities::CommandPlanKind,
+    generated_owner: generated_mob_command_capabilities::CommandPlanKind,
+    agent_identity: AgentIdentity,
+    session_id: SessionId,
+}
+
+#[must_use = "started mob spawn authority must be consumed by PendingSpawnLineage insertion"]
+struct AuthorizedMobSpawnStarted {
+    generated_owner: generated_mob_command_capabilities::CommandPlanKind,
+    generated_started: generated_mob_command_capabilities::CommandPlanKind,
+    agent_identity: AgentIdentity,
+    session_id: SessionId,
+}
+
+#[must_use = "mob spawn completion authority must be observed by pending spawn completion"]
+struct AuthorizedMobSpawnCompleted {
+    generated_plan: generated_mob_command_capabilities::CommandPlanKind,
+    generated_effect: generated_mob_command_capabilities::CommandPlanKind,
+    agent_identity: AgentIdentity,
+}
+
+impl AuthorizedMobSpawnStart {
+    fn owner_session_id(&self) -> &SessionId {
+        debug_assert_eq!(
+            self.generated_can_start,
+            generated_mob_command_capabilities::CommandPlanKind::CanStartSpawn
+        );
+        debug_assert_eq!(
+            self.generated_owner,
+            generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart
+        );
+        &self.session_id
+    }
+
+    fn start(self, pending: &PendingSpawn) -> Result<AuthorizedMobSpawnStarted, MobError> {
+        debug_assert_eq!(
+            self.generated_can_start,
+            generated_mob_command_capabilities::CommandPlanKind::CanStartSpawn
+        );
+        debug_assert_eq!(
+            self.generated_owner,
+            generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart
+        );
+        if pending.agent_identity != self.agent_identity
+            || pending.admitted_bridge_session_id != self.session_id
+        {
+            return Err(MobError::Internal(format!(
+                "MobMachine StageSpawn authority for '{}' / '{}' did not match pending spawn '{}' / '{}'",
+                self.agent_identity,
+                self.session_id,
+                pending.agent_identity,
+                pending.admitted_bridge_session_id
+            )));
+        }
+        Ok(AuthorizedMobSpawnStarted {
+            generated_owner: self.generated_owner,
+            generated_started: generated_mob_command_capabilities::CommandPlanKind::SpawnStarted,
+            agent_identity: self.agent_identity,
+            session_id: self.session_id,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -5837,18 +5903,31 @@ impl MobActor {
         spawn_ticket: u64,
         pending: PendingSpawn,
         task: tokio::task::JoinHandle<()>,
+        started: AuthorizedMobSpawnStarted,
     ) {
+        debug_assert_eq!(pending.agent_identity, started.agent_identity);
+        debug_assert_eq!(pending.admitted_bridge_session_id, started.session_id);
+        debug_assert_eq!(
+            started.generated_owner,
+            generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart
+        );
+        debug_assert_eq!(
+            started.generated_started,
+            generated_mob_command_capabilities::CommandPlanKind::SpawnStarted
+        );
         let impact = self.pending_spawns.insert(spawn_ticket, pending, task);
         if let PendingSpawnInsertImpact::Collided { replaced_identity } = impact {
             // StageSpawn has already been accepted for the new slot in enqueue paths.
             // If we replaced a prior slot at the same ticket, close that prior
             // staged snapshot now so authority counters cannot drift silently.
             if let Some(replaced_identity) = replaced_identity.as_ref() {
-                self.complete_orchestrator_spawn(
+                if let Ok(completed) = self.complete_orchestrator_spawn(
                     Some(spawn_ticket),
                     replaced_identity,
                     "pending spawn slot collision replaced existing entry",
-                );
+                ) {
+                    debug_assert_eq!(completed.agent_identity, *replaced_identity);
+                }
             }
             tracing::warn!(
                 spawn_ticket,
@@ -5882,11 +5961,13 @@ impl MobActor {
         let (pending, task) = self.take_pending_spawn_slot(spawn_ticket);
         if pending.is_some() || task.is_some() {
             if let Some(pending) = pending.as_ref() {
-                self.complete_orchestrator_spawn(
+                if let Ok(completed) = self.complete_orchestrator_spawn(
                     Some(spawn_ticket),
                     &pending.agent_identity,
                     context,
-                );
+                ) {
+                    debug_assert_eq!(completed.agent_identity, pending.agent_identity);
+                }
             }
         }
         if let Some(message) = self.pending_spawn_alignment_violation() {
@@ -5904,7 +5985,7 @@ impl MobActor {
         &mut self,
         agent_identity: &AgentIdentity,
         session_id: &SessionId,
-    ) -> Result<Option<SessionId>, MobError> {
+    ) -> Result<AuthorizedMobSpawnStart, MobError> {
         let dsl_agent_identity =
             mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
         let dsl_session_id = mob_dsl::SessionId::from_domain(session_id);
@@ -5929,12 +6010,18 @@ impl MobActor {
                 "MobMachine StageSpawn did not authorize pending operation owner for '{agent_identity}'"
             )));
         }
-        Ok(Some(session_id.clone()))
+        Ok(AuthorizedMobSpawnStart {
+            generated_can_start: generated_mob_command_capabilities::CommandPlanKind::CanStartSpawn,
+            generated_owner:
+                generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart,
+            agent_identity: agent_identity.clone(),
+            session_id: session_id.clone(),
+        })
     }
 
     fn apply_generated_self_owned_operation_owner(
         provision_request: &mut ProvisionMemberRequest,
-        generated_owner: Option<SessionId>,
+        generated_owner: &AuthorizedMobSpawnStart,
     ) -> Result<(), MobError> {
         if !matches!(provision_request.binding, crate::RuntimeBinding::Session)
             || provision_request.owner_bridge_session_id.is_some()
@@ -5942,12 +6029,8 @@ impl MobActor {
         {
             return Ok(());
         }
-        let Some(generated_owner) = generated_owner else {
-            return Err(MobError::Internal(
-                "session member operation requires generated pending spawn owner authority".into(),
-            ));
-        };
-        provision_request.generated_self_owned_operation_owner = Some(generated_owner);
+        provision_request.generated_self_owned_operation_owner =
+            Some(generated_owner.owner_session_id().clone());
         Ok(())
     }
 
@@ -6504,15 +6587,48 @@ impl MobActor {
         spawn_ticket: Option<u64>,
         agent_identity: &AgentIdentity,
         context: &'static str,
-    ) {
-        if let Err(error) = self.apply_dsl_signal(
+    ) -> Result<AuthorizedMobSpawnCompleted, MobError> {
+        let dsl_agent_identity =
+            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
+        let transition = match self.apply_dsl_signal_collect_transition(
             mob_dsl::MobMachineSignal::CompleteSpawn {
-                agent_identity: mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(
-                    agent_identity.as_str(),
-                )),
+                agent_identity: dsl_agent_identity,
             },
             "complete_spawn",
         ) {
+            Ok(transition) => transition,
+            Err(error) => {
+                if let Some(spawn_ticket) = spawn_ticket {
+                    tracing::warn!(
+                        spawn_ticket,
+                        agent_identity = %agent_identity,
+                        error = %error,
+                        context,
+                        "failed to reconcile generated pending-spawn snapshot"
+                    );
+                } else {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        error = %error,
+                        context,
+                        "failed to reconcile generated pending-spawn snapshot"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let completed = transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::EmitMemberLifecycleNotice {
+                    kind: mob_dsl::MemberLifecycleKind::Spawned
+                }
+            )
+        });
+        if !completed {
+            let error = MobError::Internal(format!(
+                "MobMachine CompleteSpawn did not authorize spawn completion notice for '{agent_identity}'"
+            ));
             if let Some(spawn_ticket) = spawn_ticket {
                 tracing::warn!(
                     spawn_ticket,
@@ -6529,7 +6645,23 @@ impl MobActor {
                     "failed to reconcile generated pending-spawn snapshot"
                 );
             }
+            return Err(error);
         }
+        let completed = AuthorizedMobSpawnCompleted {
+            generated_plan:
+                generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart,
+            generated_effect: generated_mob_command_capabilities::CommandPlanKind::SpawnEffect,
+            agent_identity: agent_identity.clone(),
+        };
+        debug_assert_eq!(
+            completed.generated_effect,
+            generated_mob_command_capabilities::CommandPlanKind::SpawnEffect
+        );
+        debug_assert_eq!(
+            completed.generated_plan,
+            generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart
+        );
+        Ok(completed)
     }
 
     async fn flow_tracker_alignment_violation(&self) -> Option<String> {
@@ -8511,6 +8643,13 @@ impl MobActor {
                 "fail_all_pending_spawns",
             ) {
                 cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
+            } else {
+                let generated_failed =
+                    generated_mob_command_capabilities::CommandPlanKind::FailSpawn;
+                debug_assert_eq!(
+                    generated_failed,
+                    generated_mob_command_capabilities::CommandPlanKind::FailSpawn
+                );
             }
             if let Err(error) = self.abort_pending_spawn_slot(&slot, reason).await {
                 cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
@@ -8609,6 +8748,13 @@ impl MobActor {
                 "cancel_pending_spawns_for_member",
             ) {
                 cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
+            } else {
+                let generated_failed =
+                    generated_mob_command_capabilities::CommandPlanKind::FailSpawn;
+                debug_assert_eq!(
+                    generated_failed,
+                    generated_mob_command_capabilities::CommandPlanKind::FailSpawn
+                );
             }
             if let Err(error) = self.abort_pending_spawn_slot(&slot, reason).await {
                 cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
@@ -9241,7 +9387,7 @@ impl MobActor {
             };
         if let Err(error) = Self::apply_generated_self_owned_operation_owner(
             &mut provision_request,
-            generated_self_owned_operation_owner,
+            &generated_self_owned_operation_owner,
         ) {
             let _ = reply_tx.send(Err(error));
             return;
@@ -9361,7 +9507,15 @@ impl MobActor {
                 );
             }
         });
-        self.insert_pending_spawn(spawn_ticket, pending, task);
+        let spawn_started = match generated_self_owned_operation_owner.start(&pending) {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = pending.reply_tx.send(Err(error));
+                task.abort();
+                return;
+            }
+        };
+        self.insert_pending_spawn(spawn_ticket, pending, task, spawn_started);
         if let Err(error) = self.ensure_pending_spawn_alignment("enqueue_spawn post-insert") {
             tracing::error!(
                 spawn_ticket,
@@ -9700,7 +9854,7 @@ impl MobActor {
             self.stage_orchestrator_spawn(agent_identity, &admitted_bridge_session_id)?;
         Self::apply_generated_self_owned_operation_owner(
             &mut provision_request,
-            generated_self_owned_operation_owner,
+            &generated_self_owned_operation_owner,
         )?;
 
         // External provisioning installs supervisor-bridge recipient trust
@@ -9742,7 +9896,8 @@ impl MobActor {
         let pending_task = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
-        self.insert_pending_spawn(spawn_ticket, pending, pending_task);
+        let spawn_started = generated_self_owned_operation_owner.start(&pending)?;
+        self.insert_pending_spawn(spawn_ticket, pending, pending_task, spawn_started);
         if let Err(error) =
             self.ensure_pending_spawn_alignment("spawn_from_policy_inline staged pending")
         {
@@ -14420,7 +14575,7 @@ impl MobActor {
         );
         Self::apply_generated_self_owned_operation_owner(
             &mut provision_request,
-            generated_self_owned_operation_owner,
+            &generated_self_owned_operation_owner,
         )
         .map_err(|error| MobRespawnError::SpawnAfterRetire {
             identity: AgentIdentity::from(agent_identity.as_str()),
@@ -14471,7 +14626,18 @@ impl MobActor {
         let respawn_inline_task = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
-        self.insert_pending_spawn(respawn_spawn_ticket, respawn_pending, respawn_inline_task);
+        let spawn_started = generated_self_owned_operation_owner
+            .start(&respawn_pending)
+            .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                identity: AgentIdentity::from(agent_identity.as_str()),
+                reason: format!("failed to start respawn replacement spawn: {error}"),
+            })?;
+        self.insert_pending_spawn(
+            respawn_spawn_ticket,
+            respawn_pending,
+            respawn_inline_task,
+            spawn_started,
+        );
         if let Err(error) = self.ensure_pending_spawn_alignment("handle_respawn staged replacement")
         {
             tracing::error!(

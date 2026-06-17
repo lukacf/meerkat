@@ -141,6 +141,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     },
                     helpers: vec![#(#helpers),*],
                     derived: vec![],
+                    command_plans: vec![],
                     invariants: vec![#(#invariants),*],
                     transitions: vec![#(#transitions),*],
                     effect_dispositions: vec![#(#dispositions),*],

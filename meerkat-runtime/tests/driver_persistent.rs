@@ -447,7 +447,7 @@ async fn recover_from_store() {
 
     // State should now be in the driver
     assert!(driver.input_state(&input_id).is_some());
-    let dequeued = driver.dequeue_next();
+    let dequeued = driver.contract_dequeue_next_for_recovery_tests();
     assert!(
         dequeued.is_some(),
         "Recovered queued input should be re-enqueued"
@@ -642,7 +642,7 @@ async fn durable_accept_failure_restores_canonical_ingress_state() {
         "failed durable admission must not leave canonical input state behind"
     );
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "failed durable admission must not leave a queued phantom input"
     );
     assert!(
@@ -694,7 +694,7 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
         "failed recovery must not leave recovered input in the live driver",
     );
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "failed recovery must not leave recovered queue projection",
     );
     let stored = inner
@@ -747,7 +747,7 @@ async fn persistence_record_rejects_unstamped_recovered_row_before_store_write()
         "failed persistence-record recovery must not retain the rejected row",
     );
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "failed persistence-record recovery must not leave recovered queue projection",
     );
     assert!(
@@ -810,7 +810,7 @@ async fn recover_allows_legacy_unstamped_terminal_rows() {
         "terminal rows must not become active"
     );
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "terminal rows must not enter runtime queues"
     );
 
@@ -893,7 +893,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
         "committed applied inputs should not stay active after recovery"
     );
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "committed applied inputs should not be replayed after recovery"
     );
 }
@@ -967,7 +967,7 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
         "duplicate legacy row must still consult the canonical boundary receipt"
     );
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "canonical committed input must not be replayed because the newer duplicate row came from the legacy alias"
     );
 }
@@ -1037,7 +1037,7 @@ async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
         "canonical applied row must not be replaced by a newer stale legacy row"
     );
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "newer stale legacy row must not replay a canonically committed input"
     );
 }
@@ -1095,7 +1095,9 @@ async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss
         "canonical missing receipt should recover by requeueing the input"
     );
     assert_eq!(
-        driver.dequeue_next().map(|(queued_id, _)| queued_id),
+        driver
+            .contract_dequeue_next_for_recovery_tests()
+            .map(|(queued_id, _)| queued_id),
         Some(input_id),
         "requeued canonical input should remain available for replay"
     );
@@ -1169,7 +1171,9 @@ async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
         "canonical receipt miss should requeue instead of consuming from stale legacy receipt"
     );
     assert_eq!(
-        driver.dequeue_next().map(|(queued_id, _)| queued_id),
+        driver
+            .contract_dequeue_next_for_recovery_tests()
+            .map(|(queued_id, _)| queued_id),
         Some(input_id),
         "canonical missing-receipt input should remain queued for replay"
     );

@@ -12,6 +12,7 @@ pub mod protocol_codegen;
 pub mod public_contracts;
 pub mod rmat_audit;
 pub mod rmat_policy;
+pub mod runtime_authority_bypass;
 pub mod seam_inventory;
 pub mod typed_carrier;
 
@@ -61,6 +62,11 @@ enum Commands {
     /// `scripts/pre-push-bridge-no-responsestatus.sh` grep gate).
     #[command(name = "bridge-classifier")]
     BridgeClassifier,
+    /// Structural queue-to-run pilot bypass gate: raw accepted enqueue,
+    /// dequeue, and stage calls must stay behind explicit generated
+    /// authority/capability wrappers.
+    #[command(name = "runtime-authority-bypass")]
+    RuntimeAuthorityBypass,
     #[command(name = "ownership-ledger")]
     OwnershipLedger(OwnershipLedgerArgs),
     /// Verify every `@generated` header corresponds to a codegen-emit path
@@ -106,6 +112,9 @@ pub fn run() -> Result<()> {
         }
         Commands::BridgeClassifier => {
             run_machine_authority_task(bridge_classifier::run_bridge_classifier)
+        }
+        Commands::RuntimeAuthorityBypass => {
+            run_machine_authority_task(runtime_authority_bypass::run_runtime_authority_bypass)
         }
         // The ownership ledger resolves anchors against the canonical machine
         // catalog; constructing the DSL schemas needs the same deep stack as

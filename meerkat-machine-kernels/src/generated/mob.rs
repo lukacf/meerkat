@@ -7431,6 +7431,140 @@ pub enum EffectKind {
     AdaptiveRunTerminalized,
 }
 
+pub mod command_capabilities {
+    mod private {
+        #[derive(Debug, PartialEq, Eq)]
+        pub struct Sealed;
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CommandPlanKind {
+        AuthorizedMobSpawnStart,
+        CanStartSpawn,
+        SpawnStarted,
+        SpawnEffect,
+        FailSpawn,
+    }
+
+    impl CommandPlanKind {
+        #[must_use]
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::AuthorizedMobSpawnStart => "AuthorizedMobSpawnStart",
+                Self::CanStartSpawn => "CanStartSpawn",
+                Self::SpawnStarted => "SpawnStarted",
+                Self::SpawnEffect => "SpawnEffect",
+                Self::FailSpawn => "FailSpawn",
+            }
+        }
+    }
+
+    #[must_use = "generated command capability `PendingSpawnOperationOwnerAuthorized` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct PendingSpawnOperationOwnerAuthorized {
+        _sealed: private::Sealed,
+    }
+
+    impl PendingSpawnOperationOwnerAuthorized {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizedMobSpawnStart
+        }
+    }
+
+    #[must_use = "generated command capability `CanStartSpawn` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct CanStartSpawn {
+        _sealed: private::Sealed,
+    }
+
+    impl CanStartSpawn {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::CanStartSpawn
+        }
+    }
+
+    #[must_use = "generated command capability `SpawnStarted` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct SpawnStarted {
+        _sealed: private::Sealed,
+    }
+
+    impl SpawnStarted {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::SpawnStarted
+        }
+    }
+
+    #[must_use = "generated command capability `SpawnEffect` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct SpawnEffect {
+        _sealed: private::Sealed,
+    }
+
+    impl SpawnEffect {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::SpawnEffect
+        }
+    }
+
+    #[must_use = "generated command capability `FailSpawn` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct FailSpawn {
+        _sealed: private::Sealed,
+    }
+
+    impl FailSpawn {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::FailSpawn
+        }
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {

@@ -686,6 +686,121 @@ pub fn render_machine_contract_markdown(
         pushln!(&mut out);
     }
 
+    if !schema.command_plans.is_empty() {
+        pushln!(&mut out, "## Command Plans");
+        let transitions_by_name = schema
+            .transitions
+            .iter()
+            .map(|transition| (transition.name.as_str(), transition))
+            .collect::<BTreeMap<_, _>>();
+        for plan in &schema.command_plans {
+            pushln!(&mut out, "### `{}`", plan.name);
+            pushln!(&mut out, "- Authority: `{}`", plan.authority_type);
+            if !plan.source_inputs.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Source Inputs: {}",
+                    plan.source_inputs
+                        .iter()
+                        .map(|input| format!("`{input}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            if !plan.source_signals.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Source Signals: {}",
+                    plan.source_signals
+                        .iter()
+                        .map(|signal| format!("`{signal}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            if !plan.transitions.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Transitions: {}",
+                    plan.transitions
+                        .iter()
+                        .map(|transition| format!("`{transition}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+                pushln!(&mut out, "- Guard Expansion:");
+                for transition_id in &plan.transitions {
+                    if let Some(transition) = transitions_by_name.get(transition_id.as_str()) {
+                        let guards = if transition.guards.is_empty() {
+                            "`<none>`".to_owned()
+                        } else {
+                            transition
+                                .guards
+                                .iter()
+                                .map(|guard| format!("`{}`", guard.name))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        pushln!(&mut out, "  - `{transition_id}`: {guards}");
+                    }
+                }
+            }
+            if !plan.effects.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Command Effects: {}",
+                    plan.effects
+                        .iter()
+                        .map(|effect| format!("`{effect}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            if !plan.effect_closures.is_empty() {
+                pushln!(&mut out, "- Effect Closure:");
+                for closure in &plan.effect_closures {
+                    writeln!(
+                        &mut out,
+                        "  - `{}` via `{}` ({}) states: {}",
+                        closure.effect,
+                        closure.authority_type,
+                        closure.closure_policy,
+                        closure
+                            .lifecycle
+                            .iter()
+                            .map(|state| format!("`{state}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                    .expect("write to string");
+                }
+            }
+            let emitted_effects = plan
+                .transitions
+                .iter()
+                .filter_map(|transition_id| transitions_by_name.get(transition_id.as_str()))
+                .flat_map(|transition| transition.emit.iter().map(|effect| &effect.variant))
+                .collect::<BTreeSet<_>>();
+            if !emitted_effects.is_empty() {
+                writeln!(
+                    &mut out,
+                    "- Emitted By Transitions: {}",
+                    emitted_effects
+                        .iter()
+                        .map(|effect| format!("`{effect}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+            }
+            pushln!(&mut out);
+        }
+    }
+
     pushln!(&mut out, "## Invariants");
     for invariant in &schema.invariants {
         pushln!(&mut out, "- `{}`", invariant.name);

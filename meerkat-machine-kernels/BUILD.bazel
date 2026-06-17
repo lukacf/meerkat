@@ -28,6 +28,22 @@ filegroup(
 
 
 
+exports_files(
+
+    [
+
+        "src/generated/meerkat.rs",
+
+        "src/generated/mob.rs",
+
+    ],
+
+    visibility = ["//meerkat-machine-codegen:__pkg__"],
+
+)
+
+
+
 rust_library(
     name = "meerkat_machine_kernels",
     aliases = aliases(package_name = "meerkat-machine-kernels"),

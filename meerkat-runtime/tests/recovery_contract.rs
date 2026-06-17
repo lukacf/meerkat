@@ -387,11 +387,11 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
         }
 
         let replayed_ids = vec![
-            driver.dequeue_next().unwrap().0,
-            driver.dequeue_next().unwrap().0,
+            driver.contract_dequeue_next_for_recovery_tests().unwrap().0,
+            driver.contract_dequeue_next_for_recovery_tests().unwrap().0,
         ];
         assert!(
-            driver.dequeue_next().is_none(),
+            driver.contract_dequeue_next_for_recovery_tests().is_none(),
             "{}: only the recovered contributors should be queued for replay",
             harness.name
         );
@@ -529,7 +529,7 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
             harness.name
         );
         assert!(
-            driver.dequeue_next().is_none(),
+            driver.contract_dequeue_next_for_recovery_tests().is_none(),
             "{}: committed contributors should not be replayed after recovery",
             harness.name
         );

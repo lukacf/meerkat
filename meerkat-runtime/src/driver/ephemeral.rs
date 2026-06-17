@@ -769,6 +769,44 @@ impl EphemeralRuntimeDriver {
         self.with_dsl_state(|state| state.input_admission_seq.get(&key).copied())
     }
 
+    #[cfg(test)]
+    pub(crate) fn input_runtime_boundary(
+        &self,
+        input_id: &InputId,
+    ) -> Option<mm_dsl::RecoveredRunApplyBoundary> {
+        let key = Self::dsl_key(input_id);
+        self.with_dsl_state(|state| state.input_runtime_boundary.get(&key).copied())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_runtime_execution_kind(
+        &self,
+        input_id: &InputId,
+    ) -> Option<mm_dsl::RecoveredRuntimeExecutionKind> {
+        let key = Self::dsl_key(input_id);
+        self.with_dsl_state(|state| state.input_runtime_execution_kind.get(&key).copied())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_peer_response_terminal_apply_intent(
+        &self,
+        input_id: &InputId,
+    ) -> Option<mm_dsl::RecoveredPeerResponseTerminalApplyIntent> {
+        let key = Self::dsl_key(input_id);
+        self.with_dsl_state(|state| {
+            state
+                .input_runtime_peer_response_terminal_apply_intent
+                .get(&key)
+                .copied()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_is_prompt_for_batch(&self, input_id: &InputId) -> Option<bool> {
+        let key = Self::dsl_key(input_id);
+        self.with_dsl_state(|state| state.input_is_prompt.get(&key).copied())
+    }
+
     /// Conversation projection decided at admission time.
     pub fn admitted_primitive_projection(
         &self,
@@ -857,6 +895,29 @@ impl EphemeralRuntimeDriver {
         self.debug_assert_queue_projection_alignment();
     }
 
+    pub(crate) fn validate_queue_projection_alignment(
+        &self,
+        context: &str,
+    ) -> Result<(), RuntimeDriverError> {
+        let physical_queue = self.queue.input_ids();
+        let machine_queue = self.dsl_queue_lane();
+        if physical_queue != machine_queue {
+            return Err(RuntimeDriverError::Internal(format!(
+                "{context}: physical queue projection diverged from machine queue lane: physical={physical_queue:?} machine={machine_queue:?}"
+            )));
+        }
+
+        let physical_steer_queue = self.steer_queue.input_ids();
+        let machine_steer_queue = self.dsl_steer_lane();
+        if physical_steer_queue != machine_steer_queue {
+            return Err(RuntimeDriverError::Internal(format!(
+                "{context}: physical steer queue projection diverged from machine steer lane: physical={physical_steer_queue:?} machine={machine_steer_queue:?}"
+            )));
+        }
+
+        Ok(())
+    }
+
     fn debug_assert_queue_projection_alignment(&self) {
         debug_assert_eq!(
             self.queue.input_ids(),
@@ -909,7 +970,17 @@ impl EphemeralRuntimeDriver {
             handling_mode,
             runtime_semantics,
         )?;
-        self.apply_recovered_lifecycle(&work_id, recovered_seed, admission_sequence_recovery)?;
+        let runtime_grouping = matches!(
+            recovered_seed.phase,
+            InputLifecycleState::Accepted | InputLifecycleState::Queued
+        )
+        .then_some((runtime_semantics, is_prompt));
+        self.apply_recovered_lifecycle(
+            &work_id,
+            recovered_seed,
+            admission_sequence_recovery,
+            runtime_grouping,
+        )?;
         self.register_accepted_idempotency(&work_id, recovered_state.idempotency_key.as_ref())?;
         self.record_admission_metadata(
             &work_id,
@@ -980,7 +1051,7 @@ impl EphemeralRuntimeDriver {
                 "terminal recovery path received non-terminal input '{work_id}'"
             )));
         }
-        self.apply_recovered_lifecycle(work_id, recovered_seed, None)?;
+        self.apply_recovered_lifecycle(work_id, recovered_seed, None, None)?;
         self.register_accepted_idempotency(work_id, idempotency_key)
     }
 
@@ -1009,6 +1080,7 @@ impl EphemeralRuntimeDriver {
         work_id: &InputId,
         recovered_seed: &InputStateSeed,
         admission_sequence_recovery: Option<mm_dsl::RecoveredInputNormalizationReasonKind>,
+        runtime_grouping: Option<(RuntimeInputSemantics, bool)>,
     ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(work_id);
         let lifecycle_state = recovered_seed.phase;
@@ -1061,6 +1133,33 @@ impl EphemeralRuntimeDriver {
         let lane = matches!(lifecycle_state, InputLifecycleState::Queued)
             .then_some(recovery_lane)
             .flatten();
+        let (
+            runtime_boundary,
+            runtime_execution_kind,
+            runtime_peer_response_terminal_apply_intent,
+            is_prompt,
+        ) = if let Some((runtime_semantics, is_prompt)) = runtime_grouping {
+            let runtime_boundary = mm_dsl::RecoveredRunApplyBoundary::try_from(
+                    runtime_semantics.boundary,
+                )
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "input '{work_id}' has unsupported runtime boundary for recovered grouping: {err}"
+                    ))
+                })?;
+            (
+                Some(runtime_boundary),
+                Some(mm_dsl::RecoveredRuntimeExecutionKind::from(
+                    runtime_semantics.execution_kind,
+                )),
+                runtime_semantics
+                    .peer_response_terminal_apply_intent
+                    .map(mm_dsl::RecoveredPeerResponseTerminalApplyIntent::from),
+                is_prompt,
+            )
+        } else {
+            (None, None, None, false)
+        };
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RecoverInputLifecycle {
                 input_id: key,
@@ -1080,6 +1179,10 @@ impl EphemeralRuntimeDriver {
                 admission_sequence_recovery,
                 recovery_lane,
                 lane,
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                is_prompt,
             },
             "RecoverInputLifecycle",
         )
@@ -1845,7 +1948,7 @@ impl EphemeralRuntimeDriver {
         self.queue = InputQueue::new();
         self.steer_queue = InputQueue::new();
     }
-    pub fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
+    pub(crate) fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
         let queued = self
             .steer_queue
             .dequeue()
@@ -1853,33 +1956,39 @@ impl EphemeralRuntimeDriver {
         Some((queued.input_id, queued.input))
     }
 
+    /// Contract helper for recovery/queue-projection tests. Production runtime
+    /// execution must use generated batch authority via `dequeue_batch_exact`.
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn contract_dequeue_next_for_recovery_tests(&mut self) -> Option<(InputId, Input)> {
+        self.dequeue_next()
+    }
+
     pub(crate) fn dequeue_batch_exact(
         &mut self,
         batch: &crate::meerkat_machine::driver::AuthorizedRuntimeLoopBatch,
     ) -> Result<Vec<(InputId, Input)>, RuntimeDriverError> {
-        let mut staged_steer_queue = self.steer_queue.clone();
-        let mut staged_queue = self.queue.clone();
-        let mut dequeued = Vec::with_capacity(batch.input_ids().len());
-
-        for input_id in batch.input_ids() {
-            let Some(input) = staged_steer_queue
-                .dequeue_by_id(input_id)
-                .or_else(|| staged_queue.dequeue_by_id(input_id))
-            else {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "authorized runtime batch member {input_id} was missing from physical queue projection"
-                )));
-            };
-            dequeued.push(input);
-        }
-
-        self.steer_queue = staged_steer_queue;
-        self.queue = staged_queue;
-        Ok(dequeued)
+        self.validate_queue_projection_alignment("before authorized runtime-loop dequeue")?;
+        let (source_name, source_queue) = match batch.source() {
+            crate::meerkat_machine::driver::RuntimeLoopBatchSource::Queue => {
+                ("queue", &mut self.queue)
+            }
+            crate::meerkat_machine::driver::RuntimeLoopBatchSource::Steer => {
+                ("steer", &mut self.steer_queue)
+            }
+        };
+        source_queue
+            .dequeue_exact_prefix(batch.input_ids())
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "authorized runtime batch from {source_name} did not match the physical queue prefix exactly: expected {:?}",
+                    batch.input_ids()
+                ))
+            })
     }
 
     /// Machine-owned realization for a validated staged contributor batch.
-    pub(crate) fn machine_realize_stage_batch(
+    fn machine_realize_stage_batch(
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
@@ -1914,9 +2023,18 @@ impl EphemeralRuntimeDriver {
             }));
         }
         self.rebuild_queue_projections();
+        self.validate_queue_projection_alignment("after authorized StageForRun")?;
         self.debug_assert_queue_projection_alignment();
 
         Ok(())
+    }
+
+    pub(crate) fn machine_realize_authorized_stage_batch(
+        &mut self,
+        authority: crate::meerkat_machine::driver::AuthorizedStageForRun,
+    ) -> Result<(), RuntimeDriverError> {
+        let (input_ids, run_id, _source) = authority.into_parts();
+        self.machine_realize_stage_batch(&input_ids, &run_id)
     }
 
     pub fn apply_input(
@@ -2053,6 +2171,7 @@ impl EphemeralRuntimeDriver {
         &mut self,
         run_id: &RunId,
         input_ids: &[InputId],
+        stage_authority: crate::meerkat_machine::driver::AuthorizedStageForRun,
     ) -> Result<RunBoundaryReceipt, RuntimeDriverError> {
         let [input_id] = input_ids else {
             return Err(RuntimeDriverError::Internal(format!(
@@ -2064,7 +2183,7 @@ impl EphemeralRuntimeDriver {
         let result = self
             .machine_resolve_live_boundary_context_receipt(run_id, input_id)
             .and_then(|receipt| {
-                self.machine_realize_stage_batch(input_ids, run_id)
+                self.machine_realize_authorized_stage_batch(stage_authority)
                     .and_then(|()| self.machine_realize_boundary_applied(run_id, &receipt))
                     .and_then(|()| self.machine_realize_run_completed(run_id, input_ids))
                     .map(|()| receipt)
@@ -3567,6 +3686,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authorized_batch_dequeue_requires_exact_source() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("batch-source"));
+        let input = prompt_input("queued");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let batch = crate::meerkat_machine::driver::test_authorized_runtime_loop_batch_from_source(
+            vec![input_id.clone()],
+            crate::meerkat_machine::driver::RuntimeLoopBatchSource::Steer,
+        );
+
+        let err = driver
+            .dequeue_batch_exact(&batch)
+            .expect_err("queue input must not be drained through steer authority");
+
+        assert!(
+            err.to_string()
+                .contains("authorized runtime batch from steer did not match"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            driver.queue().input_ids(),
+            vec![input_id],
+            "failed source conformance must leave the physical queue intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorized_batch_dequeue_requires_exact_prefix() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("batch-prefix"));
+        let first = prompt_input("first");
+        let first_id = first.id().clone();
+        driver.accept_input(first).await.unwrap();
+        let second = prompt_input("second");
+        let second_id = second.id().clone();
+        driver.accept_input(second).await.unwrap();
+
+        let batch =
+            crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![second_id]);
+
+        let err = driver
+            .dequeue_batch_exact(&batch)
+            .expect_err("later queue member must not be drained past an older prefix");
+
+        assert!(
+            err.to_string()
+                .contains("authorized runtime batch from queue did not match"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            driver.queue().input_ids(),
+            vec![first_id, batch.input_ids()[0].clone()],
+            "failed prefix conformance must leave the physical queue intact"
+        );
+    }
+
+    #[tokio::test]
     async fn coalesce_input_requires_generated_existing_target_authority() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("coalesce-guard"));
 
@@ -3962,7 +4138,57 @@ mod tests {
             .unwrap();
 
         assert!(driver.queue().is_empty());
-        driver.debug_assert_queue_projection_alignment();
+        driver
+            .validate_queue_projection_alignment("test post-stage")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn authorized_dequeue_rejects_physical_queue_projection_drift() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+            "queue-projection-drift-before-dequeue",
+        ));
+        let input = prompt_input("authorized");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let drift = prompt_input("drift");
+        let drift_id = drift.id().clone();
+        driver.queue_mut().enqueue_front(drift_id, drift);
+        let batch =
+            crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![input_id]);
+
+        let err = driver
+            .dequeue_batch_exact(&batch)
+            .expect_err("physical queue drift must fail closed before dequeue");
+        assert!(
+            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("physical queue projection diverged")),
+            "unexpected queue projection error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorized_dequeue_rejects_physical_steer_projection_drift() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+            "steer-projection-drift-before-dequeue",
+        ));
+        let input = prompt_input("authorized");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+
+        let drift = prompt_input("steer drift");
+        let drift_id = drift.id().clone();
+        driver.steer_queue_mut().enqueue(drift_id, drift);
+        let batch =
+            crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![input_id]);
+
+        let err = driver
+            .dequeue_batch_exact(&batch)
+            .expect_err("physical steer queue drift must fail closed before dequeue");
+        assert!(
+            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("physical steer queue projection diverged")),
+            "unexpected steer projection error: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -3986,7 +4212,9 @@ mod tests {
             driver.input_phase(&input_id),
             Some(InputLifecycleState::AppliedPendingConsumption)
         );
-        driver.debug_assert_queue_projection_alignment();
+        driver
+            .validate_queue_projection_alignment("test recovery")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -4143,6 +4371,10 @@ mod tests {
                     admission_sequence_recovery: None,
                     recovery_lane: None,
                     lane: None,
+                    runtime_boundary: None,
+                    runtime_execution_kind: None,
+                    runtime_peer_response_terminal_apply_intent: None,
+                    is_prompt: false,
                 },
                 "RecoverInputLifecycle(test)",
             )

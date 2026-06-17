@@ -330,9 +330,12 @@ impl PersistentRuntimeDriver {
         self.inner.take_process_requested()
     }
 
-    /// Dequeue next input (delegates to inner).
-    pub fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
-        self.inner.dequeue_next()
+    /// Contract helper for recovery/queue-projection tests. Production runtime
+    /// execution must use generated batch authority via `dequeue_batch_exact`.
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn contract_dequeue_next_for_recovery_tests(&mut self) -> Option<(InputId, Input)> {
+        self.inner.contract_dequeue_next_for_recovery_tests()
     }
 
     pub(crate) fn dequeue_batch_exact(
@@ -497,12 +500,11 @@ impl PersistentRuntimeDriver {
         staged.accept_resolved_input(input, staged_resolved).await
     }
 
-    pub(crate) fn machine_realize_stage_batch(
+    pub(crate) fn machine_realize_authorized_stage_batch(
         &mut self,
-        input_ids: &[InputId],
-        run_id: &meerkat_core::lifecycle::RunId,
+        authority: crate::meerkat_machine::driver::AuthorizedStageForRun,
     ) -> Result<(), crate::traits::RuntimeDriverError> {
-        self.inner.machine_realize_stage_batch(input_ids, run_id)
+        self.inner.machine_realize_authorized_stage_batch(authority)
     }
 
     /// Apply input (delegates to inner).
@@ -728,13 +730,15 @@ impl PersistentRuntimeDriver {
         &mut self,
         run_id: &RunId,
         input_ids: &[InputId],
+        stage_authority: crate::meerkat_machine::driver::AuthorizedStageForRun,
         session_snapshot: Option<Vec<u8>>,
     ) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        let receipt = match self
-            .inner
-            .machine_realize_live_boundary_context_injected(run_id, input_ids)
-        {
+        let receipt = match self.inner.machine_realize_live_boundary_context_injected(
+            run_id,
+            input_ids,
+            stage_authority,
+        ) {
             Ok(receipt) => receipt,
             Err(err) => {
                 self.inner.restore_rollback_snapshot(checkpoint);

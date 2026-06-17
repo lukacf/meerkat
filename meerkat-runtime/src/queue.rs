@@ -26,17 +26,17 @@ impl InputQueue {
     }
 
     /// Enqueue an input.
-    pub fn enqueue(&mut self, input_id: InputId, input: Input) {
+    pub(crate) fn enqueue(&mut self, input_id: InputId, input: Input) {
         self.queue.push_back(QueuedInput { input_id, input });
     }
 
     /// Enqueue an input at the front of the queue.
-    pub fn enqueue_front(&mut self, input_id: InputId, input: Input) {
+    pub(crate) fn enqueue_front(&mut self, input_id: InputId, input: Input) {
         self.queue.push_front(QueuedInput { input_id, input });
     }
 
     /// Dequeue the next input (FIFO).
-    pub fn dequeue(&mut self) -> Option<QueuedInput> {
+    pub(crate) fn dequeue(&mut self) -> Option<QueuedInput> {
         self.queue.pop_front()
     }
 
@@ -55,15 +55,37 @@ impl InputQueue {
         self.queue.len()
     }
 
-    /// Remove a specific input by ID and return it as (InputId, Input).
+    /// Drain the exact front prefix named by `input_ids`.
     ///
-    /// Used by the batching policy to dequeue specific IDs determined by the authority.
-    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, crate::input::Input)> {
-        self.remove(input_id).map(|q| (q.input_id, q.input))
+    /// This is intentionally prefix-only: runtime-loop batch authority proves a
+    /// physical queue projection is in exact conformance before mutation.
+    pub(crate) fn dequeue_exact_prefix(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Option<Vec<(InputId, Input)>> {
+        if self.queue.len() < input_ids.len() {
+            return None;
+        }
+        if !self
+            .queue
+            .iter()
+            .take(input_ids.len())
+            .zip(input_ids.iter())
+            .all(|(queued, expected)| queued.input_id == *expected)
+        {
+            return None;
+        }
+
+        Some(
+            (0..input_ids.len())
+                .filter_map(|_| self.queue.pop_front())
+                .map(|queued| (queued.input_id, queued.input))
+                .collect(),
+        )
     }
 
     /// Remove a specific input by ID (e.g., for supersession).
-    pub fn remove(&mut self, input_id: &InputId) -> Option<QueuedInput> {
+    pub(crate) fn remove(&mut self, input_id: &InputId) -> Option<QueuedInput> {
         if let Some(pos) = self.queue.iter().position(|q| q.input_id == *input_id) {
             self.queue.remove(pos)
         } else {
@@ -72,7 +94,7 @@ impl InputQueue {
     }
 
     /// Drain all entries from the queue.
-    pub fn drain(&mut self) -> Vec<QueuedInput> {
+    pub(crate) fn drain(&mut self) -> Vec<QueuedInput> {
         self.queue.drain(..).collect()
     }
 

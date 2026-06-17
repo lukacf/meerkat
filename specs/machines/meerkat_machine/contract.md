@@ -137,6 +137,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `next_admission_seq`: `u64`
 - `next_priority_admission_seq`: `u64`
 - `input_admission_seq`: `Map<String, u64>`
+- `input_runtime_boundary`: `Map<String, RecoveredRunApplyBoundary>`
+- `input_runtime_execution_kind`: `Map<String, RecoveredRuntimeExecutionKind>`
+- `input_runtime_peer_response_terminal_apply_intent`: `Map<String, RecoveredPeerResponseTerminalApplyIntent>`
+- `input_is_prompt`: `Map<String, Bool>`
 - `input_lane`: `Map<String, InputLane>`
 - `input_recovery_lanes`: `Map<String, InputLane>`
 - `admission_authorized_lanes`: `Map<String, InputLane>`
@@ -423,7 +427,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
-- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>)
+- `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>, recovery_lane: Option<InputLane>, lane: Option<InputLane>, runtime_boundary: Option<RecoveredRunApplyBoundary>, runtime_execution_kind: Option<RecoveredRuntimeExecutionKind>, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, is_prompt: Bool)
+- `BindAdmissionRuntimeGrouping`(input_id: String, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, is_prompt: Bool)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
 - `ChangeLane`(input_id: String, new_lane: InputLane)
@@ -759,6 +764,185 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat_session_llm_visibility_shape_matches`(previous_visibility_state: SessionToolVisibilityState, next_visibility_state: SessionToolVisibilityState, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_active_visibility_revision: u64) -> `Bool`
 - `meerkat_session_llm_visibility_delta_matches`(tool_visibility_delta: SessionToolVisibilityDelta, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, committed_visible_set_changed: Bool) -> `Bool`
 - `meerkat_session_llm_visibility_reconfigure_plan_matches`(previous_visibility_state: SessionToolVisibilityState, next_visibility_state: SessionToolVisibilityState, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta) -> `Bool`
+
+## Command Plans
+### `AuthorizedAcceptedInputMaterialization`
+- Authority: `AuthorizedAcceptedInputMaterialization`
+- Source Inputs: `ResolveAdmissionPlan`, `QueueAccepted`, `SteerAccepted`
+- Transitions: `ResolveAdmissionPlanRequestedTerminalQueueIdle`, `ResolveAdmissionPlanRequestedTerminalQueueAttached`, `ResolveAdmissionPlanRequestedTerminalQueueRunning`, `ResolveAdmissionPlanRequestedTerminalSteerIdle`, `ResolveAdmissionPlanRequestedTerminalSteerAttached`, `ResolveAdmissionPlanRequestedTerminalSteerRunning`, `ResolveAdmissionPlanRequestedQueueIdle`, `ResolveAdmissionPlanRequestedQueueAttached`, `ResolveAdmissionPlanRequestedQueueRunning`, `ResolveAdmissionPlanRequestedSteerIdle`, `ResolveAdmissionPlanRequestedSteerAttached`, `ResolveAdmissionPlanRequestedSteerRunning`, `ResolveAdmissionPlanDefaultQueueKindIdle`, `ResolveAdmissionPlanDefaultQueueKindAttached`, `ResolveAdmissionPlanDefaultQueueKindRunning`, `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`, `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`, `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`, `ResolveAdmissionPlanPeerResponseProgressIdle`, `ResolveAdmissionPlanPeerResponseProgressAttached`, `ResolveAdmissionPlanPeerResponseProgressRunning`, `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`, `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`, `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`, `ResolveAdmissionPlanDefaultContinuationIdle`, `ResolveAdmissionPlanDefaultContinuationAttached`, `ResolveAdmissionPlanDefaultContinuationRunning`, `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`, `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`, `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`, `ResolveAdmissionPlanOperationIdle`, `ResolveAdmissionPlanOperationAttached`, `ResolveAdmissionPlanOperationRunning`, `QueueAcceptedIdle`, `QueueAcceptedAttached`, `QueueAcceptedRunning`, `QueueAcceptedRetired`, `QueueAcceptedStopped`, `SteerAcceptedIdle`, `SteerAcceptedAttached`, `SteerAcceptedRunning`, `SteerAcceptedRetired`, `SteerAcceptedStopped`
+- Guard Expansion:
+  - `ResolveAdmissionPlanRequestedTerminalQueueIdle`: `runtime_running_matches_phase`, `terminal_queue_override`
+  - `ResolveAdmissionPlanRequestedTerminalQueueAttached`: `runtime_running_matches_phase`, `terminal_queue_override`
+  - `ResolveAdmissionPlanRequestedTerminalQueueRunning`: `runtime_running_matches_phase`, `terminal_queue_override`
+  - `ResolveAdmissionPlanRequestedTerminalSteerIdle`: `runtime_running_matches_phase`, `terminal_steer_override`
+  - `ResolveAdmissionPlanRequestedTerminalSteerAttached`: `runtime_running_matches_phase`, `terminal_steer_override`
+  - `ResolveAdmissionPlanRequestedTerminalSteerRunning`: `runtime_running_matches_phase`, `terminal_steer_override`
+  - `ResolveAdmissionPlanRequestedQueueIdle`: `runtime_running_matches_phase`, `queue_override`
+  - `ResolveAdmissionPlanRequestedQueueAttached`: `runtime_running_matches_phase`, `queue_override`
+  - `ResolveAdmissionPlanRequestedQueueRunning`: `runtime_running_matches_phase`, `queue_override`
+  - `ResolveAdmissionPlanRequestedSteerIdle`: `runtime_running_matches_phase`, `steer_override`
+  - `ResolveAdmissionPlanRequestedSteerAttached`: `runtime_running_matches_phase`, `steer_override`
+  - `ResolveAdmissionPlanRequestedSteerRunning`: `runtime_running_matches_phase`, `steer_override`
+  - `ResolveAdmissionPlanDefaultQueueKindIdle`: `runtime_running_matches_phase`, `default_queue_kind`
+  - `ResolveAdmissionPlanDefaultQueueKindAttached`: `runtime_running_matches_phase`, `default_queue_kind`
+  - `ResolveAdmissionPlanDefaultQueueKindRunning`: `runtime_running_matches_phase`, `default_queue_kind`
+  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`: `runtime_running_matches_phase`, `default_peer_message_or_request`
+  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`: `runtime_running_matches_phase`, `default_peer_message_or_request`
+  - `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`: `runtime_running_matches_phase`, `default_peer_message_or_request`
+  - `ResolveAdmissionPlanPeerResponseProgressIdle`: `runtime_running_matches_phase`, `peer_response_progress`, `coalesce_target_tracked_if_present`
+  - `ResolveAdmissionPlanPeerResponseProgressAttached`: `runtime_running_matches_phase`, `peer_response_progress`, `coalesce_target_tracked_if_present`
+  - `ResolveAdmissionPlanPeerResponseProgressRunning`: `runtime_running_matches_phase`, `peer_response_progress`, `coalesce_target_tracked_if_present`
+  - `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`: `runtime_running_matches_phase`, `default_peer_response_terminal`
+  - `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`: `runtime_running_matches_phase`, `default_peer_response_terminal`
+  - `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`: `runtime_running_matches_phase`, `default_peer_response_terminal`
+  - `ResolveAdmissionPlanDefaultContinuationIdle`: `runtime_running_matches_phase`, `default_continuation`
+  - `ResolveAdmissionPlanDefaultContinuationAttached`: `runtime_running_matches_phase`, `default_continuation`
+  - `ResolveAdmissionPlanDefaultContinuationRunning`: `runtime_running_matches_phase`, `default_continuation`
+  - `ResolveAdmissionPlanWorkgraphAttentionContinuationIdle`: `runtime_running_matches_phase`, `workgraph_attention_continuation`
+  - `ResolveAdmissionPlanWorkgraphAttentionContinuationAttached`: `runtime_running_matches_phase`, `workgraph_attention_continuation`
+  - `ResolveAdmissionPlanWorkgraphAttentionContinuationRunning`: `runtime_running_matches_phase`, `workgraph_attention_continuation`
+  - `ResolveAdmissionPlanOperationIdle`: `runtime_running_matches_phase`, `operation`
+  - `ResolveAdmissionPlanOperationAttached`: `runtime_running_matches_phase`, `operation`
+  - `ResolveAdmissionPlanOperationRunning`: `runtime_running_matches_phase`, `operation`
+  - `QueueAcceptedIdle`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedAttached`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedRunning`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedRetired`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedStopped`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `SteerAcceptedIdle`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedAttached`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedRunning`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedRetired`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedStopped`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+- Command Effects: `AdmissionResolved`, `IngressAccepted`, `PostAdmissionSignal`
+- Emitted By Transitions: `AdmissionResolved`, `IngressAccepted`
+
+### `AuthorizeRuntimeLoopBatch`
+- Authority: `AuthorizedRuntimeLoopBatch`
+- Source Inputs: `QueueAccepted`, `SteerAccepted`, `RecoverAdmittedInput`, `RecoverInputLifecycle`
+- Transitions: `QueueAcceptedIdle`, `QueueAcceptedAttached`, `QueueAcceptedRunning`, `QueueAcceptedRetired`, `QueueAcceptedStopped`, `SteerAcceptedIdle`, `SteerAcceptedAttached`, `SteerAcceptedRunning`, `SteerAcceptedRetired`, `SteerAcceptedStopped`, `RecoverInputLifecycleIdle`, `RecoverInputLifecycleAttached`, `RecoverInputLifecycleRunning`, `RecoverInputLifecycleRetired`, `RecoverInputLifecycleStopped`
+- Guard Expansion:
+  - `QueueAcceptedIdle`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedAttached`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedRunning`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedRetired`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `QueueAcceptedStopped`: `not_already_tracked`, `live_admission_authorized_queue_lane`
+  - `SteerAcceptedIdle`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedAttached`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedRunning`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedRetired`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `SteerAcceptedStopped`: `not_already_tracked`, `live_admission_authorized_steer_lane`
+  - `RecoverInputLifecycleIdle`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleAttached`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleRunning`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleRetired`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+  - `RecoverInputLifecycleStopped`: `recovered_lifecycle_has_admission_witness`, `recovered_recovery_lane_matches_witness`, `recovered_current_lane_matches_phase`, `recovered_queued_order_has_witness`, `recovered_order_recovery_matches_missing_sequence`, `recovered_grouping_matches_phase`, `recovered_terminal_payload_matches_phase`, `recovered_max_attempts_reason_matches_count`, `recovered_max_attempts_reason_matches_policy`
+- Command Effects: `IngressAccepted`
+- Emitted By Transitions: `IngressAccepted`, `InputLifecycleNotice`
+
+### `AuthorizedStageForRun`
+- Authority: `AuthorizedStageForRun`
+- Source Inputs: `StageForRun`
+- Transitions: `StageForRunIdle`, `StageForRunAttached`, `StageForRunRunning`, `StageForRunRetired`, `StageForRunStopped`
+- Guard Expansion:
+  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `input_not_run_associated`, `current_run_matches`
+  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `input_not_run_associated`, `current_run_matches`
+  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `input_not_run_associated`, `current_run_matches`
+  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `input_not_run_associated`, `current_run_matches`
+  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `input_not_run_associated`, `current_run_matches`
+- Emitted By Transitions: `RecordRunAssociation`
+
+### `AuthorizedRuntimeLoopRunCommit`
+- Authority: `AuthorizedRuntimeLoopRunCommit`
+- Source Inputs: `RunCompleted`, `RunFailed`, `RunCancelled`, `Commit`, `Fail`, `CancelRun`, `RollbackRun`
+- Transitions: `RunCompleted`, `RunFailed`, `RunCancelled`, `CommitRunningToIdle`, `CommitRunningToAttached`, `CommitRunningToRetired`, `FailRunningToIdle`, `FailRunningToAttached`, `FailRunningToRetired`, `CancelRunningToIdle`, `CancelRunningToAttached`, `CancelRunningToRetired`, `RollbackRunRunningToIdle`, `RollbackRunRunningToAttached`, `RollbackRunRunningToRetired`
+- Guard Expansion:
+  - `RunCompleted`: `run_matches_binding`
+  - `RunFailed`: `run_matches_binding`, `runtime_apply_failure_not_machine_terminal_failure`, `machine_terminal_failure_not_raw_source`, `machine_terminal_failure_requires_existing_outcome`, `machine_terminal_failure_requires_existing_known_cause`, `machine_terminal_failure_existing_outcome_matches_cause`, `terminal_failure_source_known_if_present`
+  - `RunCancelled`: `run_matches_binding`
+  - `CommitRunningToIdle`: `pre_run_phase_matches_idle`, `current_run_id_matches_binding`
+  - `CommitRunningToAttached`: `pre_run_phase_matches_attached`, `current_run_id_matches_binding`
+  - `CommitRunningToRetired`: `pre_run_phase_matches_retired`, `current_run_id_matches_binding`
+  - `FailRunningToIdle`: `pre_run_phase_matches_idle`, `current_run_id_matches_binding`, `turn_failed_with_cause`
+  - `FailRunningToAttached`: `pre_run_phase_matches_attached`, `current_run_id_matches_binding`, `turn_failed_with_cause`
+  - `FailRunningToRetired`: `pre_run_phase_matches_retired`, `current_run_id_matches_binding`, `turn_failed_with_cause`
+  - `CancelRunningToIdle`: `pre_run_phase_matches_idle`, `current_run_id_matches_binding`, `turn_cancelled`
+  - `CancelRunningToAttached`: `pre_run_phase_matches_attached`, `current_run_id_matches_binding`, `turn_cancelled`
+  - `CancelRunningToRetired`: `pre_run_phase_matches_retired`, `current_run_id_matches_binding`, `turn_cancelled`
+  - `RollbackRunRunningToIdle`: `pre_run_phase_matches_idle`, `current_run_id_matches_binding`
+  - `RollbackRunRunningToAttached`: `pre_run_phase_matches_attached`, `current_run_id_matches_binding`
+  - `RollbackRunRunningToRetired`: `pre_run_phase_matches_retired`, `current_run_id_matches_binding`
+- Command Effects: `TurnRunCompleted`, `TurnRunFailed`, `TurnRunCancelled`
+- Effect Closure:
+  - `TurnRunCompleted` via `AuthorizedRuntimeLoopRunCommit` (RuntimeLoopRunCommitEffect) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+  - `TurnRunFailed` via `AuthorizedRuntimeLoopRunCommit` (RuntimeLoopRunCommitEffect) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+  - `TurnRunCancelled` via `AuthorizedRuntimeLoopRunCommit` (RuntimeLoopRunCommitEffect) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+- Emitted By Transitions: `PostAdmissionSignal`, `RecordTerminalOutcome`, `TurnRunFailed`
+
+### `AuthorizedRuntimeCompletionResultClosure`
+- Authority: `RuntimeCompletionResultAuthority`
+- Source Inputs: `ResolveRuntimeCompletionResult`
+- Transitions: `ResolveRuntimeCompletionResultCompletedInitializing`, `ResolveRuntimeCompletionResultCompletedIdle`, `ResolveRuntimeCompletionResultCompletedAttached`, `ResolveRuntimeCompletionResultCompletedRunning`, `ResolveRuntimeCompletionResultCompletedRetired`, `ResolveRuntimeCompletionResultCompletedStopped`, `ResolveRuntimeCompletionResultWithoutResultInitializing`, `ResolveRuntimeCompletionResultWithoutResultIdle`, `ResolveRuntimeCompletionResultWithoutResultAttached`, `ResolveRuntimeCompletionResultWithoutResultRunning`, `ResolveRuntimeCompletionResultWithoutResultRetired`, `ResolveRuntimeCompletionResultWithoutResultStopped`, `ResolveRuntimeCompletionResultCallbackPendingInitializing`, `ResolveRuntimeCompletionResultCallbackPendingIdle`, `ResolveRuntimeCompletionResultCallbackPendingAttached`, `ResolveRuntimeCompletionResultCallbackPendingRunning`, `ResolveRuntimeCompletionResultCallbackPendingRetired`, `ResolveRuntimeCompletionResultCallbackPendingStopped`, `ResolveRuntimeCompletionResultCancelledInitializing`, `ResolveRuntimeCompletionResultCancelledIdle`, `ResolveRuntimeCompletionResultCancelledAttached`, `ResolveRuntimeCompletionResultCancelledRunning`, `ResolveRuntimeCompletionResultCancelledRetired`, `ResolveRuntimeCompletionResultCancelledStopped`, `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`, `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`, `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`, `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`, `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`, `ResolveRuntimeCompletionResultMachineFailedInitializing`, `ResolveRuntimeCompletionResultMachineFailedIdle`, `ResolveRuntimeCompletionResultMachineFailedAttached`, `ResolveRuntimeCompletionResultMachineFailedRunning`, `ResolveRuntimeCompletionResultMachineFailedRetired`, `ResolveRuntimeCompletionResultMachineFailedStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired`, `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedInitializing`, `ResolveRuntimeCompletionResultRuntimeTerminatedIdle`, `ResolveRuntimeCompletionResultRuntimeTerminatedAttached`, `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`, `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`, `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`, `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`
+- Guard Expansion:
+  - `ResolveRuntimeCompletionResultCompletedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultCompletedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultCompletedAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultCompletedRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultCompletedRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultCompletedStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultWithoutResultInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_no_result`
+  - `ResolveRuntimeCompletionResultWithoutResultIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_no_result`
+  - `ResolveRuntimeCompletionResultWithoutResultAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_no_result`
+  - `ResolveRuntimeCompletionResultWithoutResultRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_no_result`
+  - `ResolveRuntimeCompletionResultWithoutResultRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_no_result`
+  - `ResolveRuntimeCompletionResultWithoutResultStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_no_result`
+  - `ResolveRuntimeCompletionResultCallbackPendingInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_callback_pending`
+  - `ResolveRuntimeCompletionResultCallbackPendingIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_callback_pending`
+  - `ResolveRuntimeCompletionResultCallbackPendingAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_callback_pending`
+  - `ResolveRuntimeCompletionResultCallbackPendingRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_callback_pending`
+  - `ResolveRuntimeCompletionResultCallbackPendingRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_callback_pending`
+  - `ResolveRuntimeCompletionResultCallbackPendingStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_callback_pending`
+  - `ResolveRuntimeCompletionResultCancelledInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
+  - `ResolveRuntimeCompletionResultCancelledIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
+  - `ResolveRuntimeCompletionResultCancelledAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
+  - `ResolveRuntimeCompletionResultCancelledRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
+  - `ResolveRuntimeCompletionResultCancelledRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
+  - `ResolveRuntimeCompletionResultCancelledStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_cancelled`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultRuntimeApplyFailedStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultMachineFailedInitializing`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultMachineFailedIdle`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultMachineFailedAttached`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultMachineFailedRunning`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultMachineFailedRetired`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultMachineFailedStopped`: `session_registered`, `run_correlated`, `finalization_succeeded`, `terminal_machine`, `machine_failed`, `machine_failure_cause_known`, `machine_not_runtime_apply_failed`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithResultInitializing`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithResultIdle`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithResultAttached`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithResultRunning`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithResultRetired`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithResultStopped`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_run_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultInitializing`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_without_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultIdle`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_without_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultAttached`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_without_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRunning`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_without_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultRetired`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_without_result`
+  - `ResolveRuntimeCompletionResultFinalizationFailureWithoutResultStopped`: `session_registered`, `run_correlated`, `finalization_failed`, `terminal_without_result`
+  - `ResolveRuntimeCompletionResultRuntimeTerminatedInitializing`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+  - `ResolveRuntimeCompletionResultRuntimeTerminatedIdle`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+  - `ResolveRuntimeCompletionResultRuntimeTerminatedAttached`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+  - `ResolveRuntimeCompletionResultRuntimeTerminatedRunning`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+  - `ResolveRuntimeCompletionResultRuntimeTerminatedRetired`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+  - `ResolveRuntimeCompletionResultRuntimeTerminatedStopped`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+  - `ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed`: `session_registered`, `no_run_result`, `finalization_succeeded`, `terminal_runtime_terminated`
+- Command Effects: `RuntimeCompletionResultResolved`
+- Effect Closure:
+  - `RuntimeCompletionResultResolved` via `RuntimeCompletionResultAuthority` (LocalSurfaceResultAlignment) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+- Emitted By Transitions: `RuntimeCompletionResultResolved`
 
 ## Invariants
 - `fence_requires_bound_runtime`
@@ -8643,6 +8827,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `InitiateRecycle`
 - To: `Attached`
 
+### `BindAdmissionRuntimeGroupingIdle`
+- From: `Idle`
+- On: `BindAdmissionRuntimeGrouping`(input_id, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- Guards:
+  - `recovered_lifecycle_authorized`
+  - `grouping_not_bound`
+- To: `Idle`
+
+### `BindAdmissionRuntimeGroupingAttached`
+- From: `Attached`
+- On: `BindAdmissionRuntimeGrouping`(input_id, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- Guards:
+  - `recovered_lifecycle_authorized`
+  - `grouping_not_bound`
+- To: `Attached`
+
+### `BindAdmissionRuntimeGroupingRunning`
+- From: `Running`
+- On: `BindAdmissionRuntimeGrouping`(input_id, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- Guards:
+  - `recovered_lifecycle_authorized`
+  - `grouping_not_bound`
+- To: `Running`
+
+### `BindAdmissionRuntimeGroupingRetired`
+- From: `Retired`
+- On: `BindAdmissionRuntimeGrouping`(input_id, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- Guards:
+  - `recovered_lifecycle_authorized`
+  - `grouping_not_bound`
+- To: `Retired`
+
+### `BindAdmissionRuntimeGroupingStopped`
+- From: `Stopped`
+- On: `BindAdmissionRuntimeGrouping`(input_id, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
+- Guards:
+  - `recovered_lifecycle_authorized`
+  - `grouping_not_bound`
+- To: `Stopped`
+
 ### `RecoverAdmittedInputIdle`
 - From: `Idle`
 - On: `RecoverAdmittedInput`(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
@@ -8690,13 +8914,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleIdle`
 - From: `Idle`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
+  - `recovered_grouping_matches_phase`
   - `recovered_terminal_payload_matches_phase`
   - `recovered_max_attempts_reason_matches_count`
   - `recovered_max_attempts_reason_matches_policy`
@@ -8705,13 +8930,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleAttached`
 - From: `Attached`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
+  - `recovered_grouping_matches_phase`
   - `recovered_terminal_payload_matches_phase`
   - `recovered_max_attempts_reason_matches_count`
   - `recovered_max_attempts_reason_matches_policy`
@@ -8720,13 +8946,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRunning`
 - From: `Running`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
+  - `recovered_grouping_matches_phase`
   - `recovered_terminal_payload_matches_phase`
   - `recovered_max_attempts_reason_matches_count`
   - `recovered_max_attempts_reason_matches_policy`
@@ -8735,13 +8962,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleRetired`
 - From: `Retired`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
+  - `recovered_grouping_matches_phase`
   - `recovered_terminal_payload_matches_phase`
   - `recovered_max_attempts_reason_matches_count`
   - `recovered_max_attempts_reason_matches_policy`
@@ -8750,13 +8978,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverInputLifecycleStopped`
 - From: `Stopped`
-- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane)
+- On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, admission_sequence, admission_sequence_recovery, recovery_lane, lane, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, is_prompt)
 - Guards:
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_recovery_lane_matches_witness`
   - `recovered_current_lane_matches_phase`
   - `recovered_queued_order_has_witness`
   - `recovered_order_recovery_matches_missing_sequence`
+  - `recovered_grouping_matches_phase`
   - `recovered_terminal_payload_matches_phase`
   - `recovered_max_attempts_reason_matches_count`
   - `recovered_max_attempts_reason_matches_policy`

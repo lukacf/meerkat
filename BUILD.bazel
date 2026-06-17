@@ -399,6 +399,7 @@ test_suite(
         "//xtask:protocol_codegen_drift_test",
         "//xtask:rmat_audit_test",
         "//xtask:rmat_strict_test",
+        "//xtask:runtime_authority_bypass_test",
         "//xtask:seam_inventory_strict_test",
         "//xtask:xtask_unit_test",
     ],

@@ -13,8 +13,20 @@
 //! 6. Dispatcher-provided tool usage instructions (appended last).
 
 use crate::SystemPromptOverride;
-use meerkat_core::{Config, SystemPromptConfig, prompt::normalize_agents_md_content};
-use std::path::Path;
+use meerkat_core::{
+    Config, SystemPromptConfig,
+    prompt::{AGENTS_MD_MAX_BYTES, normalize_agents_md_content},
+};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+};
+use tokio::io::AsyncReadExt;
+
+const AGENTS_MD_INCLUDE_MAX_DEPTH: usize = 4;
+const AGENTS_MD_INCLUDE_MAX_FILES: usize = 32;
+const AGENTS_MD_READ_SLOP_BYTES: usize = 4;
 
 /// A fault assembling the system prompt from explicitly-configured sources.
 ///
@@ -154,8 +166,14 @@ pub async fn assemble_system_prompt(
 }
 
 async fn load_project_agents_md_in(dir: &Path) -> Result<Option<String>, PromptAssemblyError> {
+    let canonical_root = tokio::fs::canonicalize(dir).await.map_err(|source| {
+        PromptAssemblyError::AgentsMdUnreadable {
+            path: dir.display().to_string(),
+            source,
+        }
+    })?;
     for candidate in [dir.join("AGENTS.md"), dir.join(".rkat/AGENTS.md")] {
-        if let Some(content) = load_agents_md_file(&candidate).await? {
+        if let Some(content) = load_agents_md_file(&candidate, &canonical_root).await? {
             return Ok(Some(content));
         }
     }
@@ -169,7 +187,10 @@ async fn load_project_agents_md_in(dir: &Path) -> Result<Option<String>, PromptA
 /// file that exists but cannot be read (permissions, invalid UTF-8) — is a
 /// typed [`PromptAssemblyError::AgentsMdUnreadable`], never laundered into
 /// absence.
-async fn load_agents_md_file(path: &Path) -> Result<Option<String>, PromptAssemblyError> {
+async fn load_agents_md_file(
+    path: &Path,
+    canonical_root: &Path,
+) -> Result<Option<String>, PromptAssemblyError> {
     let exists = tokio::fs::try_exists(path).await.map_err(|source| {
         PromptAssemblyError::AgentsMdUnreadable {
             path: path.display().to_string(),
@@ -180,13 +201,289 @@ async fn load_agents_md_file(path: &Path) -> Result<Option<String>, PromptAssemb
         return Ok(None);
     }
 
-    let content = tokio::fs::read_to_string(path).await.map_err(|source| {
+    let canonical_path = tokio::fs::canonicalize(path).await.map_err(|source| {
         PromptAssemblyError::AgentsMdUnreadable {
             path: path.display().to_string(),
             source,
         }
     })?;
+    if !canonical_path.starts_with(canonical_root) {
+        return Err(PromptAssemblyError::AgentsMdUnreadable {
+            path: path.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} resolves outside context root {}",
+                    canonical_path.display(),
+                    canonical_root.display()
+                ),
+            ),
+        });
+    }
+
+    let mut remaining_files = AGENTS_MD_INCLUDE_MAX_FILES;
+    let mut stack = Vec::new();
+    let content = match expand_agents_md_file(
+        canonical_path.clone(),
+        canonical_root,
+        &mut stack,
+        &mut remaining_files,
+        0,
+    )
+    .await
+    {
+        Ok(content) => content,
+        Err(reason)
+            if reason.starts_with(&format!("failed to read {}:", canonical_path.display())) =>
+        {
+            return Err(PromptAssemblyError::AgentsMdUnreadable {
+                path: path.display().to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, reason),
+            });
+        }
+        Err(reason) => {
+            return Err(PromptAssemblyError::AgentsMdUnreadable {
+                path: path.display().to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, reason),
+            });
+        }
+    };
     Ok(normalize_agents_md_content(&content))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkdownFence {
+    ch: char,
+    len: usize,
+}
+
+fn expand_agents_md_file<'a>(
+    canonical_path: PathBuf,
+    canonical_root: &'a Path,
+    stack: &'a mut Vec<PathBuf>,
+    remaining_files: &'a mut usize,
+    depth: usize,
+) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+    Box::pin(async move {
+        if depth > AGENTS_MD_INCLUDE_MAX_DEPTH {
+            return Err(format!(
+                "include depth exceeded at {} via {}",
+                canonical_path.display(),
+                format_include_chain(stack, Some(&canonical_path))
+            ));
+        }
+        if stack.iter().any(|path| path == &canonical_path) {
+            return Err(format!(
+                "cyclic include at {} via {}",
+                canonical_path.display(),
+                format_include_chain(stack, Some(&canonical_path))
+            ));
+        }
+        if !canonical_path.starts_with(canonical_root) {
+            return Err(format!(
+                "{} resolves outside context root {}",
+                canonical_path.display(),
+                canonical_root.display()
+            ));
+        }
+        let metadata = tokio::fs::metadata(&canonical_path)
+            .await
+            .map_err(|source| {
+                format!("failed to inspect {}: {source}", canonical_path.display())
+            })?;
+        if !metadata.is_file() {
+            return Err(format!("{} is not a file", canonical_path.display()));
+        }
+        if *remaining_files == 0 {
+            return Err(format!(
+                "include file count exceeded at {} via {}",
+                canonical_path.display(),
+                format_include_chain(stack, Some(&canonical_path))
+            ));
+        }
+        *remaining_files -= 1;
+
+        stack.push(canonical_path.clone());
+        let read_limit = AGENTS_MD_MAX_BYTES
+            .saturating_add(AGENTS_MD_READ_SLOP_BYTES)
+            .saturating_add(1);
+        let content = read_utf8_file_capped(&canonical_path, read_limit)
+            .await
+            .map_err(|source| format!("failed to read {}: {source}", canonical_path.display()))?;
+        let mut remaining_bytes = AGENTS_MD_MAX_BYTES;
+        let expanded = expand_agents_md_content(
+            &canonical_path,
+            canonical_root,
+            stack,
+            &mut remaining_bytes,
+            remaining_files,
+            &content,
+        )
+        .await;
+        stack.pop();
+        expanded
+    })
+}
+
+fn expand_agents_md_content<'a>(
+    source_path: &'a Path,
+    canonical_root: &'a Path,
+    stack: &'a mut Vec<PathBuf>,
+    remaining_bytes: &'a mut usize,
+    remaining_files: &'a mut usize,
+    content: &'a str,
+) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut output = String::new();
+        let mut fence: Option<MarkdownFence> = None;
+        for raw_line in content.split_inclusive('\n') {
+            let line_without_lf = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+            let line_body = line_without_lf
+                .strip_suffix('\r')
+                .unwrap_or(line_without_lf);
+            if let Some(marker) = markdown_fence_marker(line_body) {
+                if let Some(open) = fence {
+                    if marker.ch == open.ch
+                        && marker.len >= open.len
+                        && markdown_fence_closer_has_no_info(line_body, marker)
+                    {
+                        fence = None;
+                    }
+                } else {
+                    fence = Some(marker);
+                }
+                append_with_budget(&mut output, remaining_bytes, raw_line);
+                continue;
+            }
+
+            if fence.is_none()
+                && let Some(include_path) = parse_agents_md_include_directive(line_body)
+            {
+                let base = source_path.parent().unwrap_or_else(|| Path::new("."));
+                let raw_target = base.join(include_path);
+                let canonical_target =
+                    tokio::fs::canonicalize(&raw_target)
+                        .await
+                        .map_err(|source| {
+                            format!(
+                                "failed to resolve include `{}` from {}: {source}",
+                                include_path,
+                                source_path.display()
+                            )
+                        })?;
+                if !canonical_target.starts_with(canonical_root) {
+                    return Err(format!(
+                        "include `{}` from {} resolves outside context root {}",
+                        include_path,
+                        source_path.display(),
+                        canonical_root.display()
+                    ));
+                }
+                let included = expand_agents_md_file(
+                    canonical_target,
+                    canonical_root,
+                    stack,
+                    remaining_files,
+                    stack.len(),
+                )
+                .await?;
+                append_with_budget(&mut output, remaining_bytes, &included);
+                if raw_line.ends_with('\n') && !included.ends_with('\n') {
+                    append_with_budget(&mut output, remaining_bytes, "\n");
+                }
+            } else {
+                append_with_budget(&mut output, remaining_bytes, raw_line);
+            }
+        }
+        Ok(output)
+    })
+}
+
+fn parse_agents_md_include_directive(line: &str) -> Option<&str> {
+    let trimmed = line.trim_matches(|ch| ch == ' ' || ch == '\t');
+    let path = trimmed.strip_prefix('@')?;
+    if path.is_empty()
+        || path.starts_with('@')
+        || path.starts_with('/')
+        || path.starts_with('~')
+        || path.contains(char::is_whitespace)
+        || path.contains('#')
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn markdown_fence_marker(line: &str) -> Option<MarkdownFence> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let leading_spaces = line.len().saturating_sub(trimmed.len());
+    if leading_spaces > 3 {
+        return None;
+    }
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = trimmed
+        .chars()
+        .take_while(|candidate| *candidate == ch)
+        .count();
+    if len < 3 {
+        return None;
+    }
+    Some(MarkdownFence { ch, len })
+}
+
+fn markdown_fence_closer_has_no_info(line: &str, marker: MarkdownFence) -> bool {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    trimmed[marker.len..]
+        .chars()
+        .all(|ch| ch == ' ' || ch == '\t')
+}
+
+fn append_with_budget(output: &mut String, remaining_bytes: &mut usize, text: &str) {
+    if *remaining_bytes == 0 || text.is_empty() {
+        return;
+    }
+    if text.len() <= *remaining_bytes {
+        output.push_str(text);
+        *remaining_bytes -= text.len();
+        return;
+    }
+    let mut end = *remaining_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&text[..end]);
+    *remaining_bytes = 0;
+}
+
+async fn read_utf8_file_capped(path: &Path, max_bytes: usize) -> Result<String, std::io::Error> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes as u64).read_to_end(&mut bytes).await?;
+    match std::str::from_utf8(&bytes) {
+        Ok(content) => Ok(content.to_string()),
+        Err(error) if bytes.len() == max_bytes && error.error_len().is_none() => {
+            let valid_prefix = &bytes[..error.valid_up_to()];
+            std::str::from_utf8(valid_prefix)
+                .map(str::to_string)
+                .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidData, source))
+        }
+        Err(error) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid UTF-8: {error}"),
+        )),
+    }
+}
+
+fn format_include_chain(stack: &[PathBuf], terminal: Option<&Path>) -> String {
+    stack
+        .iter()
+        .map(|path| path.display().to_string())
+        .chain(terminal.map(|path| path.display().to_string()))
+        .collect::<Vec<_>>()
+        .join(" -> ")
 }
 
 /// Append extra sections and tool instructions to a base prompt.
@@ -494,6 +791,364 @@ mod tests {
         let agents_section_start = result.find("# Project Instructions").unwrap();
         let agents_content = &result[agents_section_start..];
         assert!(agents_content.len() <= AGENTS_MD_MAX_BYTES + 100);
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_include_near_size_limit_is_charged_once() {
+        let temp = TempDir::new().unwrap();
+        let included = "x".repeat(AGENTS_MD_MAX_BYTES - 20);
+        tokio::fs::write(temp.path().join("AGENTS.md"), "@included.md")
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("included.md"), &included)
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.contains(&included),
+            "included AGENTS content should not be double-charged against the byte budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_expands_line_scoped_file_include() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(temp.path().join("AGENTS.md"), "Before\n@CLAUDE.md\nAfter")
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("CLAUDE.md"), "Included instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("Before\nIncluded instructions\nAfter"));
+        assert!(!result.contains("@CLAUDE.md"));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_does_not_expand_inline_or_fenced_mentions() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(
+            temp.path().join("AGENTS.md"),
+            "Inline @CLAUDE.md\n```\n@CLAUDE.md\n```\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(temp.path().join("CLAUDE.md"), "Included instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("Inline @CLAUDE.md"));
+        assert!(result.contains("```\n@CLAUDE.md\n```"));
+        assert!(!result.contains("Included instructions"));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_keeps_extended_fences_inert() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(
+            temp.path().join("AGENTS.md"),
+            "````markdown\n```\n@CLAUDE.md\n````\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(temp.path().join("CLAUDE.md"), "Included instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("````markdown\n```\n@CLAUDE.md\n````"));
+        assert!(!result.contains("Included instructions"));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_does_not_close_fence_on_info_string() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(
+            temp.path().join("AGENTS.md"),
+            "```\n```rust\n@CLAUDE.md\n```\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(temp.path().join("CLAUDE.md"), "Included instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("```\n```rust\n@CLAUDE.md\n```"));
+        assert!(!result.contains("Included instructions"));
+    }
+
+    #[tokio::test]
+    async fn test_dot_rkat_agents_md_expands_include_relative_to_dot_rkat() {
+        let temp = TempDir::new().unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        tokio::fs::create_dir_all(&rkat_dir).await.unwrap();
+        tokio::fs::write(rkat_dir.join("AGENTS.md"), "@nested.md\n@../ROOT.md")
+            .await
+            .unwrap();
+        tokio::fs::write(rkat_dir.join("nested.md"), "Nested instructions")
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("ROOT.md"), "Root instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("Nested instructions"));
+        assert!(result.contains("Root instructions"));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_missing_include_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(temp.path().join("AGENTS.md"), "@MISSING.md")
+            .await
+            .unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        tokio::fs::create_dir_all(&rkat_dir).await.unwrap();
+        tokio::fs::write(rkat_dir.join("AGENTS.md"), "Fallback instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let err = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .expect_err("bad top-level include must not fall through to .rkat/AGENTS.md");
+
+        assert!(matches!(
+            err,
+            PromptAssemblyError::AgentsMdUnreadable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_directory_include_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(temp.path().join("AGENTS.md"), "@.")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let err = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .expect_err("directory include must fail closed");
+
+        match err {
+            PromptAssemblyError::AgentsMdUnreadable { source, .. } => {
+                assert!(source.to_string().contains("is not a file"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_context_root_agents_md_symlink_escape_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        tokio::fs::write(outside.path().join("outside.md"), "Outside instructions")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("outside.md"),
+            temp.path().join("link.md"),
+        )
+        .unwrap();
+        tokio::fs::write(temp.path().join("AGENTS.md"), "@link.md")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let err = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .expect_err("symlink escape must fail closed");
+
+        match err {
+            PromptAssemblyError::AgentsMdUnreadable { source, .. } => {
+                assert!(source.to_string().contains("outside context root"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_cycle_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(temp.path().join("AGENTS.md"), "@a.md")
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("a.md"), "@AGENTS.md")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let err = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .expect_err("cyclic AGENTS include must fail closed");
+
+        assert!(matches!(
+            err,
+            PromptAssemblyError::AgentsMdUnreadable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_depth_limit_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::write(temp.path().join("AGENTS.md"), "@a0.md")
+            .await
+            .unwrap();
+        for index in 0..=AGENTS_MD_INCLUDE_MAX_DEPTH {
+            tokio::fs::write(
+                temp.path().join(format!("a{index}.md")),
+                format!("@a{}.md", index + 1),
+            )
+            .await
+            .unwrap();
+        }
+        tokio::fs::write(
+            temp.path()
+                .join(format!("a{}.md", AGENTS_MD_INCLUDE_MAX_DEPTH + 1)),
+            "too deep",
+        )
+        .await
+        .unwrap();
+
+        let config = default_config();
+        let err = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .expect_err("over-deep AGENTS include must fail closed");
+
+        assert!(matches!(
+            err,
+            PromptAssemblyError::AgentsMdUnreadable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_file_count_limit_fails_closed() {
+        let temp = TempDir::new().unwrap();
+        let includes = (0..AGENTS_MD_INCLUDE_MAX_FILES)
+            .map(|index| format!("@file-{index}.md"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(temp.path().join("AGENTS.md"), includes)
+            .await
+            .unwrap();
+        for index in 0..AGENTS_MD_INCLUDE_MAX_FILES {
+            tokio::fs::write(temp.path().join(format!("file-{index}.md")), "included")
+                .await
+                .unwrap();
+        }
+
+        let config = default_config();
+        let err = assemble_system_prompt(
+            &config,
+            &SystemPromptOverride::Inherit,
+            Some(temp.path()),
+            &[],
+            "",
+        )
+        .await
+        .expect_err("too many AGENTS include files must fail closed");
+
+        assert!(matches!(
+            err,
+            PromptAssemblyError::AgentsMdUnreadable { .. }
+        ));
     }
 
     #[tokio::test]

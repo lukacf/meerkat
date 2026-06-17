@@ -174,8 +174,8 @@ Primary CLI mob usage is tool-driven from `run`/`run --resume` prompts using `mo
 
 | Subcommand | Purpose |
 |------------|---------|
-| `spawn-helper <mob_id> <prompt> [--profile] [--agent-identity] [--json]` | Spawn a short-lived helper, wait for completion, print the result |
-| `fork-helper <mob_id> <source_member> <prompt> [--profile] [--agent-identity] [--fork-context full-history\|last-messages] [--last-messages N] [--json]` | Fork from an existing member's context and run a helper |
+| `spawn-helper <mob_id> <prompt> --agent-identity <id> [--profile <profile>] [--json]` | Spawn a short-lived helper, wait for completion, print the result |
+| `fork-helper <mob_id> <source_member> <prompt> --agent-identity <id> [--profile <profile>] [--fork-context full-history\|last-messages] [--last-messages N] [--json]` | Fork from an existing member's context and run a helper |
 | `member-status <mob_id> <agent_identity> [--json]` | Execution status snapshot for a mob member |
 | `force-cancel <mob_id> <agent_identity>` | Force-cancel a member's in-flight turn |
 | `respawn <mob_id> <agent_identity> [--initial-message]` | Retire and respawn a member with the same profile |

@@ -219,8 +219,8 @@ rkat run --tools full --resume <session_id> "retire worker-2 and add worker-4"
 Where needed, the current helper-oriented CLI mob surface is:
 
 ```bash
-rkat mob spawn-helper <mob_id> <prompt> [--agent-identity <id>] [--profile <profile>] [--json]
-rkat mob fork-helper <mob_id> <source_member> <prompt> [--agent-identity <id>] [--profile <profile>] [--fork-context full-history|last-messages] [--last-messages N] [--json]
+rkat mob spawn-helper <mob_id> <prompt> --agent-identity <id> [--profile <profile>] [--json]
+rkat mob fork-helper <mob_id> <source_member> <prompt> --agent-identity <id> [--profile <profile>] [--fork-context full-history|last-messages] [--last-messages N] [--json]
 rkat mob member-status <mob_id> <agent_identity> [--json]
 rkat mob force-cancel <mob_id> <agent_identity>
 rkat mob respawn <mob_id> <agent_identity> [--initial-message <msg>]
@@ -515,13 +515,13 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.6"  # track the latest 0.6.x release
+meerkat = "0.7"  # track the latest 0.7.x release
 
 # Single provider, minimal
-meerkat = { version = "0.6", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.7", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "0.6", features = [
+meerkat = { version = "0.7", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live"
@@ -533,7 +533,7 @@ Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `
 Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include the normal shipping surfaces. The default `rkat` feature set does not include `memory-store`; memory capabilities appear only in binaries built with the memory-store feature. Custom binary builds:
 
 ```bash
-cargo install rkat --no-default-features --features "anthropic,openai,session-store,mcp"
+cargo install rkat --version "0.7" --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.

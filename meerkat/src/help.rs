@@ -8,13 +8,19 @@ pub use meerkat_contracts::{HelpExecutionMode, HelpRequest, HelpResponse};
 
 pub const MEERKAT_PLATFORM_SKILL_NAME: &str = "meerkat-platform";
 pub const MEERKAT_CLI_REFERENCE_SKILL_NAME: &str = "meerkat-cli-reference";
-pub const MEERKAT_PLATFORM_SKILL_BODY: &str = include_str!("help_content/platform_skill.md");
+// These package-visible aliases are symlinks to the repo-root `.claude/skills`
+// files, keeping the skills as the editable authority while preserving
+// `cargo package` self-containment.
+pub const MEERKAT_PLATFORM_SKILL_BODY: &str =
+    include_str!("../embedded_skills/meerkat-platform/SKILL.md");
 pub const MEERKAT_CLI_REFERENCE_SKILL_BODY: &str =
-    include_str!("help_content/cli_reference_skill.md");
-pub const MEERKAT_PLATFORM_API_REFERENCE: &str = include_str!("help_content/api_reference.md");
-pub const MEERKAT_PLATFORM_MOBS_REFERENCE: &str = include_str!("help_content/mobs.md");
+    include_str!("../embedded_skills/meerkat-cli-reference/SKILL.md");
+pub const MEERKAT_PLATFORM_API_REFERENCE: &str =
+    include_str!("../embedded_skills/meerkat-platform/references/api_reference.md");
+pub const MEERKAT_PLATFORM_MOBS_REFERENCE: &str =
+    include_str!("../embedded_skills/meerkat-platform/references/mobs.md");
 pub const MEERKAT_PLATFORM_MIGRATION_REFERENCE: &str =
-    include_str!("help_content/migration_0_5.md");
+    include_str!("../embedded_skills/meerkat-platform/references/migration_0_5.md");
 
 pub const MEERKAT_PLATFORM_SKILL_EXTENSIONS: &[(&str, &str)] = &[
     (
@@ -155,9 +161,32 @@ mod tests {
 
     #[test]
     fn platform_skill_pins_current_cli_help_facts() {
+        for legacy_help_file in [
+            "api_reference.md",
+            "cli_reference_skill.md",
+            "migration_0_5.md",
+            "mobs.md",
+            "platform_skill.md",
+        ] {
+            assert!(
+                !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("src/help_content")
+                    .join(legacy_help_file)
+                    .exists(),
+                "embedded help must use .claude/skills directly, not legacy src/help_content/{legacy_help_file}"
+            );
+        }
         assert!(
             MEERKAT_PLATFORM_SKILL_BODY.contains("rkat mcp add <NAME>"),
             "help skill must teach the actual MCP CLI config surface"
+        );
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains("meerkat = \"0.7\""),
+            "facade examples must track the current 0.7 release family"
+        );
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains("Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `sqlite-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`, `workgraph`, `live`."),
+            "facade feature inventory must include current realtime, sqlite, WorkGraph, and Live features"
         );
         assert!(
             MEERKAT_PLATFORM_API_REFERENCE.contains("rkat help <QUESTION>"),
@@ -206,6 +235,10 @@ mod tests {
         assert!(
             MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("There is no `rkat sessions`"),
             "CLI reference must explicitly block the plural session hallucination"
+        );
+        assert!(
+            MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("There is no `rkat live`"),
+            "CLI reference must explicitly block the unshipped live CLI group"
         );
         assert!(
             MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("There is no `--tools all`"),

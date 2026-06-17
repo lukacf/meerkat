@@ -312,8 +312,21 @@ impl Config {
         self.merge_tools(&other.tools);
 
         // New schema fields (replace if non-default)
-        if other.models != ModelDefaults::default() {
-            self.models = other.models;
+        // Per-provider union, child-wins: a child overriding its anthropic
+        // default still inherits the parent's openai default. Custom model
+        // registry entries union by id (child overrides the same id).
+        let default_models = ModelDefaults::default();
+        if other.models.anthropic != default_models.anthropic {
+            self.models.anthropic = other.models.anthropic;
+        }
+        if other.models.openai != default_models.openai {
+            self.models.openai = other.models.openai;
+        }
+        if other.models.gemini != default_models.gemini {
+            self.models.gemini = other.models.gemini;
+        }
+        for (id, entry) in other.models.custom {
+            self.models.custom.insert(id, entry);
         }
         if other.max_tokens != Config::default().max_tokens {
             self.max_tokens = other.max_tokens;
@@ -330,8 +343,16 @@ impl Config {
         if other.compaction != CompactionRuntimeConfig::default() {
             self.compaction = other.compaction;
         }
-        if other.limits != LimitsConfig::default() {
-            self.limits = other.limits;
+        // Per-field child-wins so a child tightens one limit while inheriting
+        // the rest of the caps.
+        if other.limits.budget.is_some() {
+            self.limits.budget = other.limits.budget;
+        }
+        if other.limits.max_sessions.is_some() {
+            self.limits.max_sessions = other.limits.max_sessions;
+        }
+        if other.limits.max_duration.is_some() {
+            self.limits.max_duration = other.limits.max_duration;
         }
         if other.rest != RestServerConfig::default() {
             self.rest = other.rest;
@@ -353,6 +374,41 @@ impl Config {
             self.model_fallback = ModelFallbackConfig::default();
         } else if other.model_fallback != ModelFallbackConfig::default() {
             self.model_fallback = other.model_fallback;
+        }
+
+        // Skills: scalar toggles child-wins when non-default; repositories
+        // append parent-first, with a child shadowing a same-named parent
+        // source rather than dropping the rest. No removal of inherited sources.
+        let default_skills = crate::skills_config::SkillsConfig::default();
+        if other.skills.enabled != default_skills.enabled {
+            self.skills.enabled = other.skills.enabled;
+        }
+        if other.skills.max_injection_bytes != default_skills.max_injection_bytes {
+            self.skills.max_injection_bytes = other.skills.max_injection_bytes;
+        }
+        if other.skills.inventory_threshold != default_skills.inventory_threshold {
+            self.skills.inventory_threshold = other.skills.inventory_threshold;
+        }
+        for repo in other.skills.repositories {
+            if let Some(existing) = self
+                .skills
+                .repositories
+                .iter_mut()
+                .find(|existing| existing.name == repo.name)
+            {
+                *existing = repo;
+            } else {
+                self.skills.repositories.push(repo);
+            }
+        }
+
+        // Realm sections: OUTER-KEY union, child-wins. A child's `[realm.X]`
+        // entry overrides/adds at the realm-id level; the backend/auth/binding
+        // sub-maps are NEVER merged across realms, so each section stays intact
+        // and the chain walk resolves a binding only within its owning realm
+        // (MF-11, preserves the no-inherit-for-backend/auth invariant).
+        for (realm_id, section) in other.realm {
+            self.realm.insert(realm_id, section);
         }
     }
 
@@ -377,8 +433,20 @@ impl Config {
 
     fn merge_tools(&mut self, other: &ToolsConfig) {
         let defaults = ToolsConfig::default();
-        if !other.mcp_servers.is_empty() {
-            self.tools.mcp_servers.clone_from(&other.mcp_servers);
+        // Union by server name, child-wins; never remove inherited servers
+        // (an empty child list keeps the parent's set — emptiness != removal,
+        // no tombstones).
+        for server in &other.mcp_servers {
+            if let Some(existing) = self
+                .tools
+                .mcp_servers
+                .iter_mut()
+                .find(|existing| existing.name == server.name)
+            {
+                existing.clone_from(server);
+            } else {
+                self.tools.mcp_servers.push(server.clone());
+            }
         }
         if other.default_timeout != defaults.default_timeout {
             self.tools.default_timeout = other.default_timeout;
@@ -2248,6 +2316,45 @@ pub enum ConfigError {
 
     #[error("Validation error: {0}")]
     Validation(String),
+
+    #[error("realm inheritance chain error: {0}")]
+    RealmChain(#[from] crate::connection::RealmChainError),
+}
+
+/// Compose the effective flat [`Config`] for `head` by folding the per-realm
+/// config docs along `head`'s parent chain, root-first / child-wins.
+///
+/// `docs` is the set of fetched per-realm Configs keyed by realm id. An absent
+/// ancestor simply contributes nothing — it is NOT a `Config::default` clobber
+/// (the caller passes only the docs it actually found; see
+/// [`crate::config_store::RealmConfigSource`]). [`crate::connection::RealmChain`]
+/// is the single chain authority (cycle/depth/global/env_default validation),
+/// so this composition order can never diverge from the connection resolvers'
+/// chain order. The fold reuses the one [`Config::merge`] engine.
+pub fn compose_effective_config(
+    docs: &std::collections::BTreeMap<crate::connection::RealmId, Config>,
+    head: &crate::connection::RealmId,
+) -> Result<Config, crate::connection::RealmChainError> {
+    use crate::connection::RealmChain;
+    // Combined topology: union every fetched doc's realm sections so the chain
+    // authority sees each member's parent edge regardless of which doc carried
+    // it. Outer-key only — sub-maps are never merged across realms.
+    let mut topology = Config::default();
+    for doc in docs.values() {
+        for (realm_id, section) in &doc.realm {
+            topology.realm.insert(realm_id.clone(), section.clone());
+        }
+    }
+    let chain = RealmChain::resolve(&topology, head)?;
+    // Fold root-first (chain is head-first, so iterate reversed) — the
+    // most-derived head merges last and wins.
+    let mut effective = Config::default();
+    for member in chain.realms().iter().rev() {
+        if let Some(doc) = docs.get(member) {
+            effective.merge(doc.clone());
+        }
+    }
+    Ok(effective)
 }
 
 /// Serde helpers for Option<Duration> with humantime format
@@ -2485,6 +2592,169 @@ model = "custom-model"
             .map(|entry| entry.id.0.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["base", "other"]);
+    }
+
+    // ---- P3a: Config::merge inheritance reworks ---------------------------
+
+    fn mcp_server(name: &str, command: &str) -> crate::mcp_config::McpServerConfig {
+        crate::mcp_config::McpServerConfig {
+            name: name.to_string(),
+            transport: crate::mcp_config::McpTransportConfig::Stdio(
+                crate::mcp_config::McpStdioConfig {
+                    command: command.to_string(),
+                    args: Vec::new(),
+                    env: std::collections::HashMap::new(),
+                },
+            ),
+            connect_timeout_secs: None,
+        }
+    }
+
+    fn skill_repo(
+        name: &str,
+        uuid: &str,
+        path: &str,
+    ) -> crate::skills_config::SkillRepositoryConfig {
+        crate::skills_config::SkillRepositoryConfig {
+            name: name.to_string(),
+            source_uuid: crate::skills::SourceUuid::parse(uuid).expect("valid uuid"),
+            transport: crate::skills_config::SkillRepoTransport::Filesystem {
+                path: path.to_string(),
+            },
+        }
+    }
+
+    // RCT-12
+    #[test]
+    fn effective_config_unions_model_defaults_child_wins() {
+        let mut base = Config::default();
+        base.models.openai = "parent-openai".to_string();
+        base.models.anthropic = "parent-anthropic".to_string();
+        let mut child = Config::default();
+        child.models.anthropic = "child-anthropic".to_string();
+        base.merge(child);
+        assert_eq!(
+            base.models.openai, "parent-openai",
+            "child inherits the parent's openai default"
+        );
+        assert_eq!(
+            base.models.anthropic, "child-anthropic",
+            "child overrides only its anthropic default"
+        );
+    }
+
+    // RCT-14
+    #[test]
+    fn effective_config_unions_mcp_limits_skills() {
+        let mut base = Config::default();
+        base.limits.budget = Some(1000);
+        base.tools.mcp_servers = vec![mcp_server("shared", "base-cmd")];
+        base.skills.repositories = vec![skill_repo(
+            "base-repo",
+            "00000000-0000-4000-8000-000000000001",
+            "/b",
+        )];
+
+        let mut child = Config::default();
+        child.limits.max_sessions = Some(7);
+        child.tools.mcp_servers = vec![mcp_server("shared", "child-cmd"), mcp_server("extra", "x")];
+        child.skills.repositories = vec![skill_repo(
+            "child-repo",
+            "00000000-0000-4000-8000-000000000002",
+            "/c",
+        )];
+
+        base.merge(child);
+
+        // limits: per-field child-wins (both survive).
+        assert_eq!(base.limits.budget, Some(1000));
+        assert_eq!(base.limits.max_sessions, Some(7));
+
+        // mcp: union by name, child overrides same name, appends new.
+        let names: Vec<&str> = base
+            .tools
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["shared", "extra"]);
+        let shared = base
+            .tools
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "shared")
+            .unwrap();
+        assert!(
+            matches!(
+                &shared.transport,
+                crate::mcp_config::McpTransportConfig::Stdio(c) if c.command == "child-cmd"
+            ),
+            "child overrides the same-named inherited server"
+        );
+
+        // skills: repositories append parent-first.
+        let repos: Vec<&str> = base
+            .skills
+            .repositories
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(repos, vec!["base-repo", "child-repo"]);
+    }
+
+    // RCT-15
+    #[test]
+    fn config_merge_folds_realm_map_child_wins() {
+        let mut base = Config::default();
+        base.realm.insert(
+            "global".to_string(),
+            crate::connection::RealmConfigSection::default(),
+        );
+        let mut child = Config::default();
+        child.realm.insert(
+            "team".to_string(),
+            crate::connection::RealmConfigSection {
+                parent: Some(crate::connection::RealmId::global()),
+                ..Default::default()
+            },
+        );
+        base.merge(child);
+        assert!(base.realm.contains_key("global"), "inherited realm visible");
+        assert!(base.realm.contains_key("team"));
+        assert_eq!(
+            base.realm.get("team").and_then(|s| s.parent.clone()),
+            Some(crate::connection::RealmId::global())
+        );
+    }
+
+    // RCT-37
+    #[test]
+    fn child_cannot_remove_inherited_mcp_or_hook_entries() {
+        let mut base = Config::default();
+        base.tools.mcp_servers = vec![mcp_server("inherited", "cmd")];
+        base.hooks.entries.push(HookEntryConfig {
+            id: HookId::new("inherited-hook"),
+            ..HookEntryConfig::default()
+        });
+
+        // Child sets nothing: an empty child must NOT drop inherited entries
+        // (emptiness != removal, no tombstones).
+        let child = Config::default();
+        base.merge(child);
+
+        assert_eq!(
+            base.tools.mcp_servers.len(),
+            1,
+            "empty child must not remove an inherited mcp server"
+        );
+        assert_eq!(base.tools.mcp_servers[0].name, "inherited");
+        assert!(
+            base.hooks
+                .entries
+                .iter()
+                .any(|h| h.id.0.as_str() == "inherited-hook"),
+            "empty child must not remove an inherited hook"
+        );
     }
 
     #[test]

@@ -50,6 +50,95 @@ pub trait ConfigStore: Send + Sync {
     }
 }
 
+/// Source of per-realm config documents for inheritance composition.
+///
+/// Abstraction-level seam (filesystem-free): a surface injects an implementation
+/// that knows how to fetch a realm's OWN config document (the CLI reads
+/// `<state_root>/<realm>/config.toml` for workspace realms and a single
+/// home-rooted doc for the `global` realm; the WASM runtime returns its single
+/// synthesized doc). Returning `None` means the document is ABSENT — it must NOT
+/// be coerced to `Config::default()`, or an absent ancestor would clobber
+/// inherited fields via the merge fold.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait RealmConfigSource: Send + Sync {
+    /// Fetch the OWN config document for `realm`, or `None` if absent.
+    async fn config_for_realm(
+        &self,
+        realm: &crate::connection::RealmId,
+    ) -> Result<Option<Config>, ConfigError>;
+}
+
+/// Read-only reader that composes a realm's parent chain into the effective
+/// flat [`Config`] the agent and resolvers consume.
+///
+/// This is deliberately NOT a [`ConfigStore`]: composition happens only on read.
+/// Writes must go to the raw head [`ConfigStore`] (the unfolded head document),
+/// never round-trip the composed view — otherwise a read-modify-write would
+/// durably flatten every inherited entry into the child doc (and a child could
+/// then never shed an inherited mcp/hook entry). Keeping the composing reader
+/// and the head writer as distinct types makes that mistake unrepresentable.
+pub struct EffectiveConfigReader {
+    source: Arc<dyn RealmConfigSource>,
+}
+
+impl EffectiveConfigReader {
+    pub fn new(source: Arc<dyn RealmConfigSource>) -> Self {
+        Self { source }
+    }
+
+    /// Compose the effective config for `head` by walking + folding its chain.
+    ///
+    /// Discovery fetches the head document, follows its `parent` edge, and
+    /// always attempts the reserved `global` tail. The fetch loop is bounded
+    /// (a `seen` set + a depth guard) purely so a malformed cyclic config
+    /// terminates the fetch; [`crate::config::compose_effective_config`] then
+    /// re-resolves via the chain authority, which reports the cycle as a typed
+    /// error rather than silently truncating.
+    pub async fn effective_config(
+        &self,
+        head: &crate::connection::RealmId,
+    ) -> Result<Config, ConfigError> {
+        use crate::connection::{MAX_REALM_CHAIN_DEPTH, RealmId};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut docs: BTreeMap<RealmId, Config> = BTreeMap::new();
+        let mut seen: BTreeSet<RealmId> = BTreeSet::new();
+        let mut frontier = vec![head.clone()];
+        let mut guard = 0usize;
+
+        while let Some(realm) = frontier.pop() {
+            guard += 1;
+            if guard > MAX_REALM_CHAIN_DEPTH + 4 {
+                break; // belt-and-suspenders; the authority re-validates depth
+            }
+            if !seen.insert(realm.clone()) {
+                continue;
+            }
+            if let Some(doc) = self.source.config_for_realm(&realm).await? {
+                if let Some(parent) = doc
+                    .realm
+                    .get(realm.as_str())
+                    .and_then(|section| section.parent.clone())
+                {
+                    frontier.push(parent);
+                }
+                docs.insert(realm, doc);
+            }
+        }
+
+        // Always attempt the implicit `global` tail document.
+        let global = RealmId::global();
+        if seen.insert(global.clone())
+            && let Some(doc) = self.source.config_for_realm(&global).await?
+        {
+            docs.insert(global, doc);
+        }
+
+        Ok(crate::config::compose_effective_config(&docs, head)?)
+    }
+}
+
 /// In-memory config store for ephemeral settings.
 pub struct MemoryConfigStore {
     config: tokio::sync::RwLock<Config>,
@@ -270,6 +359,86 @@ pub fn apply_config_patch_preview(config: &Config, patch: Value) -> Result<Confi
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    // RCT-16/30: EffectiveConfigReader composes a realm's chain across separate
+    // per-realm docs (read-only — it is not a ConfigStore, so a write cannot
+    // round-trip the composed view back into the head doc).
+    struct MapSource {
+        docs: std::collections::BTreeMap<String, Config>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl RealmConfigSource for MapSource {
+        async fn config_for_realm(
+            &self,
+            realm: &crate::connection::RealmId,
+        ) -> Result<Option<Config>, ConfigError> {
+            Ok(self.docs.get(realm.as_str()).cloned())
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_reader_composes_chain_across_docs() {
+        use crate::connection::{RealmConfigSection, RealmId};
+
+        let mut global = Config::default();
+        global.models.openai = "g-openai".to_string();
+        global
+            .realm
+            .insert("global".to_string(), RealmConfigSection::default());
+
+        let mut child = Config::default();
+        child.models.anthropic = "c-anthropic".to_string();
+        child.realm.insert(
+            "child".to_string(),
+            RealmConfigSection {
+                parent: Some(RealmId::global()),
+                ..Default::default()
+            },
+        );
+
+        let mut docs = std::collections::BTreeMap::new();
+        docs.insert("child".to_string(), child);
+        docs.insert("global".to_string(), global);
+
+        let reader = EffectiveConfigReader::new(Arc::new(MapSource { docs }));
+        let eff = reader
+            .effective_config(&RealmId::parse("child").unwrap())
+            .await
+            .expect("compose");
+        assert_eq!(eff.models.openai, "g-openai", "inherited from global");
+        assert_eq!(eff.models.anthropic, "c-anthropic", "child override");
+        assert!(eff.realm.contains_key("global") && eff.realm.contains_key("child"));
+    }
+
+    #[tokio::test]
+    async fn effective_reader_absent_ancestor_does_not_clobber() {
+        use crate::connection::{RealmConfigSection, RealmId};
+
+        // child references global via parent, but NO global doc exists.
+        let mut child = Config::default();
+        child.models.anthropic = "c-anthropic".to_string();
+        child.realm.insert(
+            "child".to_string(),
+            RealmConfigSection {
+                parent: Some(RealmId::global()),
+                ..Default::default()
+            },
+        );
+        let mut docs = std::collections::BTreeMap::new();
+        docs.insert("child".to_string(), child);
+
+        let reader = EffectiveConfigReader::new(Arc::new(MapSource { docs }));
+        let eff = reader
+            .effective_config(&RealmId::parse("child").unwrap())
+            .await
+            .expect("compose");
+        assert_eq!(
+            eff.models.anthropic, "c-anthropic",
+            "absent global ancestor must not clobber the child's own fields"
+        );
+    }
 
     #[test]
     fn merge_patch_removes_keys_on_null_and_merges_nested_objects() {

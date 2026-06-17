@@ -1261,7 +1261,7 @@ fn session_error_means_session_identity_already_active(
 }
 
 #[cfg(feature = "runtime-adapter")]
-struct RuntimeSessionState {
+pub(super) struct RuntimeSessionState {
     // Transport-only owner context keyed by canonical runtime input identity.
     // Never used as lifecycle/ordering truth; ordering is runtime-owned via
     // contributing_input_ids and input lifecycle state.
@@ -1282,6 +1282,13 @@ struct QueuedTurnContext {
 
 #[cfg(feature = "runtime-adapter")]
 impl RuntimeSessionState {
+    #[cfg(test)]
+    pub(super) fn empty_for_test() -> Self {
+        Self {
+            queued_turns: Mutex::new(RuntimeSessionQueue::default()),
+        }
+    }
+
     async fn enqueue_turn_context(&self, input_id: InputId, event_tx: Option<TurnEventTx>) -> bool {
         let Some(event_tx) = event_tx else {
             return false;
@@ -1513,7 +1520,7 @@ mod tests {
 }
 
 #[cfg(feature = "runtime-adapter")]
-struct MobSessionRuntimeExecutor {
+pub(super) struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Arc<MeerkatMachine>,
     bridge_session_id: SessionId,
@@ -1523,7 +1530,7 @@ struct MobSessionRuntimeExecutor {
 
 #[cfg(feature = "runtime-adapter")]
 impl MobSessionRuntimeExecutor {
-    fn new(
+    pub(super) fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Arc<MeerkatMachine>,
         bridge_session_id: SessionId,
@@ -1797,14 +1804,23 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         tracing::debug!(
             bridge_session_id = %self.bridge_session_id,
-            "mob runtime executor received stop; discarding live session"
+            "mob runtime executor received stop; unregistering runtime session then discarding live session"
         );
+        // Unregister from the runtime adapter BEFORE discarding the live session.
+        // Teardown then exposes only a "gone-from-adapter / still-in-session-service"
+        // split-state, which a concurrent mob retire->archive tolerates. The reverse
+        // order (discard first) removes the session from the session-service while it
+        // is still registered in the adapter, so a concurrent archive read misses with
+        // NotFound while the provisioner guard still sees contains_session() == true,
+        // raising a spurious InternalError on every retire/respawn/console-reset of an
+        // idle member. Regression coverage: runtime::tests
+        // cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_session.
+        self.runtime_adapter
+            .unregister_session(&self.bridge_session_id)
+            .await;
         let discard_result = self
             .session_service
             .discard_live_session(&self.bridge_session_id)
-            .await;
-        self.runtime_adapter
-            .unregister_session(&self.bridge_session_id)
             .await;
         let removed = {
             let mut runtime_sessions = self.runtime_sessions.write().await;

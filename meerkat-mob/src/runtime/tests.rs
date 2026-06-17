@@ -1192,6 +1192,13 @@ struct MockSessionService {
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     runtime_adapter: Mutex<Option<Arc<meerkat_runtime::MeerkatMachine>>>,
+    /// Regression observation for the idle-member retire/archive ordering fix:
+    /// records whether the runtime adapter still contained the session at the
+    /// moment `discard_live_session` was invoked. `Some(false)` proves the
+    /// cleanup callback unregistered from the adapter BEFORE discarding the
+    /// live session (the fix); `Some(true)` would mean the buggy reverse order
+    /// that races a concurrent retire->archive to a spurious NotFound.
+    discard_adapter_session_present: Mutex<Option<bool>>,
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
     prompts: RwLock<Vec<(SessionId, String)>>,
@@ -1282,6 +1289,7 @@ impl MockSessionService {
             keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             runtime_adapter: Mutex::new(None),
+            discard_adapter_session_present: Mutex::new(None),
             session_counter: AtomicU64::new(0),
             prompts: RwLock::new(Vec::new()),
             create_requests: RwLock::new(Vec::new()),
@@ -1387,6 +1395,16 @@ impl MockSessionService {
 
     fn set_runtime_adapter(&self, adapter: Arc<meerkat_runtime::MeerkatMachine>) {
         *self.runtime_adapter.lock().expect("runtime_adapter mutex") = Some(adapter);
+    }
+
+    /// See `discard_adapter_session_present`. `None` => discard was never
+    /// called; `Some(false)` => the adapter had already unregistered the
+    /// session by discard time (the retire/archive ordering fix holds).
+    fn discard_observed_adapter_session_present(&self) -> Option<bool> {
+        *self
+            .discard_adapter_session_present
+            .lock()
+            .expect("discard observation mutex")
     }
 
     fn disable_interaction_event_injector(&self) {
@@ -2667,6 +2685,23 @@ impl MobSessionService for MockSessionService {
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        // Regression observation: capture whether the runtime adapter still
+        // holds this session at discard time. The cleanup callback must
+        // unregister from the adapter BEFORE discarding the live session, so a
+        // concurrent retire->archive never observes gone-from-service /
+        // still-in-adapter (which surfaces as a spurious archive NotFound).
+        let observed_adapter = self
+            .runtime_adapter
+            .lock()
+            .expect("runtime_adapter mutex")
+            .clone();
+        if let Some(adapter) = observed_adapter {
+            let present = adapter.contains_session(session_id).await;
+            *self
+                .discard_adapter_session_present
+                .lock()
+                .expect("discard observation mutex") = Some(present);
+        }
         self.sessions.write().await.remove(session_id);
         self.live_session_data.write().await.remove(session_id);
         self.keep_alive_notifiers.write().await.remove(session_id);
@@ -22532,6 +22567,112 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
             .await
             .expect("read live service state"),
         "successful cleanup should archive the session projection"
+    );
+}
+
+// Regression: meerkat 0.7.6 (#790, "machine-driven execution control") made an
+// idle member eagerly stop its runtime executor, firing the CoreExecutor
+// callback `cleanup_after_runtime_stop_terminalized`. That callback discarded
+// the live session from the session-service BEFORE unregistering it from the
+// runtime adapter. Running concurrently with the mob actor's retire -> archive
+// (which reads the session-service first), this exposed a "gone-from-service /
+// still-in-adapter" window: the archive read missed (NotFound) while the
+// provisioner guard still saw contains_session() == true, raising a spurious
+// InternalError on every retire / respawn / console-reset of an idle member.
+//
+// The fix reorders the callback to unregister from the adapter first, so the
+// only observable split-state is "gone-from-adapter / still-in-session-service",
+// which the archive read tolerates. This test pins that ordering deterministically:
+// by the time discard_live_session runs, the adapter must already have
+// unregistered the session. If the order is ever reverted, the observation flips
+// to Some(true) and this test fails.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_session() {
+    use meerkat_core::lifecycle::CoreExecutor;
+
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        runtime_store_for_machine,
+    ));
+    service.set_runtime_adapter(adapter.clone());
+
+    let session = Session::new();
+    let session_id = session.id().clone();
+    service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "idle cleanup ordering".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(session),
+                comms_name: Some("test-mob/worker/idle-cleanup-ordering".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create runtime-backed cleanup session");
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "precondition: session registered in the runtime adapter"
+    );
+
+    let state = Arc::new(super::provisioner::RuntimeSessionState::empty_for_test());
+    let runtime_sessions = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    runtime_sessions
+        .write()
+        .await
+        .insert(session_id.clone(), state.clone());
+
+    let mut executor = super::provisioner::MobSessionRuntimeExecutor::new(
+        service.clone(),
+        adapter.clone(),
+        session_id.clone(),
+        state.clone(),
+        runtime_sessions.clone(),
+    );
+    executor
+        .cleanup_after_runtime_stop_terminalized()
+        .await
+        .expect("cleanup after runtime stop should succeed");
+
+    // The defensive invariant: at discard time the adapter had already
+    // unregistered the session (Some(false)). A reverted order would record
+    // Some(true).
+    assert_eq!(
+        service.discard_observed_adapter_session_present(),
+        Some(false),
+        "cleanup must unregister from the runtime adapter BEFORE discarding the \
+         live session, so a concurrent retire->archive never races to NotFound"
+    );
+
+    // End state: torn down on both sides and out of the runtime_sessions map.
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "session should be unregistered from the runtime adapter after cleanup"
+    );
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("read live service state"),
+        "session should be discarded from the session-service after cleanup"
+    );
+    assert!(
+        runtime_sessions.read().await.get(&session_id).is_none(),
+        "session should be removed from the runtime_sessions map after cleanup"
     );
 }
 

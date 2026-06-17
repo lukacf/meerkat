@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.7.5
+// Contract version: 0.7.6
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.7.5";
+export const CONTRACT_VERSION = "0.7.6";
 
 
 // K21 — shared fail-closed wire parsing helpers (generated; not exported).

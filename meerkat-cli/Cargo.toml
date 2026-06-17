@@ -37,7 +37,7 @@ path = "tests/cli_mobpack_live_smoke.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]
-meerkat = { workspace = true, features = ["openai-realtime"] }
+meerkat = { workspace = true }
 meerkat-auth-core = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-models = { workspace = true }
@@ -54,7 +54,7 @@ meerkat-tools = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-pack = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
-meerkat-rpc = { workspace = true, optional = true, features = ["mob"] }
+meerkat-rpc = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 serde = { workspace = true }
@@ -79,11 +79,12 @@ uuid = { workspace = true }
 url = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule", "workgraph", "mob"]
+default = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule", "workgraph", "mob", "rpc-surface"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]
 openai = ["meerkat/openai"]
+openai-realtime = ["openai", "meerkat/openai-realtime", "meerkat-rpc?/openai-realtime"]
 gemini = ["meerkat/gemini"]
 
 # Storage backends (forwarded to facade)
@@ -101,12 +102,20 @@ mob = [
     "dep:meerkat-mob",
     "dep:meerkat-mob-pack",
     "dep:meerkat-mob-mcp",
-    "dep:meerkat-rpc",
+    "session-store",
 ]
-comms = ["dep:meerkat-comms", "meerkat/comms"]
-mcp = ["dep:meerkat-mcp", "meerkat/mcp"]
-schedule = ["meerkat/schedule"]
-workgraph = ["meerkat/workgraph"]
+rpc-surface = [
+    "dep:meerkat-rpc",
+    "meerkat-rpc/comms",
+    "meerkat-rpc/mcp",
+    "meerkat-rpc/mob",
+    "meerkat-rpc/schedule",
+    "meerkat-rpc/workgraph",
+]
+comms = ["dep:meerkat-comms", "meerkat/comms", "meerkat-rpc?/comms"]
+mcp = ["dep:meerkat-mcp", "meerkat/mcp", "meerkat-rpc?/mcp"]
+schedule = ["meerkat/schedule", "meerkat-rpc?/schedule"]
+workgraph = ["meerkat/workgraph", "meerkat-rpc?/workgraph"]
 skills = ["meerkat/skills"]
 
 integration-real-tests = []

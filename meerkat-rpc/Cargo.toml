@@ -25,12 +25,12 @@ name = "live_rpc_regression"
 path = "tests/live_rpc_regression.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "memory-store-session", "skills", "schedule", "workgraph", "live"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "memory-store-session", "skills", "schedule", "workgraph", "live"] }
 meerkat-core = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-live = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "openai-realtime"] }
+meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
 meerkat-anthropic = { workspace = true, features = ["oauth"] }
 meerkat-providers = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "native-keyring", "refresh-file-lock"] }
 reqwest = { workspace = true }
@@ -52,10 +52,11 @@ clap = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 
 [features]
-default = ["comms", "mcp", "mob", "schedule", "workgraph"]
+default = ["comms", "mcp", "mob", "schedule", "workgraph", "openai-realtime"]
 comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
+openai-realtime = ["meerkat/openai-realtime", "meerkat-client/openai-realtime"]
 schedule = ["meerkat/schedule"]
 workgraph = ["meerkat/workgraph"]
 live-webrtc = ["meerkat-live/webrtc"]

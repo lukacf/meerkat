@@ -67,6 +67,21 @@ pub trait RealmConfigSource: Send + Sync {
         &self,
         realm: &crate::connection::RealmId,
     ) -> Result<Option<Config>, ConfigError>;
+
+    /// Fetch the OWN raw TOML document for `realm` (presence-preserving), or
+    /// `None`.
+    ///
+    /// Default: `None`. Composition then falls back to a value-merge that uses a
+    /// `!= default` heuristic and so cannot honor a child realm overriding a
+    /// scalar (e.g. a `tools.*_enabled` toggle) back to its struct default. The
+    /// filesystem source overrides this with the parsed file so scalar/toggle
+    /// inheritance is presence-exact (`child-wins-scalar`).
+    async fn raw_config_for_realm(
+        &self,
+        _realm: &crate::connection::RealmId,
+    ) -> Result<Option<toml::Value>, ConfigError> {
+        Ok(None)
+    }
 }
 
 /// Read-only reader that composes a realm's parent chain into the effective
@@ -103,6 +118,7 @@ impl EffectiveConfigReader {
         use std::collections::{BTreeMap, BTreeSet};
 
         let mut docs: BTreeMap<RealmId, Config> = BTreeMap::new();
+        let mut raw_docs: BTreeMap<RealmId, toml::Value> = BTreeMap::new();
         let mut seen: BTreeSet<RealmId> = BTreeSet::new();
         let mut frontier = vec![head.clone()];
         let mut guard = 0usize;
@@ -123,6 +139,9 @@ impl EffectiveConfigReader {
                 {
                     frontier.push(parent);
                 }
+                if let Some(raw) = self.source.raw_config_for_realm(&realm).await? {
+                    raw_docs.insert(realm.clone(), raw);
+                }
                 docs.insert(realm, doc);
             }
         }
@@ -132,10 +151,15 @@ impl EffectiveConfigReader {
         if seen.insert(global.clone())
             && let Some(doc) = self.source.config_for_realm(&global).await?
         {
+            if let Some(raw) = self.source.raw_config_for_realm(&global).await? {
+                raw_docs.insert(global.clone(), raw);
+            }
             docs.insert(global, doc);
         }
 
-        Ok(crate::config::compose_effective_config(&docs, head)?)
+        Ok(crate::config::compose_effective_config(
+            &docs, &raw_docs, head,
+        )?)
     }
 
     /// Like [`Self::effective_config`], but the HEAD realm's document is supplied
@@ -155,6 +179,13 @@ impl EffectiveConfigReader {
         use std::collections::{BTreeMap, BTreeSet};
 
         let mut docs: BTreeMap<RealmId, Config> = BTreeMap::new();
+        // The head's VALUES come from the caller's in-memory config (authoritative
+        // — it may post-date the on-disk doc, e.g. a ConfigRuntime snapshot). Its
+        // PRESENCE (which keys it explicitly sets) is read from the head's durable
+        // doc in the source, so a network surface's head realm can also override a
+        // scalar/toggle back to its struct default (config get/set write that same
+        // doc, so its key set is current). Ancestors carry presence the same way.
+        let mut raw_docs: BTreeMap<RealmId, toml::Value> = BTreeMap::new();
         let mut seen: BTreeSet<RealmId> = BTreeSet::new();
         seen.insert(head.clone());
         let mut frontier = Vec::new();
@@ -164,6 +195,9 @@ impl EffectiveConfigReader {
             .and_then(|section| section.parent.clone())
         {
             frontier.push(parent);
+        }
+        if let Some(raw) = self.source.raw_config_for_realm(head).await? {
+            raw_docs.insert(head.clone(), raw);
         }
         docs.insert(head.clone(), head_config);
 
@@ -184,6 +218,9 @@ impl EffectiveConfigReader {
                 {
                     frontier.push(parent);
                 }
+                if let Some(raw) = self.source.raw_config_for_realm(&realm).await? {
+                    raw_docs.insert(realm.clone(), raw);
+                }
                 docs.insert(realm, doc);
             }
         }
@@ -192,10 +229,15 @@ impl EffectiveConfigReader {
         if seen.insert(global.clone())
             && let Some(doc) = self.source.config_for_realm(&global).await?
         {
+            if let Some(raw) = self.source.raw_config_for_realm(&global).await? {
+                raw_docs.insert(global.clone(), raw);
+            }
             docs.insert(global, doc);
         }
 
-        Ok(crate::config::compose_effective_config(&docs, head)?)
+        Ok(crate::config::compose_effective_config(
+            &docs, &raw_docs, head,
+        )?)
     }
 }
 

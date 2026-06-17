@@ -1280,4 +1280,25 @@ impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
         let store = meerkat_core::FileConfigStore::new(path, self.catalog);
         store.get().await.map(Some)
     }
+
+    async fn raw_config_for_realm(
+        &self,
+        realm: &meerkat_core::connection::RealmId,
+    ) -> Result<Option<toml::Value>, meerkat_core::config::ConfigError> {
+        // Same path resolution as `config_for_realm`; return the parsed raw TOML
+        // so composition can honor presence (a child explicitly setting a scalar
+        // to its struct default still wins). Absent doc -> None.
+        let path = if realm.is_global() {
+            self.global_doc.clone()
+        } else {
+            realm_paths_in(&self.state_root, realm.as_str()).config_path
+        };
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(None);
+        }
+        let bytes = tokio::fs::read(&path).await?;
+        let text = String::from_utf8(bytes)?;
+        let value: toml::Value = toml::from_str(&text)?;
+        Ok(Some(value))
+    }
 }

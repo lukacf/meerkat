@@ -33,12 +33,15 @@ async fn write_config_doc(path: &Path, config: &Config) {
         .expect("write realm config doc via FileConfigStore");
 }
 
-/// A leaf realm section whose only fact is its parent edge (binding inherited).
-fn child_section(parent: &str) -> RealmConfigSection {
-    RealmConfigSection {
-        parent: Some(RealmId::parse(parent).expect("valid parent slug")),
-        ..Default::default()
+/// Write a hand-authored SPARSE realm config doc (raw TOML), creating parents.
+/// Unlike [`write_config_doc`] (full serialization via `config set`), this leaves
+/// unset keys ABSENT so the composer inherits them — the realistic style for a
+/// hand-configured realm hierarchy.
+async fn write_sparse_toml_doc(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.unwrap();
     }
+    tokio::fs::write(path, contents).await.unwrap();
 }
 
 #[tokio::test]
@@ -54,6 +57,14 @@ async fn realm_config_inheritance_real_fs_chain() {
     let mut global = Config::default();
     global.agent.model = "claude-sonnet-4-5".to_string();
     global.max_tokens = Some(32_768);
+    // Toggles set to the OPPOSITE of their struct default, so the child below
+    // can override them BACK to the default — the case the `!= default` merge
+    // collapses without presence (MF-6). `shell_enabled` default=false,
+    // `schedule_enabled` default=true; `builtins_enabled` default=false is set
+    // here and left unset by the child to prove pure toggle inheritance.
+    global.tools.shell_enabled = true;
+    global.tools.schedule_enabled = false;
+    global.tools.builtins_enabled = true;
     global.realm.insert(
         GLOBAL_REALM_SLUG.to_string(),
         RealmConfigSection::from_inline_api_keys(&[("anthropic", "sk-ant-test-global")]),
@@ -63,19 +74,31 @@ async fn realm_config_inheritance_real_fs_chain() {
     // --- team (mid): inherits global's binding + model, overrides max_tokens
     // DOWN to a non-default value. Proves a parent-chain override of a scalar. -
     let team_paths = meerkat_store::realm_paths_in(&state_root, "team");
-    let mut team = Config::default();
-    team.max_tokens = Some(16_384);
-    team.realm
-        .insert("team".to_string(), child_section(GLOBAL_REALM_SLUG));
-    write_config_doc(&team_paths.config_path, &team).await;
+    write_sparse_toml_doc(
+        &team_paths.config_path,
+        "max_tokens = 16384\n\n[realm.team]\nparent = \"global\"\n",
+    )
+    .await;
 
     // --- app (head): inherits team's max_tokens + global's binding, overrides
     // the model. ------------------------------------------------------------
     let app_paths = meerkat_store::realm_paths_in(&state_root, "app");
-    let mut app = Config::default();
-    app.agent.model = "claude-opus-4-8".to_string();
-    app.realm.insert("app".to_string(), child_section("team"));
-    write_config_doc(&app_paths.config_path, &app).await;
+    // app is a SPARSE hand-authored doc: it sets ONLY the keys it overrides and
+    // OMITS the rest. It overrides shell_enabled/schedule_enabled to values
+    // EQUAL to their struct defaults (the case a `!= default` merge collapses —
+    // presence-aware compose must honor the explicit key) and never mentions
+    // builtins_enabled (so it inherits global's non-default true).
+    write_sparse_toml_doc(
+        &app_paths.config_path,
+        "[realm.app]\n\
+         parent = \"team\"\n\n\
+         [agent]\n\
+         model = \"claude-opus-4-8\"\n\n\
+         [tools]\n\
+         shell_enabled = false\n\
+         schedule_enabled = true\n",
+    )
+    .await;
 
     // --- compose the effective config for `app` over the REAL fs source. -----
     let source: Arc<dyn RealmConfigSource> =
@@ -104,6 +127,24 @@ async fn realm_config_inheritance_real_fs_chain() {
         "team's explicit max_tokens override is inherited by app"
     );
     assert_eq!(effective.resolved_max_tokens(), 16_384);
+
+    // Toggle override (MF-6): the child explicitly set each toggle to a value
+    // EQUAL to its struct default; presence-aware compose honors the explicit
+    // key so the parent's opposite value does not leak through.
+    assert!(
+        !effective.tools.shell_enabled,
+        "child shell_enabled=false (the default) overrides parent's true"
+    );
+    assert!(
+        effective.tools.schedule_enabled,
+        "child schedule_enabled=true (the default) overrides parent's false"
+    );
+    // Pure inheritance: the child never set builtins_enabled, so it inherits
+    // global's non-default true.
+    assert!(
+        effective.tools.builtins_enabled,
+        "unset child inherits global's builtins_enabled=true"
+    );
 
     // The chain's realm sections are all present in the composed config.
     for realm in ["app", "team", GLOBAL_REALM_SLUG] {

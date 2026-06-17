@@ -2386,6 +2386,7 @@ pub enum ConfigError {
 /// chain order. The fold reuses the one [`Config::merge`] engine.
 pub fn compose_effective_config(
     docs: &std::collections::BTreeMap<crate::connection::RealmId, Config>,
+    raw_docs: &std::collections::BTreeMap<crate::connection::RealmId, toml::Value>,
     head: &crate::connection::RealmId,
 ) -> Result<Config, crate::connection::RealmChainError> {
     use crate::connection::RealmChain;
@@ -2407,6 +2408,21 @@ pub fn compose_effective_config(
     for member in chain.realms().iter().rev() {
         if let Some(doc) = docs.get(member) {
             effective.merge(doc.clone());
+            // Presence-aware correction. `Config::merge` uses a `!= default`
+            // heuristic that cannot distinguish an unset scalar from one
+            // explicitly set to its struct default — so a child cannot override
+            // a parent's non-default `tools.*_enabled` toggle (or max_concurrent
+            // / timeouts / retry field) back to the default. When the doc's raw
+            // TOML is available (filesystem source), re-apply the same
+            // presence helpers `apply_toml` uses, so an EXPLICIT child key wins
+            // even when its value equals the default — honoring the plan's
+            // `child-wins-scalar` contract. Without raw TOML (e.g. an in-memory
+            // head supplied to `effective_config_over_head`) this is a no-op and
+            // the value-merge stands.
+            if let Some(raw) = raw_docs.get(member) {
+                effective.merge_tools_from_toml_presence(raw, &doc.tools);
+                effective.merge_retry_from_toml_presence(raw, &doc.retry);
+            }
             // `Config::merge` carries self_hosted/provider_tools only via the
             // toml-presence layering path (merge_toml_str), not the in-memory
             // fold. Compose folds them whole-section child-wins here so a

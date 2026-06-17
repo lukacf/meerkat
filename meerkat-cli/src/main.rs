@@ -13597,7 +13597,7 @@ async fn execute_mob_run_pack(
 
     let params = parse_mob_run_params(invocation.raw_params, invocation.prompt)?;
     validate_mobpack_input_params(&archive, &params)?;
-    let mut effective_config = load_deploy_runtime_config(scope, CliOverrides::default())?;
+    let mut effective_config = load_deploy_runtime_config(scope, CliOverrides::default()).await?;
     apply_pack_deploy_policy(
         &mut effective_config,
         &archive.manifest,
@@ -13800,7 +13800,7 @@ async fn execute_mob_deploy_internal(
     .await?;
     validate_required_capabilities(&archive.manifest, &runtime_capabilities(invocation.surface))
         .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let mut effective_config = load_deploy_runtime_config(scope, invocation.cli_overrides)?;
+    let mut effective_config = load_deploy_runtime_config(scope, invocation.cli_overrides).await?;
     apply_pack_deploy_policy(
         &mut effective_config,
         &archive.manifest,
@@ -13967,12 +13967,12 @@ fn read_config_trust_policy(scope: &RuntimeScope) -> anyhow::Result<Option<Trust
 /// config (see [`apply_pack_deploy_policy`]). A pack may never override
 /// operator-owned realm/env/CLI truth or set out-of-allow-list fields.
 #[cfg(feature = "mob")]
-fn load_deploy_runtime_config(
+async fn load_deploy_runtime_config(
     scope: &RuntimeScope,
     cli_overrides: CliOverrides,
 ) -> anyhow::Result<Config> {
-    let mut config = Config::default();
-
+    // Read the head realm's own raw config doc (head of the chain).
+    let mut head = Config::default();
     let config_path =
         meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
             .config_path;
@@ -13980,8 +13980,20 @@ fn load_deploy_runtime_config(
         let file_bytes = std::fs::read(&config_path).map_err(|err| {
             anyhow::anyhow!("failed reading config '{}': {err}", config_path.display())
         })?;
-        apply_toml_delta_layer(&mut config, &file_bytes, &config_path.display().to_string())?;
+        apply_toml_delta_layer(&mut head, &file_bytes, &config_path.display().to_string())?;
     }
+
+    // Compose the parent chain + implicit `global` tail OVER the head doc, so a
+    // deployed mob member inherits models/mcp/hooks/skills/limits and the
+    // `global`-owned credential binding exactly like the regular `rkat run`
+    // path (load_config). Without this the non-RPC deploy surface would build
+    // members from the head realm's raw config only — re-introducing the
+    // credential-write-to-global / read-from-head split this feature removes.
+    let mut config = meerkat_core::EffectiveConfigReader::new(cli_realm_config_source(scope))
+        .effective_config_over_head(&scope.locator.realm, head)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed composing realm config chain: {err}"))?;
+
     config
         .apply_env_overrides()
         .map_err(|err| anyhow::anyhow!("failed applying env overrides: {err}"))?;

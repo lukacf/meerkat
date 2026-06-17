@@ -5,7 +5,7 @@ for coding tasks. The mob runtime handles spawning, wiring, and lifecycle.
 
 ## Concepts
 - `MobDefinition` — declarative mob structure (profiles, wiring, skills)
-- `Prefab` — built-in mob templates (CodingSwarm, CodeReview, etc.)
+- `MobDefinition::from_toml` — build a mob definition from an inline TOML template
 - `MobBuilder` — create or resume a mob
 - `MobHandle` — interact with a running mob
 - Mob tools — spawn, retire, wire, status

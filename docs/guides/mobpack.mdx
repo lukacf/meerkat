@@ -83,24 +83,31 @@ rkat mob attach release-triage <RUN_ID>
 
 The web build compiles the **real meerkat agent stack** to wasm32 — same agent loop, same LLM providers (Anthropic, OpenAI, Gemini), same streaming as CLI/RPC/REST. Not a simulation.
 
-Prerequisites: a prebuilt wasm32 runtime artifact (`runtime_bg.wasm`) produced
-by the `meerkat-web-runtime` build pipeline (e.g. `wasm-pack build
-meerkat-web-runtime`). The CLI does not compile wasm32 itself and fails closed
-without the artifact — it never emits a placeholder bundle.
-
-Build:
+Prerequisites: the prebuilt meerkat-web-runtime artifacts — the wasm-bindgen
+glue (`meerkat_web_runtime.js`) and its paired `meerkat_web_runtime_bg.wasm` —
+produced by `wasm-pack build meerkat-web-runtime --target web` (or the committed
+`sdks/web/wasm` directory). The CLI does not compile wasm32 itself and fails
+closed without them — it never emits a placeholder bundle. Pass either the
+wasm-pack output **directory** or the `*_bg.wasm` file (the sibling `.js` glue is
+copied alongside it):
 
 ```bash
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --wasm ./path/to/runtime_bg.wasm
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --wasm ./sdks/web/wasm
 ```
 
-Output includes:
+Output is a self-contained, runnable bundle — serve the directory (e.g.
+`python3 -m http.server` over the output) and open `index.html`:
 
-- `runtime.js` — bundle loader module pointing at the wasm and mobpack assets
-- `runtime_bg.wasm` — the supplied compiled meerkat agent stack
-- `mobpack.bin` — the packed mob artifact
+- `index.html` — ready-to-run demo page: enter an API key, click Start, the mob boots in-browser
+- `meerkat-bootstrap.js` — reusable ES module exporting `bootMobpack(opts)`; import it from your own app
+- `meerkat_web_runtime.js` — the wasm-bindgen glue
+- `meerkat_web_runtime_bg.wasm` — the compiled meerkat agent stack
+- `mobpack.bin` — the packed mob artifact (loaded via the runtime's `init_runtime`)
 - `manifest.web.toml` — derived web manifest
-- `index.html` — minimal host page
+
+The generated `bootMobpack` bakes in the trust policy this bundle was built with
+(`--trust-policy`); override it (and supply `trusted_signers`) for signed/strict
+production deployments.
 
 ### How the WASM runtime works
 

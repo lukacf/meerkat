@@ -27,7 +27,7 @@ export interface ModelAssignments {
 interface PanelState {
   stream: StreamRenderer;
   statusEl: HTMLElement;
-  subHandle: number | null;
+  subHandle: string | null;
   currentCard: HTMLElement | null;
 }
 
@@ -36,9 +36,10 @@ export interface MobRuntime {
   mob_create(definition_json: string): Promise<string>;
   mob_spawn(mob_id: string, specs_json: string): Promise<string>;
   mob_wire(mob_id: string, a: string, b: string): Promise<void>;
-  mob_member_subscribe(mob_id: string, agent_identity: string): Promise<number>;
+  mob_member_subscribe(mob_id: string, agent_identity: string): Promise<string>;
   mob_member_send(mob_id: string, agent_identity: string, request_json: string): Promise<string>;
-  poll_subscription(handle: number): string;
+  poll_subscription(handle: string): string;
+  close_subscription(handle: string): void;
 }
 
 // ── Model resolution ────────────────────────────────────────────────────────

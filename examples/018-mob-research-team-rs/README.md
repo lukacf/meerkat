@@ -5,7 +5,7 @@ and a lead analyst synthesizes findings into a cohesive report.
 
 ## Concepts
 - Diverge/converge coordination pattern
-- Multiple specialized profiles (market, tech, user research)
+- Multiple specialized profiles (market, tech)
 - Role wiring for cross-referencing between researchers
 - Evidence-based synthesis
 
@@ -15,7 +15,6 @@ and a lead analyst synthesizes findings into a cohesive report.
 | lead-analyst | claude-opus-4-8 | Coordinates research, synthesizes findings |
 | market-researcher | claude-sonnet-4-6 | Competitive analysis, market sizing |
 | tech-researcher | claude-sonnet-4-6 | Technical feasibility |
-| user-researcher | claude-sonnet-4-6 | Personas, pain points |
 
 ## Run
 ```bash

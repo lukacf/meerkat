@@ -99,7 +99,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "provider_params": {
                         "type": "object",
-                        "description": "Provider-specific parameters. Examples: {\"reasoning_effort\": \"high\"} for deep thinking (OpenAI o-series, Anthropic extended thinking), {\"temperature\": 0.2} for more deterministic output",
+                        "description": "Typed per-turn provider parameters. Examples: {\"provider_tag\": {\"provider\": \"open_ai\", \"reasoning_effort\": \"high\"}} for OpenAI reasoning effort, {\"thinking_budget_tokens\": 5000} for Anthropic extended thinking, {\"temperature\": 0.2} for more deterministic output",
                         "additionalProperties": true
                     },
                     "session_id": {
@@ -149,7 +149,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "provider_params": {
                         "type": "object",
-                        "description": "Provider-specific parameters applied to ALL agents in the pack. Examples: {\"reasoning_effort\": \"high\"} for deep thinking, {\"temperature\": 0.2} for deterministic output. Per-agent overrides not yet supported.",
+                        "description": "Typed per-turn provider parameters applied to ALL agents in the pack. Examples: {\"provider_tag\": {\"provider\": \"open_ai\", \"reasoning_effort\": \"high\"}} for OpenAI reasoning effort, {\"thinking_budget_tokens\": 5000} for Anthropic extended thinking, {\"temperature\": 0.2} for deterministic output. Per-agent overrides not yet supported.",
                         "additionalProperties": true
                     },
                     "session_id": {

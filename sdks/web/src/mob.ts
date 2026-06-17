@@ -51,6 +51,7 @@ interface MobWasmBindings {
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_wire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_member_peer_target: (mobId: string, member: string) => Promise<string>;
   mob_unwire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
@@ -946,6 +947,25 @@ export class Mob {
       return;
     }
     await this.bindings.mob_wire_peer(this.mobId, member, JSON.stringify(peer));
+  }
+
+  /**
+   * Resolve a member's cross-mob peer target as an opaque JSON `PeerTarget`.
+   *
+   * Cross-mob wiring needs the peer's comms public key + in-proc address, which
+   * the runtime resolves server-side. Pass the result to {@link wireToPeer} on
+   * the mob whose member should trust this one.
+   */
+  async crossMobPeerTarget(member: string): Promise<string> {
+    return this.bindings.mob_member_peer_target(this.mobId, member);
+  }
+
+  /**
+   * Install trust from a local member to a peer in another mob, using a target
+   * obtained from that mob's {@link crossMobPeerTarget}.
+   */
+  async wireToPeer(member: string, peerTargetJson: string): Promise<void> {
+    await this.bindings.mob_wire_peer(this.mobId, member, peerTargetJson);
   }
 
   /** Remove comms trust between two agents. */

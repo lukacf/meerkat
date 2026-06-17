@@ -84,7 +84,9 @@ async def main():
                 prompt="What is the optimal data structure for a LRU cache? Think step by step.",
                 model="claude-sonnet-4-6",
                 provider_params={
-                    "thinking": {"budget_tokens": 5000}
+                    # Top-level typed knob: enables Anthropic extended thinking
+                    # with the given token budget (ProviderParamsOverride).
+                    "thinking_budget_tokens": 5000
                 },
             )
             print(f"  Response: {session.text[:200]}...")
@@ -97,7 +99,9 @@ async def main():
                 prompt="What is the optimal data structure for a LRU cache?",
                 model="gpt-5.5",
                 provider_params={
-                    "reasoning_effort": "high"
+                    # OpenAI-specific knobs travel under the typed provider_tag,
+                    # discriminated by the snake_case provider name "open_ai".
+                    "provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}
                 },
             )
             print(f"  Response: {session.text[:200]}...")

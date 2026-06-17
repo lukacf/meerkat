@@ -379,8 +379,15 @@ async function startMatch(): Promise<void> {
     for (let i = 0; i < factions.length; i++) {
       for (let j = i + 1; j < factions.length; j++) {
         const a = factions[i], b = factions[j];
-        try { await mod.wire_cross_mob(a.mobId, `${a.team}-ambassador`, b.mobId, `${b.team}-ambassador`); }
-        catch (e) { console.warn(`Cross-mob wire ${a.team}\u2194${b.team} failed:`, e); }
+        const aAmb = `${a.team}-ambassador`, bAmb = `${b.team}-ambassador`;
+        try {
+          // Resolve each ambassador's cross-mob peer target (comms key + in-proc
+          // address, resolved runtime-side) and install bidirectional trust.
+          const targetA = await mod.mob_member_peer_target(a.mobId, aAmb);
+          const targetB = await mod.mob_member_peer_target(b.mobId, bAmb);
+          await mod.mob_wire_peer(a.mobId, aAmb, targetB);
+          await mod.mob_wire_peer(b.mobId, bAmb, targetA);
+        } catch (e) { console.warn(`Cross-mob wire ${a.team}\u2194${b.team} failed:`, e); }
       }
     }
 

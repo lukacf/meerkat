@@ -52,17 +52,20 @@ export interface RuntimeModule {
   mob_create: (definitionJson: string) => Promise<unknown>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
-  wire_cross_mob: (mobA: string, meerkatA: string, mobB: string, meerkatB: string) => Promise<void>;
+  /** Resolve a member's cross-mob peer target (JSON PeerTarget) for mob_wire_peer. */
+  mob_member_peer_target: (mobId: string, member: string) => Promise<string>;
+  /** Install trust from `member` to an external peer (JSON PeerTarget). */
+  mob_wire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<unknown>;
   mob_flow_status: (mobId: string, runId: string) => Promise<unknown>;
   mob_list_members: (mobId: string) => Promise<unknown>;
-  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
+  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<string>;
+  poll_subscription: (handle: string) => string;
+  close_subscription: (handle: string) => void;
 }
 
-export interface AgentSub { meerkatId: string; handle: number; role: MessageRole; team: Team }
+export interface AgentSub { meerkatId: string; handle: string; role: MessageRole; team: Team }
 export interface FactionMob { team: Team; mobId: string }
 export interface MatchSession {
   factions: FactionMob[];

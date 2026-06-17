@@ -154,7 +154,8 @@ impl TargetScheduleSessionHost {
             })
             .unwrap_or(false);
         let comms_rt = self.service.comms_runtime(session_id).await;
-        self.runtime_adapter
+        let _ = self
+            .runtime_adapter
             .update_peer_ingress_context(session_id, keep_alive, comms_rt)
             .await;
     }
@@ -296,9 +297,15 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             }),
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
-            realm_id: create.realm_id.clone(),
+            realm_id: create
+                .realm_id
+                .as_deref()
+                .and_then(|s| meerkat_core::RealmId::parse(s).ok()),
             instance_id: create.instance_id.clone(),
-            backend: create.backend.clone(),
+            backend: create
+                .backend
+                .as_deref()
+                .and_then(meerkat_core::RecoveryBackendKind::parse),
             keep_alive: create.keep_alive,
             app_context: create.app_context.clone(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
@@ -310,9 +317,13 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .create_session(CreateSessionRequest {
                 model: create.model.clone(),
                 prompt: ContentInput::Text(String::new()),
-                system_prompt: prompt_system_prompt
+                system_prompt: match prompt_system_prompt
                     .map(str::to_owned)
-                    .or_else(|| create.system_prompt.clone()),
+                    .or_else(|| create.system_prompt.clone())
+                {
+                    Some(s) => meerkat::SystemPromptOverride::Set(s),
+                    None => meerkat::SystemPromptOverride::Inherit,
+                },
                 max_tokens: create.max_tokens,
                 event_tx: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -683,8 +694,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(MemoryBlobStore::new()),
         rpc_schedule_store,
     );
-    let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
+    let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+        meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
+    );
     // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
     // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
     // serve_tcp form the canonical RPC-host triad. Lifting these would require an
@@ -977,7 +989,7 @@ async fn setup_session(
     let req = CreateSessionRequest {
         model: model.to_string(),
         prompt: ContentInput::Text(String::new()),
-        system_prompt: Some(system_prompt.to_string()),
+        system_prompt: meerkat::SystemPromptOverride::Set(system_prompt.to_string()),
         max_tokens: None,
         event_tx: None,
         initial_turn: InitialTurnPolicy::Defer,
@@ -1014,7 +1026,7 @@ async fn setup_session(
     // This is the one session the mob manages for this target — TUX resets go
     // through mob/respawn, not session/create, so this wiring is stable.
     if let Some(comms) = comms_runtime {
-        runtime_adapter
+        let _ = runtime_adapter
             .update_peer_ingress_context(
                 &session_id,
                 true,
@@ -1111,7 +1123,9 @@ fn pending_system_context_appends(
     appends
         .iter()
         .map(|append| PendingSystemContextAppend {
-            text: render_runtime_context_append_text(&append.content),
+            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                text: render_runtime_context_append_text(&append.content),
+            },
             source: Some(append.key.clone()),
             idempotency_key: Some(append.key.clone()),
             accepted_at,
@@ -1143,11 +1157,9 @@ fn start_turn_request_from_primitive(
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::new(
-            metadata.and_then(|meta| meta.render_metadata.clone()),
             metadata
                 .and_then(|meta| meta.handling_mode)
                 .unwrap_or(HandlingMode::Queue),
-            metadata.and_then(|meta| meta.skill_references.clone()),
             metadata.and_then(|meta| meta.flow_tool_overlay.clone()),
             pre_turn_context_appends,
             metadata.cloned(),
@@ -1365,8 +1377,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
             Arc::new(MemoryBlobStore::new()),
             rpc_schedule_store,
         );
-        let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
-            Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
+        let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
+        );
         // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
         // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
         // serve_tcp form the canonical RPC-host triad. Lifting these would require an
@@ -1726,7 +1739,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         KennelPayload::TargetRegistered { hive_pubkey, hive_comms_addr } => {
                             if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
                                 if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str()) {
-                                    comms_trust.add_trusted_peer("hive", pk, addr).await?;
+                                    comms_trust.add_trusted_peer("hive", pk, &addr).await?;
                                 }
                             }
                             kennel_session_state = target_kennel_session::transition(
@@ -1748,7 +1761,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         KennelPayload::PeerWire { peer_name, peer_id, peer_addr } => {
                             if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(&peer_id) {
                                 comms_trust
-                                    .add_trusted_peer(peer_name, pk, peer_addr)
+                                    .add_trusted_peer(&peer_name, pk, &peer_addr)
                                     .await?;
                                 eprintln!("[target] peer wired: {peer_name} at {peer_addr}");
                             }
@@ -2139,8 +2152,9 @@ mod tests {
     use meerkat_core::ops_lifecycle::OperationKind;
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
+        StartTurnRuntimeSemantics,
     };
-    use meerkat_core::types::{ContentInput, HandlingMode};
+    use meerkat_core::types::ContentInput;
     use meerkat_mob::MobSessionService;
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
     use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
@@ -2360,17 +2374,18 @@ mod tests {
             super::start_turn_request_from_primitive(&primitive).expect("primitive should convert");
 
         assert_eq!(request.prompt.text_content(), "");
-        assert_eq!(request.pre_turn_context_appends.len(), 1);
+        assert_eq!(request.runtime.pre_turn_context_appends.len(), 1);
         assert_eq!(
-            request.pre_turn_context_appends[0]
+            request.runtime.pre_turn_context_appends[0]
                 .idempotency_key
                 .as_deref(),
             Some("peer_response_terminal:analyst:req-1")
         );
-        assert_eq!(
-            request.pre_turn_context_appends[0].text,
-            "terminal answer from analyst"
-        );
+        let appended_text = match &request.runtime.pre_turn_context_appends[0].content {
+            meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => text.as_str(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert_eq!(appended_text, "terminal answer from analyst");
     }
 
     #[tokio::test]
@@ -2431,7 +2446,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("inspect target tools".to_string()),
-            system_prompt: Some("test target".to_string()),
+            system_prompt: meerkat::SystemPromptOverride::Set("test target".to_string()),
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -2576,7 +2591,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text(String::new()),
-            system_prompt: Some("cleanup".to_string()),
+            system_prompt: meerkat::SystemPromptOverride::Set("cleanup".to_string()),
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -2716,14 +2731,14 @@ mod tests {
                     prompt: ContentInput::Text("run shell".to_string()),
                     system_prompt: None,
                     event_tx: None,
-                    runtime: StartTurnRuntimeSemantics::runtime_metadata(Some(
+                    runtime: StartTurnRuntimeSemantics::runtime_metadata(
                         meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                             execution_kind: Some(
                                 meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                             ),
                             ..Default::default()
                         },
-                    )),
+                    ),
                 },
             )
             .await
@@ -2792,7 +2807,7 @@ mod tests {
         let req2 = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
-            system_prompt: Some("test".into()),
+            system_prompt: meerkat::SystemPromptOverride::Set("test".into()),
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -2927,7 +2942,7 @@ mod tests {
         let req = CreateSessionRequest {
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
-            system_prompt: Some("test".into()),
+            system_prompt: meerkat::SystemPromptOverride::Set("test".into()),
             max_tokens: None,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,

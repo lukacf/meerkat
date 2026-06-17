@@ -71,7 +71,7 @@ consult(question: "What about the edge case?", session_id: "<id from previous ca
 - `system_prompt` — Custom persona (default: general technical advisor)
 - `shell` — Enable shell access for running commands
 - `skills` — Inject domain knowledge (e.g. `["meerkat-platform", "rct-methodology"]`)
-- `provider_params` — Provider-specific settings (e.g. `{"reasoning_effort": "high"}`)
+- `provider_params` — Typed per-turn provider settings (e.g. `{"temperature": 0.2}`, or `{"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}`)
 - `session_id` — Continue a previous session (model/prompt/shell inherited)
 
 ### `deliberate`
@@ -182,13 +182,13 @@ Pass provider-specific settings applied to all agents in a pack:
 deliberate(
   pack: "architect",
   task: "...",
-  provider_params: {"reasoning_effort": "high"}
+  provider_params: {"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}
 )
 
 consult(
   question: "...",
   model: "gpt-5.5-pro",
-  provider_params: {"reasoning_effort": "high"}
+  provider_params: {"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}
 )
 ```
 
@@ -238,7 +238,8 @@ src/
 ├── tools/
 │   ├── mod.rs           # Tool schemas, dispatch, list_sessions, destroy_session
 │   ├── consult.rs       # Single session with continuation, skills, shell, custom prompts
-│   └── deliberate.rs    # Mob lifecycle: create → spawn → flow|comms → cleanup/persist
+│   ├── deliberate.rs    # Mob lifecycle: create → spawn → flow|comms → cleanup/persist
+│   └── mobs.rs          # CRUD for user-created mob definitions (create, get, update, delete)
 └── packs/
     ├── mod.rs           # Pack trait, registry, shared helpers (6 reusable builders)
     ├── advisor.rs       # 1 agent  — quick opinion

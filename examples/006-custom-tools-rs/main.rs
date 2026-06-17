@@ -11,7 +11,9 @@
 //!
 //! ## Run
 //! ```bash
-//! This is a reference implementation. For runnable examples, see meerkat/examples/.
+//! # From the repository root
+//! ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
+//!   --example 006-custom-tools --features jsonl-store
 //! ```
 
 use async_trait::async_trait;

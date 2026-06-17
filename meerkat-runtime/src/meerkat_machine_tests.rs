@@ -24624,6 +24624,93 @@ async fn attach_session_ingress_exact_reassertion_is_idempotent() {
 }
 
 #[tokio::test]
+async fn refresh_session_owned_peer_ingress_respawns_authorized_drain_without_reattach() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
+    {
+        let mut sessions = adapter.sessions.write().await;
+        let entry = sessions
+            .get_mut(&session_id)
+            .expect("registered session entry");
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::AttachSessionIngress {
+                comms_runtime_id: expected_id.clone(),
+            },
+        )
+        .expect("session ingress attach should stage");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
+                mode: crate::meerkat_machine::dsl::DrainMode::PersistentHost,
+            },
+        )
+        .expect("spawn drain should stage");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
+                reason: crate::meerkat_machine::dsl::DrainExitReason::Failed,
+            },
+        )
+        .expect("failed persistent drain should become respawnable");
+        drop(authority);
+
+        entry
+            .drain_slot
+            .install_task(Arc::clone(&comms_runtime), tokio::spawn(async {}));
+        entry.drain_slot.clear_after_exit(true);
+    }
+
+    assert_eq!(
+        current_phase(&adapter, &session_id).await,
+        Some(CommsDrainPhase::ExitedRespawnable)
+    );
+    assert!(
+        !handle_present(&adapter, &session_id).await,
+        "fixture should retain runtime identity but have no live drain handle"
+    );
+
+    assert!(
+        adapter
+            .refresh_session_owned_peer_ingress(&session_id)
+            .await
+            .expect("refresh session-owned ingress"),
+        "refresh should respawn the authorized drain task"
+    );
+
+    assert_eq!(
+        current_phase(&adapter, &session_id).await,
+        Some(CommsDrainPhase::Running)
+    );
+    assert!(
+        handle_present(&adapter, &session_id).await,
+        "refresh should install a new drain handle"
+    );
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    assert!(
+        matches!(
+            owner,
+            crate::meerkat_machine::PeerIngressOwner::SessionOwned { ref comms_runtime_id }
+                if *comms_runtime_id == expected_id
+        ),
+        "refresh must preserve the existing session-owned runtime id, got {owner:?}"
+    );
+
+    adapter.unregister_session(&session_id).await;
+}
+
+#[tokio::test]
 async fn attach_mob_ingress_exact_reassertion_is_idempotent() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

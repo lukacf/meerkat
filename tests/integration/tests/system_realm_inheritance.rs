@@ -65,6 +65,16 @@ async fn realm_config_inheritance_real_fs_chain() {
     global.tools.shell_enabled = true;
     global.tools.schedule_enabled = false;
     global.tools.builtins_enabled = true;
+    // MF-8: a parent-realm MCP server that must survive into the child's
+    // effective config (union by name, no tombstones).
+    global.tools.mcp_servers = vec![meerkat_core::McpServerConfig::streamable_http(
+        "global-mcp",
+        "http://127.0.0.1:8888/mcp",
+        std::collections::HashMap::new(),
+    )];
+    // MF-7: a parent disables a provider tool whose struct default is `true`; the
+    // child below must be able to re-enable it (presence override-to-default).
+    global.provider_tools.anthropic.web_search = false;
     global.realm.insert(
         GLOBAL_REALM_SLUG.to_string(),
         RealmConfigSection::from_inline_api_keys(&[("anthropic", "sk-ant-test-global")]),
@@ -96,7 +106,12 @@ async fn realm_config_inheritance_real_fs_chain() {
          model = \"claude-opus-4-8\"\n\n\
          [tools]\n\
          shell_enabled = false\n\
-         schedule_enabled = true\n",
+         schedule_enabled = true\n\n\
+         [[tools.mcp_servers]]\n\
+         name = \"app-mcp\"\n\
+         url = \"http://127.0.0.1:9999/mcp\"\n\n\
+         [provider_tools.anthropic]\n\
+         web_search = true\n",
     )
     .await;
 
@@ -144,6 +159,31 @@ async fn realm_config_inheritance_real_fs_chain() {
     assert!(
         effective.tools.builtins_enabled,
         "unset child inherits global's builtins_enabled=true"
+    );
+
+    // MF-8: MCP servers union by name across the chain — the inherited parent
+    // server must NOT be clobbered when the child adds its own.
+    let mcp_names: Vec<&str> = effective
+        .tools
+        .mcp_servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect();
+    assert!(
+        mcp_names.contains(&"global-mcp"),
+        "inherited parent MCP server survives (no clobber): {mcp_names:?}"
+    );
+    assert!(
+        mcp_names.contains(&"app-mcp"),
+        "child MCP server is added (union): {mcp_names:?}"
+    );
+
+    // MF-7: the child re-enables a provider web_search the parent disabled, even
+    // though `true` is the struct default (presence override-to-default for
+    // provider_tools).
+    assert!(
+        effective.provider_tools.anthropic.web_search,
+        "child re-enables an inherited disabled provider web_search"
     );
 
     // The chain's realm sections are all present in the composed config.

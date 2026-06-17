@@ -490,9 +490,12 @@ impl Config {
         let Some(tools) = parsed.get("tools").and_then(toml::Value::as_table) else {
             return;
         };
-        if tools.contains_key("mcp_servers") {
-            self.tools.mcp_servers.clone_from(&layer.mcp_servers);
-        }
+        // NOTE: `mcp_servers` is deliberately NOT presence-replaced here. It is a
+        // union-by-name collection (no tombstones) handled by `merge_tools`
+        // (the value-merge); replacing it with only the current layer's servers
+        // would drop inherited parent-realm servers when this helper runs on the
+        // realm-composition path. The union is presence-correct on its own — a
+        // child realm ADDS/overrides servers and can never shed an inherited one.
         if tools.contains_key("default_timeout") {
             self.tools.default_timeout = layer.default_timeout;
         }
@@ -2419,19 +2422,27 @@ pub fn compose_effective_config(
             // `child-wins-scalar` contract. Without raw TOML (e.g. an in-memory
             // head supplied to `effective_config_over_head`) this is a no-op and
             // the value-merge stands.
+            // `Config::merge` does NOT carry self_hosted/provider_tools at all,
+            // so when raw TOML is available the presence helpers are the sole
+            // composition path for them (and for the tools/retry presence-
+            // sensitive scalars). They honor an explicit child key even when its
+            // value equals the struct default — so a child realm can re-enable a
+            // parent-disabled provider web_search (default true) it inherited.
             if let Some(raw) = raw_docs.get(member) {
                 effective.merge_tools_from_toml_presence(raw, &doc.tools);
                 effective.merge_retry_from_toml_presence(raw, &doc.retry);
-            }
-            // `Config::merge` carries self_hosted/provider_tools only via the
-            // toml-presence layering path (merge_toml_str), not the in-memory
-            // fold. Compose folds them whole-section child-wins here so a
-            // composed config never silently drops them.
-            if doc.self_hosted != default_self_hosted {
-                effective.self_hosted = doc.self_hosted.clone();
-            }
-            if doc.provider_tools != default_provider_tools {
-                effective.provider_tools = doc.provider_tools.clone();
+                effective.merge_provider_tools_from_toml_presence(raw, &doc.provider_tools);
+                effective.merge_self_hosted_from_toml_presence(raw, &doc.self_hosted);
+            } else {
+                // No raw TOML for this doc (e.g. a non-filesystem source): fall
+                // back to a whole-section child-wins swap so self_hosted /
+                // provider_tools still compose (the value-merge ignores them).
+                if doc.self_hosted != default_self_hosted {
+                    effective.self_hosted = doc.self_hosted.clone();
+                }
+                if doc.provider_tools != default_provider_tools {
+                    effective.provider_tools = doc.provider_tools.clone();
+                }
             }
         }
     }

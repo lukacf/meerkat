@@ -188,8 +188,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // ── Hive agent: SessionRuntime with mob tools ───────────────────────────
-    let hive_config_store: Arc<dyn meerkat_core::ConfigStore> =
-        Arc::new(meerkat_core::MemoryConfigStore::new(hive_config.clone()));
+    let hive_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+        meerkat_core::MemoryConfigStore::new(hive_config.clone(), meerkat_models::canonical()),
+    );
     // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
     // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
     // serve_tcp form the canonical RPC-host triad. Lifting these would require an
@@ -246,7 +247,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Create hive session directly on SessionRuntime ────────────────────
     let hive_session_id: Option<String> = {
         // Check for existing sessions (resume on restart)
-        let existing = hive_runtime.list_sessions(Default::default()).await;
+        let existing = hive_runtime
+            .list_sessions(Default::default())
+            .await
+            .unwrap_or_default();
         let resumed_id = existing
             .into_iter()
             .next()
@@ -261,7 +265,7 @@ async fn main() -> anyhow::Result<()> {
                 ProviderKind::Anthropic => meerkat_core::Provider::Anthropic,
                 ProviderKind::Gemini => meerkat_core::Provider::Gemini,
             });
-            build.system_prompt = Some(
+            build.system_prompt = meerkat::SystemPromptOverride::Set(
                 "You are the hive orchestrator for a fleet of managed target agents.\n\
                  Use the 'peers' tool to discover which targets are connected.\n\
                  Use 'send_request' to dispatch tasks to targets and collect responses.\n\
@@ -278,7 +282,10 @@ async fn main() -> anyhow::Result<()> {
                     let sid_str = sid.to_string();
                     eprintln!("[kennel] hive session created: {sid_str}");
                     // Verify the session is accessible
-                    let sessions = hive_runtime.list_sessions(Default::default()).await;
+                    let sessions = hive_runtime
+                        .list_sessions(Default::default())
+                        .await
+                        .unwrap_or_default();
                     eprintln!("[kennel] sessions after create: {}", sessions.len());
                     for s in &sessions {
                         eprintln!("[kennel]   session: {} state={:?}", s.session_id, s.state);
@@ -342,6 +349,11 @@ async fn main() -> anyhow::Result<()> {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
             })),
         );
 
@@ -355,11 +367,14 @@ async fn main() -> anyhow::Result<()> {
             default: MobBackendKind::External,
             external: Some(ExternalBackendConfig {
                 address_base: format!("tcp://{advertise_ip}:{hive_comms_port}"),
+                supervisor_bridge: None,
             }),
         };
-        if let Some(ref bridge_session_id) = hive_session_id {
-            definition.set_owner_bridge_session_lookup_index(bridge_session_id.clone());
-        }
+        // The `set_owner_bridge_session_lookup_index` setter was removed upstream. This hive
+        // mob is explicit, referenced directly by id (never looked up by bridge session) and
+        // never archived, so the prior call had no runtime effect here and is simply dropped.
+        // (A mob that needs the binding can still request it via
+        // `mob_create_definition_with_owner_bridge_session`.)
 
         match hive_mob_state_for_kennel
             .mob_create_definition(definition)

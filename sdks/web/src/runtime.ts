@@ -130,6 +130,7 @@ export interface WasmModule {
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_wire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_member_peer_target: (mobId: string, member: string) => Promise<string>;
   mob_unwire_peer: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
@@ -354,6 +355,7 @@ export class MeerkatRuntime {
       mob_wire: this.wasm.mob_wire,
       mob_unwire: this.wasm.mob_unwire,
       mob_wire_peer: this.wasm.mob_wire_peer,
+      mob_member_peer_target: this.wasm.mob_member_peer_target,
       mob_unwire_peer: this.wasm.mob_unwire_peer,
       mob_list_members: this.wasm.mob_list_members,
       mob_append_system_context: this.wasm.mob_append_system_context,

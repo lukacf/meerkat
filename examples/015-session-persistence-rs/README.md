@@ -1,7 +1,8 @@
 # 015 — Session Persistence (Rust)
 
-Persist sessions to disk so agents survive restarts. Shows three storage
-backends and the full session lifecycle.
+Persist sessions to disk so agents survive restarts. Demonstrates file-based
+persistence with `JsonlStore`, compares the available storage backends, and
+walks the full session lifecycle.
 
 ## Concepts
 - `JsonlStore` — file-based JSONL storage (simple, human-readable)

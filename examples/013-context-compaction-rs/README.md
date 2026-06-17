@@ -11,7 +11,7 @@ automatically summarizes old messages while preserving critical context.
 
 ## How It Works
 ```
-Messages accumulate → token_threshold exceeded →
+Messages accumulate → auto_compact_threshold exceeded →
   Compactor selects messages → LLM summarizes →
   Old messages replaced with summary → Agent continues
 ```

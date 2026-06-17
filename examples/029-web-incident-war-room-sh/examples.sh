@@ -43,6 +43,17 @@ resolve_rkat() {
 
 RKAT="$(resolve_rkat)"
 
+# `rkat mob web build` no longer compiles wasm itself; it requires a prebuilt
+# meerkat-web-runtime artifact passed via --wasm. Use the committed one under
+# sdks/web/wasm (override with MEERKAT_WASM=/path/to/*.wasm).
+WASM_RUNTIME="${MEERKAT_WASM:-$WORKSPACE_ROOT/sdks/web/wasm/meerkat_web_runtime_bg.wasm}"
+if [[ ! -s "$WASM_RUNTIME" ]]; then
+  echo "error: meerkat-web-runtime wasm not found at $WASM_RUNTIME" >&2
+  echo "Build it:  (cd \"$WORKSPACE_ROOT\" && wasm-pack build meerkat-web-runtime --target web --out-dir sdks/web/wasm)" >&2
+  echo "or set MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm" >&2
+  exit 1
+fi
+
 if [[ "${1:-}" == "--clean" ]]; then
   rm -rf "$WORK"
 fi
@@ -67,7 +78,9 @@ echo "--- 2. Inspecting artifact ---"
 
 echo ""
 echo "--- 3. Building browser bundle ---"
-"$RKAT" mob web build "$PACK" -o "$WEB_OUT"
+# This is a locally-built, unsigned demo pack, so allow unsigned with a
+# permissive trust policy (the default is strict, which rejects unsigned packs).
+"$RKAT" mob web build "$PACK" -o "$WEB_OUT" --wasm "$WASM_RUNTIME" --trust-policy permissive
 
 echo ""
 echo "--- 4. Generated bundle contents ---"

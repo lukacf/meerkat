@@ -89,3 +89,4 @@ API keys provided by the proxy server. Auto-starts on load.
 3. **Expense Report** — $4,200 invoice from CloudCorp (triggers Gate approval)
 4. **Calendar Conflict** — CTO double-booked
 5. **New Hire Onboarding** — Casey Rivera starts Monday
+6. **Security Breach** — Unusual admin-console login activity from a suspicious IP using the `deploy-bot` service account

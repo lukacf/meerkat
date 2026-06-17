@@ -157,21 +157,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         r"# .rkat/config.toml
 
 [compaction]
-# Trigger compaction when cumulative tokens exceed this threshold
-token_threshold = 50000
+# Trigger compaction when cumulative input tokens exceed this threshold
+auto_compact_threshold = 50000
 
 # Maximum tokens for the compaction summary
-summary_max_tokens = 1024
+max_summary_tokens = 1024
 
-# Always preserve the system prompt during compaction
-preserve_system = true
+# Number of most recent turns to always preserve verbatim
+# (the system prompt is always preserved automatically)
+recent_turn_budget = 4
 
-# Always preserve the N most recent message pairs
-preserve_most_recent_n = 2
+# Minimum number of turns between successive compactions
+min_turns_between_compactions = 3
 
 # How compaction works:
 #
-# 1. Agent loop detects token count > token_threshold
+# 1. Agent loop detects input token count >= auto_compact_threshold
 # 2. Compactor selects messages to summarize (excluding preserved ones)
 # 3. LLM generates a concise summary of the selected messages
 # 4. Old messages are replaced with the summary

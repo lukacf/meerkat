@@ -2158,6 +2158,90 @@ pub async fn mob_wire_peer(mob_id: &str, member: &str, peer_json: &str) -> Resul
         .map_err(err_mob)
 }
 
+/// Resolve a cross-mob peer target for a member, as a JSON `PeerTarget` ready to
+/// pass straight to [`mob_wire_peer`].
+///
+/// Cross-mob wiring needs the peer's comms public key + in-proc address, which
+/// the runtime owns and JS cannot read from the member roster. This resolves
+/// them server-side (the resolution the removed one-call `wire_cross_mob` helper
+/// did internally) and returns a `PeerTarget::External` descriptor. To wire two
+/// ambassadors across mobs bidirectionally, the app calls this for each side and
+/// feeds the result to `mob_wire_peer` on the other side.
+#[wasm_bindgen]
+pub async fn mob_member_peer_target(mob_id: &str, member: &str) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let identity = AgentIdentity::from(member);
+
+    let handle = mob_state.handle_for(&id).await.map_err(err_mob)?;
+    let entry = handle
+        .get_member(&identity)
+        .await
+        .map_err(err_mob)?
+        .ok_or_else(|| {
+            err_js(
+                "no_member",
+                &format!("mob '{mob_id}' has no member '{member}'"),
+            )
+        })?;
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .ok_or_else(|| {
+            err_js(
+                "no_session",
+                &format!("member '{member}' has no bridge session"),
+            )
+        })?;
+
+    let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
+    let comms = session_service
+        .comms_runtime(&session_id)
+        .await
+        .ok_or_else(|| {
+            err_js(
+                "no_comms",
+                &format!("member '{member}' has no comms runtime"),
+            )
+        })?;
+    let pubkey_str = comms.public_key().ok_or_else(|| {
+        err_js(
+            "no_key",
+            &format!("member '{member}' has no comms public key"),
+        )
+    })?;
+
+    // Fully-qualified, stable in-proc peer name: <mob>/<role>/<member>.
+    let peer_name = format!("{mob_id}/{}/{member}", entry.role);
+    let target = build_inproc_peer_target(&peer_name, &pubkey_str)?;
+    let json = serde_json::to_string(&target).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
+}
+
+/// Build a `PeerTarget::External` in-proc trusted-peer descriptor from a
+/// fully-qualified peer name and an `ed25519:<base64>` public key string.
+fn build_inproc_peer_target(
+    name: &str,
+    pubkey_str: &str,
+) -> Result<meerkat_mob::PeerTarget, JsValue> {
+    let pubkey = meerkat_comms::identity::PubKey::from_pubkey_string(pubkey_str)
+        .map_err(|e| err_str("invalid_pubkey", e))?;
+    let peer_id = meerkat_comms::router::peer_id_from_pubkey(&pubkey);
+    let peer_name =
+        meerkat_core::comms::PeerName::new(name).map_err(|e| err_str("invalid_peer_name", e))?;
+    Ok(meerkat_mob::PeerTarget::External(
+        meerkat_core::comms::TrustedPeerDescriptor {
+            peer_id,
+            name: peer_name,
+            address: meerkat_core::comms::PeerAddress::new(
+                meerkat_core::comms::PeerTransport::Inproc,
+                name,
+            ),
+            pubkey: *pubkey.as_bytes(),
+        },
+    ))
+}
+
 /// Unwire bidirectional trust between two members.
 #[wasm_bindgen]
 pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {

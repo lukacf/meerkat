@@ -8,14 +8,15 @@ to find relevant past knowledge.
 - `MemoryStore` trait — index and search interface
 - `HnswMemoryStore` — production HNSW-based implementation (SQLite)
 - `SimpleMemoryStore` — in-memory for tests
-- `memory_store` / `memory_search` — built-in agent tools
+- `memory_search` — the built-in agent tool for semantic recall
+- `MemoryStore::index_scoped()` — the Rust API used to index facts (also runs automatically during compaction)
 
 ## Architecture
 ```
-Agent calls memory_store("team uses Rust")
+App indexes a fact via MemoryStore::index_scoped("team uses Rust")
   → text indexed in HNSW vector space
 
-Later: Agent calls memory_search("what language for backend?")
+Later: Agent calls the memory_search("what language for backend?") tool
   → similarity search finds "team uses Rust"
   → result injected into agent context
 ```

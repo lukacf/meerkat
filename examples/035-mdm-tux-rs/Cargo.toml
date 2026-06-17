@@ -21,6 +21,7 @@ path = "src/bin/kennel.rs"
 [dependencies]
 meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store", "mcp", "session-store", "schedule", "skills"] }
 meerkat-core  = { path = "../../meerkat-core" }
+meerkat-models = { path = "../../meerkat-models" }
 meerkat-comms = { path = "../../meerkat-comms" }
 meerkat-machine-dsl = { path = "../../meerkat-machine-dsl" }
 meerkat-machine-schema = { path = "../../meerkat-machine-schema" }

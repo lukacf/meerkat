@@ -14,11 +14,15 @@ This page is intentionally browser/WASM-specific rather than a cross-surface tab
 
 <Tabs>
   <Tab title="CLI">
-    Build a web bundle from a `.mobpack` artifact:
+    Build a self-contained, runnable web bundle from a `.mobpack` artifact.
+    `--wasm` points at the prebuilt meerkat-web-runtime (the wasm-pack
+    `--target web` output dir, or the committed `sdks/web/wasm`):
 
     ```bash
-    rkat mob web build ./dist/my-mob.mobpack -o ./dist/web-bundle
+    rkat mob web build ./dist/my-mob.mobpack -o ./dist/web-bundle --wasm ./sdks/web/wasm
     ```
+
+    Then serve and open it: `python3 -m http.server -d ./dist/web-bundle`.
   </Tab>
   <Tab title="Manual (wasm-pack)">
     Build the WASM package directly with wasm-pack:

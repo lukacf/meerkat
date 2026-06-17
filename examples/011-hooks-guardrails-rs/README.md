@@ -7,8 +7,7 @@ audit logging, content filtering, approval gates, cost tracking, and more.
 - `HookPoint` — 8 interception points in the agent loop
 - `HookCapability` — observe (read-only) or guardrail (Allow/Deny)
 - `HookExecutionMode` — foreground (blocking) or background (async)
-- `HookRuntimeConfig` — command, HTTP, or in-process execution
-- `HookFailurePolicy` — compatibility field; runtime failures are typed engine errors
+- `HookAdapterConfig` — command, HTTP, or in-process execution
 - `DefaultHookEngine` — the standard hook processor
 
 ## Hook Points

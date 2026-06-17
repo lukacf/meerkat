@@ -329,7 +329,7 @@ rkat mob inspect <PACK.mobpack>
 rkat mob validate <PACK.mobpack>
 rkat mob run <PACK.mobpack|MOB_ID> [--flow <FLOW_ID>] [--param <KEY=VALUE>...] [--prompt <TEXT>] [--detach] [--json]
 rkat mob deploy <PACK.mobpack> <PROMPT> [--trust-policy <permissive|strict>] [--surface <cli|rpc>]
-rkat mob web build <PACK.mobpack> -o <OUT_DIR> --wasm <RUNTIME_BG_WASM>
+rkat mob web build <PACK.mobpack> -o <OUT_DIR> --wasm <PKG_DIR|name_bg.wasm>
 rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream|--no-stream]
 rkat mob flow-status <MOB_ID> <RUN_ID>
 rkat mob runs <MOB_ID> [--flow <FLOW_ID>] [--json]
@@ -353,7 +353,7 @@ rkat mob validate dist/release-triage.mobpack
 rkat mob run dist/release-triage.mobpack --prompt "triage the latest release regressions"
 rkat mob run release-triage --flow main --param severity='"high"' --detach
 rkat mob attach release-triage <RUN_ID>
-rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm runtime_bg.wasm
+rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm sdks/web/wasm
 ```
 
 ### Trust policy
@@ -364,13 +364,19 @@ rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm
 ### Web build prerequisites
 
 The CLI does not compile wasm32 itself. `--wasm` is required and must point at
-a `runtime_bg.wasm` artifact produced by the `meerkat-web-runtime` build
-pipeline:
+the prebuilt meerkat-web-runtime artifacts — either the wasm-pack `--target web`
+output **directory** (which holds `meerkat_web_runtime.js` + `meerkat_web_runtime_bg.wasm`)
+or that `*_bg.wasm` file (the sibling `.js` glue is copied alongside). Use the
+committed `sdks/web/wasm`, or build it:
 
 ```bash
 cargo install wasm-pack
-wasm-pack build meerkat-web-runtime
+wasm-pack build meerkat-web-runtime --target web --out-dir sdks/web/wasm
 ```
+
+The emitted bundle is self-contained and runnable: serve the output directory and
+open `index.html` (it includes the glue, a `meerkat-bootstrap.js` module, and the
+mobpack).
 
 ## skill
 

@@ -12,9 +12,9 @@ starts. Models real-world CI/CD, data processing, and approval workflows.
 
 ## Pipeline Stages
 ```
-Lint → Test → Security → Deploy
-  ↓      ↓       ↓         ↓
- PASS   PASS    PASS      PASS → Success!
+Lint → Test → Deploy
+  ↓      ↓       ↓
+ PASS   PASS    PASS → Success!
  FAIL → Stop pipeline, report failure
 ```
 

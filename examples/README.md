@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-37 examples covering every Meerkat surface and feature,
+35 examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -64,7 +64,7 @@ below describes the expected local validation level.
 
 | Status | Examples |
 |--------|----------|
-| **Live when provider keys/services are available** | 001-003, 005-015, 017-028, 034-037 |
+| **Live when provider keys/services are available** | 001-003, 005-015, 017-019, 021-028, 034-037 |
 | **Build-verified locally** | Registered Rust examples via `./scripts/repo-cargo check`; 031 and 032 via Vite builds; 033 via `sdks/web` WASM artifacts plus Vite |
 | **Syntax-checked / recipe-oriented** | 004, 010, 028-030 shell entrypoints and 036 audio setup when live provider/audio devices are unavailable |
 
@@ -107,7 +107,6 @@ below describes the expected local validation level.
 | 017 | [mob-coding-swarm-rs](017-mob-coding-swarm-rs/) | Rust | Orchestrator + worker mob for coding tasks |
 | 018 | [mob-research-team-rs](018-mob-research-team-rs/) | Rust | Diverge/converge research with specialized profiles |
 | 019 | [mob-pipeline-rs](019-mob-pipeline-rs/) | Rust | Sequential CI/CD pipeline with stage handoffs |
-| 020 | [comms-peer-messaging-rs](020-comms-peer-messaging-rs/) | Rust | Ed25519-signed peer-to-peer agent communication |
 
 ### Expert — Production Patterns & Multi-Surface
 
@@ -125,6 +124,7 @@ below describes the expected local validation level.
 | 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Shell | Build an embeddable release command-center copilot with dashboard context and starter embed assets |
 | 031 | [wasm-mini-diplomacy-sh](031-wasm-mini-diplomacy-sh/) | Shell + Web | 9 autonomous agents across 4 WASM mobs wage a 3-faction territory war with strategy, diplomacy, and deception |
 | 032 | [wasm-webcm-agent](032-wasm-webcm-agent/) | Web (WASM) | Multi-provider coding agent mob in the browser — 4 agents (Anthropic + OpenAI + Gemini) collaborate via comms in a sandboxed Linux VM |
+| 033 | [the-office-demo-sh](033-the-office-demo-sh/) | Shell + Web (WASM) | 10 autonomous office agents in the browser coordinate via comms — phone calls, speech bubbles, approval gates, and a live knowledge graph |
 | 034 | [codemob-mcp](034-codemob-mcp/) | Rust (MCP) | Multi-agent MCP server — 7 mobpacks (advisor, review, architect, brainstorm, red-team, panel, rct) with flow and comms execution, progress notifications, multi-provider model diversity |
 | 035 | [mdm-tux-rs](035-mdm-tux-rs/) | Rust + TUI + Docker | Meerkat Device Manager: TUX terminal controller, kennel rendezvous, remote targets, hive coordination, peer comms, and scheduler wakeups |
 | 036 | [realtime-audio-py](036-realtime-audio-py/) | Python | Command-line OpenAI realtime audio app with live transcript, callback tools, inline mob skills, and helper sub-agents |
@@ -145,10 +145,10 @@ below describes the expected local validation level.
 | **Compaction** | 013 |
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
-| **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032, 034, 035, 036 |
+| **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032, 033, 034, 035, 036 |
 | **Mobpack** | 028, 029, 030, 031, 034 |
-| **WASM Web Build** | 029, 030, 031, 032 |
-| **Comms** | 020, 024, 032, 034, 035 |
+| **WASM Web Build** | 029, 030, 031, 032, 033 |
+| **Comms** | 024, 032, 033, 034, 035 |
 | **Keep-alive / long-lived sessions** | 024, 032, 034, 035 |
 | **Multi-Provider** | 021, 032, 034, 035 |
 | **MCP Server** | 034 |
@@ -164,11 +164,11 @@ below describes the expected local validation level.
 
 | Surface | Examples |
 |---------|----------|
-| **Rust SDK** | 001, 005, 006, 009, 011-020, 024, 025, 034, 035 |
+| **Rust SDK** | 001, 005, 006, 009, 011-015, 017-019, 024, 025, 034, 035 |
 | **Python SDK** | 002, 007, 021, 022, 026, 036 |
 | **TypeScript SDK** | 003, 008, 023, 027 |
 | **CLI (Shell)** | 004, 010, 028, 029, 030, 031 |
-| **WASM (Browser)** | 029, 030, 031, 032 |
+| **WASM (Browser)** | 029, 030, 031, 032, 033 |
 | **WebRTC (Browser)** | 037 |
 
 ## Prerequisites

@@ -16,7 +16,7 @@ and state transition is surfaced as a typed `AgentEvent`.
 | `ToolCallRequested` | Agent wants to invoke a tool |
 | `ToolResultReceived` | Tool execution completed |
 | `TurnCompleted` | One agent loop iteration finished |
-| `BudgetUpdate` | Token/time budget consumption |
+| `BudgetWarning` | Warning emitted when approaching a token/time/tool-call budget limit |
 
 ## Run
 ```bash

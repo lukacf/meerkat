@@ -52,3 +52,7 @@ system_suite!(
     e2e_system_workgraph_shared_realm_observability,
     "workgraph-shared-realm-observability"
 );
+system_suite!(
+    e2e_system_realm_config_inheritance,
+    "realm-config-inheritance"
+);

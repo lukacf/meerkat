@@ -154,14 +154,25 @@ async fn resolve_binding_identity(
         profile: profile_typed,
         origin: meerkat_core::connection::BindingOrigin::Configured,
     };
-    let (binding, _, auth_profile) = realm.lookup_auth_binding(&auth_binding).map_err(|e| {
-        RpcResponse::error(
-            None,
-            error::INVALID_PARAMS,
-            format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
-        )
-    })?;
-    Ok((auth_binding, binding.clone(), auth_profile.clone()))
+    match realm.lookup_auth_binding(&auth_binding) {
+        Ok((binding, _, auth_profile)) => Ok((auth_binding, binding.clone(), auth_profile.clone())),
+        Err(e) => {
+            // Strict-owner write (decision 5) is owned by ONE core seam; this
+            // surface only maps the typed verdict to an RPC error.
+            let config = load_config(runtime).await?;
+            let message = match meerkat_core::connection::resolve_write_owner(
+                &config,
+                &auth_binding.realm,
+                &auth_binding.binding,
+            ) {
+                Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => {
+                    inherited.to_string()
+                }
+                _ => format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
+            };
+            Err(RpcResponse::error(None, error::INVALID_PARAMS, message))
+        }
+    }
 }
 
 async fn resolve_oauth_target(

@@ -2349,9 +2349,21 @@ pub fn compose_effective_config(
     // Fold root-first (chain is head-first, so iterate reversed) — the
     // most-derived head merges last and wins.
     let mut effective = Config::default();
+    let default_self_hosted = SelfHostedConfig::default();
+    let default_provider_tools = ProviderToolsConfig::default();
     for member in chain.realms().iter().rev() {
         if let Some(doc) = docs.get(member) {
             effective.merge(doc.clone());
+            // `Config::merge` carries self_hosted/provider_tools only via the
+            // toml-presence layering path (merge_toml_str), not the in-memory
+            // fold. Compose folds them whole-section child-wins here so a
+            // composed config never silently drops them.
+            if doc.self_hosted != default_self_hosted {
+                effective.self_hosted = doc.self_hosted.clone();
+            }
+            if doc.provider_tools != default_provider_tools {
+                effective.provider_tools = doc.provider_tools.clone();
+            }
         }
     }
     Ok(effective)

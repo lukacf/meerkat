@@ -164,8 +164,9 @@ pub use config_runtime::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_store::{
-    ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, FileConfigStore, MemoryConfigStore,
-    TaggedConfigStore, apply_config_patch_preview, merge_patch,
+    ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, EffectiveConfigReader, FileConfigStore,
+    MemoryConfigStore, RealmConfigSource, TaggedConfigStore, apply_config_patch_preview,
+    merge_patch,
 };
 pub use error::{AgentError, ToolError};
 pub use event::{

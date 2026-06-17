@@ -1175,6 +1175,70 @@ pub fn resolve_auth_binding_candidates_for_provider(
     Ok(candidates)
 }
 
+/// Outcome of classifying where a credential WRITE may land for `(head, binding)`.
+///
+/// Strict-owner write (decision 5): credential reads inherit down the chain, but
+/// a write may target only the realm that DEFINES the binding in its own
+/// section. This is the SINGLE owner of that policy — surfaces (REST/RPC/CLI)
+/// call it and merely map the typed error to their transport status, rather
+/// than each re-deriving "is this binding inherited?".
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum WriteOwnerError {
+    /// The binding is inherited from an ancestor realm; the write must target
+    /// the owning realm, not the consuming `head`.
+    #[error(
+        "binding '{binding}' is inherited by realm '{head}' from its owning realm '{owner}'; \
+         credential reads inherit down the chain, but writes are strict-owner — target the \
+         owning realm '{owner}', not '{head}'"
+    )]
+    Inherited {
+        binding: String,
+        head: String,
+        owner: String,
+    },
+    /// No realm on `head`'s chain defines the binding.
+    #[error("binding '{binding}' is not defined on realm '{head}' or any realm it inherits from")]
+    Unknown { binding: String, head: String },
+    /// The realm parent chain could not be resolved.
+    #[error(transparent)]
+    Chain(#[from] RealmChainError),
+}
+
+/// Classify the owning realm for a credential WRITE to `(head, binding)`.
+///
+/// Returns the head itself when it defines the binding in its OWN section
+/// (write allowed). Returns [`WriteOwnerError::Inherited`] naming the owning
+/// ancestor when the binding is only inherited (write rejected, strict-owner),
+/// or [`WriteOwnerError::Unknown`] when no chain member defines it.
+pub fn resolve_write_owner(
+    config: &Config,
+    head: &RealmId,
+    binding: &BindingId,
+) -> Result<RealmId, WriteOwnerError> {
+    let defines = |realm: &RealmId| {
+        config
+            .realm
+            .get(realm.as_str())
+            .is_some_and(|section| section.binding.contains_key(binding.as_str()))
+    };
+    if defines(head) {
+        return Ok(head.clone());
+    }
+    let chain = RealmChain::resolve(config, head)?;
+    // Skip the head (already checked); the first ancestor that defines it owns it.
+    if let Some(owner) = chain.realms().iter().skip(1).find(|member| defines(member)) {
+        return Err(WriteOwnerError::Inherited {
+            binding: binding.as_str().to_string(),
+            head: head.as_str().to_string(),
+            owner: owner.as_str().to_string(),
+        });
+    }
+    Err(WriteOwnerError::Unknown {
+        binding: binding.as_str().to_string(),
+        head: head.as_str().to_string(),
+    })
+}
+
 fn materialize_connection_target(
     realm: RealmConnectionSet,
     provider: Provider,
@@ -2705,6 +2769,33 @@ auth_profile = "openai_key"
         )
         .unwrap_err();
         assert!(matches!(err, ConnectionTargetError::UnknownRealm(_)));
+    }
+
+    // Strict-owner write (decision 5) — single core policy consumed by REST/RPC.
+    #[test]
+    fn resolve_write_owner_classifies_owned_inherited_and_unknown() {
+        let cfg = openai_inherit_config(""); // global owns "primary"; child parent=global
+        let primary = BindingId::parse("primary").unwrap();
+
+        // Head owns the binding in its OWN section -> write allowed at head.
+        assert_eq!(
+            resolve_write_owner(&cfg, &rid("global"), &primary)
+                .expect("global owns primary")
+                .as_str(),
+            "global"
+        );
+
+        // Inherited by child -> rejected, naming the owning realm.
+        let err = resolve_write_owner(&cfg, &rid("child"), &primary).unwrap_err();
+        assert!(
+            matches!(&err, WriteOwnerError::Inherited { owner, .. } if owner == "global"),
+            "expected Inherited{{owner=global}}, got {err:?}"
+        );
+
+        // Not defined anywhere on the chain -> Unknown.
+        let err = resolve_write_owner(&cfg, &rid("child"), &BindingId::parse("nope").unwrap())
+            .unwrap_err();
+        assert!(matches!(err, WriteOwnerError::Unknown { .. }));
     }
 
     #[test]

@@ -94,13 +94,23 @@ async fn resolve_binding_identity(
         profile: profile_id.cloned(),
         origin: meerkat_core::BindingOrigin::Configured,
     };
-    let (binding, _, auth_profile) = realm.lookup_auth_binding(&auth_binding).map_err(|e| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
-        )
-    })?;
-    Ok((auth_binding, binding.clone(), auth_profile.clone()))
+    match realm.lookup_auth_binding(&auth_binding) {
+        Ok((binding, _, auth_profile)) => Ok((auth_binding, binding.clone(), auth_profile.clone())),
+        Err(e) => {
+            // Strict-owner write (decision 5) is owned by ONE core seam; this
+            // surface only maps the typed verdict to an HTTP status.
+            let config = load_config(state).await?;
+            match meerkat_core::connection::resolve_write_owner(&config, realm_id, binding_id) {
+                Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => {
+                    Err((StatusCode::CONFLICT, inherited.to_string()))
+                }
+                _ => Err((
+                    StatusCode::NOT_FOUND,
+                    format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
+                )),
+            }
+        }
+    }
 }
 
 fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
@@ -112,7 +122,8 @@ fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
         ConnectionTargetError::MissingRealm
         | ConnectionTargetError::InvalidRealmId { .. }
         | ConnectionTargetError::InvalidBindingId { .. }
-        | ConnectionTargetError::ProviderMismatch { .. } => StatusCode::BAD_REQUEST,
+        | ConnectionTargetError::ProviderMismatch { .. }
+        | ConnectionTargetError::RealmChain(_) => StatusCode::BAD_REQUEST,
     }
 }
 

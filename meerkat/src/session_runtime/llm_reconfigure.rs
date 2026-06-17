@@ -124,6 +124,12 @@ pub struct SessionRuntimeLlmReconfigureHost {
     pub agent_llm_client_decorator: Arc<std::sync::RwLock<Option<AgentLlmClientDecorator>>>,
     /// Optional config runtime for resolving the model registry.
     pub config_runtime: Arc<std::sync::RwLock<Option<Arc<ConfigRuntime>>>>,
+    /// Realm parent-chain inheritance (the same shared slot the builder reads).
+    /// When populated, the hot-swap / reconfigure path composes the active realm
+    /// chain over the raw head config so an inherited (global-owned) credential
+    /// binding and self-hosted/provider capabilities resolve on a model swap —
+    /// matching the initial agent build. Empty slot => no composition.
+    pub realm_inheritance: Arc<std::sync::RwLock<Option<crate::RealmInheritance>>>,
 }
 
 impl SessionRuntimeLlmReconfigureHost {
@@ -174,20 +180,10 @@ impl SessionRuntimeLlmReconfigureHost {
     }
 
     async fn model_registry(&self) -> Result<ModelRegistry, RuntimeDriverError> {
-        let config_runtime = self
-            .config_runtime
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let config = if let Some(runtime) = config_runtime {
-            runtime
-                .get()
-                .await
-                .map(|snapshot| snapshot.config)
-                .map_err(|e| RuntimeDriverError::Internal(format!("Failed to load config: {e}")))?
-        } else {
-            Config::default()
-        };
+        // Compose the realm chain so an inherited self-hosted/custom model entry
+        // (e.g. defined in `global`) is visible to capability resolution on a
+        // hot-swap, matching the agent build path.
+        let config = self.load_config_for_hot_swap().await?;
 
         config
             .model_registry(meerkat_models::canonical())
@@ -249,17 +245,37 @@ impl SessionRuntimeLlmReconfigureHost {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        if let Some(runtime) = config_runtime {
+        let head_config = if let Some(runtime) = config_runtime {
             runtime
                 .get()
                 .await
                 .map(|snapshot| snapshot.config)
                 .map_err(|e| {
                     RuntimeDriverError::Internal(format!("Failed to load config for hot-swap: {e}"))
-                })
+                })?
         } else {
-            Ok(Config::default())
+            Config::default()
+        };
+
+        // Compose the active realm chain over the head snapshot so a model
+        // hot-swap resolves the same inherited (e.g. global-owned) credential
+        // binding and self-hosted/provider capabilities as the initial agent
+        // build. Without this the swap rebuilds the LLM client from the RAW head
+        // config and an inherited binding yields no candidate. Fail-closed: a
+        // compose error propagates rather than silently using the raw head.
+        let inheritance = self
+            .realm_inheritance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(inheritance) = inheritance {
+            return inheritance.compose_over(head_config).await.map_err(|e| {
+                RuntimeDriverError::Internal(format!(
+                    "Failed to compose realm config chain for hot-swap: {e}"
+                ))
+            });
         }
+        Ok(head_config)
     }
 
     async fn build_request_policy_for_llm_identity(

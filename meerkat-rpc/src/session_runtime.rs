@@ -1762,6 +1762,7 @@ impl SessionRuntime {
                 default_llm_client: Arc::clone(&default_llm_client),
                 agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
                 config_runtime: Arc::clone(&config_runtime),
+                realm_inheritance: Arc::clone(&builder_realm_inheritance),
             },
         ));
 
@@ -1901,6 +1902,7 @@ impl SessionRuntime {
                 default_llm_client: Arc::clone(&default_llm_client),
                 agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
                 config_runtime: Arc::clone(&config_runtime),
+                realm_inheritance: Arc::clone(&builder_realm_inheritance),
             },
         ));
 
@@ -3653,6 +3655,7 @@ impl SessionRuntime {
             default_llm_client: Arc::clone(&self.default_llm_client),
             agent_llm_client_decorator: Arc::clone(&self.agent_llm_client_decorator),
             config_runtime: Arc::clone(&self.config_runtime),
+            realm_inheritance: Arc::clone(&self.builder_realm_inheritance),
         }
     }
 

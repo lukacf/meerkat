@@ -678,6 +678,9 @@ impl Config {
                     if model_table.contains_key("supports_reasoning") {
                         merged.supports_reasoning = model_layer.supports_reasoning;
                     }
+                    if model_table.contains_key("supports_web_search") {
+                        merged.supports_web_search = model_layer.supports_web_search;
+                    }
                     if model_table.contains_key("call_timeout_secs") {
                         merged.call_timeout_secs = model_layer.call_timeout_secs;
                     }

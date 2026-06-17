@@ -559,6 +559,20 @@ impl RealmInheritance {
     ) -> Self {
         Self { source, head }
     }
+
+    /// Compose the parent chain + `global` tail over `head_config` (the surface's
+    /// authoritative head config), producing the effective config the agent
+    /// build AND the model hot-swap / reconfigure path consume.
+    ///
+    /// Fail-closed: a compose error is returned, never masked behind the raw head.
+    pub async fn compose_over(
+        &self,
+        head_config: Config,
+    ) -> Result<Config, meerkat_core::ConfigError> {
+        meerkat_core::EffectiveConfigReader::new(self.source.clone())
+            .effective_config_over_head(&self.head, head_config)
+            .await
+    }
 }
 
 pub struct FactoryAgentBuilder {

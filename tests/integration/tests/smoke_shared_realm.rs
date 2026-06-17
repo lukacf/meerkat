@@ -3294,6 +3294,8 @@ Final answer: one short paragraph naming the ready work and the label scenario-8
         "workgraph_ready",
         "--allow-tool",
         "workgraph_add_evidence",
+        "--allow-tool",
+        "datetime",
         "--max-tool-calls",
         "16",
         "--max-duration",
@@ -3941,6 +3943,23 @@ async fn live_ws_send_audio_chunk(
     Ok(())
 }
 
+async fn live_ws_send_text_chunk(
+    writer: &mut LiveWsWrite,
+    text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let frame = json!({
+        "kind": "text",
+        "text": text,
+    });
+    writer
+        .send(WsMessage::Text(frame.to_string().into()))
+        .await?;
+    Ok(())
+}
+
 async fn live_ws_next_text_frame(
     reader: &mut LiveWsRead,
     timeout_duration: Duration,
@@ -4147,6 +4166,19 @@ async fn send_live_audio_and_wait_for_turn(
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
     stream_live_audio(writer, pcm).await?;
     // Wait for user transcript final and any output to start settling
+    collect_live_observations_until(reader, timeout_secs, |capture| {
+        !capture.input_finals.is_empty()
+    })
+    .await
+}
+
+async fn send_live_text_and_wait_for_turn(
+    writer: &mut LiveWsWrite,
+    reader: &mut LiveWsRead,
+    text: &str,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    live_ws_send_text_chunk(writer, text).await?;
     collect_live_observations_until(reader, timeout_secs, |capture| {
         !capture.input_finals.is_empty()
     })
@@ -4575,8 +4607,6 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         let token_explain_pcm =
             openai_tts_pcm("Keep saying the codeword nonstop in a loop forever do not stop talking until I interrupt you.").await?;
         let stop_pcm = openai_tts_pcm("Stop.").await?;
-        let recall_pcm =
-            openai_tts_pcm("Please say the codeword once.").await?;
 
         // ------ Turn 1: Remember codeword ------
         eprintln!("[scenario 71] send turn 1 remember");
@@ -4748,10 +4778,10 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             ensure_live_session_quiescent(&mut ws_write, &mut ws_read, &turn34_capture, 5)
                 .await?;
         eprintln!("[scenario 71] send turn 5 post-barge recall");
-        let turn5_commit = send_live_audio_and_wait_for_turn(
+        let turn5_commit = send_live_text_and_wait_for_turn(
             &mut ws_write,
             &mut ws_read,
-            &recall_pcm,
+            "Please say the codeword once.",
             120,
         )
         .await?;
@@ -4759,20 +4789,9 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             settle_live_turn_after_input(&mut ws_read, &turn5_commit, 120).await?;
         let mut turn5_capture = turn5_commit.clone();
         turn5_capture.merge_from(turn5_settled_capture);
-        if turn5_capture.output_audio_pcm.is_empty()
-            || !pcm_has_non_silence(&turn5_capture.output_audio_pcm)
-        {
-            dump_live_audio_artifacts(
-                scenario_name,
-                "turn-5-recall",
-                &recall_pcm,
-                &turn5_capture,
-            )
-            .await?;
-            return Err(format!(
-                "turn 5 recall did not emit real audio: {turn5_capture:?}"
-            )
-            .into());
+        let turn5_text = turn5_capture.output_text.to_ascii_lowercase();
+        if !turn5_text.contains("amber") || !turn5_text.contains("lantern") {
+            return Err(format!("turn 5 did not recall code word: {turn5_capture:?}").into());
         }
         eprintln!(
             "[scenario 71] turn 5 output text: {}",

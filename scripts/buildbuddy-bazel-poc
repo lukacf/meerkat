@@ -24,6 +24,7 @@ Common commands:
   e2e-live-rbe             Bazel-native live e2e lane.
   e2e-smoke-rbe            Build the Bazel-native smoke e2e foundation.
   e2e-smoke-remote-rbe     Run e2e-smoke fully on BuildBuddy macOS RBE.
+  e2e-smoke-turbo-s-rbe    Run sharded e2e-smoke on BuildBuddy RBE.
   e2e-auth-rbe             Bazel-native release-grade auth smoke lane.
   machine-authority-rbe    Bazel-native machine authority lane.
   rmat-audit-rbe           Bazel-native RMAT + ownership audit lane.
@@ -135,6 +136,15 @@ e2e_test_env=(
   --test_env=TEST
   --test_env=SCENARIO
   --test_env=SUITE
+  --test_env=SMOKE_MODEL
+  --test_env=SMOKE_MODEL_OPENAI
+  --test_env=OPENAI_SMOKE_MODEL
+  --test_env=SMOKE_MODEL_OPENAI_STRESS
+  --test_env=SMOKE_MODEL_GEMINI
+  --test_env=SMOKE_IMAGE_MODEL_OPENAI
+  --test_env=SMOKE_IMAGE_MODEL_GEMINI
+  --test_env=FLOW_SMOKE_MODEL
+  --test_env=MEERKAT_FLOW_RUNTIME_TURBO_MODEL
   --test_env=MEERKAT_CLEAN_E2E_SCENARIO_TARGETS
   --test_env=MEERKAT_STRICT_E2E_PREREQS=1
 )
@@ -324,6 +334,19 @@ case "${command}" in
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//:e2e_smoke_remote_test"
+    extra_args+=(
+      "${e2e_test_env[@]}"
+      --nocache_test_results
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  e2e-smoke-turbo-s-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//:e2e_smoke_turbo_s"
     extra_args+=(
       "${e2e_test_env[@]}"
       --nocache_test_results

@@ -324,6 +324,35 @@ if [[ "${selection_count}" -eq 0 ]]; then
   selection_args=(--lane smoke)
 fi
 
+if [[ "${MEERKAT_E2E_SMOKE_TURBO_DEFAULTS:-}" == "1" ]]; then
+  case "${SCENARIO:-}:${SUITE:-}" in
+    77:* | 85:* | *:cli-background-job-active-turn)
+      export SMOKE_MODEL="${SMOKE_MODEL:-claude-sonnet-4-5}"
+      ;;
+    *)
+      export SMOKE_MODEL="${SMOKE_MODEL:-claude-haiku-4-5-20251001}"
+      ;;
+  esac
+  export SMOKE_MODEL_OPENAI="${SMOKE_MODEL_OPENAI:-gpt-5.4-mini}"
+  export SMOKE_MODEL_OPENAI_STRESS="${SMOKE_MODEL_OPENAI_STRESS:-gpt-5.4-mini}"
+  if [[ -z "${SMOKE_MODEL_GEMINI:-}" ]]; then
+    case "${SCENARIO:-}" in
+      44)
+        export SMOKE_MODEL_GEMINI="gemini-3.1-flash-lite-preview"
+        ;;
+    esac
+  fi
+  if [[ -z "${FLOW_SMOKE_MODEL:-}" ]]; then
+    if [[ -n "${RKAT_GEMINI_API_KEY:-${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}}" ]]; then
+      export FLOW_SMOKE_MODEL="${MEERKAT_FLOW_RUNTIME_TURBO_MODEL:-gemini-3.1-flash-lite-preview}"
+    elif [[ -n "${RKAT_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}" ]]; then
+      export FLOW_SMOKE_MODEL="claude-haiku-4-5-20251001"
+    elif [[ -n "${RKAT_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}" ]]; then
+      export FLOW_SMOKE_MODEL="gpt-5.4-mini"
+    fi
+  fi
+fi
+
 workspace_root="$(workspace_root_from_runfiles)"
 prepend_runfile_tool_dir npm
 prepend_runfile_tool_dir node

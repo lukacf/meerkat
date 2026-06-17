@@ -46,6 +46,7 @@ struct Args {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum RealmBackendArg {
     Jsonl,
+    Memory,
     Sqlite,
 }
 
@@ -53,6 +54,7 @@ impl From<RealmBackendArg> for RealmBackend {
     fn from(value: RealmBackendArg) -> Self {
         match value {
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Memory => RealmBackend::Memory,
             RealmBackendArg::Sqlite => RealmBackend::Sqlite,
         }
     }

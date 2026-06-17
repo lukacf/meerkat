@@ -31,7 +31,7 @@ Compaction and semantic memory have separate build-time and runtime switches.
 | Memory session wiring | `memory-store-session` | `HnswMemoryStore`, `memory_search`, and memory integration with the agent/session path |
 
 <Note>
-The CLI's default features include `skills` but **not** `session-compaction` or memory features. You must enable them explicitly for source builds.
+The CLI's default features include the memory backend/session wiring, but **not** `session-compaction`. For no-default/custom source builds, enable the memory features explicitly when you need `memory_search`.
 </Note>
 
 ```bash

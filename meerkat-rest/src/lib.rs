@@ -456,6 +456,7 @@ impl AppState {
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| match manifest.backend {
                 meerkat_store::RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
+                meerkat_store::RealmBackend::Memory => realm_paths.root.clone(),
                 meerkat_store::RealmBackend::Sqlite => realm_paths.root.clone(),
             });
 
@@ -1689,6 +1690,7 @@ fn rest_instance_root() -> PathBuf {
 fn parse_backend_hint(raw: &str) -> Option<RealmBackend> {
     match raw {
         "jsonl" => Some(RealmBackend::Jsonl),
+        "memory" => Some(RealmBackend::Memory),
         "sqlite" => Some(RealmBackend::Sqlite),
         _ => None,
     }

@@ -99,6 +99,7 @@ impl LiveWsScheme {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum RealmBackendArg {
     Jsonl,
+    Memory,
     Sqlite,
 }
 
@@ -130,6 +131,7 @@ impl From<RealmBackendArg> for RealmBackend {
     fn from(value: RealmBackendArg) -> Self {
         match value {
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            RealmBackendArg::Memory => RealmBackend::Memory,
             RealmBackendArg::Sqlite => RealmBackend::Sqlite,
         }
     }
@@ -270,6 +272,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| match manifest.backend {
             RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
+            RealmBackend::Memory => realm_paths.root.clone(),
             RealmBackend::Sqlite => realm_paths.root.clone(),
         });
     let project_root = cli

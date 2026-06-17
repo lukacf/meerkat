@@ -1247,6 +1247,8 @@ struct Cli {
 enum RealmBackendArg {
     #[cfg(feature = "jsonl-store")]
     Jsonl,
+    #[cfg(feature = "memory-store")]
+    Memory,
     Sqlite,
 }
 
@@ -1255,6 +1257,8 @@ impl From<RealmBackendArg> for RealmBackend {
         match value {
             #[cfg(feature = "jsonl-store")]
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
+            #[cfg(feature = "memory-store")]
+            RealmBackendArg::Memory => RealmBackend::Memory,
             RealmBackendArg::Sqlite => {
                 #[cfg(feature = "session-store")]
                 {
@@ -7393,6 +7397,8 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
+        #[cfg(feature = "memory-store")]
+        RealmBackend::Memory => paths.root,
         #[cfg(feature = "session-store")]
         RealmBackend::Sqlite => paths.root,
         #[cfg(not(feature = "jsonl-store"))]

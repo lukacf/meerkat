@@ -182,7 +182,9 @@ No durability across process restart.
 
 ### Persistent mode
 
-Durability follows the active realm backend (`sqlite` or `jsonl`).
+Durability follows the active persistent realm backend (`sqlite` or `jsonl`).
+The `memory` backend is explicit ephemeral storage and does not survive process
+restart.
 
 - Completed turns are persisted.
 - Crash during in-flight turn may lose only that turn.

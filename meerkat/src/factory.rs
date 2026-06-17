@@ -423,7 +423,7 @@ pub struct AgentBuildConfig {
     pub realm_id: Option<RealmId>,
     /// Optional process/agent instance identifier within a realm.
     pub instance_id: Option<String>,
-    /// Backend pinned by the realm manifest (e.g. "sqlite", "jsonl").
+    /// Backend pinned by the realm manifest (e.g. "sqlite", "jsonl", "memory").
     ///
     /// Typed thread-through (`#207`): parsed fail-closed at the surface ingress
     /// and projected to the durable `SessionMetadata.backend` string only at the
@@ -879,6 +879,31 @@ impl AgentBuildConfig {
             runtime_build_mode: self.runtime_build_mode.clone(),
             initial_turn_metadata: None,
         }
+    }
+}
+
+fn realm_allows_file_backed_semantic_memory(
+    backend: Option<meerkat_core::RecoveryBackendKind>,
+) -> bool {
+    !matches!(backend, Some(meerkat_core::RecoveryBackendKind::Memory))
+}
+
+fn effective_memory_for_realm(
+    requested: ToolCategoryOverride,
+    factory_enabled: bool,
+    backend: Option<meerkat_core::RecoveryBackendKind>,
+) -> bool {
+    realm_allows_file_backed_semantic_memory(backend) && requested.resolve(factory_enabled)
+}
+
+fn metadata_memory_override_for_realm(
+    requested: ToolCategoryOverride,
+    backend: Option<meerkat_core::RecoveryBackendKind>,
+) -> ToolCategoryOverride {
+    if realm_allows_file_backed_semantic_memory(backend) {
+        requested
+    } else {
+        ToolCategoryOverride::Disable
     }
 }
 
@@ -2441,7 +2466,9 @@ impl AgentFactory {
         );
 
         let memory_enabled = build_config
-            .map(|build| build.override_memory.resolve(self.enable_memory))
+            .map(|build| {
+                effective_memory_for_realm(build.override_memory, self.enable_memory, build.backend)
+            })
             .unwrap_or(self.enable_memory);
         set_tool_capability(
             &mut capabilities,
@@ -5229,7 +5256,10 @@ impl AgentFactory {
                 metadata.tooling.comms = build_config.override_comms;
             }
             metadata.tooling.mob = build_config.override_mob;
-            metadata.tooling.memory = build_config.override_memory;
+            metadata.tooling.memory = metadata_memory_override_for_realm(
+                build_config.override_memory,
+                build_config.backend,
+            );
             metadata.tooling.schedule = build_config.override_schedule;
             metadata.tooling.workgraph = build_config.override_workgraph;
             metadata.tooling.image_generation = build_config.override_image_generation;
@@ -5261,7 +5291,10 @@ impl AgentFactory {
                     shell: build_config.override_shell,
                     comms: build_config.override_comms,
                     mob: build_config.override_mob,
-                    memory: build_config.override_memory,
+                    memory: metadata_memory_override_for_realm(
+                        build_config.override_memory,
+                        build_config.backend,
+                    ),
                     schedule: build_config.override_schedule,
                     workgraph: build_config.override_workgraph,
                     image_generation: build_config.override_image_generation,
@@ -5367,7 +5400,11 @@ impl AgentFactory {
         }
 
         // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
-        let effective_memory = build_config.override_memory.resolve(self.enable_memory);
+        let effective_memory = effective_memory_for_realm(
+            build_config.override_memory,
+            self.enable_memory,
+            build_config.backend,
+        );
         #[cfg(feature = "memory-store-session")]
         if effective_memory {
             let memory_dir = self.store_path.join("memory");
@@ -10195,6 +10232,41 @@ mod prompt_tests {
         async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn memory_realm_backend_suppresses_file_backed_semantic_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("sessions");
+        let factory = AgentFactory::new(store_path.clone())
+            .builtins(false)
+            .memory(true);
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.override_memory = ToolCategoryOverride::Enable;
+        build_config.backend = Some(meerkat_core::RecoveryBackendKind::Memory);
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+
+        assert!(
+            !store_path.join("memory").exists(),
+            "memory realm backend must not open the file-backed semantic memory store"
+        );
+        assert!(
+            !agent
+                .tool_scope()
+                .visible_tool_names()
+                .unwrap()
+                .contains("memory_search"),
+            "memory_search must not be exposed when its only available store would be file-backed"
+        );
+        assert_eq!(
+            agent.session().session_metadata().unwrap().tooling.memory,
+            ToolCategoryOverride::Disable
+        );
     }
 
     fn tools(names: &[&str]) -> Arc<[Arc<ToolDef>]> {

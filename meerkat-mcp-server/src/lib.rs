@@ -500,6 +500,7 @@ fn realm_store_path(
     let paths = meerkat_store::realm_paths_in(realms_root, realm_id.as_str());
     match backend {
         meerkat_store::RealmBackend::Jsonl => paths.sessions_jsonl_dir,
+        meerkat_store::RealmBackend::Memory => paths.root,
         meerkat_store::RealmBackend::Sqlite => paths.root,
     }
 }
@@ -1006,6 +1007,7 @@ impl MeerkatMcpState {
 fn parse_backend_hint(raw: &str) -> Option<meerkat_store::RealmBackend> {
     match raw {
         "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
+        "memory" => Some(meerkat_store::RealmBackend::Memory),
         "sqlite" => Some(meerkat_store::RealmBackend::Sqlite),
         _ => None,
     }

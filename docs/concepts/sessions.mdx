@@ -62,8 +62,9 @@ Backends are selected once per realm and pinned in `realm_manifest.json`.
 |---------|-------|
 | `sqlite` | Durable embedded database; default for new persistent realms when compiled |
 | `jsonl` | File-based, inspectable, useful for debugging |
+| `memory` | In-process session storage for throwaway runs; not durable across process restart |
 
-A realm created as `sqlite` stays `sqlite`; a realm created as `jsonl` stays `jsonl`.
+A realm stays pinned to the backend recorded in `realm_manifest.json`.
 
 ## Concurrency guarantees
 

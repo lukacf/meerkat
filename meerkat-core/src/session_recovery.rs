@@ -56,7 +56,7 @@ pub struct SurfaceSessionRecoveryOverrides {
 /// Typed session-store backend pinned by a realm.
 ///
 /// This is the one semantic owner of the realm-pinned storage backend value
-/// (the `"sqlite"`/`"jsonl"` literal carried by `SessionMetadata.backend`,
+/// (the `"sqlite"`/`"jsonl"`/`"memory"` literal carried by `SessionMetadata.backend`,
 /// `RealmConfig.backend_hint`, and the config envelopes). It is a pure,
 /// feature-independent value type so it is reachable from `meerkat-core`;
 /// `meerkat_store::RealmBackend` is the downstream, feature-gated store-layer
@@ -71,6 +71,8 @@ pub struct SurfaceSessionRecoveryOverrides {
 pub enum RecoveryBackendKind {
     /// JSONL append-only session store.
     Jsonl,
+    /// In-memory session store.
+    Memory,
     /// SQLite session store.
     Sqlite,
 }
@@ -85,6 +87,7 @@ impl RecoveryBackendKind {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "jsonl" => Some(Self::Jsonl),
+            "memory" => Some(Self::Memory),
             "sqlite" => Some(Self::Sqlite),
             _ => None,
         }
@@ -95,6 +98,7 @@ impl RecoveryBackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Jsonl => "jsonl",
+            Self::Memory => "memory",
             Self::Sqlite => "sqlite",
         }
     }
@@ -1240,9 +1244,18 @@ mod tests {
             RecoveryBackendKind::parse("jsonl"),
             Some(RecoveryBackendKind::Jsonl)
         );
+        assert_eq!(
+            RecoveryBackendKind::parse("memory"),
+            Some(RecoveryBackendKind::Memory)
+        );
         assert_eq!(RecoveryBackendKind::Sqlite.as_str(), "sqlite");
         assert_eq!(RecoveryBackendKind::Jsonl.as_str(), "jsonl");
-        for kind in [RecoveryBackendKind::Sqlite, RecoveryBackendKind::Jsonl] {
+        assert_eq!(RecoveryBackendKind::Memory.as_str(), "memory");
+        for kind in [
+            RecoveryBackendKind::Sqlite,
+            RecoveryBackendKind::Jsonl,
+            RecoveryBackendKind::Memory,
+        ] {
             assert_eq!(RecoveryBackendKind::parse(kind.as_str()), Some(kind));
         }
     }

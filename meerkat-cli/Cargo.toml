@@ -79,7 +79,7 @@ uuid = { workspace = true }
 url = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule", "workgraph", "mob", "rpc-surface"]
+default = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "memory-store", "session-store", "skills", "comms", "mcp", "schedule", "workgraph", "mob", "rpc-surface"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]

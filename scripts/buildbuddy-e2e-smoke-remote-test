@@ -325,8 +325,8 @@ if [[ "${selection_count}" -eq 0 ]]; then
 fi
 
 if [[ "${MEERKAT_E2E_SMOKE_TURBO_DEFAULTS:-}" == "1" ]]; then
-  case "${SCENARIO:-}" in
-    85)
+  case "${SCENARIO:-}:${SUITE:-}" in
+    77:* | 85:* | *:cli-background-job-active-turn)
       export SMOKE_MODEL="${SMOKE_MODEL:-claude-sonnet-4-5}"
       ;;
     *)

@@ -1,0 +1,1 @@
+../../../.claude/skills/meerkat-cli-reference/SKILL.md

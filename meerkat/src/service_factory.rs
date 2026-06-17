@@ -534,11 +534,52 @@ impl SessionAgent for FactoryAgent {
 }
 
 /// Implements [`SessionAgentBuilder`] by delegating to [`AgentFactory::build_agent()`].
+/// Parent-chain inheritance inputs for [`FactoryAgentBuilder`].
+///
+/// Holds the realm config source (ancestors) and the head realm whose durable
+/// document the surface owns. Kept as one value so the builder cannot be left
+/// with a source but no head (or vice versa). Surfaces that learn their realm
+/// source after the builder is consumed (e.g. the RPC `SessionRuntime`) set it
+/// through the shared slot on [`FactoryAgentBuilder::realm_inheritance`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct RealmInheritance {
+    source: Arc<dyn meerkat_core::RealmConfigSource>,
+    head: meerkat_core::connection::RealmId,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RealmInheritance {
+    /// Build the inheritance inputs from a realm config `source` (supplies the
+    /// ancestor chain + the implicit `global` tail) and the `head` realm whose
+    /// durable config the surface owns.
+    pub fn new(
+        source: Arc<dyn meerkat_core::RealmConfigSource>,
+        head: meerkat_core::connection::RealmId,
+    ) -> Self {
+        Self { source, head }
+    }
+}
+
 pub struct FactoryAgentBuilder {
     factory: AgentFactory,
     config_snapshot: Config,
     #[cfg(not(target_arch = "wasm32"))]
     config_store: Option<Arc<dyn ConfigStore>>,
+    /// Realm parent-chain inheritance slot.
+    ///
+    /// When populated, [`Self::resolve_config`] folds the head realm's durable
+    /// config (the live `config_store`, or the `config_snapshot` when no store is
+    /// configured) with its ancestor chain so top-level fields (models, mcp,
+    /// hooks, skills, limits) inherit from parent realms on every agent build —
+    /// not just the auth-binding path.
+    ///
+    /// A shared slot (rather than a plain field) so surfaces that learn their
+    /// realm source after the builder is consumed into a session service — the
+    /// RPC `SessionRuntime` sets it from `set_realm_config_source` — can populate
+    /// it through the same `Arc` the live builder reads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub realm_inheritance: Arc<std::sync::RwLock<Option<RealmInheritance>>>,
     /// Optional default LLM client injected into all builds (for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
     /// Optional default wrapper applied to every final agent-facing LLM client.
@@ -581,6 +622,8 @@ impl FactoryAgentBuilder {
             config_snapshot: config,
             #[cfg(not(target_arch = "wasm32"))]
             config_store: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
             default_llm_client: None,
             default_agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
             default_tool_dispatcher: None,
@@ -609,6 +652,7 @@ impl FactoryAgentBuilder {
             factory,
             config_snapshot: initial_config,
             config_store: Some(config_store),
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
             default_llm_client: None,
             default_agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
             default_tool_dispatcher: None,
@@ -619,6 +663,27 @@ impl FactoryAgentBuilder {
             default_blob_store: None,
             default_image_generation_executor: None,
         }
+    }
+
+    /// Attach realm parent-chain inheritance to this builder.
+    ///
+    /// `source` supplies ancestor realm documents (parent chain + the implicit
+    /// `global` tail); `head` is the realm whose durable config is owned by the
+    /// `config_store` passed to [`Self::new_with_config_store`]. Has no effect
+    /// unless a config store is also configured: with no store, builds serve the
+    /// in-memory `config_snapshot` unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_realm_inheritance(
+        self,
+        source: Arc<dyn meerkat_core::RealmConfigSource>,
+        head: meerkat_core::connection::RealmId,
+    ) -> Self {
+        *self
+            .realm_inheritance
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(RealmInheritance::new(source, head));
+        self
     }
 
     pub fn with_image_generation_machine(
@@ -636,15 +701,50 @@ impl FactoryAgentBuilder {
     /// never serves a stale `config_snapshot` behind a store failure. The
     /// in-memory `config_snapshot` is returned only when no store is configured.
     async fn resolve_config(&self) -> Result<Config, SessionError> {
+        // The head config is the surface's authoritative document: the live
+        // `config_store` when one is configured (a read failure is propagated,
+        // never masked behind a stale snapshot), otherwise the in-memory
+        // `config_snapshot`.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(store) = &self.config_store {
-            return store.get().await.map_err(|err| {
+        let head_config = if let Some(store) = &self.config_store {
+            store.get().await.map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::ConfigError(format!(
                     "failed to read latest config from store: {err}"
                 )))
-            });
+            })?
+        } else {
+            self.config_snapshot.clone()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let head_config = self.config_snapshot.clone();
+
+        // When realm inheritance is configured, fold the head realm's config with
+        // its ancestor chain so top-level fields (models, mcp, hooks, skills,
+        // limits) inherit on every build — not just the auth-binding path. The
+        // head config keeps coming from the surface's store/snapshot; inheritance
+        // only ADDS ancestor docs, so an inherited entry is never durably
+        // flattened into the child realm's document.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let inheritance = self
+                .realm_inheritance
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(inheritance) = inheritance {
+                let reader = meerkat_core::EffectiveConfigReader::new(inheritance.source.clone());
+                return reader
+                    .effective_config_over_head(&inheritance.head, head_config)
+                    .await
+                    .map_err(|err| {
+                        SessionError::Agent(meerkat_core::error::AgentError::ConfigError(format!(
+                            "failed to compose effective config for realm '{}': {err}",
+                            inheritance.head
+                        )))
+                    });
+            }
         }
-        Ok(self.config_snapshot.clone())
+        Ok(head_config)
     }
 
     /// Get a reference to the factory.

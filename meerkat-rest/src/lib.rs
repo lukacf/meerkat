@@ -462,14 +462,21 @@ impl AppState {
         // (the `global` tail). Composition is read-only; `config get/set` use
         // the RAW head store (`config_runtime`), so an inherited entry is never
         // durably flattened into a child doc.
-        let head_config = config_store
-            .get()
-            .await
-            .unwrap_or_else(|_| Config::default());
+        let head_config = config_store.get().await.map_err(|err| {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to read head realm config: {err}"),
+            )) as Box<dyn std::error::Error>
+        })?;
         let mut config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&realm_config_source))
             .effective_config_over_head(&realm, head_config)
             .await
-            .unwrap_or_else(|_| Config::default());
+            .map_err(|err| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("failed to compose effective config for realm '{realm}': {err}"),
+                )) as Box<dyn std::error::Error>
+            })?;
         if let Err(err) = config.apply_env_overrides() {
             tracing::warn!("Failed to apply env overrides: {}", err);
         }
@@ -534,7 +541,8 @@ impl AppState {
 
         let max_sessions = config.max_sessions();
         let builder =
-            FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
+            FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store))
+                .with_realm_inheritance(Arc::clone(&realm_config_source), realm.clone());
         // Capture the mob tools slot before the builder is consumed into the session service.
         // We set the actual factory after mob_state is constructed (circular dep break).
         #[cfg(feature = "mob")]

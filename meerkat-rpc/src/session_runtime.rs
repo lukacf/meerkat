@@ -1327,6 +1327,11 @@ pub struct SessionRuntime {
     /// to the strict-owner write guard. The raw `config_runtime` stays the
     /// authority for `config get/set` (writes never compose — read/write split).
     realm_config_source: Arc<StdRwLock<Option<Arc<dyn meerkat_core::RealmConfigSource>>>>,
+    /// Builder-shared inheritance slot. Populated by [`Self::set_realm_config_source`]
+    /// so the agent-BUILD path (`FactoryAgentBuilder::resolve_config`) composes the
+    /// active realm's parent chain into the effective config — not just the
+    /// auth-resolution read path. Same `Arc` the live builder reads.
+    builder_realm_inheritance: Arc<StdRwLock<Option<meerkat::RealmInheritance>>>,
     runtime_adapter: Arc<MeerkatMachine>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
@@ -1719,6 +1724,7 @@ impl SessionRuntime {
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+        let builder_realm_inheritance = Arc::clone(&builder.realm_inheritance);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let builder_agent_llm_client_decorator_slot =
             Arc::clone(&builder.default_agent_llm_client_decorator);
@@ -1817,6 +1823,7 @@ impl SessionRuntime {
             backend,
             config_runtime,
             realm_config_source,
+            builder_realm_inheritance,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry,
@@ -1856,6 +1863,7 @@ impl SessionRuntime {
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+        let builder_realm_inheritance = Arc::clone(&builder.realm_inheritance);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let builder_agent_llm_client_decorator_slot =
             Arc::clone(&builder.default_agent_llm_client_decorator);
@@ -1954,6 +1962,7 @@ impl SessionRuntime {
             backend,
             config_runtime,
             realm_config_source,
+            builder_realm_inheritance,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry,
@@ -2074,14 +2083,30 @@ impl SessionRuntime {
     }
 
     /// Attach the per-realm config-document source used by the auth-resolution
-    /// read path to compose the active realm's parent chain (inheritance).
+    /// read path AND the agent-BUILD path to compose the active realm's parent
+    /// chain (inheritance).
+    ///
+    /// Also populates the builder-shared inheritance slot so
+    /// `FactoryAgentBuilder::resolve_config` folds the active realm's parent
+    /// chain (head ⊕ ancestors ⊕ `global` tail) into the effective config on
+    /// every build. The head realm is this runtime's active realm, defaulting to
+    /// the reserved `global` realm when none is configured — matching the
+    /// connection resolver's head default.
     ///
     /// Writes never compose — `config get/set` stay on the raw `config_runtime`.
     pub fn set_realm_config_source(&mut self, source: Arc<dyn meerkat_core::RealmConfigSource>) {
+        let head = self
+            .realm_id()
+            .unwrap_or_else(meerkat_core::connection::RealmId::global);
         *self
             .realm_config_source
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&source));
+        *self
+            .builder_realm_inheritance
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(meerkat::RealmInheritance::new(source, head));
     }
 
     /// Per-realm config-document source for inheritance composition, if attached.

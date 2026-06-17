@@ -14241,6 +14241,10 @@ where
             .or_else(|| Some(format!("mobpack:{deployed_mob_id}"))),
         Some(manifest.backend.as_str().to_string()),
     );
+    // Attach the realm source AFTER realm context so the agent-BUILD path
+    // composes this realm's parent chain (→ `global`) into the effective config,
+    // matching REST/RPC. `set_realm_config_source` reads `realm_id()` for the head.
+    runtime.set_realm_config_source(cli_realm_config_source(scope));
     let runtime = Arc::new(runtime);
 
     // Pre-initialize the callback channel so the ExternalToolsProvider closure

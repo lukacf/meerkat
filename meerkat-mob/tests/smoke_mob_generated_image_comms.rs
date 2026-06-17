@@ -17,6 +17,8 @@ use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::time::{Duration, Instant, sleep};
@@ -189,12 +191,24 @@ fn image_relay_definition(
     definition
 }
 
+fn materialize_project_context(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    for dir in [root.join("project-root"), root.join("context-root")] {
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join("AGENTS.md"),
+            "# Generated Image Mob Smoke\n\nUse concise responses for live mob smoke tests.\n",
+        )?;
+    }
+    Ok(())
+}
+
 async fn setup_generated_image_comms_mob(
     api_key: String,
     model: &str,
 ) -> Result<(MobHandle, Arc<dyn MobSessionService>, TempDir), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let root = temp_dir.path();
+    materialize_project_context(root)?;
     let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::default());
     let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
     let runtime_adapter = Arc::new(MeerkatMachine::persistent(
@@ -245,6 +259,7 @@ async fn setup_image_relay_mob(
 ) -> Result<(MobHandle, Arc<dyn MobSessionService>, TempDir), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let root = temp_dir.path();
+    materialize_project_context(root)?;
     let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::default());
     let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
     let runtime_adapter = Arc::new(MeerkatMachine::persistent(

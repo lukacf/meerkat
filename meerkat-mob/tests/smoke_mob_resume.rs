@@ -23,6 +23,7 @@ use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use serde_json::to_string;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -96,6 +97,17 @@ impl SmokePaths {
             mob_db_path: root.join("mob.db"),
         }
     }
+
+    fn materialize_project_context(&self) {
+        for root in [&self.project_root, &self.context_root] {
+            fs::create_dir_all(root).expect("create mob smoke project/context root");
+            fs::write(
+                root.join("AGENTS.md"),
+                "# Mob Smoke\n\nUse concise responses for live mob smoke tests.\n",
+            )
+            .expect("write mob smoke AGENTS.md");
+        }
+    }
 }
 
 fn smoke_factory(paths: &SmokePaths) -> AgentFactory {
@@ -115,6 +127,7 @@ fn persistent_service(
     Arc<PersistentSessionService<FactoryAgentBuilder>>,
     Arc<JsonlStore>,
 ) {
+    paths.materialize_project_context();
     let factory = smoke_factory(paths);
     let mut builder = FactoryAgentBuilder::new(factory, Config::default());
     let store = Arc::new(JsonlStore::new(paths.sessions_root.clone()));

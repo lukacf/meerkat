@@ -90,13 +90,13 @@ machine_authority_path() {
     meerkat-machine-kernels/src/generated/*|meerkat-core/src/generated/*|meerkat-mob/src/generated/*|meerkat-runtime/src/generated/*|meerkat-schedule/src/generated/*|*/src/generated/protocol_*.rs)
       return 0
       ;;
-    xtask/Cargo.toml|xtask/BUILD.bazel|xtask/src/lib.rs|xtask/src/main.rs|xtask/src/machines*.rs|xtask/src/protocol_codegen.rs|xtask/src/audit_generated_headers.rs|xtask/src/public_contracts.rs)
+    xtask/Cargo.toml|xtask/BUILD.bazel|xtask/src/lib.rs|xtask/src/main.rs|xtask/src/machines*.rs|xtask/src/protocol_codegen.rs|xtask/src/audit_generated_headers.rs|xtask/src/public_contracts.rs|xtask/src/runtime_authority_bypass.rs)
       return 0
       ;;
     xtask/src/rmat_policy.rs|xtask/src/seam_inventory.rs|xtask/src/ownership_ledger.rs|xtask/src/rmat_audit.rs|xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md)
       return 0
       ;;
-    xtask/tests/machine_verify_all_tlc_test.sh|xtask/tests/machines_contracts.rs|xtask/tests/protocol_codegen_drift.rs)
+    xtask/tests/machine_verify_all_tlc_test.sh|xtask/tests/machines_contracts.rs|xtask/tests/protocol_codegen_drift.rs|xtask/tests/runtime_authority_bypass.rs)
       return 0
       ;;
   esac

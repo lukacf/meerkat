@@ -10322,6 +10322,12 @@ pub struct State {
     pub next_admission_seq: u64,
     pub next_priority_admission_seq: u64,
     pub input_admission_seq: std::collections::BTreeMap<String, u64>,
+    pub input_runtime_boundary: std::collections::BTreeMap<String, RecoveredRunApplyBoundary>,
+    pub input_runtime_execution_kind:
+        std::collections::BTreeMap<String, RecoveredRuntimeExecutionKind>,
+    pub input_runtime_peer_response_terminal_apply_intent:
+        std::collections::BTreeMap<String, RecoveredPeerResponseTerminalApplyIntent>,
+    pub input_is_prompt: std::collections::BTreeMap<String, bool>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
     pub input_recovery_lanes: std::collections::BTreeMap<String, InputLane>,
     pub admission_authorized_lanes: std::collections::BTreeMap<String, InputLane>,
@@ -11240,6 +11246,20 @@ pub mod inputs {
         pub admission_sequence_recovery: Option<RecoveredInputNormalizationReasonKind>,
         pub recovery_lane: Option<InputLane>,
         pub lane: Option<InputLane>,
+        pub runtime_boundary: Option<RecoveredRunApplyBoundary>,
+        pub runtime_execution_kind: Option<RecoveredRuntimeExecutionKind>,
+        pub runtime_peer_response_terminal_apply_intent:
+            Option<RecoveredPeerResponseTerminalApplyIntent>,
+        pub is_prompt: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindAdmissionRuntimeGrouping {
+        pub input_id: String,
+        pub runtime_boundary: RecoveredRunApplyBoundary,
+        pub runtime_execution_kind: RecoveredRuntimeExecutionKind,
+        pub runtime_peer_response_terminal_apply_intent:
+            Option<RecoveredPeerResponseTerminalApplyIntent>,
+        pub is_prompt: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct QueueAccepted {
@@ -12113,6 +12133,7 @@ pub enum Input {
     RunCancelled(inputs::RunCancelled),
     RecoverAdmittedInput(inputs::RecoverAdmittedInput),
     RecoverInputLifecycle(inputs::RecoverInputLifecycle),
+    BindAdmissionRuntimeGrouping(inputs::BindAdmissionRuntimeGrouping),
     QueueAccepted(inputs::QueueAccepted),
     SteerAccepted(inputs::SteerAccepted),
     ChangeLane(inputs::ChangeLane),
@@ -12427,6 +12448,7 @@ impl Input {
             Self::RunCancelled(_) => InputKind::RunCancelled,
             Self::RecoverAdmittedInput(_) => InputKind::RecoverAdmittedInput,
             Self::RecoverInputLifecycle(_) => InputKind::RecoverInputLifecycle,
+            Self::BindAdmissionRuntimeGrouping(_) => InputKind::BindAdmissionRuntimeGrouping,
             Self::QueueAccepted(_) => InputKind::QueueAccepted,
             Self::SteerAccepted(_) => InputKind::SteerAccepted,
             Self::ChangeLane(_) => InputKind::ChangeLane,
@@ -12744,6 +12766,7 @@ pub enum InputKind {
     RunCancelled,
     RecoverAdmittedInput,
     RecoverInputLifecycle,
+    BindAdmissionRuntimeGrouping,
     QueueAccepted,
     SteerAccepted,
     ChangeLane,
@@ -14108,6 +14131,383 @@ pub enum EffectKind {
     RequestCompletionWaiterResolutionForUnregister,
 }
 
+pub mod command_capabilities {
+    mod private {
+        #[derive(Debug, PartialEq, Eq)]
+        pub struct Sealed;
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CommandPlanKind {
+        AuthorizedAcceptedInputMaterialization,
+        AuthorizeRuntimeLoopBatch,
+        AuthorizedStageForRun,
+        AuthorizedRuntimeLoopRunCommit,
+        AuthorizedRuntimeCompletionResultClosure,
+    }
+
+    impl CommandPlanKind {
+        #[must_use]
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::AuthorizedAcceptedInputMaterialization => {
+                    "AuthorizedAcceptedInputMaterialization"
+                }
+                Self::AuthorizeRuntimeLoopBatch => "AuthorizeRuntimeLoopBatch",
+                Self::AuthorizedStageForRun => "AuthorizedStageForRun",
+                Self::AuthorizedRuntimeLoopRunCommit => "AuthorizedRuntimeLoopRunCommit",
+                Self::AuthorizedRuntimeCompletionResultClosure => {
+                    "AuthorizedRuntimeCompletionResultClosure"
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RuntimeLoopBatchSource {
+        Queue,
+        Steer,
+    }
+
+    #[must_use = "generated runtime-loop batch plan must be consumed by exact dequeue/stage realization"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct RuntimeLoopBatchPlan {
+        batch_capability: AuthorizedRuntimeLoopBatch,
+        input_ids: Vec<String>,
+        source: RuntimeLoopBatchSource,
+    }
+
+    #[must_use = "generated stage-for-run plan must be consumed by exact stage realization"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct StageForRunPlan {
+        stage_capability: AuthorizedStageForRun,
+        input_ids: Vec<String>,
+        source: RuntimeLoopBatchSource,
+    }
+
+    impl RuntimeLoopBatchPlan {
+        #[must_use]
+        pub fn input_ids(&self) -> &[String] {
+            &self.input_ids
+        }
+
+        #[must_use]
+        pub const fn source(&self) -> RuntimeLoopBatchSource {
+            self.source
+        }
+
+        pub fn into_parts(
+            self,
+        ) -> (
+            AuthorizedRuntimeLoopBatch,
+            Vec<String>,
+            RuntimeLoopBatchSource,
+        ) {
+            (self.batch_capability, self.input_ids, self.source)
+        }
+    }
+
+    impl StageForRunPlan {
+        #[must_use]
+        pub fn input_ids(&self) -> &[String] {
+            &self.input_ids
+        }
+
+        #[must_use]
+        pub const fn source(&self) -> RuntimeLoopBatchSource {
+            self.source
+        }
+
+        pub fn into_parts(self) -> (AuthorizedStageForRun, Vec<String>, RuntimeLoopBatchSource) {
+            (self.stage_capability, self.input_ids, self.source)
+        }
+    }
+
+    #[must_use = "generated command capability `AuthorizedAcceptedInputMaterialization` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct AuthorizedAcceptedInputMaterialization {
+        _sealed: private::Sealed,
+    }
+
+    impl AuthorizedAcceptedInputMaterialization {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizedAcceptedInputMaterialization
+        }
+    }
+
+    #[must_use = "generated command capability `AuthorizedRuntimeLoopBatch` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct AuthorizedRuntimeLoopBatch {
+        _sealed: private::Sealed,
+    }
+
+    impl AuthorizedRuntimeLoopBatch {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizeRuntimeLoopBatch
+        }
+    }
+
+    #[must_use = "generated command capability `AuthorizedStageForRun` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct AuthorizedStageForRun {
+        _sealed: private::Sealed,
+    }
+
+    impl AuthorizedStageForRun {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizedStageForRun
+        }
+    }
+
+    #[must_use = "generated command capability `AuthorizedRuntimeLoopRunCommit` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct AuthorizedRuntimeLoopRunCommit {
+        _sealed: private::Sealed,
+    }
+
+    impl AuthorizedRuntimeLoopRunCommit {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizedRuntimeLoopRunCommit
+        }
+    }
+
+    #[must_use = "generated command capability `RuntimeCompletionResultAuthority` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct RuntimeCompletionResultAuthority {
+        _sealed: private::Sealed,
+    }
+
+    impl RuntimeCompletionResultAuthority {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizedRuntimeCompletionResultClosure
+        }
+    }
+
+    impl AuthorizedRuntimeLoopBatch {
+        #[must_use]
+        pub fn authorize_runtime_loop_batch_from_state(
+            state: &super::State,
+        ) -> Option<RuntimeLoopBatchPlan> {
+            runtime_loop_batch_from_state(
+                state,
+                super::InputLane::Steer,
+                RuntimeLoopBatchSource::Steer,
+            )
+            .or_else(|| {
+                runtime_loop_batch_from_state(
+                    state,
+                    super::InputLane::Queue,
+                    RuntimeLoopBatchSource::Queue,
+                )
+            })
+        }
+    }
+
+    impl AuthorizedStageForRun {
+        #[must_use]
+        pub fn authorize_stage_for_run_from_state(
+            state: &super::State,
+            input_ids: &[String],
+            run_id: &super::RunId,
+            source: RuntimeLoopBatchSource,
+        ) -> Option<StageForRunPlan> {
+            runtime_stage_for_run_from_state(state, input_ids, run_id, source)
+        }
+    }
+
+    fn runtime_loop_batch_from_state(
+        state: &super::State,
+        lane: super::InputLane,
+        source: RuntimeLoopBatchSource,
+    ) -> Option<RuntimeLoopBatchPlan> {
+        let ordered = ordered_queued_lane_inputs(state, lane)?;
+        let first = ordered.first()?;
+        let selected = match source {
+            RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),
+            RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),
+        };
+        if selected.is_empty() {
+            None
+        } else {
+            Some(RuntimeLoopBatchPlan {
+                batch_capability: AuthorizedRuntimeLoopBatch::mint_from_generated_command_plan(),
+                input_ids: selected,
+                source,
+            })
+        }
+    }
+
+    fn runtime_stage_for_run_from_state(
+        state: &super::State,
+        input_ids: &[String],
+        run_id: &super::RunId,
+        source: RuntimeLoopBatchSource,
+    ) -> Option<StageForRunPlan> {
+        if input_ids.is_empty() {
+            return None;
+        }
+        if state.current_run_id.as_ref() != Some(run_id) {
+            return None;
+        }
+        let expected_lane = match source {
+            RuntimeLoopBatchSource::Queue => super::InputLane::Queue,
+            RuntimeLoopBatchSource::Steer => super::InputLane::Steer,
+        };
+        for input_id in input_ids {
+            if state.input_phases.get(input_id) != Some(&super::InputPhase::Queued) {
+                return None;
+            }
+            if state.input_lane.get(input_id) != Some(&expected_lane) {
+                return None;
+            }
+            if !state.input_admission_seq.contains_key(input_id) {
+                return None;
+            }
+            if !state.input_recovery_lanes.contains_key(input_id) {
+                return None;
+            }
+            if state.input_run_associations.contains_key(input_id) {
+                return None;
+            }
+        }
+        Some(StageForRunPlan {
+            stage_capability: AuthorizedStageForRun::mint_from_generated_command_plan(),
+            input_ids: input_ids.to_vec(),
+            source,
+        })
+    }
+
+    fn ordered_queued_lane_inputs(
+        state: &super::State,
+        lane: super::InputLane,
+    ) -> Option<Vec<String>> {
+        let mut ordered = Vec::new();
+        for (input_id, input_lane) in &state.input_lane {
+            if *input_lane != lane {
+                continue;
+            }
+            if state.input_phases.get(input_id) != Some(&super::InputPhase::Queued) {
+                return None;
+            }
+            let sequence = *state.input_admission_seq.get(input_id)?;
+            ordered.push((sequence, input_id.clone()));
+        }
+        ordered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        Some(ordered.into_iter().map(|(_, input_id)| input_id).collect())
+    }
+
+    fn select_steer_batch(state: &super::State, ordered: &[String], first: &String) -> Vec<String> {
+        let Some(target_boundary) = state.input_runtime_boundary.get(first).copied() else {
+            return vec![first.clone()];
+        };
+        let Some(target_execution_kind) = state.input_runtime_execution_kind.get(first).copied()
+        else {
+            return vec![first.clone()];
+        };
+        let target_terminal_intent = state
+            .input_runtime_peer_response_terminal_apply_intent
+            .get(first)
+            .copied();
+        ordered
+            .iter()
+            .take_while(|input_id| {
+                state.input_runtime_boundary.get(*input_id).copied() == Some(target_boundary)
+                    && state.input_runtime_execution_kind.get(*input_id).copied()
+                        == Some(target_execution_kind)
+                    && state
+                        .input_runtime_peer_response_terminal_apply_intent
+                        .get(*input_id)
+                        .copied()
+                        == target_terminal_intent
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn select_queue_batch(state: &super::State, ordered: &[String], first: &String) -> Vec<String> {
+        let Some(target_execution_kind) = state.input_runtime_execution_kind.get(first).copied()
+        else {
+            return vec![first.clone()];
+        };
+        let target_terminal_intent = state
+            .input_runtime_peer_response_terminal_apply_intent
+            .get(first)
+            .copied();
+        let Some(driver_is_prompt) = state.input_is_prompt.get(first).copied() else {
+            return vec![first.clone()];
+        };
+        let mut selected = Vec::new();
+        for input_id in ordered {
+            if state.input_runtime_execution_kind.get(input_id).copied()
+                != Some(target_execution_kind)
+                || state
+                    .input_runtime_peer_response_terminal_apply_intent
+                    .get(input_id)
+                    .copied()
+                    != target_terminal_intent
+            {
+                break;
+            }
+            let Some(is_prompt) = state.input_is_prompt.get(input_id).copied() else {
+                break;
+            };
+            if !driver_is_prompt && is_prompt {
+                break;
+            }
+            selected.push(input_id.clone());
+            if is_prompt || driver_is_prompt {
+                break;
+            }
+        }
+        selected
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
@@ -14946,6 +15346,11 @@ pub enum TransitionId {
     RollbackRunRunningToRetired,
     RecycleFromIdleOrRetired,
     RecycleFromAttached,
+    BindAdmissionRuntimeGroupingIdle,
+    BindAdmissionRuntimeGroupingAttached,
+    BindAdmissionRuntimeGroupingRunning,
+    BindAdmissionRuntimeGroupingRetired,
+    BindAdmissionRuntimeGroupingStopped,
     RecoverAdmittedInputIdle,
     RecoverAdmittedInputAttached,
     RecoverAdmittedInputRunning,
@@ -15983,6 +16388,10 @@ pub fn initial_state() -> State {
         next_admission_seq: 1000000000,
         next_priority_admission_seq: 999999999,
         input_admission_seq: Default::default(),
+        input_runtime_boundary: Default::default(),
+        input_runtime_execution_kind: Default::default(),
+        input_runtime_peer_response_terminal_apply_intent: Default::default(),
+        input_is_prompt: Default::default(),
         input_lane: Default::default(),
         input_recovery_lanes: Default::default(),
         admission_authorized_lanes: Default::default(),

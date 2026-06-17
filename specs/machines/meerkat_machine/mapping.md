@@ -2531,6 +2531,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecycleFromAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BindAdmissionRuntimeGroupingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindAdmissionRuntimeGroupingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindAdmissionRuntimeGroupingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindAdmissionRuntimeGroupingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindAdmissionRuntimeGroupingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverAdmittedInputIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

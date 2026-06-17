@@ -83,7 +83,7 @@ pub mod protocol_supervisor_trust_publish;
 #[allow(unused_imports)]
 #[path = "generated/protocol_supervisor_trust_revoke.rs"]
 pub mod protocol_supervisor_trust_revoke;
-pub mod queue;
+pub(crate) mod queue;
 pub mod runtime_event;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
@@ -424,7 +424,6 @@ pub use policy::{
     ApplyMode, ConsumePoint, DrainPolicy, PolicyDecision, QueueMode, RoutingDisposition, WakeMode,
 };
 pub use policy_table::{DefaultPolicyTable, generated_default_policy_version};
-pub use queue::InputQueue;
 pub use runtime_event::{
     InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,

@@ -4,8 +4,9 @@ use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
     render_composition_ci_cfg, render_composition_driver, render_composition_mapping_coverage,
     render_composition_module, render_composition_semantic_model, render_composition_witness_cfg,
-    render_generated_kernel_mod, render_machine_ci_cfg, render_machine_kernel_module,
-    render_machine_mapping_coverage, render_machine_module, render_machine_semantic_model,
+    render_generated_kernel_mod, render_machine_ci_cfg, render_machine_contract_markdown,
+    render_machine_kernel_module, render_machine_mapping_coverage, render_machine_module,
+    render_machine_semantic_model,
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
@@ -116,6 +117,39 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     }
     assert!(rendered.contains("AgentIdentity"));
     assert!(!rendered.contains("MeerkatId"));
+}
+
+#[test]
+fn renders_mob_spawn_command_plan_in_contract_markdown() {
+    let schema = mob_machine();
+    let coverage = canonical_machine_coverage_manifests()
+        .into_iter()
+        .find(|coverage| coverage.machine == schema.machine)
+        .expect("mob machine coverage manifest");
+    let rendered = render_machine_contract_markdown(&schema, &coverage);
+
+    for required in [
+        "### `AuthorizedMobSpawnStart`",
+        "- Authority: `PendingSpawnOperationOwnerAuthorized`",
+        "- Source Inputs: `CancelPendingSpawn`",
+        "- Source Signals: `StageSpawn`, `CompleteSpawn`",
+        "- Command Effects: `PendingSpawnOperationOwnerAuthorized`, `ExposePendingSpawn`, `EmitMemberLifecycleNotice`",
+        "`PendingSpawnOperationOwnerAuthorized` via `PendingSpawnOperationOwnerAuthorized` (LocalPendingSpawnOwner) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`",
+        "`EmitMemberLifecycleNotice` via `CompleteSpawn` (LocalSpawnCompletion) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`",
+        "### `CanStartSpawn`",
+        "- Authority: `CanStartSpawn`",
+        "### `SpawnStarted`",
+        "- Authority: `SpawnStarted`",
+        "### `SpawnEffect`",
+        "- Authority: `SpawnEffect`",
+        "### `FailSpawn`",
+        "- Authority: `FailSpawn`",
+    ] {
+        assert!(
+            rendered.contains(required),
+            "MobMachine contract markdown must expose `{required}`:\n{rendered}"
+        );
+    }
 }
 
 #[test]

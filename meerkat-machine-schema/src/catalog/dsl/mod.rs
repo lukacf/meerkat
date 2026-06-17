@@ -44,15 +44,16 @@ pub mod session_turn_admission;
 pub mod work_attention_lifecycle;
 pub mod workgraph_lifecycle;
 
-use crate::identity::InputVariantId;
+use crate::identity::{EffectVariantId, InputVariantId, SignalVariantId, TransitionId};
 use crate::{
-    MachineSchema, NamedTypeBinding, RustBinding, TypePathEnumPayloadField,
-    TypePathEnumStructuralVariant, TypePathStructField,
+    CommandPlanSchema, EffectClosureSchema, MachineSchema, NamedTypeBinding, RustBinding,
+    TypePathEnumPayloadField, TypePathEnumStructuralVariant, TypePathStructField,
 };
 
 pub struct MachineSchemaMetadata {
     pub named_types: Vec<NamedTypeBinding>,
     pub runtime_internal_inputs: Vec<InputVariantId>,
+    pub command_plans: Vec<CommandPlanSchema>,
     pub ci_step_limit: Option<u32>,
 }
 
@@ -60,6 +61,7 @@ impl MachineSchemaMetadata {
     pub fn attach_to(self, mut schema: MachineSchema) -> MachineSchema {
         schema.named_types = self.named_types;
         schema.runtime_internal_inputs = self.runtime_internal_inputs;
+        schema.command_plans = self.command_plans;
         schema.ci_step_limit = self.ci_step_limit;
         schema
     }
@@ -155,6 +157,26 @@ fn input_variant_ids<T: RuntimeInternalInputVariant>(
         .collect()
 }
 
+fn input_variant_id(value: &'static str) -> InputVariantId {
+    InputVariantId::from_trusted_catalog_literal(value)
+}
+
+fn signal_variant_id(value: &'static str) -> SignalVariantId {
+    SignalVariantId::from_trusted_catalog_literal(value)
+}
+
+fn transition_id(value: &'static str) -> TransitionId {
+    TransitionId::from_trusted_catalog_literal(value)
+}
+
+fn transition_id_owned(value: String) -> TransitionId {
+    TransitionId::from_trusted_catalog_string(value)
+}
+
+fn effect_variant_id(value: &'static str) -> EffectVariantId {
+    EffectVariantId::from_trusted_catalog_literal(value)
+}
+
 fn machine_schema_metadata(
     named_types: Vec<NamedTypeBinding>,
     runtime_internal_inputs: Vec<InputVariantId>,
@@ -162,8 +184,263 @@ fn machine_schema_metadata(
     MachineSchemaMetadata {
         named_types,
         runtime_internal_inputs,
+        command_plans: Vec::new(),
         ci_step_limit: None,
     }
+}
+
+fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
+    let admission_plan_transitions = [
+        "ResolveAdmissionPlanRequestedTerminalQueueIdle",
+        "ResolveAdmissionPlanRequestedTerminalQueueAttached",
+        "ResolveAdmissionPlanRequestedTerminalQueueRunning",
+        "ResolveAdmissionPlanRequestedTerminalSteerIdle",
+        "ResolveAdmissionPlanRequestedTerminalSteerAttached",
+        "ResolveAdmissionPlanRequestedTerminalSteerRunning",
+        "ResolveAdmissionPlanRequestedQueueIdle",
+        "ResolveAdmissionPlanRequestedQueueAttached",
+        "ResolveAdmissionPlanRequestedQueueRunning",
+        "ResolveAdmissionPlanRequestedSteerIdle",
+        "ResolveAdmissionPlanRequestedSteerAttached",
+        "ResolveAdmissionPlanRequestedSteerRunning",
+        "ResolveAdmissionPlanDefaultQueueKindIdle",
+        "ResolveAdmissionPlanDefaultQueueKindAttached",
+        "ResolveAdmissionPlanDefaultQueueKindRunning",
+        "ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle",
+        "ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached",
+        "ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning",
+        "ResolveAdmissionPlanPeerResponseProgressIdle",
+        "ResolveAdmissionPlanPeerResponseProgressAttached",
+        "ResolveAdmissionPlanPeerResponseProgressRunning",
+        "ResolveAdmissionPlanDefaultPeerResponseTerminalIdle",
+        "ResolveAdmissionPlanDefaultPeerResponseTerminalAttached",
+        "ResolveAdmissionPlanDefaultPeerResponseTerminalRunning",
+        "ResolveAdmissionPlanDefaultContinuationIdle",
+        "ResolveAdmissionPlanDefaultContinuationAttached",
+        "ResolveAdmissionPlanDefaultContinuationRunning",
+        "ResolveAdmissionPlanWorkgraphAttentionContinuationIdle",
+        "ResolveAdmissionPlanWorkgraphAttentionContinuationAttached",
+        "ResolveAdmissionPlanWorkgraphAttentionContinuationRunning",
+        "ResolveAdmissionPlanOperationIdle",
+        "ResolveAdmissionPlanOperationAttached",
+        "ResolveAdmissionPlanOperationRunning",
+        "QueueAcceptedIdle",
+        "QueueAcceptedAttached",
+        "QueueAcceptedRunning",
+        "QueueAcceptedRetired",
+        "QueueAcceptedStopped",
+        "SteerAcceptedIdle",
+        "SteerAcceptedAttached",
+        "SteerAcceptedRunning",
+        "SteerAcceptedRetired",
+        "SteerAcceptedStopped",
+    ];
+    let stage_transitions = [
+        "StageForRunIdle",
+        "StageForRunAttached",
+        "StageForRunRunning",
+        "StageForRunRetired",
+        "StageForRunStopped",
+    ];
+    let run_commit_transitions = [
+        "RunCompleted",
+        "RunFailed",
+        "RunCancelled",
+        "CommitRunningToIdle",
+        "CommitRunningToAttached",
+        "CommitRunningToRetired",
+        "FailRunningToIdle",
+        "FailRunningToAttached",
+        "FailRunningToRetired",
+        "CancelRunningToIdle",
+        "CancelRunningToAttached",
+        "CancelRunningToRetired",
+        "RollbackRunRunningToIdle",
+        "RollbackRunRunningToAttached",
+        "RollbackRunRunningToRetired",
+    ];
+    let completion_result_phases = [
+        "Initializing",
+        "Idle",
+        "Attached",
+        "Running",
+        "Retired",
+        "Stopped",
+    ];
+    let completion_result_families = [
+        "ResolveRuntimeCompletionResultCompleted",
+        "ResolveRuntimeCompletionResultWithoutResult",
+        "ResolveRuntimeCompletionResultCallbackPending",
+        "ResolveRuntimeCompletionResultCancelled",
+        "ResolveRuntimeCompletionResultRuntimeApplyFailed",
+        "ResolveRuntimeCompletionResultMachineFailed",
+        "ResolveRuntimeCompletionResultFinalizationFailureWithResult",
+        "ResolveRuntimeCompletionResultFinalizationFailureWithoutResult",
+        "ResolveRuntimeCompletionResultRuntimeTerminated",
+    ];
+    let mut completion_result_transitions = completion_result_families
+        .iter()
+        .flat_map(|family| {
+            completion_result_phases
+                .iter()
+                .map(move |phase| transition_id_owned(format!("{family}{phase}")))
+        })
+        .collect::<Vec<_>>();
+    completion_result_transitions.push(transition_id(
+        "ResolveRuntimeCompletionResultRuntimeTerminatedDestroyedDestroyed",
+    ));
+    vec![
+        CommandPlanSchema {
+            name: "AuthorizedAcceptedInputMaterialization".to_owned(),
+            authority_type: "AuthorizedAcceptedInputMaterialization".to_owned(),
+            source_inputs: vec![
+                input_variant_id("ResolveAdmissionPlan"),
+                input_variant_id("QueueAccepted"),
+                input_variant_id("SteerAccepted"),
+            ],
+            source_signals: vec![],
+            transitions: admission_plan_transitions
+                .iter()
+                .copied()
+                .map(transition_id)
+                .collect(),
+            effects: vec![
+                effect_variant_id("AdmissionResolved"),
+                effect_variant_id("IngressAccepted"),
+                effect_variant_id("PostAdmissionSignal"),
+            ],
+            effect_closures: vec![],
+        },
+        CommandPlanSchema {
+            name: "AuthorizeRuntimeLoopBatch".to_owned(),
+            authority_type: "AuthorizedRuntimeLoopBatch".to_owned(),
+            source_inputs: vec![
+                input_variant_id("QueueAccepted"),
+                input_variant_id("SteerAccepted"),
+                input_variant_id("RecoverAdmittedInput"),
+                input_variant_id("RecoverInputLifecycle"),
+            ],
+            source_signals: vec![],
+            transitions: vec![
+                transition_id("QueueAcceptedIdle"),
+                transition_id("QueueAcceptedAttached"),
+                transition_id("QueueAcceptedRunning"),
+                transition_id("QueueAcceptedRetired"),
+                transition_id("QueueAcceptedStopped"),
+                transition_id("SteerAcceptedIdle"),
+                transition_id("SteerAcceptedAttached"),
+                transition_id("SteerAcceptedRunning"),
+                transition_id("SteerAcceptedRetired"),
+                transition_id("SteerAcceptedStopped"),
+                transition_id("RecoverInputLifecycleIdle"),
+                transition_id("RecoverInputLifecycleAttached"),
+                transition_id("RecoverInputLifecycleRunning"),
+                transition_id("RecoverInputLifecycleRetired"),
+                transition_id("RecoverInputLifecycleStopped"),
+            ],
+            effects: vec![effect_variant_id("IngressAccepted")],
+            effect_closures: vec![],
+        },
+        CommandPlanSchema {
+            name: "AuthorizedStageForRun".to_owned(),
+            authority_type: "AuthorizedStageForRun".to_owned(),
+            source_inputs: vec![input_variant_id("StageForRun")],
+            source_signals: vec![],
+            transitions: stage_transitions
+                .iter()
+                .copied()
+                .map(transition_id)
+                .collect(),
+            effects: vec![],
+            effect_closures: vec![],
+        },
+        CommandPlanSchema {
+            name: "AuthorizedRuntimeLoopRunCommit".to_owned(),
+            authority_type: "AuthorizedRuntimeLoopRunCommit".to_owned(),
+            source_inputs: vec![
+                input_variant_id("RunCompleted"),
+                input_variant_id("RunFailed"),
+                input_variant_id("RunCancelled"),
+                input_variant_id("Commit"),
+                input_variant_id("Fail"),
+                input_variant_id("CancelRun"),
+                input_variant_id("RollbackRun"),
+            ],
+            source_signals: vec![],
+            transitions: run_commit_transitions
+                .iter()
+                .copied()
+                .map(transition_id)
+                .collect(),
+            effects: vec![
+                effect_variant_id("TurnRunCompleted"),
+                effect_variant_id("TurnRunFailed"),
+                effect_variant_id("TurnRunCancelled"),
+            ],
+            effect_closures: vec![
+                EffectClosureSchema {
+                    effect: effect_variant_id("TurnRunCompleted"),
+                    authority_type: "AuthorizedRuntimeLoopRunCommit".to_owned(),
+                    closure_policy: "RuntimeLoopRunCommitEffect".to_owned(),
+                    lifecycle: vec![
+                        "Authorized".to_owned(),
+                        "Attempted".to_owned(),
+                        "Realized".to_owned(),
+                        "Failed".to_owned(),
+                        "Cancelled".to_owned(),
+                        "Abandoned".to_owned(),
+                    ],
+                },
+                EffectClosureSchema {
+                    effect: effect_variant_id("TurnRunFailed"),
+                    authority_type: "AuthorizedRuntimeLoopRunCommit".to_owned(),
+                    closure_policy: "RuntimeLoopRunCommitEffect".to_owned(),
+                    lifecycle: vec![
+                        "Authorized".to_owned(),
+                        "Attempted".to_owned(),
+                        "Realized".to_owned(),
+                        "Failed".to_owned(),
+                        "Cancelled".to_owned(),
+                        "Abandoned".to_owned(),
+                    ],
+                },
+                EffectClosureSchema {
+                    effect: effect_variant_id("TurnRunCancelled"),
+                    authority_type: "AuthorizedRuntimeLoopRunCommit".to_owned(),
+                    closure_policy: "RuntimeLoopRunCommitEffect".to_owned(),
+                    lifecycle: vec![
+                        "Authorized".to_owned(),
+                        "Attempted".to_owned(),
+                        "Realized".to_owned(),
+                        "Failed".to_owned(),
+                        "Cancelled".to_owned(),
+                        "Abandoned".to_owned(),
+                    ],
+                },
+            ],
+        },
+        CommandPlanSchema {
+            name: "AuthorizedRuntimeCompletionResultClosure".to_owned(),
+            authority_type: "RuntimeCompletionResultAuthority".to_owned(),
+            source_inputs: vec![input_variant_id("ResolveRuntimeCompletionResult")],
+            source_signals: vec![],
+            transitions: completion_result_transitions,
+            effects: vec![effect_variant_id("RuntimeCompletionResultResolved")],
+            effect_closures: vec![EffectClosureSchema {
+                effect: effect_variant_id("RuntimeCompletionResultResolved"),
+                authority_type: "RuntimeCompletionResultAuthority".to_owned(),
+                closure_policy: "LocalSurfaceResultAlignment".to_owned(),
+                lifecycle: vec![
+                    "Authorized".to_owned(),
+                    "Attempted".to_owned(),
+                    "Realized".to_owned(),
+                    "Failed".to_owned(),
+                    "Cancelled".to_owned(),
+                    "Abandoned".to_owned(),
+                ],
+            }],
+        },
+    ]
 }
 
 pub fn dsl_auth_machine() -> MachineSchema {
@@ -502,7 +779,7 @@ pub fn dsl_meerkat_machine_production_schema() -> MachineSchema {
 }
 
 pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
-    machine_schema_metadata(
+    let mut metadata = machine_schema_metadata(
         vec![
             NamedTypeBinding::u64("BoundarySequence"),
             NamedTypeBinding::u64("FenceToken"),
@@ -1670,7 +1947,9 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
         ],
         input_variant_ids(MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
-    .with_ci_step_limit(1)
+    .with_ci_step_limit(1);
+    metadata.command_plans = meerkat_queue_to_run_command_plans();
+    metadata
 }
 
 runtime_internal_inputs!(
@@ -1690,6 +1969,7 @@ runtime_internal_inputs!(
         AuthorizeSupervisor,
         AuthorizeDeferredSessionSystemContextAppend,
         BeginUnregisterSession,
+        BindAdmissionRuntimeGrouping,
         BindSupervisor,
         BoundaryComplete,
         BoundaryContinue,
@@ -1939,8 +2219,133 @@ pub fn dsl_mob_machine_production_schema() -> MachineSchema {
     )
 }
 
+fn mob_spawn_command_plans() -> Vec<CommandPlanSchema> {
+    let spawn_closure_lifecycle = || {
+        vec![
+            "Authorized".to_owned(),
+            "Attempted".to_owned(),
+            "Realized".to_owned(),
+            "Failed".to_owned(),
+            "Cancelled".to_owned(),
+            "Abandoned".to_owned(),
+        ]
+    };
+    let full_spawn_transitions = || {
+        vec![
+            transition_id("StageSpawnRunning"),
+            transition_id("CompleteSpawnRunning"),
+            transition_id("CompleteSpawnLateArrivalRunning"),
+            transition_id("CompleteSpawnLateArrivalStopped"),
+            transition_id("CompleteSpawnLateArrivalCompleted"),
+            transition_id("CompleteSpawnDestroyed"),
+            transition_id("CancelPendingSpawnPresentRunning"),
+            transition_id("CancelPendingSpawnPresentStopped"),
+            transition_id("CancelPendingSpawnPresentCompleted"),
+            transition_id("CancelPendingSpawnAbsentRunning"),
+            transition_id("CancelPendingSpawnAbsentStopped"),
+            transition_id("CancelPendingSpawnAbsentCompleted"),
+            transition_id("CancelPendingSpawnDestroyed"),
+        ]
+    };
+    vec![
+        CommandPlanSchema {
+            name: "AuthorizedMobSpawnStart".to_owned(),
+            authority_type: "PendingSpawnOperationOwnerAuthorized".to_owned(),
+            source_inputs: vec![input_variant_id("CancelPendingSpawn")],
+            source_signals: vec![
+                signal_variant_id("StageSpawn"),
+                signal_variant_id("CompleteSpawn"),
+            ],
+            transitions: full_spawn_transitions(),
+            effects: vec![
+                effect_variant_id("PendingSpawnOperationOwnerAuthorized"),
+                effect_variant_id("ExposePendingSpawn"),
+                effect_variant_id("EmitMemberLifecycleNotice"),
+            ],
+            effect_closures: vec![
+                EffectClosureSchema {
+                    effect: effect_variant_id("PendingSpawnOperationOwnerAuthorized"),
+                    authority_type: "PendingSpawnOperationOwnerAuthorized".to_owned(),
+                    closure_policy: "LocalPendingSpawnOwner".to_owned(),
+                    lifecycle: spawn_closure_lifecycle(),
+                },
+                EffectClosureSchema {
+                    effect: effect_variant_id("EmitMemberLifecycleNotice"),
+                    authority_type: "CompleteSpawn".to_owned(),
+                    closure_policy: "LocalSpawnCompletion".to_owned(),
+                    lifecycle: spawn_closure_lifecycle(),
+                },
+            ],
+        },
+        CommandPlanSchema {
+            name: "CanStartSpawn".to_owned(),
+            authority_type: "CanStartSpawn".to_owned(),
+            source_inputs: vec![],
+            source_signals: vec![signal_variant_id("StageSpawn")],
+            transitions: vec![transition_id("StageSpawnRunning")],
+            effects: vec![effect_variant_id("PendingSpawnOperationOwnerAuthorized")],
+            effect_closures: vec![EffectClosureSchema {
+                effect: effect_variant_id("PendingSpawnOperationOwnerAuthorized"),
+                authority_type: "CanStartSpawn".to_owned(),
+                closure_policy: "LocalPendingSpawnOwner".to_owned(),
+                lifecycle: spawn_closure_lifecycle(),
+            }],
+        },
+        CommandPlanSchema {
+            name: "SpawnStarted".to_owned(),
+            authority_type: "SpawnStarted".to_owned(),
+            source_inputs: vec![],
+            source_signals: vec![signal_variant_id("StageSpawn")],
+            transitions: vec![transition_id("StageSpawnRunning")],
+            effects: vec![effect_variant_id("ExposePendingSpawn")],
+            effect_closures: vec![EffectClosureSchema {
+                effect: effect_variant_id("ExposePendingSpawn"),
+                authority_type: "SpawnStarted".to_owned(),
+                closure_policy: "LocalSpawnStarted".to_owned(),
+                lifecycle: spawn_closure_lifecycle(),
+            }],
+        },
+        CommandPlanSchema {
+            name: "SpawnEffect".to_owned(),
+            authority_type: "SpawnEffect".to_owned(),
+            source_inputs: vec![input_variant_id("CancelPendingSpawn")],
+            source_signals: vec![signal_variant_id("CompleteSpawn")],
+            transitions: full_spawn_transitions(),
+            effects: vec![effect_variant_id("EmitMemberLifecycleNotice")],
+            effect_closures: vec![EffectClosureSchema {
+                effect: effect_variant_id("EmitMemberLifecycleNotice"),
+                authority_type: "SpawnEffect".to_owned(),
+                closure_policy: "LocalSpawnCompletion".to_owned(),
+                lifecycle: spawn_closure_lifecycle(),
+            }],
+        },
+        CommandPlanSchema {
+            name: "FailSpawn".to_owned(),
+            authority_type: "FailSpawn".to_owned(),
+            source_inputs: vec![input_variant_id("CancelPendingSpawn")],
+            source_signals: vec![],
+            transitions: vec![
+                transition_id("CancelPendingSpawnPresentRunning"),
+                transition_id("CancelPendingSpawnPresentStopped"),
+                transition_id("CancelPendingSpawnPresentCompleted"),
+                transition_id("CancelPendingSpawnAbsentRunning"),
+                transition_id("CancelPendingSpawnAbsentStopped"),
+                transition_id("CancelPendingSpawnAbsentCompleted"),
+                transition_id("CancelPendingSpawnDestroyed"),
+            ],
+            effects: vec![effect_variant_id("EmitMemberLifecycleNotice")],
+            effect_closures: vec![EffectClosureSchema {
+                effect: effect_variant_id("EmitMemberLifecycleNotice"),
+                authority_type: "FailSpawn".to_owned(),
+                closure_policy: "LocalSpawnFailure".to_owned(),
+                lifecycle: spawn_closure_lifecycle(),
+            }],
+        },
+    ]
+}
+
 pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
-    machine_schema_metadata(
+    let mut metadata = machine_schema_metadata(
         vec![
             // WAVE G2 machine folds (#14/#260/#261/#293/#314/#320): typed
             // verdict/fault/policy/capability/timeout classifiers owned by MobMachine.
@@ -2465,7 +2870,9 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
         ],
         input_variant_ids(MOB_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
-    .with_ci_step_limit(1)
+    .with_ci_step_limit(1);
+    metadata.command_plans = mob_spawn_command_plans();
+    metadata
 }
 
 runtime_internal_inputs!(

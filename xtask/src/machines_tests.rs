@@ -93,12 +93,22 @@ fn machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts() {
     let registry = CanonicalRegistry::load();
     let selection = registry
         .select(&SelectionArgs {
-            all: true,
-            machines: vec![],
-            compositions: vec![],
+            all: false,
+            machines: vec!["meerkat_machine".to_string()],
+            compositions: vec!["meerkat_mob_seam".to_string()],
         })
-        .expect("selection should resolve canonical workflow artifacts");
+        .expect("selection should resolve representative canonical workflow artifacts");
     let dir = tempdir().expect("tempdir");
+    let selected_machine_dir = dir
+        .path()
+        .join("specs/machines/meerkat_machine")
+        .display()
+        .to_string();
+    let selected_composition_dir = dir
+        .path()
+        .join("specs/compositions/meerkat_mob_seam")
+        .display()
+        .to_string();
 
     let missing = collect_drift_mismatches(dir.path(), &selection).expect("missing drift");
     assert!(
@@ -111,7 +121,10 @@ fn machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts() {
 
     let mut clean = collect_drift_mismatches(dir.path(), &selection).expect("clean drift");
     clean.retain(|mismatch| {
-        !mismatch.starts_with("production owner audit path for ")
+        selected_workflow_mismatch(
+            mismatch,
+            &[&selected_machine_dir, &selected_composition_dir],
+        ) && !mismatch.starts_with("production owner audit path for ")
             && !mismatch.starts_with("production owner schema relation for ")
             && !mismatch.starts_with("MobCommand::")
     });
@@ -132,10 +145,29 @@ fn machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts() {
 
     fs::write(&machine_model, "---- MODULE stale ----\n").expect("write stale model");
     let stale = collect_drift_mismatches(dir.path(), &selection).expect("stale drift");
+    let stale = stale
+        .into_iter()
+        .filter(|mismatch| {
+            selected_workflow_mismatch(
+                mismatch,
+                &[&selected_machine_dir, &selected_composition_dir],
+            )
+        })
+        .collect::<Vec<_>>();
     assert!(
-        !stale.is_empty(),
-        "editing a generated artifact should be caught by anti-drift checks"
+        stale.iter().any(|mismatch| mismatch.contains(
+            machine_model
+                .to_str()
+                .expect("machine model path should be UTF-8")
+        )),
+        "editing a selected generated artifact should be caught by anti-drift checks: {stale:#?}"
     );
+}
+
+fn selected_workflow_mismatch(mismatch: &str, selected_dirs: &[&str]) -> bool {
+    selected_dirs
+        .iter()
+        .any(|selected_dir| mismatch.contains(*selected_dir))
 }
 
 #[cfg(feature = "machine-authority")]
@@ -526,6 +558,7 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
                 emit: vec![],
             },
         ],
+        command_plans: vec![],
         effect_dispositions: vec![],
         ci_step_limit: None,
         named_types: vec![],

@@ -578,6 +578,8 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "}}");
     pushln!(&mut out);
 
+    render_command_capability_section(&mut out, schema);
+
     pushln!(&mut out, "#[allow(non_camel_case_types)]");
     pushln!(
         &mut out,
@@ -710,6 +712,454 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "    }}");
     pushln!(&mut out, "}}");
     out
+}
+
+#[cfg(not(test))]
+fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
+    if schema.command_plans.is_empty() {
+        return;
+    }
+
+    pushln!(out, "pub mod command_capabilities {{");
+    pushln!(out, "    mod private {{");
+    pushln!(out, "        #[derive(Debug, PartialEq, Eq)]");
+    pushln!(out, "        pub struct Sealed;");
+    pushln!(out, "    }}");
+    pushln!(out);
+
+    pushln!(out, "    #[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+    pushln!(out, "    pub enum CommandPlanKind {{");
+    for plan in &schema.command_plans {
+        pushln!(out, "        {},", rust_ident(&plan.name));
+    }
+    pushln!(out, "    }}");
+    pushln!(out);
+    pushln!(out, "    impl CommandPlanKind {{");
+    pushln!(out, "        #[must_use]");
+    pushln!(out, "        pub const fn as_str(self) -> &'static str {{");
+    pushln!(out, "            match self {{");
+    for plan in &schema.command_plans {
+        pushln!(
+            out,
+            "                Self::{} => {:?},",
+            rust_ident(&plan.name),
+            plan.name
+        );
+    }
+    pushln!(out, "            }}");
+    pushln!(out, "        }}");
+    pushln!(out, "    }}");
+    pushln!(out);
+
+    if schema
+        .command_plans
+        .iter()
+        .any(|plan| plan.authority_type == "AuthorizedRuntimeLoopBatch")
+    {
+        pushln!(out, "    #[derive(Debug, Clone, Copy, PartialEq, Eq)]");
+        pushln!(out, "    pub enum RuntimeLoopBatchSource {{");
+        pushln!(out, "        Queue,");
+        pushln!(out, "        Steer,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "    #[must_use = \"generated runtime-loop batch plan must be consumed by exact dequeue/stage realization\"]"
+        );
+        pushln!(out, "    #[derive(Debug, PartialEq, Eq)]");
+        pushln!(out, "    pub struct RuntimeLoopBatchPlan {{");
+        pushln!(out, "        batch_capability: AuthorizedRuntimeLoopBatch,");
+        pushln!(out, "        input_ids: Vec<String>,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "    #[must_use = \"generated stage-for-run plan must be consumed by exact stage realization\"]"
+        );
+        pushln!(out, "    #[derive(Debug, PartialEq, Eq)]");
+        pushln!(out, "    pub struct StageForRunPlan {{");
+        pushln!(out, "        stage_capability: AuthorizedStageForRun,");
+        pushln!(out, "        input_ids: Vec<String>,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl RuntimeLoopBatchPlan {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(out, "        pub fn input_ids(&self) -> &[String] {{");
+        pushln!(out, "            &self.input_ids");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub const fn source(&self) -> RuntimeLoopBatchSource {{"
+        );
+        pushln!(out, "            self.source");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "        pub fn into_parts(self) -> (AuthorizedRuntimeLoopBatch, Vec<String>, RuntimeLoopBatchSource) {{"
+        );
+        pushln!(
+            out,
+            "            (self.batch_capability, self.input_ids, self.source)"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl StageForRunPlan {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(out, "        pub fn input_ids(&self) -> &[String] {{");
+        pushln!(out, "            &self.input_ids");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub const fn source(&self) -> RuntimeLoopBatchSource {{"
+        );
+        pushln!(out, "            self.source");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(
+            out,
+            "        pub fn into_parts(self) -> (AuthorizedStageForRun, Vec<String>, RuntimeLoopBatchSource) {{"
+        );
+        pushln!(
+            out,
+            "            (self.stage_capability, self.input_ids, self.source)"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+    }
+
+    for plan in &schema.command_plans {
+        let type_name = rust_ident(&plan.authority_type);
+        let kind_name = rust_ident(&plan.name);
+        pushln!(
+            out,
+            "    #[must_use = {:?}]",
+            format!(
+                "generated command capability `{}` must be consumed by the shell action it authorizes",
+                plan.authority_type
+            )
+        );
+        pushln!(out, "    #[derive(Debug, PartialEq, Eq)]");
+        pushln!(out, "    pub struct {type_name} {{");
+        pushln!(out, "        _sealed: private::Sealed,");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl {type_name} {{");
+        pushln!(out, "        #[doc(hidden)]");
+        pushln!(out, "        #[allow(dead_code)]");
+        pushln!(
+            out,
+            "        pub(crate) fn mint_from_generated_command_plan() -> Self {{"
+        );
+        pushln!(out, "            Self {{ _sealed: private::Sealed }}");
+        pushln!(out, "        }}");
+        pushln!(out);
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub const fn plan(&self) -> CommandPlanKind {{"
+        );
+        pushln!(out, "            CommandPlanKind::{kind_name}");
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+    }
+
+    if schema
+        .command_plans
+        .iter()
+        .any(|plan| plan.authority_type == "AuthorizedRuntimeLoopBatch")
+    {
+        pushln!(out, "    impl AuthorizedRuntimeLoopBatch {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub fn authorize_runtime_loop_batch_from_state(state: &super::State) -> Option<RuntimeLoopBatchPlan> {{"
+        );
+        pushln!(
+            out,
+            "            runtime_loop_batch_from_state(state, super::InputLane::Steer, RuntimeLoopBatchSource::Steer)"
+        );
+        pushln!(
+            out,
+            "                .or_else(|| runtime_loop_batch_from_state(state, super::InputLane::Queue, RuntimeLoopBatchSource::Queue))"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    impl AuthorizedStageForRun {{");
+        pushln!(out, "        #[must_use]");
+        pushln!(
+            out,
+            "        pub fn authorize_stage_for_run_from_state(state: &super::State, input_ids: &[String], run_id: &super::RunId, source: RuntimeLoopBatchSource) -> Option<StageForRunPlan> {{"
+        );
+        pushln!(
+            out,
+            "            runtime_stage_for_run_from_state(state, input_ids, run_id, source)"
+        );
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn runtime_loop_batch_from_state(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        lane: super::InputLane,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    ) -> Option<RuntimeLoopBatchPlan> {{");
+        pushln!(
+            out,
+            "        let ordered = ordered_queued_lane_inputs(state, lane)?;"
+        );
+        pushln!(out, "        let first = ordered.first()?;");
+        pushln!(out, "        let selected = match source {{");
+        pushln!(
+            out,
+            "            RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),"
+        );
+        pushln!(
+            out,
+            "            RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),"
+        );
+        pushln!(out, "        }};");
+        pushln!(out, "        if selected.is_empty() {{");
+        pushln!(out, "            None");
+        pushln!(out, "        }} else {{");
+        pushln!(out, "            Some(RuntimeLoopBatchPlan {{");
+        pushln!(
+            out,
+            "                batch_capability: AuthorizedRuntimeLoopBatch::mint_from_generated_command_plan(),"
+        );
+        pushln!(out, "                input_ids: selected,");
+        pushln!(out, "                source,");
+        pushln!(out, "            }})");
+        pushln!(out, "        }}");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn runtime_stage_for_run_from_state(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        input_ids: &[String],");
+        pushln!(out, "        run_id: &super::RunId,");
+        pushln!(out, "        source: RuntimeLoopBatchSource,");
+        pushln!(out, "    ) -> Option<StageForRunPlan> {{");
+        pushln!(out, "        if input_ids.is_empty() {{");
+        pushln!(out, "            return None;");
+        pushln!(out, "        }}");
+        pushln!(
+            out,
+            "        if state.current_run_id.as_ref() != Some(run_id) {{"
+        );
+        pushln!(out, "            return None;");
+        pushln!(out, "        }}");
+        pushln!(out, "        let expected_lane = match source {{");
+        pushln!(
+            out,
+            "            RuntimeLoopBatchSource::Queue => super::InputLane::Queue,"
+        );
+        pushln!(
+            out,
+            "            RuntimeLoopBatchSource::Steer => super::InputLane::Steer,"
+        );
+        pushln!(out, "        }};");
+        pushln!(out, "        for input_id in input_ids {{");
+        pushln!(
+            out,
+            "            if state.input_phases.get(input_id) != Some(&super::InputPhase::Queued) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if state.input_lane.get(input_id) != Some(&expected_lane) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if !state.input_admission_seq.contains_key(input_id) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if !state.input_recovery_lanes.contains_key(input_id) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if state.input_run_associations.contains_key(input_id) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(out, "        }}");
+        pushln!(out, "        Some(StageForRunPlan {{");
+        pushln!(
+            out,
+            "            stage_capability: AuthorizedStageForRun::mint_from_generated_command_plan(),"
+        );
+        pushln!(out, "            input_ids: input_ids.to_vec(),");
+        pushln!(out, "            source,");
+        pushln!(out, "        }})");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn ordered_queued_lane_inputs(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        lane: super::InputLane,");
+        pushln!(out, "    ) -> Option<Vec<String>> {{");
+        pushln!(out, "        let mut ordered = Vec::new();");
+        pushln!(
+            out,
+            "        for (input_id, input_lane) in &state.input_lane {{"
+        );
+        pushln!(out, "            if *input_lane != lane {{");
+        pushln!(out, "                continue;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            if state.input_phases.get(input_id) != Some(&super::InputPhase::Queued) {{"
+        );
+        pushln!(out, "                return None;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            let sequence = *state.input_admission_seq.get(input_id)?;"
+        );
+        pushln!(
+            out,
+            "            ordered.push((sequence, input_id.clone()));"
+        );
+        pushln!(out, "        }}");
+        pushln!(
+            out,
+            "        ordered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));"
+        );
+        pushln!(
+            out,
+            "        Some(ordered.into_iter().map(|(_, input_id)| input_id).collect())"
+        );
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn select_steer_batch(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        ordered: &[String],");
+        pushln!(out, "        first: &String,");
+        pushln!(out, "    ) -> Vec<String> {{");
+        pushln!(
+            out,
+            "        let Some(target_boundary) = state.input_runtime_boundary.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(
+            out,
+            "        let Some(target_execution_kind) = state.input_runtime_execution_kind.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(out, "        let target_terminal_intent = state");
+        pushln!(
+            out,
+            "            .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "            .get(first)");
+        pushln!(out, "            .copied();");
+        pushln!(out, "        ordered");
+        pushln!(out, "            .iter()");
+        pushln!(out, "            .take_while(|input_id| {{");
+        pushln!(
+            out,
+            "                state.input_runtime_boundary.get(*input_id).copied() == Some(target_boundary)"
+        );
+        pushln!(
+            out,
+            "                    && state.input_runtime_execution_kind.get(*input_id).copied()"
+        );
+        pushln!(
+            out,
+            "                        == Some(target_execution_kind)"
+        );
+        pushln!(out, "                    && state");
+        pushln!(
+            out,
+            "                        .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "                        .get(*input_id)");
+        pushln!(out, "                        .copied()");
+        pushln!(out, "                        == target_terminal_intent");
+        pushln!(out, "            }})");
+        pushln!(out, "            .cloned()");
+        pushln!(out, "            .collect()");
+        pushln!(out, "    }}");
+        pushln!(out);
+        pushln!(out, "    fn select_queue_batch(");
+        pushln!(out, "        state: &super::State,");
+        pushln!(out, "        ordered: &[String],");
+        pushln!(out, "        first: &String,");
+        pushln!(out, "    ) -> Vec<String> {{");
+        pushln!(
+            out,
+            "        let Some(target_execution_kind) = state.input_runtime_execution_kind.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(out, "        let target_terminal_intent = state");
+        pushln!(
+            out,
+            "            .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "            .get(first)");
+        pushln!(out, "            .copied();");
+        pushln!(
+            out,
+            "        let Some(driver_is_prompt) = state.input_is_prompt.get(first).copied() else {{"
+        );
+        pushln!(out, "            return vec![first.clone()];");
+        pushln!(out, "        }};");
+        pushln!(out, "        let mut selected = Vec::new();");
+        pushln!(out, "        for input_id in ordered {{");
+        pushln!(
+            out,
+            "            if state.input_runtime_execution_kind.get(input_id).copied()"
+        );
+        pushln!(out, "                != Some(target_execution_kind)");
+        pushln!(out, "                || state");
+        pushln!(
+            out,
+            "                    .input_runtime_peer_response_terminal_apply_intent"
+        );
+        pushln!(out, "                    .get(input_id)");
+        pushln!(out, "                    .copied()");
+        pushln!(out, "                    != target_terminal_intent");
+        pushln!(out, "            {{");
+        pushln!(out, "                break;");
+        pushln!(out, "            }}");
+        pushln!(
+            out,
+            "            let Some(is_prompt) = state.input_is_prompt.get(input_id).copied() else {{"
+        );
+        pushln!(out, "                break;");
+        pushln!(out, "            }};");
+        pushln!(out, "            if !driver_is_prompt && is_prompt {{");
+        pushln!(out, "                break;");
+        pushln!(out, "            }}");
+        pushln!(out, "            selected.push(input_id.clone());");
+        pushln!(out, "            if is_prompt || driver_is_prompt {{");
+        pushln!(out, "                break;");
+        pushln!(out, "            }}");
+        pushln!(out, "        }}");
+        pushln!(out, "        selected");
+        pushln!(out, "    }}");
+        pushln!(out);
+    }
+    pushln!(out, "}}");
+    pushln!(out);
 }
 
 #[cfg(not(test))]
@@ -1875,6 +2325,7 @@ mod tests {
             },
             helpers: vec![],
             derived: vec![],
+            command_plans: vec![],
             invariants: vec![],
             transitions: vec![
                 TransitionSchema {

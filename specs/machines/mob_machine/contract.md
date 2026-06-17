@@ -508,6 +508,94 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdaptiveBodyEvidenceMissing`(adaptive_run_id: AdaptiveRunId, missing_digest: String)
 - `AdaptiveRunTerminalized`(adaptive_run_id: AdaptiveRunId, reason: AdaptiveStopReason)
 
+## Command Plans
+### `AuthorizedMobSpawnStart`
+- Authority: `PendingSpawnOperationOwnerAuthorized`
+- Source Inputs: `CancelPendingSpawn`
+- Source Signals: `StageSpawn`, `CompleteSpawn`
+- Transitions: `StageSpawnRunning`, `CompleteSpawnRunning`, `CompleteSpawnLateArrivalRunning`, `CompleteSpawnLateArrivalStopped`, `CompleteSpawnLateArrivalCompleted`, `CompleteSpawnDestroyed`, `CancelPendingSpawnPresentRunning`, `CancelPendingSpawnPresentStopped`, `CancelPendingSpawnPresentCompleted`, `CancelPendingSpawnAbsentRunning`, `CancelPendingSpawnAbsentStopped`, `CancelPendingSpawnAbsentCompleted`, `CancelPendingSpawnDestroyed`
+- Guard Expansion:
+  - `StageSpawnRunning`: `pending_identity_unused`
+  - `CompleteSpawnRunning`: `pending_spawns_present`, `pending_identity_present`
+  - `CompleteSpawnLateArrivalRunning`: `pending_identity_absent`
+  - `CompleteSpawnLateArrivalStopped`: `pending_identity_absent`
+  - `CompleteSpawnLateArrivalCompleted`: `pending_identity_absent`
+  - `CompleteSpawnDestroyed`: `<none>`
+  - `CancelPendingSpawnPresentRunning`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnPresentStopped`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnPresentCompleted`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnAbsentRunning`: `pending_identity_absent`
+  - `CancelPendingSpawnAbsentStopped`: `pending_identity_absent`
+  - `CancelPendingSpawnAbsentCompleted`: `pending_identity_absent`
+  - `CancelPendingSpawnDestroyed`: `<none>`
+- Command Effects: `PendingSpawnOperationOwnerAuthorized`, `ExposePendingSpawn`, `EmitMemberLifecycleNotice`
+- Effect Closure:
+  - `PendingSpawnOperationOwnerAuthorized` via `PendingSpawnOperationOwnerAuthorized` (LocalPendingSpawnOwner) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+  - `EmitMemberLifecycleNotice` via `CompleteSpawn` (LocalSpawnCompletion) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+- Emitted By Transitions: `EmitMemberLifecycleNotice`, `ExposePendingSpawn`, `PendingSpawnOperationOwnerAuthorized`
+
+### `CanStartSpawn`
+- Authority: `CanStartSpawn`
+- Source Signals: `StageSpawn`
+- Transitions: `StageSpawnRunning`
+- Guard Expansion:
+  - `StageSpawnRunning`: `pending_identity_unused`
+- Command Effects: `PendingSpawnOperationOwnerAuthorized`
+- Effect Closure:
+  - `PendingSpawnOperationOwnerAuthorized` via `CanStartSpawn` (LocalPendingSpawnOwner) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+- Emitted By Transitions: `ExposePendingSpawn`, `PendingSpawnOperationOwnerAuthorized`
+
+### `SpawnStarted`
+- Authority: `SpawnStarted`
+- Source Signals: `StageSpawn`
+- Transitions: `StageSpawnRunning`
+- Guard Expansion:
+  - `StageSpawnRunning`: `pending_identity_unused`
+- Command Effects: `ExposePendingSpawn`
+- Effect Closure:
+  - `ExposePendingSpawn` via `SpawnStarted` (LocalSpawnStarted) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+- Emitted By Transitions: `ExposePendingSpawn`, `PendingSpawnOperationOwnerAuthorized`
+
+### `SpawnEffect`
+- Authority: `SpawnEffect`
+- Source Inputs: `CancelPendingSpawn`
+- Source Signals: `CompleteSpawn`
+- Transitions: `StageSpawnRunning`, `CompleteSpawnRunning`, `CompleteSpawnLateArrivalRunning`, `CompleteSpawnLateArrivalStopped`, `CompleteSpawnLateArrivalCompleted`, `CompleteSpawnDestroyed`, `CancelPendingSpawnPresentRunning`, `CancelPendingSpawnPresentStopped`, `CancelPendingSpawnPresentCompleted`, `CancelPendingSpawnAbsentRunning`, `CancelPendingSpawnAbsentStopped`, `CancelPendingSpawnAbsentCompleted`, `CancelPendingSpawnDestroyed`
+- Guard Expansion:
+  - `StageSpawnRunning`: `pending_identity_unused`
+  - `CompleteSpawnRunning`: `pending_spawns_present`, `pending_identity_present`
+  - `CompleteSpawnLateArrivalRunning`: `pending_identity_absent`
+  - `CompleteSpawnLateArrivalStopped`: `pending_identity_absent`
+  - `CompleteSpawnLateArrivalCompleted`: `pending_identity_absent`
+  - `CompleteSpawnDestroyed`: `<none>`
+  - `CancelPendingSpawnPresentRunning`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnPresentStopped`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnPresentCompleted`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnAbsentRunning`: `pending_identity_absent`
+  - `CancelPendingSpawnAbsentStopped`: `pending_identity_absent`
+  - `CancelPendingSpawnAbsentCompleted`: `pending_identity_absent`
+  - `CancelPendingSpawnDestroyed`: `<none>`
+- Command Effects: `EmitMemberLifecycleNotice`
+- Effect Closure:
+  - `EmitMemberLifecycleNotice` via `SpawnEffect` (LocalSpawnCompletion) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+- Emitted By Transitions: `EmitMemberLifecycleNotice`, `ExposePendingSpawn`, `PendingSpawnOperationOwnerAuthorized`
+
+### `FailSpawn`
+- Authority: `FailSpawn`
+- Source Inputs: `CancelPendingSpawn`
+- Transitions: `CancelPendingSpawnPresentRunning`, `CancelPendingSpawnPresentStopped`, `CancelPendingSpawnPresentCompleted`, `CancelPendingSpawnAbsentRunning`, `CancelPendingSpawnAbsentStopped`, `CancelPendingSpawnAbsentCompleted`, `CancelPendingSpawnDestroyed`
+- Guard Expansion:
+  - `CancelPendingSpawnPresentRunning`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnPresentStopped`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnPresentCompleted`: `pending_spawns_present`, `pending_identity_present`
+  - `CancelPendingSpawnAbsentRunning`: `pending_identity_absent`
+  - `CancelPendingSpawnAbsentStopped`: `pending_identity_absent`
+  - `CancelPendingSpawnAbsentCompleted`: `pending_identity_absent`
+  - `CancelPendingSpawnDestroyed`: `<none>`
+- Command Effects: `EmitMemberLifecycleNotice`
+- Effect Closure:
+  - `EmitMemberLifecycleNotice` via `FailSpawn` (LocalSpawnFailure) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
+
 ## Invariants
 - `bindings_require_known_identity`
 - `identity_runtime_material_matches_runtime_binding`

@@ -2626,6 +2626,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             next_admission_seq: u64,
             next_priority_admission_seq: u64,
             input_admission_seq: Map<String, u64>,
+            // Runtime-loop batch grouping facts minted by admission authority.
+            // These survive as machine-owned witnesses so batch selection does
+            // not need to reconstruct semantic grouping from shell metadata.
+            input_runtime_boundary: Map<String, Enum<RecoveredRunApplyBoundary>>,
+            input_runtime_execution_kind: Map<String, Enum<RecoveredRuntimeExecutionKind>>,
+            input_runtime_peer_response_terminal_apply_intent: Map<String, Enum<RecoveredPeerResponseTerminalApplyIntent>>,
+            input_is_prompt: Map<String, bool>,
             // Unified work-lane membership for admitted inputs. Mutual
             // exclusion between Queue and Steer is structural: an input
             // maps to exactly one `InputLane` value by construction.
@@ -3064,6 +3071,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             next_admission_seq = 1000000000,
             next_priority_admission_seq = 999999999,
             input_admission_seq = EmptyMap,
+            input_runtime_boundary = EmptyMap,
+            input_runtime_execution_kind = EmptyMap,
+            input_runtime_peer_response_terminal_apply_intent = EmptyMap,
+            input_is_prompt = EmptyMap,
             input_lane = EmptyMap,
             input_recovery_lanes = EmptyMap,
             admission_authorized_lanes = EmptyMap,
@@ -3716,6 +3727,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 admission_sequence_recovery: Option<Enum<RecoveredInputNormalizationReasonKind>>,
                 recovery_lane: Option<Enum<InputLane>>,
                 lane: Option<Enum<InputLane>>,
+                runtime_boundary: Option<Enum<RecoveredRunApplyBoundary>>,
+                runtime_execution_kind: Option<Enum<RecoveredRuntimeExecutionKind>>,
+                runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
+                is_prompt: bool,
+            },
+            BindAdmissionRuntimeGrouping {
+                input_id: String,
+                runtime_boundary: Enum<RecoveredRunApplyBoundary>,
+                runtime_execution_kind: Enum<RecoveredRuntimeExecutionKind>,
+                runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
+                is_prompt: bool,
             },
             QueueAccepted { input_id: String },
             SteerAccepted { input_id: String },
@@ -10734,6 +10756,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -10780,6 +10806,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -10840,6 +10870,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, if input_kind == AdmissionInputKind::Continuation {
+                    RecoveredRuntimeExecutionKind::ResumePending
+                } else {
+                    RecoveredRuntimeExecutionKind::ContentTurn
+                });
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, input_kind == AdmissionInputKind::Prompt);
             }
             to Idle
             emit AdmissionResolved {
@@ -10906,6 +10944,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, if silent_intent_match {
+                    RecoveredRunApplyBoundary::RunStart
+                } else {
+                    RecoveredRunApplyBoundary::RunCheckpoint
+                });
+                self.input_runtime_execution_kind.insert(input_id, if input_kind == AdmissionInputKind::Continuation {
+                    RecoveredRuntimeExecutionKind::ResumePending
+                } else {
+                    RecoveredRuntimeExecutionKind::ContentTurn
+                });
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, input_kind == AdmissionInputKind::Prompt);
             }
             to Idle
             emit AdmissionResolved {
@@ -10973,6 +11023,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, input_kind == AdmissionInputKind::Prompt);
             }
             to Idle
             emit AdmissionResolved {
@@ -11032,6 +11086,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -11099,6 +11157,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.admission_authorized_existing_actions.remove(input_id);
                     self.admission_authorized_existing_targets.remove(input_id);
                 }
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunCheckpoint);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -11149,6 +11211,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -11196,6 +11262,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunCheckpoint);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ResumePending);
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -11259,6 +11329,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -11317,6 +11391,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::ConsumedOnAccept);
                 self.admission_authorized_existing_actions.remove(input_id);
                 self.admission_authorized_existing_targets.remove(input_id);
+                self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
+                self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.insert(input_id, false);
             }
             to Idle
             emit AdmissionResolved {
@@ -15232,6 +15310,44 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Absorbed substate transitions — Input Lifecycle
         // =====================================================================
 
+        // BindAdmissionRuntimeGrouping: persist the generated admission
+        // runtime-loop grouping witnesses before physical queue projection.
+        // Live admission records these from the just-emitted
+        // AdmissionResolved effect; recovery records them from durable
+        // admission witnesses. Runtime-loop batch selection reads these maps
+        // instead of shell metadata.
+        transition BindAdmissionRuntimeGrouping {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BindAdmissionRuntimeGrouping {
+                input_id,
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                is_prompt
+            }
+            guard "recovered_lifecycle_authorized" {
+                self.input_phases.contains_key(input_id)
+            }
+            guard "grouping_not_bound" {
+                !self.input_runtime_boundary.contains_key(input_id)
+                && !self.input_runtime_execution_kind.contains_key(input_id)
+            }
+            update {
+                self.input_runtime_boundary.insert(input_id, runtime_boundary);
+                self.input_runtime_execution_kind.insert(input_id, runtime_execution_kind);
+                if runtime_peer_response_terminal_apply_intent != None {
+                    self.input_runtime_peer_response_terminal_apply_intent.insert(
+                        input_id,
+                        runtime_peer_response_terminal_apply_intent.get("value")
+                    );
+                } else {
+                    self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                }
+                self.input_is_prompt.insert(input_id, is_prompt);
+            }
+            to Idle
+        }
+
         // RecoverAdmittedInput: accept or reject the recovered admission
         // witness before shell recovery may re-materialize admission metadata.
         // This is the coherence check for persisted input kind, lane, and
@@ -15291,7 +15407,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 admission_sequence,
                 admission_sequence_recovery,
                 recovery_lane,
-                lane
+                lane,
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                is_prompt
             }
             guard "recovered_lifecycle_has_admission_witness" {
                 phase == InputPhase::Consumed
@@ -15339,6 +15459,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "recovered_order_recovery_matches_missing_sequence" {
                 admission_sequence_recovery == None
                 || (phase == InputPhase::Queued && admission_sequence == None)
+            }
+            guard "recovered_grouping_matches_phase" {
+                (
+                    phase == InputPhase::Queued
+                    && runtime_boundary != None
+                    && runtime_execution_kind != None
+                )
+                || (
+                    phase != InputPhase::Queued
+                    && runtime_boundary == None
+                    && runtime_execution_kind == None
+                    && runtime_peer_response_terminal_apply_intent == None
+                    && is_prompt == false
+                )
             }
             guard "recovered_terminal_payload_matches_phase" {
                 (
@@ -15455,6 +15589,25 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.input_recovery_lanes.insert(input_id, recovery_lane.get("value"));
                 } else {
                     self.input_recovery_lanes.remove(input_id);
+                }
+
+                if runtime_boundary != None {
+                    self.input_runtime_boundary.insert(input_id, runtime_boundary.get("value"));
+                    self.input_runtime_execution_kind.insert(input_id, runtime_execution_kind.get("value"));
+                    if runtime_peer_response_terminal_apply_intent != None {
+                        self.input_runtime_peer_response_terminal_apply_intent.insert(
+                            input_id,
+                            runtime_peer_response_terminal_apply_intent.get("value")
+                        );
+                    } else {
+                        self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                    }
+                    self.input_is_prompt.insert(input_id, is_prompt);
+                } else {
+                    self.input_runtime_boundary.remove(input_id);
+                    self.input_runtime_execution_kind.remove(input_id);
+                    self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                    self.input_is_prompt.remove(input_id);
                 }
             }
             to Idle
@@ -20565,6 +20718,276 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnSurfaceResultResolved { outcome: outcome, cause_class: cause_class, surface_class: SurfaceResultClass::HardFailure }
         }
     }
+        }
+
+        pub mod command_capabilities {
+            use super::{InputLane, InputPhase, MeerkatMachineState, RunId};
+
+            mod private {
+                #[derive(Debug, PartialEq, Eq)]
+                pub struct Sealed;
+            }
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub enum RuntimeLoopBatchSource {
+                Queue,
+                Steer,
+            }
+
+            #[must_use = "generated runtime-loop batch plan must be consumed by exact dequeue/stage realization"]
+            #[derive(Debug, PartialEq, Eq)]
+            pub struct RuntimeLoopBatchPlan {
+                batch_capability: AuthorizedRuntimeLoopBatch,
+                input_ids: Vec<String>,
+                source: RuntimeLoopBatchSource,
+            }
+
+            impl RuntimeLoopBatchPlan {
+                pub fn into_parts(
+                    self,
+                ) -> (
+                    AuthorizedRuntimeLoopBatch,
+                    Vec<String>,
+                    RuntimeLoopBatchSource,
+                ) {
+                    (self.batch_capability, self.input_ids, self.source)
+                }
+            }
+
+            #[must_use = "generated stage-for-run plan must be consumed by exact stage realization"]
+            #[derive(Debug, PartialEq, Eq)]
+            pub struct StageForRunPlan {
+                stage_capability: AuthorizedStageForRun,
+                input_ids: Vec<String>,
+                source: RuntimeLoopBatchSource,
+            }
+
+            impl StageForRunPlan {
+                pub fn into_parts(self) -> (AuthorizedStageForRun, Vec<String>, RuntimeLoopBatchSource) {
+                    (self.stage_capability, self.input_ids, self.source)
+                }
+            }
+
+            #[must_use = "generated command capability `AuthorizedRuntimeLoopBatch` must be consumed by the shell action it authorizes"]
+            #[derive(Debug, PartialEq, Eq)]
+            pub struct AuthorizedRuntimeLoopBatch {
+                _sealed: private::Sealed,
+            }
+
+            impl AuthorizedRuntimeLoopBatch {
+                #[doc(hidden)]
+                #[allow(dead_code)]
+                pub(crate) fn mint_from_generated_command_plan() -> Self {
+                    Self {
+                        _sealed: private::Sealed,
+                    }
+                }
+
+                #[must_use]
+                pub fn authorize_runtime_loop_batch_from_state(
+                    state: &MeerkatMachineState,
+                ) -> Option<RuntimeLoopBatchPlan> {
+                    runtime_loop_batch_from_state(
+                        state,
+                        InputLane::Steer,
+                        RuntimeLoopBatchSource::Steer,
+                    )
+                    .or_else(|| {
+                        runtime_loop_batch_from_state(
+                            state,
+                            InputLane::Queue,
+                            RuntimeLoopBatchSource::Queue,
+                        )
+                    })
+                }
+            }
+
+            #[must_use = "generated command capability `AuthorizedStageForRun` must be consumed by the shell action it authorizes"]
+            #[derive(Debug, PartialEq, Eq)]
+            pub struct AuthorizedStageForRun {
+                _sealed: private::Sealed,
+            }
+
+            impl AuthorizedStageForRun {
+                #[doc(hidden)]
+                #[allow(dead_code)]
+                pub(crate) fn mint_from_generated_command_plan() -> Self {
+                    Self {
+                        _sealed: private::Sealed,
+                    }
+                }
+
+                #[must_use]
+                pub fn authorize_stage_for_run_from_state(
+                    state: &MeerkatMachineState,
+                    input_ids: &[String],
+                    run_id: &RunId,
+                    source: RuntimeLoopBatchSource,
+                ) -> Option<StageForRunPlan> {
+                    runtime_stage_for_run_from_state(state, input_ids, run_id, source)
+                }
+            }
+
+            fn runtime_loop_batch_from_state(
+                state: &MeerkatMachineState,
+                lane: InputLane,
+                source: RuntimeLoopBatchSource,
+            ) -> Option<RuntimeLoopBatchPlan> {
+                let ordered = ordered_queued_lane_inputs(state, lane)?;
+                let first = ordered.first()?;
+                let selected = match source {
+                    RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),
+                    RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),
+                };
+                if selected.is_empty() {
+                    None
+                } else {
+                    Some(RuntimeLoopBatchPlan {
+                        batch_capability: AuthorizedRuntimeLoopBatch::mint_from_generated_command_plan(),
+                        input_ids: selected,
+                        source,
+                    })
+                }
+            }
+
+            fn runtime_stage_for_run_from_state(
+                state: &MeerkatMachineState,
+                input_ids: &[String],
+                run_id: &RunId,
+                source: RuntimeLoopBatchSource,
+            ) -> Option<StageForRunPlan> {
+                if input_ids.is_empty() {
+                    return None;
+                }
+                if state.current_run_id.as_ref() != Some(run_id) {
+                    return None;
+                }
+                let expected_lane = match source {
+                    RuntimeLoopBatchSource::Queue => InputLane::Queue,
+                    RuntimeLoopBatchSource::Steer => InputLane::Steer,
+                };
+                for input_id in input_ids {
+                    if state.input_phases.get(input_id) != Some(&InputPhase::Queued) {
+                        return None;
+                    }
+                    if state.input_lane.get(input_id) != Some(&expected_lane) {
+                        return None;
+                    }
+                    if !state.input_admission_seq.contains_key(input_id) {
+                        return None;
+                    }
+                    if !state.input_recovery_lanes.contains_key(input_id) {
+                        return None;
+                    }
+                    if state.input_run_associations.contains_key(input_id) {
+                        return None;
+                    }
+                }
+                Some(StageForRunPlan {
+                    stage_capability: AuthorizedStageForRun::mint_from_generated_command_plan(),
+                    input_ids: input_ids.to_vec(),
+                    source,
+                })
+            }
+
+            fn ordered_queued_lane_inputs(
+                state: &MeerkatMachineState,
+                lane: InputLane,
+            ) -> Option<Vec<String>> {
+                let mut ordered = Vec::new();
+                for (input_id, input_lane) in &state.input_lane {
+                    if *input_lane != lane {
+                        continue;
+                    }
+                    if state.input_phases.get(input_id) != Some(&InputPhase::Queued) {
+                        return None;
+                    }
+                    let sequence = *state.input_admission_seq.get(input_id)?;
+                    ordered.push((sequence, input_id.clone()));
+                }
+                ordered.sort_by(|left, right| {
+                    left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
+                });
+                Some(ordered.into_iter().map(|(_, input_id)| input_id).collect())
+            }
+
+            fn select_steer_batch(
+                state: &MeerkatMachineState,
+                ordered: &[String],
+                first: &String,
+            ) -> Vec<String> {
+                let Some(target_boundary) = state.input_runtime_boundary.get(first).copied()
+                else {
+                    return vec![first.clone()];
+                };
+                let Some(target_execution_kind) =
+                    state.input_runtime_execution_kind.get(first).copied()
+                else {
+                    return vec![first.clone()];
+                };
+                let target_terminal_intent = state
+                    .input_runtime_peer_response_terminal_apply_intent
+                    .get(first)
+                    .copied();
+                ordered
+                    .iter()
+                    .take_while(|input_id| {
+                        state.input_runtime_boundary.get(*input_id).copied()
+                            == Some(target_boundary)
+                            && state.input_runtime_execution_kind.get(*input_id).copied()
+                                == Some(target_execution_kind)
+                            && state
+                                .input_runtime_peer_response_terminal_apply_intent
+                                .get(*input_id)
+                                .copied()
+                                == target_terminal_intent
+                    })
+                    .cloned()
+                    .collect()
+            }
+
+            fn select_queue_batch(
+                state: &MeerkatMachineState,
+                ordered: &[String],
+                first: &String,
+            ) -> Vec<String> {
+                let Some(target_execution_kind) =
+                    state.input_runtime_execution_kind.get(first).copied()
+                else {
+                    return vec![first.clone()];
+                };
+                let target_terminal_intent = state
+                    .input_runtime_peer_response_terminal_apply_intent
+                    .get(first)
+                    .copied();
+                let Some(driver_is_prompt) = state.input_is_prompt.get(first).copied() else {
+                    return vec![first.clone()];
+                };
+                let mut selected = Vec::new();
+                for input_id in ordered {
+                    if state.input_runtime_execution_kind.get(input_id).copied()
+                        != Some(target_execution_kind)
+                        || state
+                            .input_runtime_peer_response_terminal_apply_intent
+                            .get(input_id)
+                            .copied()
+                            != target_terminal_intent
+                    {
+                        break;
+                    }
+                    let Some(is_prompt) = state.input_is_prompt.get(input_id).copied() else {
+                        break;
+                    };
+                    if !driver_is_prompt && is_prompt {
+                        break;
+                    }
+                    selected.push(input_id.clone());
+                    if is_prompt || driver_is_prompt {
+                        break;
+                    }
+                }
+                selected
+            }
         }
 
         impl MeerkatMachineAuthority {

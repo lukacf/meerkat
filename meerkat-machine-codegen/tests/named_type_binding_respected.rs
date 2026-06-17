@@ -76,6 +76,7 @@ fn schema_with_single_named_type(field_name: &str, named: &str) -> MachineSchema
         },
         helpers: vec![],
         derived: vec![],
+        command_plans: vec![],
         invariants: vec![],
         transitions: vec![],
         effect_dispositions: vec![],

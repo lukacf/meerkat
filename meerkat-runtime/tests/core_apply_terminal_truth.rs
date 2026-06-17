@@ -95,6 +95,8 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
     let runtime_driver =
         fs::read_to_string(root.join("meerkat-runtime/src/meerkat_machine/driver.rs"))
             .map_err(|err| format!("read runtime driver source: {err}"))?;
+    let completion_source = fs::read_to_string(root.join("meerkat-runtime/src/completion.rs"))
+        .map_err(|err| format!("read completion source: {err}"))?;
     let persistent_driver =
         fs::read_to_string(root.join("meerkat-runtime/src/driver/persistent.rs"))
             .map_err(|err| format!("read persistent driver source: {err}"))?;
@@ -106,6 +108,9 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
     let meerkat_machine_model =
         fs::read_to_string(root.join("specs/machines/meerkat_machine/model.tla"))
             .map_err(|err| format!("read MeerkatMachine TLA source: {err}"))?;
+    let meerkat_machine_contract =
+        fs::read_to_string(root.join("specs/machines/meerkat_machine/contract.md"))
+            .map_err(|err| format!("read MeerkatMachine contract source: {err}"))?;
     let accept_source = fs::read_to_string(root.join("meerkat-runtime/src/accept.rs"))
         .map_err(|err| format!("read accept source: {err}"))?;
 
@@ -148,6 +153,36 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
         !completion_authority.contains("Clone") && !completion_authority_derive.contains("Clone"),
         "runtime completion authority must not be Clone; waiter fanout consumes one token and clones only derived cleanup observations"
     );
+    let completion_attempt = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) struct RuntimeCompletionResultAttempt",
+    )?;
+    let completion_realized = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) struct RuntimeCompletionResultRealized",
+    )?;
+    assert!(
+        runtime_driver.contains(
+            "#[must_use = \"attempted runtime completion closure must be realized, failed, or abandoned\"]"
+        ) && runtime_driver.contains(
+            "#[must_use = \"realized runtime completion closure must mint a completion cleanup observation\"]"
+        ) && completion_attempt.contains("authority: RuntimeCompletionResultAuthority")
+            && completion_realized.contains("authority: RuntimeCompletionResultAuthority")
+            && completion_authority
+                .contains("generated_plan: generated_kernel_command_capabilities::CommandPlanKind")
+            && !runtime_driver.contains(
+                "generated_kernel_command_capabilities::RuntimeCompletionResultAuthority::mint_from_generated_command_plan()"
+            )
+            && runtime_driver.contains(
+                "CommandPlanKind::AuthorizedRuntimeCompletionResultClosure"
+            )
+            && completion_source.contains("authority.begin_surface_resolution()")
+            && completion_source.contains("Self::cleanup_from_realized_attempt(attempt)")
+            && completion_source.contains("attempt.fail()")
+            && completion_source.contains("attempt.abandon()")
+            && !completion_source.contains("CompletionCleanupObservation::from_authority"),
+        "completion waiter delivery must consume generated authority through Attempted -> Realized/Failed/Abandoned closure phases"
+    );
     assert!(
         !waiter_resolver.contains("authority.clone()"),
         "runtime completion waiter fanout must not clone the generated authority token"
@@ -159,11 +194,45 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
             && !runtime_loop.contains("filter_map(|id| d.dequeue_by_id(id))"),
         "runtime loop batch execution must use authorized batch tokens and fail closed on projection mismatch"
     );
+    let exact_dequeue =
+        extract_braced_item(&ephemeral_driver, "pub(crate) fn dequeue_batch_exact")?;
+    assert!(
+        exact_dequeue.contains("match batch.source()")
+            && exact_dequeue.contains("RuntimeLoopBatchSource::Queue")
+            && exact_dequeue.contains("RuntimeLoopBatchSource::Steer")
+            && exact_dequeue.contains("dequeue_exact_prefix(batch.input_ids())")
+            && !exact_dequeue.contains("dequeue_by_id"),
+        "runtime batch dequeue must enforce exact source/prefix conformance instead of draining by id from either queue"
+    );
+    assert!(
+        runtime_driver.contains("input_runtime_boundary")
+            && runtime_driver.contains("input_runtime_execution_kind")
+            && runtime_driver.contains("input_peer_response_terminal_apply_intent")
+            && runtime_driver.contains("input_is_prompt_for_batch")
+            && !runtime_driver.contains("fn machine_validate_stage_drain_snapshot")
+            && !runtime_driver.contains("machine_validate_stage_drain_snapshot("),
+        "runtime batch grouping must use machine-owned grouping witnesses without retaining a shell stage-drain validator"
+    );
+    let batch_authorizer = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) fn machine_authorize_runtime_loop_batch",
+    )?;
+    assert!(
+        !runtime_driver.contains("pub(crate) fn machine_select_runtime_loop_batch")
+            && batch_authorizer
+                .contains("AuthorizedRuntimeLoopBatch::authorize_runtime_loop_batch_from_state")
+            && batch_authorizer.contains("authority.state()")
+            && !batch_authorizer.contains("runtime_semantics(")
+            && !batch_authorizer.contains("driver_ingress()"),
+        "runtime-loop batch authorization must use the generated command-plan selector over machine state, not a handwritten shell selector"
+    );
     assert!(
         !ephemeral_driver.contains("pub fn dequeue_by_id")
+            && !ephemeral_driver.contains("pub fn dequeue_next")
             && !ephemeral_driver.contains("pub fn stage_input")
             && !ephemeral_driver.contains("pub fn stage_batch")
             && !persistent_driver.contains("pub fn dequeue_by_id")
+            && !persistent_driver.contains("pub fn dequeue_next")
             && !persistent_driver.contains("pub fn stage_input")
             && !persistent_driver.contains("pub fn stage_batch")
             && !ephemeral_driver.contains("pub fn contract_stage_current_run_input"),
@@ -195,12 +264,102 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
             && !stage_authority_derive.contains("Clone"),
         "stage-for-run authority must be must-use and non-Clone"
     );
-    let shared_stage_realizer =
-        extract_braced_item(&runtime_driver, "pub(crate) fn machine_realize_stage_batch")?;
+    let prepare_batch_start = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) async fn prepare_runtime_loop_batch_start",
+    )?;
+    let live_boundary_stage = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) async fn machine_realize_live_boundary_context_injected",
+    )?;
+    assert!(
+        !runtime_batch_authority
+            .contains("generated_stage: generated_command_capabilities::AuthorizedStageForRun")
+            && !runtime_driver.contains("pub(crate) fn into_stage_for_run")
+            && prepare_batch_start.contains("machine_authorize_stage_for_run(")
+            && prepare_batch_start.contains("machine_begin_run(&mut driver")
+            && live_boundary_stage.contains("machine_authorize_stage_for_run(")
+            && runtime_driver.contains("AuthorizedStageForRun::authorize_stage_for_run_from_state"),
+        "stage-for-run authority must be carried from generated state plans instead of minted by handwritten runtime bridge code"
+    );
+    let run_commit_authority = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) struct AuthorizedRuntimeLoopRunCommit",
+    )?;
+    let run_commit_authority_derive = derive_attribute_before(
+        &runtime_driver,
+        "pub(crate) struct AuthorizedRuntimeLoopRunCommit",
+    )?;
+    let runtime_loop_commit = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) async fn commit_runtime_loop_run",
+    )?;
+    assert!(
+        runtime_driver.contains(
+            "#[must_use = \"runtime-loop run commit authority must be consumed by commit realization\"]"
+        ) && !run_commit_authority.contains("Clone")
+            && !run_commit_authority_derive.contains("Clone")
+            && run_commit_authority.contains("run_id: RunId")
+            && run_commit_authority.contains("consumed_input_ids: Vec<InputId>")
+            && run_commit_authority.contains("commit_input_id: InputId")
+            && run_commit_authority.contains("receipt: meerkat_core::lifecycle::RunBoundaryReceipt")
+            && run_commit_authority
+                .contains("generated_plan: generated_kernel_command_capabilities::CommandPlanKind")
+            && run_commit_authority.contains("owner_session_id:")
+            && run_commit_authority.contains("owner_agent_runtime_id:")
+            && run_commit_authority.contains("commit_outcome: AuthorizedRuntimeLoopRunCommitOutcome")
+            && run_commit_authority.contains(
+                "effect_closure_obligations: Vec<RuntimeLoopRunCommitEffectObligation>"
+            )
+            && run_commit_authority.contains("return_projection: RuntimeLifecycleProjection")
+            && runtime_driver.contains("struct RuntimeLoopRunCommitEffectObligation")
+            && runtime_driver.contains("enum RuntimeLoopRunCommitEffect")
+            && runtime_driver.contains("\"RuntimeLoopRunCommitEffect\"")
+            && runtime_loop_commit.contains("effect_closure_obligations()")
+            && runtime_loop_commit.contains("RuntimeLoopRunCommitEffect::Completed")
+            && runtime_driver.contains("fn preview_authorized_runtime_loop_run_commit(")
+            && runtime_driver.contains("MeerkatMachineInput::RunCompleted")
+            && runtime_driver.contains("MeerkatMachineInput::Commit")
+            && runtime_loop_commit.contains("AuthorizedRuntimeLoopRunCommit::authorize(")
+            && runtime_loop_commit.contains("CommandPlanKind::AuthorizedRuntimeLoopRunCommit")
+            && runtime_loop_commit.contains("commit_authority.commit_outcome().outcome()")
+            && runtime_loop_commit.contains("&return_projection != commit_authority.return_projection()")
+            && !runtime_loop_commit.contains("commit_authority.into_parts()"),
+        "runtime-loop run commit must consume a generated-shaped authority binding run id, terminal inputs, owner, outcome, receipt, and return projection"
+    );
+    let shared_stage_realizer = extract_braced_item(
+        &runtime_driver,
+        "pub(crate) fn machine_realize_authorized_stage_batch",
+    )?;
     assert!(
         shared_stage_realizer.contains("authority: AuthorizedStageForRun")
-            && shared_stage_realizer.contains("authority.into_parts()"),
+            && shared_stage_realizer.contains("machine_realize_authorized_stage_batch(authority)")
+            && !shared_stage_realizer.contains("machine_realize_stage_batch(&input_ids"),
         "shared stage realization must consume AuthorizedStageForRun instead of raw ids"
+    );
+    let concrete_authorized_stage = extract_braced_item(
+        &ephemeral_driver,
+        "pub(crate) fn machine_realize_authorized_stage_batch",
+    )?;
+    assert!(
+        concrete_authorized_stage
+            .contains("authority: crate::meerkat_machine::driver::AuthorizedStageForRun")
+            && concrete_authorized_stage.contains("authority.into_parts()")
+            && concrete_authorized_stage
+                .contains("self.machine_realize_stage_batch(&input_ids, &run_id)"),
+        "concrete staging must be reachable through an explicit AuthorizedStageForRun wrapper"
+    );
+    let live_boundary_realizer = extract_braced_item(
+        &ephemeral_driver,
+        "pub(crate) fn machine_realize_live_boundary_context_injected",
+    )?;
+    assert!(
+        live_boundary_realizer
+            .contains("stage_authority: crate::meerkat_machine::driver::AuthorizedStageForRun")
+            && live_boundary_realizer
+                .contains("self.machine_realize_authorized_stage_batch(stage_authority)")
+            && !live_boundary_realizer.contains("self.machine_realize_stage_batch(input_ids"),
+        "live-boundary staging must consume explicit stage authority instead of raw ids"
     );
     let stage_for_run_transition =
         extract_braced_item(&meerkat_machine_schema, "transition StageForRun")?;
@@ -228,10 +387,41 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
             && stage_for_run_model.contains("current_run_id[\"value\"] ELSE None) = run_id"),
         "generated StageForRun TLA must bind staging to the active machine-owned current_run_id"
     );
-    let stage_realizer = extract_braced_item(
-        &ephemeral_driver,
-        "pub(crate) fn machine_realize_stage_batch",
-    )?;
+    let command_plan_start = meerkat_machine_contract
+        .find("## Command Plans")
+        .ok_or_else(|| "generated contract missing Command Plans section".to_string())?;
+    let command_plan_end = meerkat_machine_contract[command_plan_start..]
+        .find("## Invariants")
+        .map(|offset| command_plan_start + offset)
+        .ok_or_else(|| {
+            "generated contract missing Invariants section after Command Plans".to_string()
+        })?;
+    let command_plans = &meerkat_machine_contract[command_plan_start..command_plan_end];
+    assert!(
+        command_plans.contains("### `AuthorizedAcceptedInputMaterialization`")
+            && command_plans.contains("### `AuthorizeRuntimeLoopBatch`")
+            && command_plans.contains("### `AuthorizedStageForRun`")
+            && command_plans.contains("### `AuthorizedRuntimeLoopRunCommit`")
+            && command_plans.contains("### `AuthorizedRuntimeCompletionResultClosure`")
+            && command_plans.contains("- Authority: `AuthorizedRuntimeLoopBatch`")
+            && command_plans.contains("- Authority: `AuthorizedRuntimeLoopRunCommit`")
+            && command_plans.contains("- Authority: `RuntimeCompletionResultAuthority`")
+            && command_plans.contains(
+                "- Command Effects: `TurnRunCompleted`, `TurnRunFailed`, `TurnRunCancelled`"
+            )
+            && command_plans.contains(
+                "`TurnRunCompleted` via `AuthorizedRuntimeLoopRunCommit` (RuntimeLoopRunCommitEffect) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`"
+            )
+            && command_plans.contains(
+                "- Command Effects: `RuntimeCompletionResultResolved`"
+            )
+            && command_plans.contains(
+                "`RuntimeCompletionResultResolved` via `RuntimeCompletionResultAuthority` (LocalSurfaceResultAlignment) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`"
+            )
+            && command_plans.contains("`StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `input_not_run_associated`, `current_run_matches`"),
+        "generated contract must expose queue-to-run, run-commit, and completion-result closure command plans with expanded guards and effects"
+    );
+    let stage_realizer = extract_braced_item(&ephemeral_driver, "fn machine_realize_stage_batch")?;
     assert!(
         !stage_realizer.contains("IncrementAttemptCount"),
         "runtime staging must not split StageForRun from the attempt-count update"

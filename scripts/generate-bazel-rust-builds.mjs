@@ -790,6 +790,12 @@ function compileData(target, packageRoot, includeTests) {
         )
       ) {
         labels.add("//:meerkat_platform_skill_files");
+      } else if (
+        target.name === "runtime_schema_parity" &&
+        absolute.startsWith(`${root}/meerkat-machine-kernels/src/generated/`)
+      ) {
+        const rel = relative(resolve(root, "meerkat-machine-kernels"), absolute).replaceAll("\\", "/");
+        labels.add(`//meerkat-machine-kernels:${rel}`);
       }
     }
     if (source.includes("../../test-fixtures/live_smoke/support.rs")) {
@@ -1765,6 +1771,18 @@ for (const pkg of localPackages.values()) {
       `    visibility = ["//visibility:public"],`,
       `)`,
       "",
+      ...(key === "meerkat-machine-kernels"
+        ? [
+            `exports_files(`,
+            `    [`,
+            `        "src/generated/meerkat.rs",`,
+            `        "src/generated/mob.rs",`,
+            `    ],`,
+            `    visibility = ["//meerkat-machine-codegen:__pkg__"],`,
+            `)`,
+            "",
+          ]
+        : []),
       ...rules,
       "",
     ].join("\n\n"),

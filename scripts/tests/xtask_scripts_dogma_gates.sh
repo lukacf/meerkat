@@ -118,13 +118,13 @@ done
 # ── #296: governance/spec changes route formal/governance checks ─────────────
 echo "#296 agent gates route governance/spec changes:"
 if grep -Fq 'is_governance_path' scripts/cargo-agent-gate \
-  && grep -Fq 'machine-check-drift seam-inventory rmat-audit' scripts/cargo-agent-gate; then
+  && grep -Fq 'machine-check-drift runtime-authority-bypass seam-inventory rmat-audit' scripts/cargo-agent-gate; then
   ok "cargo-agent-gate has governance allowlist + formal gate routing"
 else
   bad "cargo-agent-gate missing governance allowlist or formal gate routing"
 fi
 if grep -Fq 'is_governance_path' scripts/buildbuddy-agent-gate \
-  && grep -Fq 'machine-check-drift seam-inventory rmat-audit' scripts/buildbuddy-agent-gate; then
+  && grep -Fq 'machine-check-drift runtime-authority-bypass seam-inventory rmat-audit' scripts/buildbuddy-agent-gate; then
   ok "buildbuddy-agent-gate has governance allowlist + formal gate routing"
 else
   bad "buildbuddy-agent-gate missing governance allowlist or formal gate routing"
@@ -132,7 +132,7 @@ fi
 # Behavioral: a spec-only change is no longer reported as "no changes" and is
 # routed to the governance gate (dry-run avoids invoking cargo/make work).
 gate_out=$(scripts/cargo-agent-gate --dry-run -- specs/machines/example.tla 2>&1 || true)
-if printf '%s' "$gate_out" | grep -Fq 'machine-check-drift seam-inventory rmat-audit' \
+if printf '%s' "$gate_out" | grep -Fq 'machine-check-drift runtime-authority-bypass seam-inventory rmat-audit' \
   && ! printf '%s' "$gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
   ok "cargo-agent-gate dry-run routes specs/machines change to governance gate"
 else

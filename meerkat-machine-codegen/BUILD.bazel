@@ -431,6 +431,9 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/runtime_schema_parity.rs",
@@ -447,6 +450,8 @@ rust_test(
     size = "small",
     data = [
         ":package_runfiles",
+        "//meerkat-machine-kernels:package_runfiles",
+        "//meerkat:package_runfiles",
         "//:workspace_runfiles",
     ],
     env = {

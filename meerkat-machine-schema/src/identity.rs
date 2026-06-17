@@ -156,10 +156,24 @@ define_identity!(
     /// Signal-variant name.
     SignalVariantId
 );
+
+impl SignalVariantId {
+    /// Construct from a crate-owned catalog literal.
+    pub(crate) fn from_trusted_catalog_literal(value: &'static str) -> Self {
+        Self(value.to_owned())
+    }
+}
 define_identity!(
     /// Effect-variant name.
     EffectVariantId
 );
+
+impl EffectVariantId {
+    /// Construct from a crate-owned catalog literal.
+    pub(crate) fn from_trusted_catalog_literal(value: &'static str) -> Self {
+        Self(value.to_owned())
+    }
+}
 define_identity!(
     /// Field name within a kernel state, input, signal, or effect.
     FieldId
@@ -168,6 +182,19 @@ define_identity!(
     /// Transition name.
     TransitionId
 );
+
+impl TransitionId {
+    /// Construct from a crate-owned catalog literal.
+    pub(crate) fn from_trusted_catalog_literal(value: &'static str) -> Self {
+        Self(value.to_owned())
+    }
+
+    /// Construct from a crate-owned catalog string assembled from trusted
+    /// literals.
+    pub(crate) fn from_trusted_catalog_string(value: String) -> Self {
+        Self(value)
+    }
+}
 define_identity!(
     /// Route name within a composition.
     RouteId

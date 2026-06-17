@@ -34,10 +34,10 @@ pub use composition::{
     RouteTargetSelector, RouteVariantId, SchedulerRule, TeardownObligationClass, WatchedEffect,
 };
 pub use machine::{
-    EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
-    FieldType, Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema,
-    MachineSchemaError, Quantifier, RustBinding, StateSchema, TransitionSchema, TriggerKind,
-    TriggerMatch, TypeRef, Update, VariantSchema,
+    CommandPlanSchema, EffectClosureSchema, EffectDisposition, EffectDispositionRule, EffectEmit,
+    EnumSchema, Expr, FieldInit, FieldSchema, FieldType, Guard, HelperSchema, InitSchema,
+    InputMatch, InvariantSchema, MachineSchema, MachineSchemaError, Quantifier, RustBinding,
+    StateSchema, TransitionSchema, TriggerKind, TriggerMatch, TypeRef, Update, VariantSchema,
 };
 pub use seam::SeamClassification;
 

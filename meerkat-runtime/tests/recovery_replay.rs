@@ -156,11 +156,17 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
     }
 
     let replayed = vec![
-        driver.dequeue_next().expect("first replay input").0,
-        driver.dequeue_next().expect("second replay input").0,
+        driver
+            .contract_dequeue_next_for_recovery_tests()
+            .expect("first replay input")
+            .0,
+        driver
+            .contract_dequeue_next_for_recovery_tests()
+            .expect("second replay input")
+            .0,
     ];
     assert!(
-        driver.dequeue_next().is_none(),
+        driver.contract_dequeue_next_for_recovery_tests().is_none(),
         "recovery should requeue only the missing-boundary contributors"
     );
     assert_eq!(

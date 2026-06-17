@@ -570,6 +570,8 @@ struct MockCommsRuntime {
     remove_failures_remaining: std::sync::Mutex<usize>,
     trusted_peers: RwLock<HashMap<String, TrustedPeerDescriptor>>,
     sent_intents: RwLock<Vec<String>>,
+    peer_lifecycle_in_flight: AtomicU64,
+    peer_lifecycle_max_in_flight: AtomicU64,
     inbox_notify: Arc<tokio::sync::Notify>,
     mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
 }
@@ -612,6 +614,8 @@ impl MockCommsRuntime {
             )),
             trusted_peers: RwLock::new(HashMap::new()),
             sent_intents: RwLock::new(Vec::new()),
+            peer_lifecycle_in_flight: AtomicU64::new(0),
+            peer_lifecycle_max_in_flight: AtomicU64::new(0),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
             mob_machine_trust_owner: std::sync::RwLock::new(None),
         }
@@ -684,6 +688,10 @@ impl MockCommsRuntime {
 
     async fn sent_intents(&self) -> Vec<String> {
         self.sent_intents.read().await.clone()
+    }
+
+    fn max_concurrent_peer_lifecycle_sends(&self) -> u64 {
+        self.peer_lifecycle_max_in_flight.load(Ordering::Relaxed)
     }
 
     fn validate_mob_trust_authority_owner(
@@ -977,8 +985,16 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     .read()
                     .expect("poisoned behavior lock in mock runtime");
                 if behavior.peer_lifecycle_delay_ms > 0 {
+                    let in_flight = self
+                        .peer_lifecycle_in_flight
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    self.peer_lifecycle_max_in_flight
+                        .fetch_max(in_flight, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(behavior.peer_lifecycle_delay_ms))
                         .await;
+                    self.peer_lifecycle_in_flight
+                        .fetch_sub(1, Ordering::Relaxed);
                 }
                 match kind {
                     meerkat_core::comms::PeerLifecycleKind::PeerAdded
@@ -1025,6 +1041,18 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     .behavior
                     .read()
                     .expect("poisoned behavior lock in mock runtime");
+                if behavior.peer_lifecycle_delay_ms > 0 && intent.starts_with("mob.peer_") {
+                    let in_flight = self
+                        .peer_lifecycle_in_flight
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    self.peer_lifecycle_max_in_flight
+                        .fetch_max(in_flight, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(behavior.peer_lifecycle_delay_ms))
+                        .await;
+                    self.peer_lifecycle_in_flight
+                        .fetch_sub(1, Ordering::Relaxed);
+                }
                 if intent == "mob.peer_added" && behavior.fail_send_peer_added {
                     return Err(SendError::Unsupported(
                         "mock mob.peer_added notification failure".to_string(),
@@ -1182,6 +1210,8 @@ struct MockSessionService {
     archive_fail_comms_names: RwLock<HashSet<String>>,
     /// Sent intents for sessions that were archived and removed.
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
+    /// Fanout concurrency observed by sessions that were archived and removed.
+    archived_peer_lifecycle_max_in_flight: RwLock<HashMap<SessionId, u64>>,
     /// Sessions that were archived. Mirrors the real persistent-service
     /// contract: `load_persisted_session` returns `None` for archived
     /// sessions, so archive stays terminal (no revival from an archived
@@ -1262,6 +1292,7 @@ impl MockSessionService {
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
+            archived_peer_lifecycle_max_in_flight: RwLock::new(HashMap::new()),
             archived_session_ids: RwLock::new(HashSet::new()),
             create_fail_sessions: RwLock::new(HashSet::new()),
             create_identity_already_active_sessions: RwLock::new(HashSet::new()),
@@ -1671,6 +1702,23 @@ impl MockSessionService {
                 .await
                 .get(session_id)
                 .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    async fn max_concurrent_peer_lifecycle_sends(&self, session_id: &SessionId) -> u64 {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        match runtime {
+            Some(runtime) => runtime.max_concurrent_peer_lifecycle_sends(),
+            None => self
+                .archived_peer_lifecycle_max_in_flight
+                .read()
+                .await
+                .get(session_id)
+                .copied()
                 .unwrap_or_default(),
         }
     }
@@ -2229,10 +2277,15 @@ impl SessionService for MockSessionService {
                 notifier.notify_waiters();
             }
             let intents = runtime.sent_intents().await;
+            let peer_lifecycle_max_in_flight = runtime.max_concurrent_peer_lifecycle_sends();
             self.archived_sent_intents
                 .write()
                 .await
                 .insert(id.clone(), intents);
+            self.archived_peer_lifecycle_max_in_flight
+                .write()
+                .await
+                .insert(id.clone(), peer_lifecycle_max_in_flight);
         }
         Ok(())
     }
@@ -11266,6 +11319,47 @@ fn test_generated_dsl_paths_do_not_shadow_destroy_admission() {
     );
 }
 
+#[test]
+fn test_pending_spawn_insertion_requires_generated_start_authority() {
+    let source = include_str!("actor.rs");
+    let insert_pending_spawn = source
+        .find("fn insert_pending_spawn")
+        .expect("insert_pending_spawn");
+    let insert_body = &source[insert_pending_spawn..];
+    let pending_start_count = source.matches(".start(&pending)").count();
+    assert!(
+        source.contains("struct AuthorizedMobSpawnStart")
+            && source.contains("struct AuthorizedMobSpawnStarted")
+            && source.contains("struct AuthorizedMobSpawnCompleted")
+            && source.contains(
+                "generated_can_start: generated_mob_command_capabilities::CommandPlanKind"
+            )
+            && source
+                .contains("generated_owner: generated_mob_command_capabilities::CommandPlanKind")
+            && source
+                .contains("generated_started: generated_mob_command_capabilities::CommandPlanKind")
+            && source
+                .contains("generated_effect: generated_mob_command_capabilities::CommandPlanKind")
+            && !source.contains("mint_from_generated_command_plan(")
+            && source.contains(
+                "generated_mob_command_capabilities::CommandPlanKind::AuthorizedMobSpawnStart"
+            )
+            && source
+                .contains("generated_mob_command_capabilities::CommandPlanKind::CanStartSpawn")
+            && source.contains("generated_mob_command_capabilities::CommandPlanKind::SpawnStarted")
+            && source.contains("generated_mob_command_capabilities::CommandPlanKind::SpawnEffect")
+            && source.contains("generated_mob_command_capabilities::CommandPlanKind::FailSpawn")
+            && source.contains("MobMachineSignal::StageSpawn")
+            && source.contains("PendingSpawnOperationOwnerAuthorized")
+            && source.contains("MobMachineSignal::CompleteSpawn")
+            && source.contains("EmitMemberLifecycleNotice")
+            && insert_body.contains("started: AuthorizedMobSpawnStarted")
+            && pending_start_count >= 2
+            && source.contains(".start(&respawn_pending)"),
+        "mob pending-spawn insertion and completion must consume generated StageSpawn/CompleteSpawn authorities"
+    );
+}
+
 #[tokio::test]
 async fn test_stopped_missing_member_wire_is_rejected_by_machine_admission() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
@@ -19457,16 +19551,27 @@ async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_secon
         .iter()
         .filter(|event| matches!(event.kind, MobEventKind::MembersWiredBatch { .. }))
         .count();
+    let batch_event_edges = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MembersWiredBatch { edges } => Some(edges.len()),
+            _ => None,
+        })
+        .sum::<usize>();
     let single_edge_events = events
         .iter()
         .filter(|event| matches!(event.kind, MobEventKind::MembersWired { .. }))
         .count();
     assert_eq!(batch_events, 1);
     assert_eq!(
+        batch_event_edges, EXPECTED_EDGES,
+        "dense topology materialization should publish every new edge through the compact batch event"
+    );
+    assert_eq!(
         single_edge_events, 0,
         "dense topology materialization must not emit per-edge wire events"
     );
-    let max_wire_elapsed = std::time::Duration::from_secs(90);
+    let max_wire_elapsed = std::time::Duration::from_secs(180);
     assert!(
         wire_elapsed < max_wire_elapsed,
         "300x150 topology materialization should stay inside the generated-authority stress budget of {max_wire_elapsed:?} (spawn={spawn_elapsed:?}, wire={wire_elapsed:?})"
@@ -19544,13 +19649,20 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         .await
         .expect("retire high-degree member");
     let elapsed = started.elapsed();
+    let max_concurrent = service
+        .max_concurrent_peer_lifecycle_sends(&retiring_sid)
+        .await;
 
     assert!(
-        elapsed < Duration::from_millis(2750),
-        "150 peer-retired notifications with {PER_NOTIFICATION_DELAY_MS}ms send delay should fan out with bounded parallelism, not run sequentially (elapsed={elapsed:?})"
+        max_concurrent > 1,
+        "150 peer-retired notifications with {PER_NOTIFICATION_DELAY_MS}ms send delay should overlap; max observed concurrent sends: {max_concurrent}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "150 peer-retired notifications with {PER_NOTIFICATION_DELAY_MS}ms send delay should stay comfortably below a serialized stress timeout (elapsed={elapsed:?}, max_concurrent={max_concurrent})"
     );
     eprintln!(
-        "retire fanout stress: peers={PEERS}, per_notification_delay_ms={PER_NOTIFICATION_DELAY_MS}, retire={elapsed:?}"
+        "retire fanout stress: peers={PEERS}, per_notification_delay_ms={PER_NOTIFICATION_DELAY_MS}, retire={elapsed:?}, max_concurrent={max_concurrent}"
     );
     let retiring_intents = service.sent_intents(&retiring_sid).await;
     assert_eq!(

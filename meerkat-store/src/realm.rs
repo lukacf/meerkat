@@ -1229,3 +1229,55 @@ mod tests {
         );
     }
 }
+
+/// Filesystem-backed [`meerkat_core::RealmConfigSource`] shared by every
+/// runtime-backed surface (CLI, REST, RPC, MCP). It is the single owner of the
+/// realm→config-document filesystem projection: the reserved `global` realm maps
+/// to a home-rooted document (`global_doc`), every other realm to its per-realm
+/// `<state_root>/<realm>/config.toml`. Returns `None` for an absent document so
+/// composition never folds a `Config::default()` clobber. Surfaces inject this
+/// rather than each re-deriving the mapping.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct FilesystemRealmConfigSource {
+    state_root: PathBuf,
+    global_doc: PathBuf,
+    catalog: meerkat_core::ModelCatalog,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FilesystemRealmConfigSource {
+    pub fn new(
+        state_root: impl Into<PathBuf>,
+        global_doc: impl Into<PathBuf>,
+        catalog: meerkat_core::ModelCatalog,
+    ) -> Self {
+        Self {
+            state_root: state_root.into(),
+            global_doc: global_doc.into(),
+            catalog,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
+    async fn config_for_realm(
+        &self,
+        realm: &meerkat_core::connection::RealmId,
+    ) -> Result<Option<meerkat_core::Config>, meerkat_core::config::ConfigError> {
+        use meerkat_core::ConfigStore;
+        let path = if realm.is_global() {
+            self.global_doc.clone()
+        } else {
+            realm_paths_in(&self.state_root, realm.as_str()).config_path
+        };
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(None);
+        }
+        // FileConfigStore::get parses the toml; the existence check above means a
+        // present-but-absent doc never collapses to Config::default().
+        let store = meerkat_core::FileConfigStore::new(path, self.catalog);
+        store.get().await.map(Some)
+    }
+}

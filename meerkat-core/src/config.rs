@@ -2366,6 +2366,16 @@ pub fn compose_effective_config(
             }
         }
     }
+    // NOTE (Finding D, non-blocking per adversarial review): `effective.realm`
+    // is the outer-key union of every folded doc's sections (via Config::merge),
+    // so a doc that hand-places a foreign `[realm.X]` (X != its owning realm)
+    // could shadow the authoritative ancestor section. Reachability is narrow —
+    // the standard tooling reads `global` from a dedicated home-rooted doc and
+    // each realm from its own path, never co-locating a foreign section — and a
+    // strict owner-only rebuild is INCOMPATIBLE with the supported
+    // single-file-multiple-realms model (one doc carrying `[realm.a]`,
+    // `[realm.b]`, ... is how the CLI and surfaces resolve a `--realm`/section
+    // that is not itself a chain member). Tracked, not gated.
     Ok(effective)
 }
 

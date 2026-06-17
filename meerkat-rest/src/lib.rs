@@ -147,6 +147,11 @@ pub struct AppState {
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
     pub realm: meerkat_core::RealmId,
+    /// Filesystem realm config source used to COMPOSE the realm's parent chain
+    /// (workspace head ⊕ home-rooted `global`) into the effective config the
+    /// agent build + auth-resolution paths read. Composition is read-only; the
+    /// config get/set path stays on the RAW head store (`config_runtime`).
+    pub realm_config_source: Arc<dyn meerkat_core::RealmConfigSource>,
     pub instance_id: Option<String>,
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
@@ -437,8 +442,32 @@ impl AppState {
         )
         .await?;
 
-        let mut config = config_store
+        // Shared filesystem realm-config source: maps the reserved `global`
+        // realm to the home-rooted doc (or, when no HOME-rooted path exists, a
+        // path under the realms root that will never exist — so `global` yields
+        // None and behaves like today) and every other realm to its per-realm
+        // config. Surfaces inject this rather than re-deriving the projection.
+        let global_doc = meerkat_core::Config::global_config_path()
+            .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
+        let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+            Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+                realms_root.clone(),
+                global_doc,
+                meerkat_models::canonical(),
+            ));
+
+        // Compose the head realm's parent chain into the effective config the
+        // agent build + auth-resolution paths read. The HEAD config is the raw
+        // head store (authoritative); the source supplies only ancestor docs
+        // (the `global` tail). Composition is read-only; `config get/set` use
+        // the RAW head store (`config_runtime`), so an inherited entry is never
+        // durably flattened into a child doc.
+        let head_config = config_store
             .get()
+            .await
+            .unwrap_or_else(|_| Config::default());
+        let mut config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&realm_config_source))
+            .effective_config_over_head(&realm, head_config)
             .await
             .unwrap_or_else(|_| Config::default());
         if let Err(err) = config.apply_env_overrides() {
@@ -541,6 +570,7 @@ impl AppState {
             workgraph_service,
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm,
+            realm_config_source,
             instance_id,
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,

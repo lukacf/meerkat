@@ -3352,6 +3352,11 @@ async fn handle_run_command(
     auth_binding: Option<AuthBindingRef>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
+    // One-time, idempotent: carry any pre-`global` (`dev`) login credentials
+    // forward on the credential-READ path so users who upgraded but never
+    // re-logged in are still migrated (the login-time trigger alone misses
+    // them). Runs at most once per process; failures are logged, not fatal.
+    ensure_legacy_login_credentials_migrated_once().await;
     let output = resolve_cli_output_selection(
         output,
         json,
@@ -4098,36 +4103,16 @@ fn cli_global_config_store(scope: &RuntimeScope) -> Arc<dyn ConfigStore> {
     ))
 }
 
-/// Filesystem-backed [`meerkat_core::RealmConfigSource`]: maps the reserved
-/// `global` realm to the HOME-rooted doc and every other realm to its
-/// per-realm `<state_root>/<realm>/config.toml`. Absent doc => `None` (never a
-/// `Config::default()` clobber).
-struct CliRealmConfigSource {
-    state_root: PathBuf,
-    global_doc: PathBuf,
-}
-
-#[async_trait::async_trait]
-impl meerkat_core::RealmConfigSource for CliRealmConfigSource {
-    async fn config_for_realm(
-        &self,
-        realm: &meerkat_core::RealmId,
-    ) -> Result<Option<Config>, meerkat_core::config::ConfigError> {
-        let path = if realm.is_global() {
-            self.global_doc.clone()
-        } else {
-            meerkat_store::realm_paths_in(&self.state_root, realm.as_str()).config_path
-        };
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(None);
-        }
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(meerkat_core::config::ConfigError::Io)?;
-        let config: Config =
-            toml::from_str(&content).map_err(meerkat_core::config::ConfigError::Parse)?;
-        Ok(Some(config))
-    }
+/// Shared filesystem [`meerkat_core::RealmConfigSource`] for this scope, mapping
+/// the reserved `global` realm to the HOME-rooted doc and other realms to their
+/// per-realm config (owned by `meerkat-store`, the realm-layout authority, so
+/// CLI/REST/RPC don't each re-derive the projection).
+fn cli_realm_config_source(scope: &RuntimeScope) -> Arc<dyn meerkat_core::RealmConfigSource> {
+    Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+        scope.locator.state_root.clone(),
+        cli_global_config_path(scope),
+        meerkat_models::canonical(),
+    ))
 }
 
 async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> {
@@ -4141,11 +4126,7 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     // Compose the scope realm's parent chain (workspace head ⊕ home-rooted
     // `global`) into the effective config the agent reads. Composition is
     // read-only; `config get/set` use the raw head store (resolve_config_store).
-    let source = Arc::new(CliRealmConfigSource {
-        state_root: scope.locator.state_root.clone(),
-        global_doc: cli_global_config_path(scope),
-    });
-    let reader = meerkat_core::EffectiveConfigReader::new(source);
+    let reader = meerkat_core::EffectiveConfigReader::new(cli_realm_config_source(scope));
     let mut config = reader
         .effective_config(&scope.locator.realm)
         .await
@@ -5448,6 +5429,35 @@ fn auth_binding_from_token_key(key: &meerkat_providers::auth_store::TokenKey) ->
 /// it (disposal of legacy persisted data, not retention).
 const LEGACY_LOGIN_REALM_SLUG: &str = "dev";
 
+/// Every binding id `auth login` (interactive OAuth + API-key provisioning)
+/// has ever persisted a `dev:<binding>` credential under. The two families:
+///   * `<provider>_oauth` — the interactive OAuth binding ids
+///     ([`LoginProvider::binding_id`]).
+///   * `default_<provider>` — the API-key / env-default binding ids
+///     (`env_default_target`'s `format!("default_{provider}")`, where
+///     `<provider>` is [`meerkat_core::Provider::as_str`], so Gemini is
+///     `default_gemini`).
+///
+/// This is the per-binding migration probe set: OS keyring backends frequently
+/// cannot enumerate (so `TokenStore::list` returns only file-backed keys and
+/// silently omits keychain-resident credentials), which means a `list`-only
+/// migration copies ZERO on keychain desktops. We therefore additionally
+/// `load(dev:<binding>)` each known id directly — `load` resolves through the
+/// keyring backend and succeeds where `list` cannot. The `list`-based pass is
+/// kept as a superset (it still catches profile-override credentials and any
+/// id not enumerated here).
+///
+/// This list is deliberately not derived from `LoginProvider` (which is gated
+/// on all three provider features): the migration must run in every CLI build.
+const LEGACY_LOGIN_BINDING_IDS: &[&str] = &[
+    "anthropic_oauth",
+    "openai_oauth",
+    "google_oauth",
+    "default_anthropic",
+    "default_openai",
+    "default_gemini",
+];
+
 /// One-time, idempotent migration of pre-`global` login credentials.
 ///
 /// Historically `auth login` persisted under the `dev` realm; it now targets
@@ -5460,24 +5470,101 @@ async fn migrate_legacy_login_credentials_to_global(
 ) -> Result<usize, meerkat_providers::auth_store::TokenStoreError> {
     use meerkat_providers::auth_store::TokenKey;
     let mut migrated = 0usize;
+
+    // Pass 1 — per-known-binding direct `load` probe. OS keyring backends
+    // frequently cannot enumerate, so `list` omits keychain-resident
+    // credentials entirely; `load(dev:<binding>)` resolves through the keyring
+    // backend and copies them where the `list`-based pass would copy zero. Each
+    // probe is no-clobber + idempotent (it skips when `global:<binding>` already
+    // exists), so running both passes cannot double-copy.
+    for binding_id in LEGACY_LOGIN_BINDING_IDS {
+        // Every id in `LEGACY_LOGIN_BINDING_IDS` is a static valid slug, so this
+        // parse cannot fail at runtime. Skip-with-warning instead of unwrapping
+        // keeps the probe defensive (library code never panics) without folding
+        // an absent `From<IdentityError>` conversion into the store-error path.
+        let dev_key = match TokenKey::parse(LEGACY_LOGIN_REALM_SLUG, binding_id) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::warn!(binding = %binding_id, error = %e, "skipping malformed legacy login binding id");
+                continue;
+            }
+        };
+        migrated += migrate_one_legacy_login_credential(store, &dev_key).await?;
+    }
+
+    // Pass 2 — `list`-based superset. Catches any enumerable `dev:*`
+    // credential the probe set does not name (e.g. profile-override keys).
     for key in store.list().await? {
         if key.realm.as_str() != LEGACY_LOGIN_REALM_SLUG {
             continue;
         }
-        let global_key = TokenKey::new_with_profile(
-            meerkat_core::connection::RealmId::global(),
-            key.binding.clone(),
-            key.profile.clone(),
-        );
-        if store.load(&global_key).await?.is_some() {
-            continue; // no-clobber: an existing global credential wins
-        }
-        if let Some(tokens) = store.load(&key).await? {
-            store.save(&global_key, &tokens).await?;
-            migrated += 1;
-        }
+        migrated += migrate_one_legacy_login_credential(store, &key).await?;
     }
+
     Ok(migrated)
+}
+
+/// Copy a single `dev:<binding>[:<profile>]` credential forward to the matching
+/// `global:<binding>[:<profile>]` key, no-clobber (an existing global
+/// credential wins) and idempotent (a missing dev credential is a no-op).
+/// Returns 1 if a copy was performed, 0 otherwise.
+async fn migrate_one_legacy_login_credential(
+    store: &dyn meerkat_providers::auth_store::TokenStore,
+    dev_key: &meerkat_providers::auth_store::TokenKey,
+) -> Result<usize, meerkat_providers::auth_store::TokenStoreError> {
+    use meerkat_providers::auth_store::TokenKey;
+    debug_assert_eq!(dev_key.realm.as_str(), LEGACY_LOGIN_REALM_SLUG);
+    let global_key = TokenKey::new_with_profile(
+        meerkat_core::connection::RealmId::global(),
+        dev_key.binding.clone(),
+        dev_key.profile.clone(),
+    );
+    if store.load(&global_key).await?.is_some() {
+        return Ok(0); // no-clobber: an existing global credential wins
+    }
+    if let Some(tokens) = store.load(dev_key).await? {
+        store.save(&global_key, &tokens).await?;
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+/// Process-level guard so the read-path migration trigger opens the
+/// TokenStore and runs the (idempotent) copy at most once per CLI process,
+/// regardless of how many credential-read paths fire. The migration is
+/// idempotent + no-clobber, so this is a performance gate, not a correctness
+/// one — re-running it would copy nothing once `global` is populated.
+static LEGACY_LOGIN_MIGRATION_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// One-time, idempotent migration trigger for the credential-READ path.
+///
+/// Historically the `dev`->`global` login-credential migration ran ONLY at
+/// `auth login`, so a user who never re-logs in after upgrading would never be
+/// migrated. This runs it (once per process) from the run/resolution path that
+/// reads credentials, so existing sign-ins keep working without a re-login.
+/// Failures are logged and swallowed — a migration hiccup must never block a
+/// run.
+async fn ensure_legacy_login_credentials_migrated_once() {
+    use std::sync::atomic::Ordering;
+    if LEGACY_LOGIN_MIGRATION_DONE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return; // already attempted in this process
+    }
+    let store = match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+        .and_then(|backend| backend.open())
+    {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(error = %e, "legacy dev->global credential migration skipped (TokenStore open failed)");
+            return;
+        }
+    };
+    if let Err(e) = migrate_legacy_login_credentials_to_global(store.as_ref()).await {
+        tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
+    }
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -15351,6 +15438,153 @@ mod tests {
         assert_eq!(copied_again, 0, "migration must be idempotent");
 
         // No-clobber: an existing global credential is never overwritten.
+        let mut owned = openai_oauth_tokens();
+        owned.primary_secret = Some("global-owned-secret".to_string());
+        store.save(&global_key, &owned).await.expect("seed global");
+        let _ = migrate_legacy_login_credentials_to_global(&store)
+            .await
+            .expect("migrate no-clobber");
+        let after = store
+            .load(&global_key)
+            .await
+            .unwrap()
+            .expect("global present");
+        assert_eq!(
+            after.primary_secret.as_deref(),
+            Some("global-owned-secret"),
+            "existing global credential must not be clobbered"
+        );
+    }
+
+    /// A TokenStore double that can `load`/`save`/`clear` by key but CANNOT
+    /// enumerate: `list` always returns empty. This models the OS-keyring
+    /// reality the migration must survive — many keyring backends cannot list
+    /// their entries, so a `list`-only migration sees ZERO `dev:*` credentials
+    /// even though every one is reachable via `load`. Keyed by
+    /// `TokenKey::keyring_account` (the canonical flat account id), matching how
+    /// a real keyring addresses entries.
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    struct NonEnumerableTokenStore {
+        entries: std::sync::Mutex<
+            std::collections::HashMap<String, meerkat_providers::auth_store::PersistedTokens>,
+        >,
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    impl NonEnumerableTokenStore {
+        fn new() -> Self {
+            Self {
+                entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[async_trait::async_trait]
+    impl meerkat_providers::auth_store::TokenStore for NonEnumerableTokenStore {
+        async fn load(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+        ) -> Result<
+            Option<meerkat_providers::auth_store::PersistedTokens>,
+            meerkat_providers::auth_store::TokenStoreError,
+        > {
+            Ok(self
+                .entries
+                .lock()
+                .expect("token store mutex")
+                .get(&key.keyring_account())
+                .cloned())
+        }
+
+        async fn save(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+            tokens: &meerkat_providers::auth_store::PersistedTokens,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            self.entries
+                .lock()
+                .expect("token store mutex")
+                .insert(key.keyring_account(), tokens.clone());
+            Ok(())
+        }
+
+        async fn clear(
+            &self,
+            key: &meerkat_providers::auth_store::TokenKey,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            self.entries
+                .lock()
+                .expect("token store mutex")
+                .remove(&key.keyring_account());
+            Ok(())
+        }
+
+        async fn list(
+            &self,
+        ) -> Result<
+            Vec<meerkat_providers::auth_store::TokenKey>,
+            meerkat_providers::auth_store::TokenStoreError,
+        > {
+            // The defining property: a non-enumerable backend yields nothing.
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "non-enumerable-test"
+        }
+    }
+
+    // RCT: a `dev:` credential reachable ONLY via `load` (keyring-resident, not
+    // enumerable) is migrated to `global:` by the per-known-binding probe pass —
+    // the exact path the run/resolution (NON-login) trigger drives. The
+    // `list`-only migration would copy ZERO here. No-clobber + idempotence hold.
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn non_login_path_migrates_keyring_resident_dev_credential_to_global() {
+        use meerkat_providers::auth_store::{TokenKey, TokenStore};
+
+        let store = NonEnumerableTokenStore::new();
+        // Seed a credential reachable only via `load` (a known login binding id),
+        // and confirm the store genuinely cannot enumerate it.
+        let dev_key = TokenKey::parse("dev", "anthropic_oauth").expect("dev key");
+        store
+            .save(&dev_key, &openai_oauth_tokens())
+            .await
+            .expect("seed keyring-resident dev token");
+        assert!(
+            store.list().await.expect("list").is_empty(),
+            "fixture must model a non-enumerable keyring (list yields nothing)"
+        );
+
+        // The run/resolution (NON-login) trigger drives exactly this migration.
+        // The per-binding `load` probe finds the credential `list` cannot.
+        let copied = migrate_legacy_login_credentials_to_global(&store)
+            .await
+            .expect("migrate");
+        assert_eq!(
+            copied, 1,
+            "keyring-resident dev credential must be migrated"
+        );
+
+        let global_key = TokenKey::parse("global", "anthropic_oauth").expect("global key");
+        assert!(
+            store.load(&global_key).await.unwrap().is_some(),
+            "credential migrated to global despite non-enumerable backend"
+        );
+        assert!(
+            store.load(&dev_key).await.unwrap().is_some(),
+            "legacy dev credential left intact"
+        );
+
+        // Idempotent: a second run copies nothing.
+        let copied_again = migrate_legacy_login_credentials_to_global(&store)
+            .await
+            .expect("re-migrate");
+        assert_eq!(copied_again, 0, "migration must be idempotent");
+
+        // No-clobber: an existing global credential is never overwritten, even
+        // when discovered only via the per-binding probe.
         let mut owned = openai_oauth_tokens();
         owned.primary_secret = Some("global-owned-secret".to_string());
         store.save(&global_key, &owned).await.expect("seed global");

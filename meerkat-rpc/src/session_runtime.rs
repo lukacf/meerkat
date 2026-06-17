@@ -1319,6 +1319,14 @@ pub struct SessionRuntime {
     /// Phase 4 R1: slot-shared with the inner [`MeerkatSessionRuntime`].
     backend: Arc<StdRwLock<Option<String>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+    /// Per-realm config-document source for inheritance composition (decision
+    /// 2/3). When present, the auth-resolution read path composes the active
+    /// realm's parent chain (workspace head ⊕ home-rooted `global`) into the
+    /// effective [`Config`] consumed by `resolve_oauth_target` /
+    /// `resolve_write_owner` so an inherited (`global`-owned) binding is visible
+    /// to the strict-owner write guard. The raw `config_runtime` stays the
+    /// authority for `config get/set` (writes never compose — read/write split).
+    realm_config_source: Arc<StdRwLock<Option<Arc<dyn meerkat_core::RealmConfigSource>>>>,
     runtime_adapter: Arc<MeerkatMachine>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
@@ -1716,6 +1724,7 @@ impl SessionRuntime {
             Arc::clone(&builder.default_agent_llm_client_decorator);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
+        let realm_config_source = Arc::new(StdRwLock::new(None));
         let staged_sessions = Arc::new(StagedSessionRegistry::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
@@ -1807,6 +1816,7 @@ impl SessionRuntime {
             instance_id,
             backend,
             config_runtime,
+            realm_config_source,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry,
@@ -1851,6 +1861,7 @@ impl SessionRuntime {
             Arc::clone(&builder.default_agent_llm_client_decorator);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
+        let realm_config_source = Arc::new(StdRwLock::new(None));
         let staged_sessions = Arc::new(StagedSessionRegistry::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
@@ -1942,6 +1953,7 @@ impl SessionRuntime {
             instance_id,
             backend,
             config_runtime,
+            realm_config_source,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry,
@@ -2056,6 +2068,25 @@ impl SessionRuntime {
     /// Shared config runtime used by config handlers.
     pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
         self.config_runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Attach the per-realm config-document source used by the auth-resolution
+    /// read path to compose the active realm's parent chain (inheritance).
+    ///
+    /// Writes never compose — `config get/set` stay on the raw `config_runtime`.
+    pub fn set_realm_config_source(&mut self, source: Arc<dyn meerkat_core::RealmConfigSource>) {
+        *self
+            .realm_config_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+    }
+
+    /// Per-realm config-document source for inheritance composition, if attached.
+    pub fn realm_config_source(&self) -> Option<Arc<dyn meerkat_core::RealmConfigSource>> {
+        self.realm_config_source
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()

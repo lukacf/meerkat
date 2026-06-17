@@ -362,6 +362,24 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         Some(manifest.backend.as_str().to_string()),
     );
     runtime.set_config_runtime(config_runtime);
+
+    // Inheritance composition (decision 2/3): attach the per-realm config-document
+    // source so the auth-resolution read path composes the active realm's parent
+    // chain (workspace head ⊕ home-rooted `global`) into the effective config that
+    // `resolve_oauth_target` / `resolve_write_owner` consume. Writes stay raw on
+    // `config_runtime` (read/write split). The reserved `global` realm maps to the
+    // HOME-rooted doc; when no home is resolvable, fall back to a path under the
+    // state root that will not exist, so `global` yields `None` (today's behavior).
+    let global_doc = Config::global_config_path()
+        .unwrap_or_else(|| locator.state_root.join("global").join("config.toml"));
+    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            locator.state_root.clone(),
+            global_doc,
+            meerkat_models::canonical(),
+        ));
+    runtime.set_realm_config_source(realm_config_source);
+
     let runtime = Arc::new(runtime);
 
     let lease = meerkat_store::start_realm_lease_in(

@@ -137,6 +137,66 @@ impl EffectiveConfigReader {
 
         Ok(crate::config::compose_effective_config(&docs, head)?)
     }
+
+    /// Like [`Self::effective_config`], but the HEAD realm's document is supplied
+    /// by the caller (the surface's authoritative head config — e.g. from an
+    /// in-memory store or a `ConfigRuntime` snapshot) instead of being fetched
+    /// from the source. Ancestors (the parent chain + the implicit `global`
+    /// tail) are still fetched from the source. Network surfaces use this so the
+    /// head config keeps coming from their existing config store/runtime while
+    /// inheritance only ADDS ancestor docs — composing purely from a filesystem
+    /// source would drop a head config that lives in memory.
+    pub async fn effective_config_over_head(
+        &self,
+        head: &crate::connection::RealmId,
+        head_config: Config,
+    ) -> Result<Config, ConfigError> {
+        use crate::connection::{MAX_REALM_CHAIN_DEPTH, RealmId};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut docs: BTreeMap<RealmId, Config> = BTreeMap::new();
+        let mut seen: BTreeSet<RealmId> = BTreeSet::new();
+        seen.insert(head.clone());
+        let mut frontier = Vec::new();
+        if let Some(parent) = head_config
+            .realm
+            .get(head.as_str())
+            .and_then(|section| section.parent.clone())
+        {
+            frontier.push(parent);
+        }
+        docs.insert(head.clone(), head_config);
+
+        let mut guard = 0usize;
+        while let Some(realm) = frontier.pop() {
+            guard += 1;
+            if guard > MAX_REALM_CHAIN_DEPTH + 4 {
+                break;
+            }
+            if !seen.insert(realm.clone()) {
+                continue;
+            }
+            if let Some(doc) = self.source.config_for_realm(&realm).await? {
+                if let Some(parent) = doc
+                    .realm
+                    .get(realm.as_str())
+                    .and_then(|section| section.parent.clone())
+                {
+                    frontier.push(parent);
+                }
+                docs.insert(realm, doc);
+            }
+        }
+
+        let global = RealmId::global();
+        if seen.insert(global.clone())
+            && let Some(doc) = self.source.config_for_realm(&global).await?
+        {
+            docs.insert(global, doc);
+        }
+
+        Ok(crate::config::compose_effective_config(&docs, head)?)
+    }
 }
 
 /// In-memory config store for ephemeral settings.

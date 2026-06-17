@@ -104,6 +104,11 @@ async fn inner_test_rest_resume_metadata() {
         ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
+        realm_config_source: Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            store_path.join("empty-realms"),
+            store_path.join("empty-realms").join("__no_global__"),
+            meerkat_models::canonical(),
+        )),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {
@@ -250,6 +255,11 @@ async fn inner_test_rest_resume_metadata() {
         ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
+        realm_config_source: Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            store_path.join("empty-realms"),
+            store_path.join("empty-realms").join("__no_global__"),
+            meerkat_models::canonical(),
+        )),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {

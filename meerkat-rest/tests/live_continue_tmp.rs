@@ -90,6 +90,11 @@ async fn integration_real_live_continue_hangs() {
         ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
+        realm_config_source: Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            temp_dir.path().join("empty-realms"),
+            temp_dir.path().join("empty-realms").join("__no_global__"),
+            meerkat_models::canonical(),
+        )),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {

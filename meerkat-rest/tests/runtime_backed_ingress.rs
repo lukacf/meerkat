@@ -143,6 +143,11 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("phase1-rest").expect("valid realm"),
+        realm_config_source: Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            temp_dir.path().join("empty-realms"),
+            temp_dir.path().join("empty-realms").join("__no_global__"),
+            meerkat_models::canonical(),
+        )),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {

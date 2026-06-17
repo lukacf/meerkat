@@ -3732,13 +3732,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
                 is_prompt: bool,
             },
-            BindAdmissionRuntimeGrouping {
-                input_id: String,
-                runtime_boundary: Enum<RecoveredRunApplyBoundary>,
-                runtime_execution_kind: Enum<RecoveredRuntimeExecutionKind>,
-                runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
-                is_prompt: bool,
-            },
             QueueAccepted { input_id: String },
             SteerAccepted { input_id: String },
             ChangeLane { input_id: String, new_lane: Enum<InputLane> },
@@ -15309,44 +15302,6 @@ macro_rules! meerkat_catalog_machine_dsl {
         // =====================================================================
         // Absorbed substate transitions — Input Lifecycle
         // =====================================================================
-
-        // BindAdmissionRuntimeGrouping: persist the generated admission
-        // runtime-loop grouping witnesses before physical queue projection.
-        // Live admission records these from the just-emitted
-        // AdmissionResolved effect; recovery records them from durable
-        // admission witnesses. Runtime-loop batch selection reads these maps
-        // instead of shell metadata.
-        transition BindAdmissionRuntimeGrouping {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input BindAdmissionRuntimeGrouping {
-                input_id,
-                runtime_boundary,
-                runtime_execution_kind,
-                runtime_peer_response_terminal_apply_intent,
-                is_prompt
-            }
-            guard "recovered_lifecycle_authorized" {
-                self.input_phases.contains_key(input_id)
-            }
-            guard "grouping_not_bound" {
-                !self.input_runtime_boundary.contains_key(input_id)
-                && !self.input_runtime_execution_kind.contains_key(input_id)
-            }
-            update {
-                self.input_runtime_boundary.insert(input_id, runtime_boundary);
-                self.input_runtime_execution_kind.insert(input_id, runtime_execution_kind);
-                if runtime_peer_response_terminal_apply_intent != None {
-                    self.input_runtime_peer_response_terminal_apply_intent.insert(
-                        input_id,
-                        runtime_peer_response_terminal_apply_intent.get("value")
-                    );
-                } else {
-                    self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
-                }
-                self.input_is_prompt.insert(input_id, is_prompt);
-            }
-            to Idle
-        }
 
         // RecoverAdmittedInput: accept or reject the recovered admission
         // witness before shell recovery may re-materialize admission metadata.

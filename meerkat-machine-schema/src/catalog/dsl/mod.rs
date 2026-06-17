@@ -1969,7 +1969,6 @@ runtime_internal_inputs!(
         AuthorizeSupervisor,
         AuthorizeDeferredSessionSystemContextAppend,
         BeginUnregisterSession,
-        BindAdmissionRuntimeGrouping,
         BindSupervisor,
         BoundaryComplete,
         BoundaryContinue,

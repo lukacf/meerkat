@@ -11253,15 +11253,6 @@ pub mod inputs {
         pub is_prompt: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct BindAdmissionRuntimeGrouping {
-        pub input_id: String,
-        pub runtime_boundary: RecoveredRunApplyBoundary,
-        pub runtime_execution_kind: RecoveredRuntimeExecutionKind,
-        pub runtime_peer_response_terminal_apply_intent:
-            Option<RecoveredPeerResponseTerminalApplyIntent>,
-        pub is_prompt: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct QueueAccepted {
         pub input_id: String,
     }
@@ -12133,7 +12124,6 @@ pub enum Input {
     RunCancelled(inputs::RunCancelled),
     RecoverAdmittedInput(inputs::RecoverAdmittedInput),
     RecoverInputLifecycle(inputs::RecoverInputLifecycle),
-    BindAdmissionRuntimeGrouping(inputs::BindAdmissionRuntimeGrouping),
     QueueAccepted(inputs::QueueAccepted),
     SteerAccepted(inputs::SteerAccepted),
     ChangeLane(inputs::ChangeLane),
@@ -12448,7 +12438,6 @@ impl Input {
             Self::RunCancelled(_) => InputKind::RunCancelled,
             Self::RecoverAdmittedInput(_) => InputKind::RecoverAdmittedInput,
             Self::RecoverInputLifecycle(_) => InputKind::RecoverInputLifecycle,
-            Self::BindAdmissionRuntimeGrouping(_) => InputKind::BindAdmissionRuntimeGrouping,
             Self::QueueAccepted(_) => InputKind::QueueAccepted,
             Self::SteerAccepted(_) => InputKind::SteerAccepted,
             Self::ChangeLane(_) => InputKind::ChangeLane,
@@ -12766,7 +12755,6 @@ pub enum InputKind {
     RunCancelled,
     RecoverAdmittedInput,
     RecoverInputLifecycle,
-    BindAdmissionRuntimeGrouping,
     QueueAccepted,
     SteerAccepted,
     ChangeLane,
@@ -15346,11 +15334,6 @@ pub enum TransitionId {
     RollbackRunRunningToRetired,
     RecycleFromIdleOrRetired,
     RecycleFromAttached,
-    BindAdmissionRuntimeGroupingIdle,
-    BindAdmissionRuntimeGroupingAttached,
-    BindAdmissionRuntimeGroupingRunning,
-    BindAdmissionRuntimeGroupingRetired,
-    BindAdmissionRuntimeGroupingStopped,
     RecoverAdmittedInputIdle,
     RecoverAdmittedInputAttached,
     RecoverAdmittedInputRunning,

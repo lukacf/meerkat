@@ -623,7 +623,6 @@ meerkat_machine_runtime_internal_inputs!(
     InputQueueLifecycle => [
         AbandonInput,
         AdvanceSessionContext,
-        BindAdmissionRuntimeGrouping,
         BudgetExhausted,
         ChangeLane,
         CoalesceInput,

@@ -809,6 +809,159 @@ impl RealmChain {
     }
 }
 
+/// Synthesize the typed env-var-default target for `provider`.
+///
+/// The single owner of the synthetic fallback materialization, shared by the
+/// single-target and candidate resolvers so the ephemeral
+/// [`BindingOrigin::SyntheticEnvDefault`] identity is minted in exactly one
+/// place.
+fn env_default_target(
+    provider: Provider,
+    profile: Option<ProfileId>,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    let realm = RealmConnectionSet::synthesize_env_default(provider);
+    let binding =
+        BindingId::parse("default").map_err(|source| ConnectionTargetError::InvalidBindingId {
+            binding: "default".to_string(),
+            source,
+        })?;
+    materialize_connection_target(
+        realm,
+        provider,
+        binding,
+        profile,
+        BindingOrigin::SyntheticEnvDefault,
+    )
+}
+
+/// Walk `head`'s realm parent chain and collect, in chain order, one
+/// owner-stamped provider candidate per chain member that defines a usable
+/// provider binding (via the unified [`selected_binding_id_for_provider`]
+/// policy). This is the single owner of the default-selection cross-realm
+/// candidate order — it replaces both the deleted flat scan over
+/// `config.realm.keys()` and the deleted literal `"default"` realm candidate.
+///
+/// Provenance (decision A): each candidate is materialized from the OWNING
+/// chain member's OWN [`RealmConnectionSet`], so `AuthBindingRef.realm` is the
+/// realm that DEFINES the binding, and `materialize_connection_target` stamps
+/// `realm.realm_id` for an owner whose `realm_id == owner` by construction —
+/// the strict registry equality stays a real invariant with no relaxation.
+///
+/// Isolation (per-member fail-closed, MF-03): an ancestor member with an
+/// absent or structurally-invalid section is SKIPPED (it cannot take down
+/// resolution for valid descendants). The head isolates the same way unless
+/// `head_required`, in which case an absent head is `UnknownRealm` and an
+/// invalid head is `RealmConfigInvalid`.
+fn collect_provider_candidates_on_chain(
+    config: &Config,
+    provider: Provider,
+    head: &RealmId,
+    head_required: bool,
+) -> Result<Vec<ResolvedConnectionTarget>, ConnectionTargetError> {
+    let chain = RealmChain::resolve(config, head)?;
+    let mut out = Vec::new();
+    for (idx, member) in chain.realms().iter().enumerate() {
+        let is_head = idx == 0;
+        let Some(section) = config.realm.get(member.as_str()) else {
+            if is_head && head_required {
+                return Err(ConnectionTargetError::UnknownRealm(
+                    member.as_str().to_string(),
+                ));
+            }
+            continue;
+        };
+        let realm = match RealmConnectionSet::from_config(member.as_str(), section) {
+            Ok(realm) => realm,
+            Err(source) => {
+                if is_head && head_required {
+                    return Err(ConnectionTargetError::RealmConfigInvalid {
+                        realm: member.as_str().to_string(),
+                        source,
+                    });
+                }
+                continue;
+            }
+        };
+        let binding_id = match selected_binding_id_for_provider(&realm, provider) {
+            Ok(binding_id) => binding_id,
+            Err(err) => {
+                if is_head && head_required {
+                    return Err(err);
+                }
+                continue;
+            }
+        };
+        if let Some(binding_id) = binding_id {
+            out.push(materialize_connection_target(
+                realm,
+                provider,
+                binding_id,
+                None,
+                BindingOrigin::Configured,
+            )?);
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve an EXPLICIT binding id along `head`'s chain, returning the
+/// owner-stamped target for the first chain member (child-first) that defines
+/// it. A binding may be inherited: the head names the consuming realm, but the
+/// owner stamped is the chain member that actually declares the binding.
+///
+/// Head validity: an absent head is `UnknownRealm` and an invalid head is
+/// `RealmConfigInvalid` when `head_required`; ancestors isolate. If no chain
+/// member declares the binding, fail closed with `BindingInvalid`/UnknownBinding
+/// attributed to the head realm. A provider mismatch on the explicitly named
+/// binding propagates as `ProviderMismatch` (explicit requests are strict).
+fn resolve_explicit_binding_on_chain(
+    config: &Config,
+    provider: Provider,
+    head: &RealmId,
+    binding: &BindingId,
+    profile: Option<&ProfileId>,
+    head_required: bool,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    let chain = RealmChain::resolve(config, head)?;
+    for (idx, member) in chain.realms().iter().enumerate() {
+        let is_head = idx == 0;
+        let Some(section) = config.realm.get(member.as_str()) else {
+            if is_head && head_required {
+                return Err(ConnectionTargetError::UnknownRealm(
+                    member.as_str().to_string(),
+                ));
+            }
+            continue;
+        };
+        let realm = match RealmConnectionSet::from_config(member.as_str(), section) {
+            Ok(realm) => realm,
+            Err(source) => {
+                if is_head && head_required {
+                    return Err(ConnectionTargetError::RealmConfigInvalid {
+                        realm: member.as_str().to_string(),
+                        source,
+                    });
+                }
+                continue;
+            }
+        };
+        if realm.bindings.contains_key(binding.as_str()) {
+            return materialize_connection_target(
+                realm,
+                provider,
+                binding.clone(),
+                profile.cloned(),
+                BindingOrigin::Configured,
+            );
+        }
+    }
+    Err(ConnectionTargetError::BindingInvalid {
+        realm: head.as_str().to_string(),
+        binding: binding.as_str().to_string(),
+        source: ProviderBindingError::UnknownBinding(binding.as_str().to_string()),
+    })
+}
+
 /// Resolve a connection target from config-owned identity facts.
 ///
 /// `explicit_realm` / `explicit_binding` are request atoms, not defaults.
@@ -825,81 +978,38 @@ pub fn resolve_realm_binding_target_for_provider(
     preferred_realm: Option<&RealmId>,
     allow_env_default: bool,
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
-    let mut candidates: Vec<&str> = Vec::new();
-    if let Some(realm) = explicit_realm {
-        candidates.push(realm.as_str());
-    } else {
-        if let Some(realm) = preferred_realm {
-            candidates.push(realm.as_str());
+    // Head of the chain: an explicit realm names it (and must exist); else the
+    // preferred realm. Resolution walks head -> parents -> global; an unrelated
+    // sibling realm is NOT a candidate (the flat scan is gone).
+    let head = explicit_realm.or(preferred_realm);
+    let head_required = explicit_realm.is_some();
+    if let Some(head) = head {
+        if let Some(binding) = explicit_binding {
+            return resolve_explicit_binding_on_chain(
+                config,
+                provider,
+                head,
+                binding,
+                explicit_profile,
+                head_required,
+            );
         }
-        if !candidates.contains(&"default") {
-            candidates.push("default");
+        let candidates =
+            collect_provider_candidates_on_chain(config, provider, head, head_required)?;
+        if let Some(first) = candidates.into_iter().next() {
+            return Ok(first);
         }
-    }
-
-    let mut missing_default: Option<String> = None;
-    for realm_id in candidates {
-        let Some(section) = config.realm.get(realm_id) else {
-            if explicit_realm.is_some() {
-                return Err(ConnectionTargetError::UnknownRealm(realm_id.to_string()));
-            }
-            continue;
-        };
-        let realm = RealmConnectionSet::from_config(realm_id, section).map_err(|source| {
-            ConnectionTargetError::RealmConfigInvalid {
-                realm: realm_id.to_string(),
-                source,
-            }
-        })?;
-        let binding_id = match explicit_binding {
-            Some(binding) => binding.clone(),
-            None => {
-                let Some(default_binding) = realm.default_binding.as_deref() else {
-                    missing_default = Some(realm_id.to_string());
-                    if explicit_realm.is_some() {
-                        return Err(ConnectionTargetError::MissingDefaultBinding {
-                            realm: realm_id.to_string(),
-                        });
-                    }
-                    continue;
-                };
-                BindingId::parse(default_binding).map_err(|source| {
-                    ConnectionTargetError::InvalidBindingId {
-                        binding: default_binding.to_string(),
-                        source,
-                    }
-                })?
-            }
-        };
-        return materialize_connection_target(
-            realm,
-            provider,
-            binding_id,
-            explicit_profile.cloned(),
-            BindingOrigin::Configured,
-        );
+        if head_required {
+            return Err(ConnectionTargetError::MissingDefaultBinding {
+                realm: head.as_str().to_string(),
+            });
+        }
     }
 
     if allow_env_default && explicit_realm.is_none() && explicit_binding.is_none() {
-        let realm = RealmConnectionSet::synthesize_env_default(provider);
-        let binding = BindingId::parse("default").map_err(|source| {
-            ConnectionTargetError::InvalidBindingId {
-                binding: "default".to_string(),
-                source,
-            }
-        })?;
-        return materialize_connection_target(
-            realm,
-            provider,
-            binding,
-            explicit_profile.cloned(),
-            BindingOrigin::SyntheticEnvDefault,
-        );
+        return env_default_target(provider, explicit_profile.cloned());
     }
 
-    if let Some(realm) = missing_default {
-        return Err(ConnectionTargetError::MissingDefaultBinding { realm });
-    }
     Err(ConnectionTargetError::MissingRealm)
 }
 
@@ -914,26 +1024,22 @@ pub fn resolve_auth_binding_or_default_for_provider(
     allow_env_default: bool,
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
     if let Some(auth_binding) = auth_binding {
-        let realm_id = auth_binding.realm.as_str();
+        // The synthetic env-var fallback is never a durable, config-resolvable
+        // identity: reject it BEFORE any chain walk (guards the reorder).
         if auth_binding.is_env_default() {
-            return Err(ConnectionTargetError::UnknownRealm(realm_id.to_string()));
+            return Err(ConnectionTargetError::UnknownRealm(
+                auth_binding.realm.as_str().to_string(),
+            ));
         }
-        let section = config
-            .realm
-            .get(realm_id)
-            .ok_or_else(|| ConnectionTargetError::UnknownRealm(realm_id.to_string()))?;
-        let realm = RealmConnectionSet::from_config(realm_id, section).map_err(|source| {
-            ConnectionTargetError::RealmConfigInvalid {
-                realm: realm_id.to_string(),
-                source,
-            }
-        })?;
-        return materialize_connection_target(
-            realm,
+        // Walk the named realm's chain so an explicitly-referenced binding that
+        // is defined only in a parent/global resolves at its OWNING realm.
+        return resolve_explicit_binding_on_chain(
+            config,
             provider,
-            auth_binding.binding.clone(),
-            auth_binding.profile.clone(),
-            BindingOrigin::Configured,
+            &auth_binding.realm,
+            &auth_binding.binding,
+            auth_binding.profile.as_ref(),
+            /* head_required = */ true,
         );
     }
 
@@ -1013,30 +1119,22 @@ fn selected_binding_id_for_provider(
     }
 }
 
-fn push_candidate_realm_ids<'a>(
-    ids: &mut Vec<&'a str>,
-    seen: &mut BTreeSet<&'a str>,
-    id: Option<&'a str>,
-) {
-    if let Some(id) = id
-        && seen.insert(id)
-    {
-        ids.push(id);
-    }
-}
-
 /// Resolve ordered connection candidates for an omitted `auth_binding`.
 ///
 /// The returned order is the shared "best available" policy used by all
-/// factory-backed surfaces:
-/// 1. configured provider binding in the preferred realm
-/// 2. configured provider binding in the `default` realm
-/// 3. configured provider binding in any remaining realm
+/// factory-backed surfaces, now driven by the realm parent chain:
+/// 1. provider binding in the preferred (head) realm
+/// 2. provider binding in each ancestor realm, child-first
+/// 3. provider binding in the reserved `global` root (implicit chain tail)
 /// 4. synthetic env-var fallback when allowed
 ///
-/// Within a realm, `default_binding` wins when it resolves to the requested
-/// provider, then `default_<provider>`, then a single unambiguous provider
-/// binding. Explicit `auth_binding` still resolves to one strict target.
+/// An unrelated sibling realm is NOT a candidate — the prior flat scan over
+/// `config.realm.keys()` and the literal `"default"` realm candidate are both
+/// removed; shared credentials belong in `[realm.global]` (inherited by every
+/// realm via the implicit tail) or a named parent. Within a realm,
+/// `default_binding` wins when it resolves to the requested provider, then the
+/// typed `provider_default` marker, then a single unambiguous provider binding.
+/// Explicit `auth_binding` still resolves to one strict (owner-stamped) target.
 pub fn resolve_auth_binding_candidates_for_provider(
     config: &Config,
     provider: Provider,
@@ -1055,68 +1153,23 @@ pub fn resolve_auth_binding_candidates_for_provider(
         .map(|target| vec![target]);
     }
 
-    let mut realm_ids = Vec::new();
-    let mut seen = BTreeSet::new();
-    push_candidate_realm_ids(
-        &mut realm_ids,
-        &mut seen,
-        preferred_realm.map(RealmId::as_str),
-    );
-    push_candidate_realm_ids(&mut realm_ids, &mut seen, Some("default"));
-    for realm_id in config.realm.keys() {
-        push_candidate_realm_ids(&mut realm_ids, &mut seen, Some(realm_id.as_str()));
-    }
-
     let mut candidates = Vec::new();
-    let mut missing_default: Option<String> = None;
-    for realm_id in realm_ids {
-        let Some(section) = config.realm.get(realm_id) else {
-            if preferred_realm.is_some_and(|preferred| preferred.as_str() == realm_id) {
-                missing_default.get_or_insert_with(|| realm_id.to_string());
-            }
-            continue;
-        };
-        let realm = RealmConnectionSet::from_config(realm_id, section).map_err(|source| {
-            ConnectionTargetError::RealmConfigInvalid {
-                realm: realm_id.to_string(),
-                source,
-            }
-        })?;
-        if let Some(binding_id) = selected_binding_id_for_provider(&realm, provider)? {
-            candidates.push(materialize_connection_target(
-                realm,
-                provider,
-                binding_id,
-                None,
-                BindingOrigin::Configured,
-            )?);
-        }
-    }
-
-    if allow_env_default {
-        let realm = RealmConnectionSet::synthesize_env_default(provider);
-        let binding = BindingId::parse("default").map_err(|source| {
-            ConnectionTargetError::InvalidBindingId {
-                binding: "default".to_string(),
-                source,
-            }
-        })?;
-        candidates.push(materialize_connection_target(
-            realm,
-            provider,
-            binding,
-            None,
-            BindingOrigin::SyntheticEnvDefault,
+    if let Some(head) = preferred_realm {
+        // Candidate discovery never requires the head to exist (an unmaterialized
+        // session realm still inherits its chain / global); ancestors isolate.
+        candidates.extend(collect_provider_candidates_on_chain(
+            config, provider, head, false,
         )?);
     }
 
-    if !candidates.is_empty() {
-        return Ok(candidates);
+    if allow_env_default {
+        candidates.push(env_default_target(provider, None)?);
     }
-    if let Some(realm) = missing_default {
-        return Err(ConnectionTargetError::MissingDefaultBinding { realm });
+
+    if candidates.is_empty() {
+        return Err(ConnectionTargetError::MissingRealm);
     }
-    Err(ConnectionTargetError::MissingRealm)
+    Ok(candidates)
 }
 
 fn materialize_connection_target(
@@ -2302,15 +2355,20 @@ auth_profile = "default_profile"
         assert_eq!(target.binding.id, "secondary");
     }
 
+    // An EXPLICITLY named binding whose provider disagrees with the requested
+    // provider is a strict ProviderMismatch (explicit requests are not
+    // provider-filtered). Default-selection by contrast simply yields no
+    // candidate for a provider the realm has no binding for (see RCT-10).
     #[test]
     fn connection_target_rejects_provider_mismatch() {
         let config = openai_target_config();
         let preferred_realm = RealmId::parse("prod").unwrap();
+        let binding = BindingId::parse("primary").unwrap();
         let err = resolve_realm_binding_target_for_provider(
             &config,
             Provider::Anthropic,
             None,
-            None,
+            Some(&binding),
             None,
             Some(&preferred_realm),
             false,
@@ -2326,6 +2384,324 @@ auth_profile = "default_profile"
                 ..
             }
         ));
+    }
+
+    // ---- P2: chain-aware resolution + owning-realm provenance -------------
+
+    /// global owns the openai binding `primary`; `child` inherits via parent.
+    fn openai_inherit_config(extra_child: &str) -> Config {
+        config_with_realms(&format!(
+            r#"
+[global]
+default_binding = "primary"
+
+[global.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[global.auth.openai_key]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = {{ kind = "platform_default" }}
+
+[global.binding.primary]
+backend_profile = "openai_default"
+auth_profile = "openai_key"
+
+[child]
+parent = "global"
+{extra_child}
+"#
+        ))
+    }
+
+    // RCT-06
+    #[test]
+    fn inherited_binding_stamps_owning_realm_not_consuming_realm() {
+        let cfg = openai_inherit_config("");
+        let child = rid("child");
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &cfg,
+            Provider::OpenAI,
+            None,
+            Some(&child),
+            false,
+        )
+        .expect("resolve");
+        assert_eq!(
+            candidates[0].auth_binding.realm.as_str(),
+            "global",
+            "owner is the defining realm, not the consuming child"
+        );
+        assert_eq!(candidates[0].auth_binding.binding.as_str(), "primary");
+    }
+
+    // RCT-07
+    #[test]
+    fn resolved_target_realm_equals_owning_connection_set_realm_id() {
+        let cfg = openai_inherit_config("");
+        let child = rid("child");
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &cfg,
+            Provider::OpenAI,
+            None,
+            Some(&child),
+            false,
+        )
+        .expect("resolve");
+        let target = &candidates[0];
+        // The registry equality (auth_binding.realm == realm.realm_id) holds for
+        // an inherited binding WITHOUT any relaxation.
+        assert_eq!(
+            target.realm.realm_id.as_str(),
+            target.auth_binding.realm.as_str()
+        );
+        assert_eq!(target.realm.realm_id.as_str(), "global");
+    }
+
+    // RCT-08
+    #[test]
+    fn inherited_binding_resolves_backend_auth_in_owning_realm_only() {
+        // child redefines the SAME auth-profile key as a DIFFERENT provider.
+        // The inherited binding (owned by global) must resolve global's auth,
+        // never child's shadow (binding-owner == auth-owner invariant).
+        let cfg = openai_inherit_config(
+            r#"
+[child.auth.openai_key]
+provider = "gemini"
+auth_method = "api_key"
+source = { kind = "platform_default" }
+"#,
+        );
+        let child = rid("child");
+        let target = resolve_auth_binding_or_default_for_provider(
+            &cfg,
+            Provider::OpenAI,
+            None,
+            Some(&child),
+            false,
+        )
+        .expect("resolve");
+        assert_eq!(target.auth_binding.realm.as_str(), "global");
+        assert_eq!(
+            target.auth_profile.provider,
+            Provider::OpenAI,
+            "auth must resolve in the owning (global) section, not child's shadow"
+        );
+    }
+
+    // RCT-10
+    #[test]
+    fn single_target_path_uses_unified_selection_policy() {
+        // A realm with NO default_binding but a single unambiguous provider
+        // binding resolves it (old default_binding-only path would have failed).
+        let cfg = config_with_realms(
+            r#"
+[solo]
+
+[solo.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[solo.auth.openai_key]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[solo.binding.only]
+backend_profile = "openai_default"
+auth_profile = "openai_key"
+"#,
+        );
+        let solo = rid("solo");
+        let target = resolve_realm_binding_target_for_provider(
+            &cfg,
+            Provider::OpenAI,
+            None,
+            None,
+            None,
+            Some(&solo),
+            false,
+        )
+        .expect("single unambiguous provider binding resolves without default_binding");
+        assert_eq!(target.auth_binding.binding.as_str(), "only");
+        assert_eq!(target.auth_binding.realm.as_str(), "solo");
+    }
+
+    // RCT-11
+    #[test]
+    fn explicit_inherited_binding_resolves_at_owning_realm() {
+        let cfg = openai_inherit_config("");
+        let explicit = AuthBindingRef {
+            realm: rid("child"),
+            binding: BindingId::parse("primary").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        let target = resolve_auth_binding_or_default_for_provider(
+            &cfg,
+            Provider::OpenAI,
+            Some(&explicit),
+            None,
+            false,
+        )
+        .expect("explicit inherited binding resolves");
+        assert_eq!(target.auth_binding.realm.as_str(), "global");
+        assert_eq!(target.auth_binding.binding.as_str(), "primary");
+    }
+
+    // RCT-25
+    #[test]
+    fn default_realm_literal_not_consulted_then_works_under_global() {
+        // [realm.default] is NOT auto-consulted for an unrelated head.
+        let with_default = config_with_realms(
+            r#"
+[default]
+default_binding = "p"
+
+[default.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[default.auth.openai_key]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[default.binding.p]
+backend_profile = "openai_default"
+auth_profile = "openai_key"
+
+[prod]
+"#,
+        );
+        let prod = rid("prod");
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &with_default,
+            Provider::OpenAI,
+            None,
+            Some(&prod),
+            false,
+        )
+        .unwrap_or_default();
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.auth_binding.realm.as_str() != "default"),
+            "the literal 'default' realm must not be consulted for an unrelated head"
+        );
+
+        // The SAME binding under [realm.global] IS inherited via the implicit tail.
+        let under_global = config_with_realms(
+            r#"
+[global]
+default_binding = "p"
+
+[global.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[global.auth.openai_key]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[global.binding.p]
+backend_profile = "openai_default"
+auth_profile = "openai_key"
+
+[prod]
+"#,
+        );
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &under_global,
+            Provider::OpenAI,
+            None,
+            Some(&prod),
+            false,
+        )
+        .expect("global is inherited via the implicit tail");
+        assert_eq!(candidates[0].auth_binding.realm.as_str(), "global");
+        assert_eq!(candidates[0].auth_binding.binding.as_str(), "p");
+    }
+
+    // RCT-35
+    #[test]
+    fn nearest_child_wins_when_head_and_ancestor_both_define_binding() {
+        let cfg = config_with_realms(
+            r#"
+[global]
+default_binding = "g"
+
+[global.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[global.auth.openai_key]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[global.binding.g]
+backend_profile = "openai_default"
+auth_profile = "openai_key"
+
+[team]
+parent = "global"
+default_binding = "t"
+
+[team.backend.openai_default]
+provider = "openai"
+backend_kind = "openai_api"
+
+[team.auth.openai_key]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[team.binding.t]
+backend_profile = "openai_default"
+auth_profile = "openai_key"
+"#,
+        );
+        let team = rid("team");
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &cfg,
+            Provider::OpenAI,
+            None,
+            Some(&team),
+            false,
+        )
+        .expect("resolve");
+        assert_eq!(
+            candidates[0].auth_binding.realm.as_str(),
+            "team",
+            "nearest-child first"
+        );
+        assert_eq!(candidates[0].auth_binding.binding.as_str(), "t");
+        assert_eq!(candidates[1].auth_binding.realm.as_str(), "global");
+        assert_eq!(candidates[1].auth_binding.binding.as_str(), "g");
+    }
+
+    // RCT-38
+    #[test]
+    fn explicit_env_default_ref_rejected_before_chain_walk() {
+        let cfg = openai_inherit_config("");
+        let env_ref = AuthBindingRef {
+            realm: RealmId::from_known_valid(ENV_DEFAULT_REALM_SLUG),
+            binding: BindingId::parse("default").unwrap(),
+            profile: None,
+            origin: BindingOrigin::SyntheticEnvDefault,
+        };
+        let err = resolve_auth_binding_or_default_for_provider(
+            &cfg,
+            Provider::OpenAI,
+            Some(&env_ref),
+            None,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConnectionTargetError::UnknownRealm(_)));
     }
 
     #[test]
@@ -2366,8 +2742,11 @@ default_model = "test-openai-default"
         assert!(!candidates[0].auth_binding.is_env_default());
     }
 
+    // RCT-09: the flat cross-realm scan is gone. An unrelated sibling realm
+    // (not an ancestor of the head) is NOT auto-discovered; only chain members
+    // + env_default are candidates.
     #[test]
-    fn auth_binding_candidates_scan_configured_realms_before_env_default() {
+    fn auth_binding_candidates_exclude_unrelated_sibling_realm() {
         let config = config_with_realms(
             r#"
 [dev]
@@ -2386,6 +2765,8 @@ backend_profile = "openai_chatgpt"
 auth_profile = "openai_oauth"
 "#,
         );
+        // Head 'missing' is absent, has no parent edge, and there is no global
+        // realm — so 'dev' is an unrelated sibling and must NOT be discovered.
         let preferred_realm = RealmId::parse("missing").unwrap();
 
         let candidates = resolve_auth_binding_candidates_for_provider(
@@ -2397,17 +2778,19 @@ auth_profile = "openai_oauth"
         )
         .expect("candidates resolve");
 
-        assert_eq!(candidates[0].auth_binding.realm.as_str(), "dev");
-        assert_eq!(candidates[0].auth_binding.binding.as_str(), "openai_oauth");
-        assert!(!candidates[0].auth_binding.is_env_default());
-        let synthetic = candidates.last().unwrap();
-        assert_eq!(synthetic.auth_binding.realm.as_str(), "env_default");
-        // The synthetic fallback carries the typed origin, not just the slug.
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.auth_binding.realm.as_str() != "dev"),
+            "unrelated sibling 'dev' must not be discovered via a flat scan"
+        );
+        // Only the synthetic env-var fallback remains.
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].auth_binding.is_env_default());
         assert_eq!(
-            synthetic.auth_binding.origin,
+            candidates[0].auth_binding.origin,
             BindingOrigin::SyntheticEnvDefault
         );
-        assert!(synthetic.auth_binding.is_env_default());
     }
 
     #[test]

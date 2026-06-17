@@ -1843,18 +1843,74 @@ impl ShellState {
                 )
             })
             .count();
-        let completion_entries = {
+        let authority_completion_entries = self.completion_feed_authority_entries()?;
+        let published_completion_entries_by_id: HashMap<OperationId, CompletionEntry> = {
             let inner = self
                 .feed_buffer
                 .inner
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            inner.entries.iter().cloned().collect()
+            let mut entries = HashMap::new();
+            for entry in &inner.entries {
+                if !authority_completion_entries.contains_key(&entry.operation_id) {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "public completion feed projection for {} has no generated authority",
+                        entry.operation_id
+                    )));
+                }
+                if entries
+                    .insert(entry.operation_id.clone(), entry.clone())
+                    .is_some()
+                {
+                    return Err(OpsLifecycleError::Internal(format!(
+                        "public completion feed projection for {} appeared more than once",
+                        entry.operation_id
+                    )));
+                }
+            }
+            entries
         };
+        let mut completion_entries: Vec<CompletionEntry> = authority_completion_entries
+            .iter()
+            .map(|(operation_id, authority_entry)| {
+                if let Some(projection) = published_completion_entries_by_id.get(operation_id) {
+                    if projection.seq != authority_entry.seq
+                        || projection.kind != authority_entry.kind
+                        || projection.terminal_outcome != authority_entry.terminal_outcome
+                    {
+                        return Err(OpsLifecycleError::Internal(format!(
+                            "public completion feed projection for {operation_id} drifted from generated authority"
+                        )));
+                    }
+                    return Ok(projection.clone());
+                }
+
+                let display_name = self
+                    .records
+                    .get(operation_id)
+                    .map(|record| record.spec.display_name.clone())
+                    .unwrap_or_default();
+                let completed_at_ms = self.records.get(operation_id).and_then(|record| {
+                    record
+                        .completed_at
+                        .map(|completed_at| record.epoch_millis_for_instant(completed_at))
+                });
+
+                Ok(CompletionEntry {
+                    seq: authority_entry.seq,
+                    operation_id: operation_id.clone(),
+                    kind: authority_entry.kind,
+                    display_name,
+                    terminal_outcome: authority_entry.terminal_outcome.clone(),
+                    completed_at_ms,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        completion_entries.sort_by_key(|entry| entry.seq);
 
         let authority_state = RegistryCanonicalState {
             operations,
-            completion_feed_entries: self.completion_feed_authority_entries()?,
+            completion_feed_entries: authority_completion_entries,
             completed_order,
             max_completed: self.max_completed,
             max_concurrent: self.max_concurrent,
@@ -4968,6 +5024,41 @@ mod tests {
         assert!(
             matches!(&err, OpsLifecycleError::Internal(message) if message.contains("no generated feed authority")),
             "unexpected recovery error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn captured_snapshot_rejects_completion_feed_projection_without_generated_authority() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let phantom_id = OperationId::new();
+        {
+            let state = registry.read_state().unwrap();
+            state.feed_buffer.push(CompletionEntry {
+                seq: 1,
+                operation_id: phantom_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                display_name: "phantom".into(),
+                terminal_outcome: OperationTerminalOutcome::Completed(OperationResult {
+                    id: phantom_id,
+                    content: "phantom".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                }),
+                completed_at_ms: None,
+            });
+        }
+
+        let cursor_state = meerkat_core::EpochCursorState::new();
+        let err = match registry
+            .capture_persistence_snapshot(meerkat_core::RuntimeEpochId::new(), &cursor_state)
+        {
+            Ok(_) => panic!("phantom public completion projection must fail snapshot capture"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, OpsLifecycleError::Internal(message) if message.contains("no generated authority")),
+            "unexpected capture error: {err:?}"
         );
     }
 

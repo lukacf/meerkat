@@ -413,6 +413,14 @@ fn append_self_hosted(
             api_style: server.api_style,
             base_url: normalize_base_url(&server.base_url),
         };
+        let image_tool_results = model.image_tool_results
+            && matches!(
+                (server.transport, server.api_style),
+                (
+                    SelfHostedTransport::OpenAiCompatible,
+                    SelfHostedApiStyle::Responses
+                )
+            );
         let profile = ModelProfile {
             provider: Provider::SelfHosted,
             model_family: model.family.clone(),
@@ -423,7 +431,7 @@ fn append_self_hosted(
             inline_video: model.inline_video,
             vision: model.vision,
             image_input: model.vision,
-            image_tool_results: model.image_tool_results,
+            image_tool_results,
             realtime: false,
             image_generation: false,
             params_schema: serde_json::json!({}),
@@ -562,6 +570,35 @@ mod tests {
         assert_eq!(
             registry.default_model(Provider::SelfHosted),
             Some("gemma-4-31b")
+        );
+        let profile = match registry.profile_for_provider(Provider::SelfHosted, "gemma-4-31b") {
+            Some(profile) => profile,
+            None => panic!("missing self-hosted profile"),
+        };
+        assert!(
+            profile.image_tool_results,
+            "Responses-mode self-hosted models should retain configured image tool-result support"
+        );
+    }
+
+    #[test]
+    fn self_hosted_chat_completions_downgrades_image_tool_result_support() {
+        let mut config = config_with_self_hosted();
+        match config.self_hosted.servers.get_mut("local") {
+            Some(server) => server.api_style = SelfHostedApiStyle::ChatCompletions,
+            None => panic!("missing local self-hosted server"),
+        }
+        let registry = match ModelRegistry::from_config(&config, test_catalog()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+        let profile = match registry.profile_for_provider(Provider::SelfHosted, "gemma-4-31b") {
+            Some(profile) => profile,
+            None => panic!("missing self-hosted profile"),
+        };
+        assert!(
+            !profile.image_tool_results,
+            "Chat Completions self-hosted models text-project tool results even when raw config requests image support"
         );
     }
 

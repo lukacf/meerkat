@@ -13,6 +13,7 @@
 //!   cargo test -p meerkat --test live_meerkat_regression -- --ignored --test-threads=1
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use meerkat::*;
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_core::image_generation::{
@@ -26,8 +27,8 @@ use meerkat_core::image_generation::{
 use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeExecutionKind};
 use meerkat_core::service::{InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::{
-    AgentToolDispatcher, AssistantBlock, BlobStore, ContentBlock, ProviderId, SessionEffect,
-    ToolCallView,
+    AgentToolDispatcher, AssistantBlock, BlobStore, BlockAssistantMessage, ContentBlock, ImageData,
+    Message, ProviderId, SessionEffect, StopReason, ToolCallView, ToolDef, ToolResult, UserMessage,
 };
 use meerkat_runtime::{MeerkatMachine, SessionServiceRuntimeExt};
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder};
@@ -385,6 +386,91 @@ mod image_generation_substrate {
             Arc::new(meerkat_client::OpenAiClient::new(api_key)),
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_openai_responses_tool_result_image_output() {
+        let Some(api_key) = openai_api_key() else {
+            eprintln!("Skipping OpenAI tool-result image smoke: missing OPENAI_API_KEY");
+            return;
+        };
+        let model = std::env::var("RKAT_OPENAI_TEXT_MODEL")
+            .or_else(|_| std::env::var("SMOKE_OPENAI_MODEL"))
+            .unwrap_or_else(|_| "gpt-5.4".to_string());
+        let call_id = "call_meerkat_tool_result_image_smoke";
+        let args = RawValue::from_string("{}".to_string()).expect("valid empty args");
+        let request = LlmRequest::new(
+            &model,
+            vec![
+                Message::User(UserMessage::text(
+                    "A screenshot tool has already returned a tiny PNG. Reply with one short sentence confirming the tool result image was accepted."
+                        .to_string(),
+                )),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: call_id.to_string(),
+                        name: "capture_screenshot".to_string(),
+                        args,
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )),
+                Message::tool_results(vec![ToolResult::with_blocks(
+                    call_id.to_string(),
+                    vec![
+                        ContentBlock::Text {
+                            text: "Captured a 1x1 PNG smoke-test image.".to_string(),
+                        },
+                        ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: ImageData::Inline {
+                                data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+                                    .to_string(),
+                            },
+                        },
+                    ],
+                    false,
+                )]),
+            ],
+        )
+        .with_tools(vec![Arc::new(ToolDef::new(
+            "capture_screenshot",
+            "Capture a screenshot and return image content.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ))]);
+
+        let client = meerkat_client::OpenAiClient::new(api_key);
+        let mut stream = client.stream(&request);
+        let mut saw_text = false;
+        let mut saw_done = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(LlmEvent::TextDelta { delta, .. }) => {
+                    saw_text |= !delta.trim().is_empty();
+                }
+                Ok(LlmEvent::Done { outcome, .. }) => {
+                    assert!(
+                        matches!(outcome, LlmDoneOutcome::Success { .. }),
+                        "OpenAI Responses image tool-result smoke should finish successfully, got {outcome:?}"
+                    );
+                    saw_done = true;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    panic!(
+                        "OpenAI Responses rejected or failed image tool-result output for {model}: {error:?}"
+                    );
+                }
+            }
+        }
+
+        assert!(saw_text, "OpenAI smoke should stream assistant text");
+        assert!(saw_done, "OpenAI smoke should reach Done");
     }
 
     #[tokio::test]

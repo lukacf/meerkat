@@ -16,12 +16,20 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::client::{OpenAiReplayProjectionMode, project_openai_replay_messages};
+use crate::client::{OpenAiReplayProjectionMode, project_openai_replay_messages_for_capabilities};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiCompatibleMode {
     Responses,
     ChatCompletions,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenAiCompatibleClientOptions {
+    pub supports_temperature: bool,
+    pub supports_thinking: bool,
+    pub supports_reasoning: bool,
+    pub supports_image_tool_results: bool,
 }
 
 /// OpenAI-compatible client for self-hosted servers.
@@ -35,6 +43,7 @@ pub struct OpenAiCompatibleClient {
     supports_temperature: bool,
     supports_thinking: bool,
     supports_reasoning: bool,
+    supports_image_tool_results: bool,
 }
 
 impl OpenAiCompatibleClient {
@@ -46,6 +55,27 @@ impl OpenAiCompatibleClient {
         supports_temperature: bool,
         supports_thinking: bool,
         supports_reasoning: bool,
+    ) -> Self {
+        Self::new_with_options(
+            mode,
+            remote_model,
+            base_url,
+            bearer_token,
+            OpenAiCompatibleClientOptions {
+                supports_temperature,
+                supports_thinking,
+                supports_reasoning,
+                supports_image_tool_results: false,
+            },
+        )
+    }
+
+    pub fn new_with_options(
+        mode: OpenAiCompatibleMode,
+        remote_model: String,
+        base_url: String,
+        bearer_token: Option<String>,
+        options: OpenAiCompatibleClientOptions,
     ) -> Self {
         let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
             .unwrap_or_else(|_| reqwest::Client::new());
@@ -62,9 +92,10 @@ impl OpenAiCompatibleClient {
             base_url,
             http,
             responses_delegate,
-            supports_temperature,
-            supports_thinking,
-            supports_reasoning,
+            supports_temperature: options.supports_temperature,
+            supports_thinking: options.supports_thinking,
+            supports_reasoning: options.supports_reasoning,
+            supports_image_tool_results: options.supports_image_tool_results,
         }
     }
 
@@ -402,7 +433,11 @@ impl LlmClient for OpenAiCompatibleClient {
             OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,
             OpenAiCompatibleMode::ChatCompletions => OpenAiReplayProjectionMode::ChatCompletions,
         };
-        project_openai_replay_messages(messages, mode)
+        project_openai_replay_messages_for_capabilities(
+            messages,
+            mode,
+            self.supports_image_tool_results,
+        )
     }
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
@@ -700,15 +735,32 @@ struct ChatUsage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::{
         Json, Router,
         extract::{Request, State},
         response::IntoResponse,
         routing::post,
     };
-    use meerkat_core::UserMessage;
+    use meerkat_core::{
+        BlockAssistantMessage, ContentBlock, ImageData, StopReason, ToolResult, UserMessage,
+    };
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    fn options(
+        supports_temperature: bool,
+        supports_thinking: bool,
+        supports_reasoning: bool,
+        supports_image_tool_results: bool,
+    ) -> OpenAiCompatibleClientOptions {
+        OpenAiCompatibleClientOptions {
+            supports_temperature,
+            supports_thinking,
+            supports_reasoning,
+            supports_image_tool_results,
+        }
+    }
 
     async fn chat_sse(State(payload): State<String>) -> impl IntoResponse {
         ([("content-type", "text/event-stream")], payload)
@@ -718,6 +770,7 @@ mod tests {
     struct ResponsesStubState {
         payload: String,
         auth_headers: Arc<Mutex<Vec<Option<String>>>>,
+        request_bodies: Arc<Mutex<Vec<Value>>>,
     }
 
     async fn responses_sse(
@@ -734,6 +787,15 @@ mod tests {
             .lock()
             .expect("auth header capture lock")
             .push(auth);
+        if let Ok(bytes) = to_bytes(request.into_body(), usize::MAX).await
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        {
+            state
+                .request_bodies
+                .lock()
+                .expect("request body capture lock")
+                .push(value);
+        }
         ([("content-type", "text/event-stream")], state.payload)
     }
 
@@ -761,15 +823,18 @@ mod tests {
     ) -> (
         String,
         Arc<Mutex<Vec<Option<String>>>>,
+        Arc<Mutex<Vec<Value>>>,
         tokio::task::JoinHandle<()>,
     ) {
         let auth_headers = Arc::new(Mutex::new(Vec::new()));
+        let request_bodies = Arc::new(Mutex::new(Vec::new()));
         let app = Router::new()
             .route("/v1/responses", post(responses_sse))
             .route("/v1/models", axum::routing::get(models))
             .with_state(ResponsesStubState {
                 payload,
                 auth_headers: Arc::clone(&auth_headers),
+                request_bodies: Arc::clone(&request_bodies),
             });
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -778,7 +843,12 @@ mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test server");
         });
-        (format!("http://{addr}/v1"), auth_headers, handle)
+        (
+            format!("http://{addr}/v1"),
+            auth_headers,
+            request_bodies,
+            handle,
+        )
     }
 
     #[test]
@@ -826,14 +896,12 @@ mod tests {
         )
         .to_string();
         let (base_url, handle) = spawn_chat_stub_server(payload).await;
-        let client = OpenAiCompatibleClient::new(
+        let client = OpenAiCompatibleClient::new_with_options(
             OpenAiCompatibleMode::ChatCompletions,
             "remote-model".to_string(),
             base_url,
             None,
-            true,
-            false,
-            false,
+            options(true, false, false, false),
         );
         let request = LlmRequest::new(
             "gemma-4-31b",
@@ -881,14 +949,12 @@ mod tests {
         )
         .to_string();
         let (base_url, handle) = spawn_chat_stub_server(payload).await;
-        let client = OpenAiCompatibleClient::new(
+        let client = OpenAiCompatibleClient::new_with_options(
             OpenAiCompatibleMode::ChatCompletions,
             "remote-model".to_string(),
             base_url,
             None,
-            true,
-            false,
-            false,
+            options(true, false, false, false),
         );
         let request = LlmRequest::new(
             "gemma-4-31b",
@@ -937,14 +1003,12 @@ mod tests {
         )
         .to_string();
         let (base_url, handle) = spawn_chat_stub_server(payload).await;
-        let client = OpenAiCompatibleClient::new(
+        let client = OpenAiCompatibleClient::new_with_options(
             OpenAiCompatibleMode::ChatCompletions,
             "remote-model".to_string(),
             base_url,
             None,
-            true,
-            true,
-            true,
+            options(true, true, true, false),
         );
         let request = LlmRequest::new(
             "gemma-4-31b",
@@ -978,14 +1042,12 @@ mod tests {
 
     #[test]
     fn build_chat_completions_body_preserves_reasoning_overrides() {
-        let client = OpenAiCompatibleClient::new(
+        let client = OpenAiCompatibleClient::new_with_options(
             OpenAiCompatibleMode::ChatCompletions,
             "remote-model".to_string(),
             "http://localhost:11434/v1".to_string(),
             None,
-            true,
-            true,
-            true,
+            options(true, true, true, false),
         );
         let request = LlmRequest::new(
             "gemma-4-31b",
@@ -1018,14 +1080,12 @@ mod tests {
 
     #[test]
     fn build_chat_completions_body_preserves_xhigh_reasoning_effort() {
-        let client = OpenAiCompatibleClient::new(
+        let client = OpenAiCompatibleClient::new_with_options(
             OpenAiCompatibleMode::ChatCompletions,
             "remote-model".to_string(),
             "http://localhost:11434/v1".to_string(),
             None,
-            true,
-            true,
-            true,
+            options(true, true, true, false),
         );
         let request = LlmRequest::new(
             "gemma-4-31b",
@@ -1051,15 +1111,14 @@ mod tests {
             "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n"
         )
         .to_string();
-        let (base_url, auth_headers, handle) = spawn_responses_stub_server(payload).await;
-        let client = OpenAiCompatibleClient::new(
+        let (base_url, auth_headers, _request_bodies, handle) =
+            spawn_responses_stub_server(payload).await;
+        let client = OpenAiCompatibleClient::new_with_options(
             OpenAiCompatibleMode::Responses,
             "gemma4:e2b".to_string(),
             base_url,
             None,
-            true,
-            true,
-            true,
+            options(true, true, true, true),
         );
         let request = LlmRequest::new(
             "gemma-4-e2b",
@@ -1077,16 +1136,82 @@ mod tests {
         handle.abort();
     }
 
+    #[tokio::test]
+    async fn responses_mode_posts_tool_result_images_as_responses_output_parts() {
+        let payload = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n"
+        )
+        .to_string();
+        let (base_url, _auth_headers, request_bodies, handle) =
+            spawn_responses_stub_server(payload).await;
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::Responses,
+            "gemma4:e2b".to_string(),
+            base_url,
+            None,
+            options(true, true, true, true),
+        );
+        let request = LlmRequest::new(
+            "gemma-4-e2b",
+            vec![
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "screenshot".to_string(),
+                        args: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("valid args"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )),
+                Message::tool_results(vec![ToolResult::with_blocks(
+                    "call_1".to_string(),
+                    vec![
+                        ContentBlock::Text {
+                            text: "screenshot taken".to_string(),
+                        },
+                        ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: ImageData::Inline {
+                                data: "iVBOR...".to_string(),
+                            },
+                        },
+                    ],
+                    false,
+                )]),
+            ],
+        );
+
+        let events: Vec<_> = client.stream(&request).collect().await;
+        assert!(
+            events.iter().all(Result::is_ok),
+            "responses mode should complete against the stub server"
+        );
+        let request_bodies = request_bodies.lock().expect("request body capture lock");
+        assert_eq!(request_bodies.len(), 1);
+        assert_eq!(request_bodies[0]["model"], "gemma4:e2b");
+        let input = request_bodies[0]["input"].as_array().expect("input array");
+        let tool_output = input
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+            .expect("function_call_output");
+        let output = tool_output["output"].as_array().expect("output array");
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[0]["text"], "screenshot taken");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(output[1]["image_url"], "data:image/png;base64,iVBOR...");
+        handle.abort();
+    }
+
     #[test]
     fn request_with_remote_model_preserves_self_hosted_capabilities_for_delegate() {
-        let client = OpenAiCompatibleClient::new(
+        let client = OpenAiCompatibleClient::new_with_options(
             OpenAiCompatibleMode::Responses,
             "gemma4:e2b".to_string(),
             "http://localhost:11434/v1".to_string(),
             None,
-            true,
-            true,
-            true,
+            options(true, true, true, true),
         );
         let request = LlmRequest::new(
             "gemma-4-e2b",
@@ -1102,6 +1227,154 @@ mod tests {
         };
         assert_eq!(tag.supports_temperature_override, Some(true));
         assert_eq!(tag.supports_reasoning_override, Some(true));
+    }
+
+    #[test]
+    fn responses_mode_replay_preserves_tool_result_images_for_delegate() {
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::Responses,
+            "gemma4:e2b".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, true),
+        );
+        let messages = vec![
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "screenshot".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string())
+                        .expect("valid args"),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "call_1".to_string(),
+                vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "iVBOR...".to_string(),
+                    },
+                }],
+                false,
+            )]),
+        ];
+
+        let projected = client
+            .project_replay_messages(&messages)
+            .expect("responses projection");
+        assert!(
+            matches!(&projected[1], Message::ToolResults { .. }),
+            "expected tool results"
+        );
+        let Message::ToolResults { results, .. } = &projected[1] else {
+            return;
+        };
+        assert!(
+            results[0].has_images(),
+            "compatible Responses mode must keep images for delegate serialization"
+        );
+    }
+
+    #[test]
+    fn responses_mode_replay_text_projects_tool_result_images_when_model_cannot_accept_them() {
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::Responses,
+            "gemma4:e2b".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, false),
+        );
+        let messages = vec![
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "screenshot".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string())
+                        .expect("valid args"),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "call_1".to_string(),
+                vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "iVBOR...".to_string(),
+                    },
+                }],
+                false,
+            )]),
+        ];
+
+        let projected = client
+            .project_replay_messages(&messages)
+            .expect("responses projection");
+        assert!(
+            matches!(&projected[1], Message::ToolResults { .. }),
+            "expected tool results"
+        );
+        let Message::ToolResults { results, .. } = &projected[1] else {
+            return;
+        };
+        assert!(
+            !results[0].has_images(),
+            "incapable compatible Responses models should receive text-projected images"
+        );
+        assert_eq!(results[0].text_content(), "[image: image/png]");
+    }
+
+    #[test]
+    fn legacy_constructor_text_projects_tool_result_images() {
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::Responses,
+            "gemma4:e2b".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            true,
+            true,
+            true,
+        );
+        let messages = vec![
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "screenshot".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string())
+                        .expect("valid args"),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "call_1".to_string(),
+                vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "iVBOR...".to_string(),
+                    },
+                }],
+                false,
+            )]),
+        ];
+
+        let projected = client
+            .project_replay_messages(&messages)
+            .expect("responses projection");
+        assert!(
+            matches!(&projected[1], Message::ToolResults { .. }),
+            "expected tool results"
+        );
+        let Message::ToolResults { results, .. } = &projected[1] else {
+            return;
+        };
+        assert!(
+            !results[0].has_images(),
+            "legacy constructor should preserve source compatibility and keep image tool-results disabled"
+        );
+        assert_eq!(results[0].text_content(), "[image: image/png]");
     }
 
     #[test]

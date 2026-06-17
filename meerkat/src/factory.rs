@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
 #[cfg(feature = "openai")]
-use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
+use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleClientOptions, OpenAiCompatibleMode};
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
@@ -1176,6 +1176,7 @@ struct SelfHostedClientSpec {
     supports_temperature: bool,
     supports_thinking: bool,
     supports_reasoning: bool,
+    supports_image_tool_results: bool,
 }
 
 struct SelfHostedClientBuild {
@@ -3208,6 +3209,7 @@ impl AgentFactory {
             supports_temperature: profile.supports_temperature,
             supports_thinking: profile.supports_thinking,
             supports_reasoning: profile.supports_reasoning,
+            supports_image_tool_results: profile.image_tool_results,
         })
     }
 
@@ -3280,14 +3282,17 @@ impl AgentFactory {
                 .clone()
                 .unwrap_or(spec.base_url);
             Ok(SelfHostedClientBuild {
-                client: Arc::new(OpenAiCompatibleClient::new(
+                client: Arc::new(OpenAiCompatibleClient::new_with_options(
                     spec.mode,
                     spec.remote_model,
                     base_url,
                     bearer_token,
-                    spec.supports_temperature,
-                    spec.supports_thinking,
-                    spec.supports_reasoning,
+                    OpenAiCompatibleClientOptions {
+                        supports_temperature: spec.supports_temperature,
+                        supports_thinking: spec.supports_thinking,
+                        supports_reasoning: spec.supports_reasoning,
+                        supports_image_tool_results: spec.supports_image_tool_results,
+                    },
                 )),
                 durable_auth_binding,
             })
@@ -7591,6 +7596,21 @@ mod tests {
 
         factory.build_agent(build, &config).await.unwrap();
 
+        let expected_filter = meerkat_core::tool_scope::ToolFilter::Deny(
+            [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            bindings
+                .tool_visibility_owner()
+                .visibility_state()
+                .unwrap()
+                .capability_base_filter,
+            expected_filter,
+            "Chat Completions self-hosted models must hide view_image even when raw config requests image tool results"
+        );
+
         let calls = calls.lock().unwrap();
         assert_eq!(
             calls.len(),
@@ -7749,11 +7769,7 @@ mod tests {
             .await
             .unwrap();
 
-        let expected_filter = meerkat_core::tool_scope::ToolFilter::Deny(
-            [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-                .into_iter()
-                .collect(),
-        );
+        let expected_filter = meerkat_core::tool_scope::ToolFilter::All;
         let owner_state = bindings.tool_visibility_owner().visibility_state().unwrap();
         assert_eq!(&owner_state.capability_base_filter, &expected_filter);
         assert!(

@@ -23,7 +23,7 @@ pub mod text_adapter;
 pub mod web_search;
 
 pub use client::{AzureOpenAiWireConfig, OpenAiClient};
-pub use client_compatible::OpenAiCompatibleClient;
+pub use client_compatible::{OpenAiCompatibleClient, OpenAiCompatibleClientOptions};
 pub use image_generation::{
     OpenAiImageGenerationProfile, OpenAiImageOutputOptions, OpenAiImageProviderParams,
     OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiImagesApiRequestShape,

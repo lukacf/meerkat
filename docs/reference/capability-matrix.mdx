@@ -75,19 +75,19 @@ failures -32010, budget exhaustion -32011, hook denial -32012, cancellation
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "0.7.6", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.7.7", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "0.7.6", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "0.7.7", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "0.7.6", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "0.7.7", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add scheduling
-meerkat = { version = "0.7.6", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "0.7.7", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Kitchen sink
-meerkat = { version = "0.7.6", features = [
+meerkat = { version = "0.7.7", features = [
   "all-providers", "openai-realtime", "session-store", "session-compaction",
   "memory-store-session", "comms", "mcp", "skills", "schedule", "workgraph", "live"
 ] }

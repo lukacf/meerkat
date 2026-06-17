@@ -1038,6 +1038,8 @@ rust_test(
         "//meerkat-rpc:package_runfiles",
         "//meerkat:cargo_manifest",
         "//meerkat:package_runfiles",
+        "//tests/integration:cargo_manifest",
+        "//tests/integration:package_runfiles",
         "//meerkat-cli:rkat",
     ],
     env = {

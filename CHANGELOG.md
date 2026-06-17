@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Provider params now expose typed prompt-cache hints for OpenAI, Anthropic,
+  and Gemini. OpenAI Responses requests still default to `store: false`, with
+  explicit overrides for `store`, `prompt_cache_key`, and
+  `prompt_cache_retention`; Anthropic can mark the stable system prefix for
+  `cache_control`; Gemini can pass an explicit cached-content resource name.
+- OpenAI Responses streaming can reuse stored response IDs as
+  `previous_response_id` continuation hints when `store: true` is explicitly
+  enabled, while preserving full local transcript replay as the fallback path.
 - Gemini video inputs can now be passed by provider-readable URI as
   `VideoData::Uri` / `WireVideoData::Uri`. Vertex accepts `gs://` references
   directly. Gemini API clients use public or already-registered file URIs as

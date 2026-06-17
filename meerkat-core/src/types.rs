@@ -625,6 +625,19 @@ pub enum ProviderMeta {
         #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
+        /// Provider response ID for server-side continuation. This is an
+        /// optimization hint only; canonical transcript replay does not
+        /// depend on it being present or valid.
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
+    },
+    /// OpenAI response-level continuation metadata for non-reasoning blocks.
+    /// The ID is an optimization hint for `previous_response_id`; it is not
+    /// semantic transcript content.
+    OpenAiResponse {
+        /// Provider response ID returned by the Responses API.
+        response_id: String,
     },
 }
 

@@ -45,6 +45,16 @@ fn workspace_dependency_table<'a>(
         .ok_or_else(|| format!("workspace should depend on {name}"))
 }
 
+fn dependency_features<'a>(manifest: &'a toml::Value, name: &str) -> Result<Vec<&'a str>, String> {
+    Ok(dependency_table(manifest, name)?
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .collect())
+}
+
 #[test]
 fn slim_cli_does_not_enable_openai_realtime_unconditionally() -> Result<(), String> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -79,6 +89,40 @@ fn slim_cli_does_not_enable_openai_realtime_unconditionally() -> Result<(), Stri
         !unconditional_features.contains(&"openai-realtime"),
         "rkat --no-default-features must not pull the OpenAI realtime stack through its facade dependency"
     );
+    Ok(())
+}
+
+#[test]
+fn integration_tests_restore_rpc_default_feature_surface() -> Result<(), String> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .ok_or_else(|| "rkat manifest dir should have workspace parent".to_string())?;
+    let integration_manifest = read_manifest(workspace_root.join("tests/integration/Cargo.toml"))?;
+
+    let rpc_dependency = dependency_table(&integration_manifest, "meerkat-rpc")?;
+    assert_eq!(
+        rpc_dependency
+            .get("workspace")
+            .and_then(toml::Value::as_bool),
+        Some(true),
+        "integration tests should still inherit the workspace meerkat-rpc path/version"
+    );
+
+    let features = dependency_features(&integration_manifest, "meerkat-rpc")?;
+    for expected in [
+        "comms",
+        "mcp",
+        "mob",
+        "openai-realtime",
+        "schedule",
+        "workgraph",
+    ] {
+        assert!(
+            features.contains(&expected),
+            "integration tests should opt back into meerkat-rpc/{expected} after workspace defaults are suppressed"
+        );
+    }
     Ok(())
 }
 

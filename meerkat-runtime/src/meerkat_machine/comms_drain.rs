@@ -168,6 +168,10 @@ impl CommsDrainSlot {
             .is_some_and(|current| Arc::ptr_eq(current, runtime))
     }
 
+    pub(crate) fn task_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.task_runtime.clone()
+    }
+
     pub(crate) fn handle_present(&self) -> bool {
         self.handle.is_some()
     }
@@ -329,6 +333,46 @@ impl MeerkatMachine {
         }
     }
 
+    /// Refresh a session-owned peer ingress drain without re-attaching
+    /// ownership.
+    ///
+    /// This is intentionally narrower than
+    /// [`MeerkatMachine::update_peer_ingress_context`]: callers that only need
+    /// the existing authorized session-owned transport to be healthy can
+    /// respawn a missing/respawnable drain task without staging
+    /// `AttachSessionIngress` with a possibly different runtime handle.
+    /// Mob-owned ingress and missing cached session runtimes are left
+    /// untouched.
+    pub async fn refresh_session_owned_peer_ingress(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        if !self.sessions.read().await.contains_key(session_id) {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            });
+        }
+        if matches!(
+            self.existing_session_runtime_state(session_id).await,
+            Some(RuntimeState::Destroyed)
+        ) {
+            return Err(RuntimeDriverError::Destroyed);
+        }
+
+        let gate = self.session_mutation_gate(session_id).await;
+        let _gate_guard = match gate {
+            Some(ref g) => Some(g.lock().await),
+            None => None,
+        };
+
+        let Some(comms_runtime) = self.session_owned_drain_runtime(session_id).await else {
+            return Ok(false);
+        };
+
+        self.update_peer_ingress_context_inner(session_id, true, Some(comms_runtime))
+            .await
+    }
+
     /// Mob-owned variant of [`MeerkatMachine::maybe_spawn_comms_drain`]
     /// (W2-G / issue #264).
     ///
@@ -414,6 +458,28 @@ impl MeerkatMachine {
                 }
             }
         }
+    }
+
+    async fn session_owned_drain_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id)?;
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        if state.peer_ingress_owner_kind
+            != crate::meerkat_machine::dsl::PeerIngressOwnerKind::SessionOwned
+        {
+            return None;
+        }
+        let expected_runtime_id = state.peer_ingress_comms_runtime_id.as_ref()?;
+        let runtime = entry.drain_slot.task_runtime()?;
+        let actual_runtime_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&runtime);
+        (expected_runtime_id == &actual_runtime_id).then_some(runtime)
     }
 
     pub(super) async fn drain_authority_state(

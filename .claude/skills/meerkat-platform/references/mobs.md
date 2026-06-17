@@ -298,7 +298,7 @@ rkat run --tools full --resume <session_id> "Retire worker-2 and add worker-4, t
 
 ```bash
 rkat mob spawn-helper team-mob "Join as lead-1" --profile lead --agent-identity lead-1
-rkat mob fork-helper team-mob lead-1 "Investigate the failing test cluster." --profile worker --json
+rkat mob fork-helper team-mob lead-1 "Investigate the failing test cluster." --agent-identity worker-2 --profile worker --json
 rkat mob member-status team-mob lead-1 --json
 rkat mob force-cancel team-mob worker-1
 rkat mob respawn team-mob worker-1 --initial-message "restart"

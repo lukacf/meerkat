@@ -348,6 +348,12 @@ pub enum WireProviderMeta {
         #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
+    },
+    OpenAiResponse {
+        response_id: String,
     },
     Unknown,
 }
@@ -363,12 +369,14 @@ impl From<ProviderMeta> for WireProviderMeta {
                 id,
                 encrypted_content,
                 phase,
-                ..
+                response_id,
             } => Self::OpenAi {
                 id,
                 encrypted_content,
                 phase,
+                response_id,
             },
+            ProviderMeta::OpenAiResponse { response_id } => Self::OpenAiResponse { response_id },
             _ => Self::Unknown,
         }
     }
@@ -900,11 +908,16 @@ fn wire_provider_meta_to_core(value: WireProviderMeta) -> Option<ProviderMeta> {
             id,
             encrypted_content,
             phase,
+            response_id,
         } => Some(ProviderMeta::OpenAi {
             id,
             encrypted_content,
             phase,
+            response_id,
         }),
+        WireProviderMeta::OpenAiResponse { response_id } => {
+            Some(ProviderMeta::OpenAiResponse { response_id })
+        }
         WireProviderMeta::Unknown => None,
     }
 }
@@ -2286,6 +2299,7 @@ mod tests {
                     id: "rs_1".to_string(),
                     encrypted_content: Some("enc".to_string()),
                     phase: Some("draft".to_string()),
+                    response_id: None,
                 })),
             },
             AssistantBlock::Transcript {

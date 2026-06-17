@@ -117,6 +117,14 @@ Pass provider parameter overrides via `AgentBuildConfig`. The JSON bag is retire
 `provider_params` is the typed `ProviderParamsOverride` (temperature, `top_p`,
 `max_output_tokens`, reasoning mode, `thinking_budget_tokens`, and an optional
 provider-specific `provider_tag`), parsed fail-closed at each surface ingress.
+Provider tags also carry opt-in provider cache hints: OpenAI can override
+Responses `store` (default remains `false`) and set `prompt_cache_key` /
+`prompt_cache_retention`; Anthropic can mark the stable system prefix with
+`cache_control`; Gemini can pass an explicit `cached_content_name`. When
+OpenAI `store` is explicitly enabled, stored response IDs may be reused as
+`previous_response_id` hints; Meerkat still keeps the local transcript as the
+canonical replay source and falls back to full replay if the provider rejects
+the hint.
 
 ```rust
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;

@@ -64,9 +64,9 @@ use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
 use meerkat_runtime::{CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput};
 use meerkat_tools::find_project_root;
-use tokio::io::AsyncWriteExt;
 #[cfg(all(feature = "mob", feature = "rpc-surface"))]
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -808,6 +808,314 @@ fn prepend_stdin_blob_context(prompt: String) -> String {
         return prompt;
     }
     format!("<stdin>\n{stdin_content}\n</stdin>\n\n{prompt}")
+}
+
+const USER_PROMPT_FILE_MENTION_MAX_FILES: usize = 16;
+const USER_PROMPT_FILE_MENTION_MAX_FILE_BYTES: usize = 64 * 1024;
+const USER_PROMPT_FILE_MENTION_MAX_TOTAL_BYTES: usize = 128 * 1024;
+const USER_PROMPT_FILE_MENTION_MAX_FILE_LINES: usize = 2_000;
+const USER_PROMPT_FILE_MENTION_MAX_TOTAL_LINES: usize = 4_000;
+const USER_PROMPT_FILE_MENTION_READ_SLOP_BYTES: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserPromptFileMention {
+    token: String,
+    path: PathBuf,
+    explicit: bool,
+}
+
+#[derive(Debug)]
+struct UserPromptFileAttachment {
+    mention: UserPromptFileMention,
+    display_path: PathBuf,
+    content: String,
+    bytes_included: usize,
+    lines_included: usize,
+    truncated: bool,
+}
+
+async fn expand_user_prompt_file_mentions(
+    prompt: String,
+    base_dir: &Path,
+) -> anyhow::Result<String> {
+    let tokens = scan_user_prompt_file_mention_tokens(&prompt);
+    if tokens.is_empty() {
+        return Ok(prompt);
+    }
+    if tokens.len() > USER_PROMPT_FILE_MENTION_MAX_FILES {
+        anyhow::bail!(
+            "too many @file mentions in prompt: {} found, maximum is {}",
+            tokens.len(),
+            USER_PROMPT_FILE_MENTION_MAX_FILES
+        );
+    }
+    let mentions = collect_user_prompt_file_mentions(tokens, base_dir).await?;
+    if mentions.is_empty() {
+        return Ok(prompt);
+    }
+
+    let mention_tokens = mentions
+        .iter()
+        .map(|mention| mention.token.clone())
+        .collect::<Vec<_>>();
+    let mut attachments = Vec::new();
+    let mut mentions_processed = 0;
+    let mut total_remaining_bytes = USER_PROMPT_FILE_MENTION_MAX_TOTAL_BYTES;
+    let mut total_remaining_lines = USER_PROMPT_FILE_MENTION_MAX_TOTAL_LINES;
+    for mention in mentions {
+        let attachment = read_user_prompt_file_attachment(
+            mention,
+            &mut total_remaining_bytes,
+            &mut total_remaining_lines,
+        )
+        .await?;
+        attachments.push(attachment);
+        mentions_processed += 1;
+        if total_remaining_bytes == 0 || total_remaining_lines == 0 {
+            break;
+        }
+    }
+
+    if attachments.is_empty() {
+        return Ok(prompt);
+    }
+
+    let mut expanded = String::new();
+    expanded.push_str("<user_mentioned_files>\n");
+    for attachment in attachments {
+        let path = attachment.display_path.display();
+        expanded.push_str(&format!(
+            "--- BEGIN @file: {path} (token=@{}, bytes={}, lines={}, truncated={}) ---\n",
+            attachment.mention.token,
+            attachment.bytes_included,
+            attachment.lines_included,
+            attachment.truncated
+        ));
+        expanded.push_str(&attachment.content);
+        if !attachment.content.ends_with('\n') {
+            expanded.push('\n');
+        }
+        expanded.push_str(&format!("--- END @file: {path} ---\n"));
+    }
+    if mentions_processed < mention_tokens.len() {
+        expanded.push_str(&format!(
+            "--- OMITTED @file mentions: {} (total byte/line expansion limits reached) ---\n",
+            mention_tokens[mentions_processed..]
+                .iter()
+                .map(|token| format!("@{token}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    expanded.push_str("</user_mentioned_files>\n\n");
+    expanded.push_str(&prompt);
+    Ok(expanded)
+}
+
+async fn collect_user_prompt_file_mentions(
+    tokens: Vec<String>,
+    base_dir: &Path,
+) -> anyhow::Result<Vec<UserPromptFileMention>> {
+    let mut mentions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in tokens {
+        let explicit = is_explicit_user_prompt_file_token(&token);
+        let path = resolve_user_prompt_file_token(&token, base_dir)?;
+        let exists = tokio::fs::try_exists(&path)
+            .await
+            .map_err(|source| anyhow::anyhow!("failed to inspect @{token}: {source}"))?;
+        if !exists {
+            if explicit {
+                anyhow::bail!("prompt referenced @{token} but file does not exist");
+            }
+            continue;
+        }
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|source| anyhow::anyhow!("failed to inspect @{token}: {source}"))?;
+        if !metadata.is_file() {
+            if explicit {
+                anyhow::bail!("prompt referenced @{token} but it is not a file");
+            }
+            continue;
+        }
+        let canonical = tokio::fs::canonicalize(&path)
+            .await
+            .map_err(|source| anyhow::anyhow!("failed to resolve @{token}: {source}"))?;
+        // Unlike project AGENTS.md includes, prompt mentions are direct
+        // operator input. Absolute and parent-relative paths are intentionally
+        // allowed so commands like `rkat "read @/tmp/log.txt"` work as explicit
+        // context requests.
+        if seen.insert(canonical.clone()) {
+            mentions.push(UserPromptFileMention {
+                token,
+                path: canonical,
+                explicit,
+            });
+        }
+    }
+    Ok(mentions)
+}
+
+fn scan_user_prompt_file_mention_tokens(prompt: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let indices: Vec<(usize, char)> = prompt.char_indices().collect();
+    let mut pos = 0;
+    while pos < indices.len() {
+        let (byte_index, ch) = indices[pos];
+        if ch != '@' || mention_has_word_char_before(prompt, byte_index) {
+            pos += 1;
+            continue;
+        }
+        let start = byte_index + ch.len_utf8();
+        let mut end = start;
+        let mut next_pos = pos + 1;
+        while next_pos < indices.len() {
+            let (candidate_end, candidate_ch) = indices[next_pos];
+            if is_user_prompt_file_token_terminator(candidate_ch) {
+                break;
+            }
+            end = candidate_end + candidate_ch.len_utf8();
+            next_pos += 1;
+        }
+        if end > start {
+            let token = prompt[start..end].trim_end_matches(|ch: char| {
+                matches!(ch, ',' | ';' | ':' | '.' | '!' | '?' | ')' | ']' | '}')
+            });
+            if is_potential_user_prompt_file_token(token) {
+                tokens.push(token.to_string());
+            }
+        }
+        pos = next_pos.max(pos + 1);
+    }
+    tokens
+}
+
+fn mention_has_word_char_before(prompt: &str, byte_index: usize) -> bool {
+    prompt[..byte_index]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn is_user_prompt_file_token_terminator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+}
+
+fn is_potential_user_prompt_file_token(token: &str) -> bool {
+    !token.is_empty()
+        && !token.starts_with('@')
+        && token != "."
+        && token != ".."
+        && !token.contains('\\')
+}
+
+fn is_explicit_user_prompt_file_token(token: &str) -> bool {
+    token.starts_with('/')
+        || token.starts_with("~/")
+        || token.starts_with("./")
+        || token.starts_with("../")
+}
+
+fn resolve_user_prompt_file_token(token: &str, base_dir: &Path) -> anyhow::Result<PathBuf> {
+    if let Some(rest) = token.strip_prefix("~/") {
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("unable to resolve home directory"))?;
+        Ok(home.join(rest))
+    } else {
+        let path = PathBuf::from(token);
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Ok(base_dir.join(path))
+        }
+    }
+}
+
+async fn read_user_prompt_file_attachment(
+    mention: UserPromptFileMention,
+    total_remaining_bytes: &mut usize,
+    total_remaining_lines: &mut usize,
+) -> anyhow::Result<UserPromptFileAttachment> {
+    let per_file_limit = USER_PROMPT_FILE_MENTION_MAX_FILE_BYTES
+        .min(*total_remaining_bytes)
+        .saturating_add(USER_PROMPT_FILE_MENTION_READ_SLOP_BYTES);
+    let file = tokio::fs::File::open(&mention.path)
+        .await
+        .map_err(|source| anyhow::anyhow!("failed to read @{}: {source}", mention.token))?;
+    let mut bytes = Vec::new();
+    file.take(per_file_limit as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|source| anyhow::anyhow!("failed to read @{}: {source}", mention.token))?;
+
+    let read_hit_limit = bytes.len() == per_file_limit && per_file_limit > 0;
+    let mut content =
+        utf8_from_possibly_capped_prompt_file(&bytes, read_hit_limit).map_err(|source| {
+            anyhow::anyhow!("failed to read @{} as UTF-8: {source}", mention.token)
+        })?;
+    let mut truncated = read_hit_limit;
+    let byte_limit = USER_PROMPT_FILE_MENTION_MAX_FILE_BYTES.min(*total_remaining_bytes);
+    if content.len() > byte_limit {
+        truncate_string_to_byte_limit(&mut content, byte_limit);
+        truncated = true;
+    }
+
+    let line_limit = USER_PROMPT_FILE_MENTION_MAX_FILE_LINES.min(*total_remaining_lines);
+    let original_line_count = content.lines().count();
+    if original_line_count > line_limit {
+        content = content
+            .lines()
+            .take(line_limit)
+            .collect::<Vec<_>>()
+            .join("\n");
+        content.push('\n');
+        truncated = true;
+    }
+
+    let bytes_included = content.len();
+    let lines_included = content.lines().count();
+    *total_remaining_bytes = total_remaining_bytes.saturating_sub(bytes_included);
+    *total_remaining_lines = total_remaining_lines.saturating_sub(lines_included);
+    if truncated {
+        content.push_str(&format!(
+            "\n[truncated @{}: byte/file/line expansion limits reached]\n",
+            mention.token
+        ));
+    }
+
+    Ok(UserPromptFileAttachment {
+        display_path: mention.path.clone(),
+        mention,
+        content,
+        bytes_included,
+        lines_included,
+        truncated,
+    })
+}
+
+fn utf8_from_possibly_capped_prompt_file(
+    bytes: &[u8],
+    read_hit_limit: bool,
+) -> Result<String, std::str::Utf8Error> {
+    match std::str::from_utf8(bytes) {
+        Ok(content) => Ok(content.to_string()),
+        Err(error) if read_hit_limit && error.error_len().is_none() => {
+            Ok(std::str::from_utf8(&bytes[..error.valid_up_to()])?.to_string())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn truncate_string_to_byte_limit(content: &mut String, byte_limit: usize) {
+    if content.len() <= byte_limit {
+        return;
+    }
+    let mut end = byte_limit;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content.truncate(end);
 }
 
 async fn init_project_config() -> anyhow::Result<()> {
@@ -3170,6 +3478,11 @@ async fn handle_run_command(
     };
     let html_output_request =
         resolve_html_output_request(&output, &config, &config_base_dir).await?;
+    let prompt_file_base = match scope.context_root.clone() {
+        Some(root) => root,
+        None => std::env::current_dir()?,
+    };
+    prompt = expand_user_prompt_file_mentions(prompt, &prompt_file_base).await?;
     if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
         prompt = prepend_stdin_blob_context(prompt);
     }
@@ -8996,6 +9309,11 @@ async fn resume_session(
     comms_overrides: CommsOverrides,
 ) -> anyhow::Result<()> {
     let stdin = resolve_stdin_mode(stdin);
+    let prompt_file_base = match scope.context_root.clone() {
+        Some(root) => root,
+        None => std::env::current_dir()?,
+    };
+    prompt = expand_user_prompt_file_mentions(prompt, &prompt_file_base).await?;
     if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
         prompt = prepend_stdin_blob_context(prompt);
     }
@@ -13791,6 +14109,203 @@ mod tests {
         let skill_name = meerkat_core::skills::SkillName::parse(name)
             .expect("fixture skill name should be valid");
         meerkat_core::skills::SkillKey::new(meerkat_core::skills::SourceUuid::builtin(), skill_name)
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_expand_multiple_files_and_preserve_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let relative_path = temp.path().join("notes.md");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let absolute_path = outside.path().join("absolute.md");
+        tokio::fs::write(&relative_path, "relative context")
+            .await
+            .unwrap();
+        tokio::fs::write(&absolute_path, "absolute context")
+            .await
+            .unwrap();
+
+        let prompt = format!(
+            "Read @notes.md and @{} but ignore person@example.com and @missing-handle",
+            absolute_path.display()
+        );
+        let expanded = expand_user_prompt_file_mentions(prompt.clone(), temp.path())
+            .await
+            .unwrap();
+
+        assert!(expanded.starts_with("<user_mentioned_files>"));
+        assert!(expanded.contains("relative context"));
+        assert!(expanded.contains("absolute context"));
+        assert!(expanded.ends_with(&prompt));
+        assert!(!expanded.contains("token=@missing-handle"));
+        assert_eq!(expanded.matches("--- BEGIN @file:").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_trim_sentence_punctuation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(temp.path().join("notes.md"), "sentence context")
+            .await
+            .unwrap();
+
+        let expanded = expand_user_prompt_file_mentions("Read @notes.md.".to_string(), temp.path())
+            .await
+            .unwrap();
+
+        assert!(expanded.contains("token=@notes.md"));
+        assert!(expanded.contains("sentence context"));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_missing_explicit_path_is_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let err = expand_user_prompt_file_mentions("Read @./missing.md".to_string(), temp.path())
+            .await
+            .expect_err("explicit missing @file should fail");
+
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_invalid_utf8_is_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(temp.path().join("bad.bin"), [0xff, 0xfe])
+            .await
+            .unwrap();
+
+        let err = expand_user_prompt_file_mentions("Read @bad.bin".to_string(), temp.path())
+            .await
+            .expect_err("invalid UTF-8 prompt file should fail closed");
+
+        assert!(err.to_string().contains("UTF-8"));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_dedupe_canonical_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("target.txt");
+        tokio::fs::write(&target, "deduped context").await.unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, temp.path().join("alias.txt")).unwrap();
+            let expanded = expand_user_prompt_file_mentions(
+                "Read @target.txt @alias.txt".to_string(),
+                temp.path(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(expanded.matches("--- BEGIN @file:").count(), 1);
+            assert!(expanded.contains("deduped context"));
+        }
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_truncate_large_file_with_marker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(
+            temp.path().join("large.txt"),
+            "x".repeat(USER_PROMPT_FILE_MENTION_MAX_FILE_BYTES + 1024),
+        )
+        .await
+        .unwrap();
+
+        let expanded = expand_user_prompt_file_mentions("Read @large.txt".to_string(), temp.path())
+            .await
+            .unwrap();
+
+        assert!(expanded.contains("truncated=true"));
+        assert!(expanded.contains("[truncated @large.txt"));
+        assert!(expanded.len() < USER_PROMPT_FILE_MENTION_MAX_FILE_BYTES + 4096);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_truncate_line_count_with_marker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let content = (0..USER_PROMPT_FILE_MENTION_MAX_FILE_LINES + 10)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(temp.path().join("many-lines.txt"), content)
+            .await
+            .unwrap();
+
+        let expanded =
+            expand_user_prompt_file_mentions("Read @many-lines.txt".to_string(), temp.path())
+                .await
+                .unwrap();
+
+        assert!(expanded.contains("truncated=true"));
+        assert!(expanded.contains("[truncated @many-lines.txt"));
+        assert!(!expanded.contains(&format!(
+            "line-{}",
+            USER_PROMPT_FILE_MENTION_MAX_FILE_LINES + 1
+        )));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_enforce_file_count_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut prompt = String::from("Read");
+        for index in 0..=USER_PROMPT_FILE_MENTION_MAX_FILES {
+            let filename = format!("file-{index}.txt");
+            tokio::fs::write(temp.path().join(&filename), format!("content-{index}"))
+                .await
+                .unwrap();
+            prompt.push_str(&format!(" @{filename}"));
+        }
+
+        let err = expand_user_prompt_file_mentions(prompt, temp.path())
+            .await
+            .expect_err("too many files should fail");
+
+        assert!(err.to_string().contains("too many @file mentions"));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_enforce_token_limit_before_io() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut prompt = String::from("Read");
+        for index in 0..=USER_PROMPT_FILE_MENTION_MAX_FILES {
+            prompt.push_str(&format!(" @missing-{index}.txt"));
+        }
+
+        let err = expand_user_prompt_file_mentions(prompt, temp.path())
+            .await
+            .expect_err("too many candidate tokens should fail before filesystem filtering");
+
+        assert!(err.to_string().contains("too many @file mentions"));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_file_mentions_report_mentions_omitted_by_total_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(
+            temp.path().join("first.txt"),
+            "a".repeat(USER_PROMPT_FILE_MENTION_MAX_FILE_BYTES),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            temp.path().join("second.txt"),
+            "b".repeat(USER_PROMPT_FILE_MENTION_MAX_FILE_BYTES),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(temp.path().join("third.txt"), "third context")
+            .await
+            .unwrap();
+
+        let expanded = expand_user_prompt_file_mentions(
+            "Read @first.txt @second.txt @third.txt".to_string(),
+            temp.path(),
+        )
+        .await
+        .unwrap();
+
+        assert!(expanded.contains("OMITTED @file mentions"));
+        assert!(expanded.contains("@third.txt"));
+        assert!(!expanded.contains("third context"));
     }
 
     #[cfg(feature = "session-store")]

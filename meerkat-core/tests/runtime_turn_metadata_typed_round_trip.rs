@@ -10,9 +10,10 @@ use std::time::Duration;
 use meerkat_core::connection::{AuthBindingRef, BindingOrigin};
 use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, GeminiProviderTag, KeepAliveDirective, KeepAliveMode, KeepAlivePolicy,
-    ModelId, OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride,
-    ProviderTag, ReasoningEffort, ReasoningMode, RuntimeExecutionKind, RuntimeTurnMetadata,
-    TurnInstruction, TurnInstructionKind, TurnMetadataMergeConflict, TurnMetadataOverride,
+    ModelId, OpenAiPromptCacheRetention, OpenAiProviderTag, PeerResponseTerminalApplyIntent,
+    ProviderParamsOverride, ProviderTag, ReasoningEffort, ReasoningMode, RuntimeExecutionKind,
+    RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind, TurnMetadataMergeConflict,
+    TurnMetadataOverride,
 };
 use meerkat_core::provider::Provider;
 use meerkat_core::service::TurnToolOverlay;
@@ -88,6 +89,9 @@ fn provider_tag_openai_round_trips() {
         provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
                 reasoning_effort: Some(ReasoningEffort::High),
+                store: Some(false),
+                prompt_cache_key: Some("tenant-a:stable-prefix".to_string()),
+                prompt_cache_retention: Some(OpenAiPromptCacheRetention::InMemory),
                 ..Default::default()
             })),
             ..Default::default()
@@ -106,6 +110,7 @@ fn provider_tag_gemini_round_trips() {
         provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             provider_tag: Some(ProviderTag::Gemini(GeminiProviderTag {
                 candidate_count: Some(4),
+                cached_content_name: Some("cachedContents/stable-prefix".to_string()),
                 ..Default::default()
             })),
             ..Default::default()

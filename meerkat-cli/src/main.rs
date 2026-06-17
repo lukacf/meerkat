@@ -64,7 +64,9 @@ use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
 use meerkat_runtime::{CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput};
 use meerkat_tools::find_project_root;
-use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
+#[cfg(all(feature = "mob", feature = "rpc-surface"))]
+use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -12718,6 +12720,7 @@ async fn execute_mob_deploy(
             cli_trust_policy,
             surface,
             cli_overrides,
+            #[cfg(feature = "rpc-surface")]
             rpc_io: None,
             config_observer: None,
         },
@@ -12921,7 +12924,7 @@ fn render_mob_run_pack_with_warnings(
     }
 }
 
-#[cfg(feature = "mob")]
+#[cfg(all(feature = "mob", feature = "rpc-surface"))]
 type RpcDeployIo = (
     Box<dyn AsyncBufRead + Send + Unpin>,
     Box<dyn AsyncWrite + Send + Unpin>,
@@ -12933,11 +12936,12 @@ struct DeployInvocation {
     cli_trust_policy: Option<TrustPolicyArg>,
     surface: DeploySurfaceArg,
     cli_overrides: CliOverrides,
+    #[cfg(feature = "rpc-surface")]
     rpc_io: Option<RpcDeployIo>,
     config_observer: Option<DeployConfigObserver>,
 }
 
-#[cfg(feature = "mob")]
+#[cfg(all(feature = "mob", feature = "rpc-surface"))]
 struct RpcSurfaceDeployResult {
     mob_id: String,
     result_render: Option<String>,
@@ -12974,23 +12978,35 @@ async fn execute_mob_deploy_internal(
         observer(&effective_config);
     }
 
-    let (deployed_mob_id, result_render) = if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
-        let (reader, writer): RpcDeployIo = invocation.rpc_io.unwrap_or_else(|| {
-            (
-                Box::new(BufReader::new(tokio::io::stdin())),
-                Box::new(tokio::io::stdout()),
-            )
-        });
-        let result = Box::pin(run_rpc_surface(
-            scope,
-            effective_config,
-            &archive,
-            prompt,
-            reader,
-            writer,
-        ))
-        .await?;
-        (result.mob_id, result.result_render)
+    let (deployed_mob_id, result_render): (String, Option<String>) = if matches!(
+        invocation.surface,
+        DeploySurfaceArg::Rpc
+    ) {
+        #[cfg(feature = "rpc-surface")]
+        {
+            let (reader, writer): RpcDeployIo = invocation.rpc_io.unwrap_or_else(|| {
+                (
+                    Box::new(BufReader::new(tokio::io::stdin())),
+                    Box::new(tokio::io::stdout()),
+                )
+            });
+            let result = Box::pin(run_rpc_surface(
+                scope,
+                effective_config,
+                &archive,
+                prompt,
+                reader,
+                writer,
+            ))
+            .await?;
+            (result.mob_id, result.result_render)
+        }
+        #[cfg(not(feature = "rpc-surface"))]
+        {
+            anyhow::bail!(
+                "mob deploy failed: RPC deploy surface is not compiled into this rkat build"
+            );
+        }
     } else {
         let session_service =
             build_deploy_mob_session_service(scope, effective_config.clone()).await?;
@@ -13338,7 +13354,7 @@ fn validate_required_capabilities(
     Ok(())
 }
 
-#[cfg(feature = "mob")]
+#[cfg(all(feature = "mob", feature = "rpc-surface"))]
 async fn run_rpc_surface<R, W>(
     scope: &RuntimeScope,
     config: Config,
@@ -18485,7 +18501,7 @@ capabilities = ["rpc"]
         );
     }
 
-    #[cfg(feature = "mob")]
+    #[cfg(all(feature = "mob", feature = "rpc-surface"))]
     #[tokio::test]
     async fn test_mob_deploy_rpc_surface_executes_deploy_path() {
         use tokio::io::AsyncWriteExt;
@@ -18513,6 +18529,7 @@ capabilities = ["rpc"]
                     cli_trust_policy: Some(TrustPolicyArg::Permissive),
                     surface: DeploySurfaceArg::Rpc,
                     cli_overrides: CliOverrides::default(),
+                    #[cfg(feature = "rpc-surface")]
                     rpc_io: Some((Box::new(BufReader::new(server_in)), Box::new(server_out))),
                     config_observer: None,
                 },
@@ -19119,6 +19136,7 @@ capabilities = ["rpc"]
                     max_tool_calls: None,
                     override_config: None,
                 },
+                #[cfg(feature = "rpc-surface")]
                 rpc_io: None,
                 config_observer: Some(observer),
             },

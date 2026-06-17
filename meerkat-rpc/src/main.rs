@@ -305,6 +305,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // factory work is wasted. B15: when live is configured, factory build
     // failure must fail at startup rather than leaving live/open exposed
     // with no provider wired.
+    #[cfg(feature = "openai-realtime")]
     let live_session_factory: Option<
         Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
     > = if live_transport_enabled {
@@ -318,6 +319,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
         }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "openai-realtime"))]
+    let live_session_factory: Option<
+        Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
+    > = if live_transport_enabled {
+        return Err(
+            "a live transport is configured but this rkat-rpc build does not include the \
+             openai-realtime feature"
+                .into(),
+        );
     } else {
         None
     };

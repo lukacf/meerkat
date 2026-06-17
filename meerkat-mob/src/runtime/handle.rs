@@ -5496,11 +5496,11 @@ impl MobHandle {
                 }
                 let bridge_session_id =
                     Self::machine_bridge_session_id_for_identity(identity, machine_state)?;
-                Some((identity.clone(), dsl_identity, bridge_session_id))
+                Some((identity.clone(), bridge_session_id))
             })
             .collect::<Vec<_>>();
 
-        for (identity, dsl_identity, bridge_session_id) in probes {
+        for (identity, bridge_session_id) in probes {
             let bridge_session_key = bridge_session_id.to_string();
             if observed_missing_bridge_sessions
                 .contains(&(identity.clone(), bridge_session_key.clone()))
@@ -5510,14 +5510,18 @@ impl MobHandle {
             match self.session_service.read(&bridge_session_id).await {
                 Ok(_) => {}
                 Err(SessionError::NotFound { .. }) => {
-                    let reason =
-                        format!("missing bridge session snapshot for '{bridge_session_id}'");
-                    match self.command_tx.try_send(MobCommand::ProjectMachineSignal {
-                        signal: mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
-                            agent_identity: dsl_identity,
-                            reason,
-                        },
-                    }) {
+                    // Route the observation through the actor's binding-currency
+                    // guard (the same path member_status uses) rather than firing
+                    // RecoverMemberRestoreFailure raw: the read above is awaited, so
+                    // a member can rebind to a fresh session in the gap. The actor
+                    // re-checks the live member_session_binding before marking the
+                    // member broken and drops the observation if it has gone stale.
+                    match self
+                        .command_tx
+                        .try_send(MobCommand::RecordMissingMemberBridgeSession {
+                            agent_identity: identity.clone(),
+                            bridge_session_id: bridge_session_id.clone(),
+                        }) {
                         Ok(()) => {
                             observed_missing_bridge_sessions.insert((identity, bridge_session_key));
                         }

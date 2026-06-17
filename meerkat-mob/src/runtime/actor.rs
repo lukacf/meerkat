@@ -7660,6 +7660,22 @@ impl MobActor {
                         }
                     }
                 }
+                MobCommand::RecordMissingMemberBridgeSession {
+                    agent_identity,
+                    bridge_session_id,
+                } => {
+                    // Ready-wait saw a missing bridge-session snapshot. Re-check the
+                    // live member binding under actor ownership before marking the
+                    // member broken; a rebind that landed during the handle's read
+                    // makes this a stale observation the guard drops.
+                    let _ = self
+                        .record_missing_member_bridge_session(
+                            &agent_identity,
+                            &bridge_session_id,
+                            "ready_wait",
+                        )
+                        .await;
+                }
                 MobCommand::FlowFinished { run_id } => {
                     if let Err(error) = self
                         .handle_flow_cleanup(run_id, "flow finished cleanup")

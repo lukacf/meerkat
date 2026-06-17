@@ -400,6 +400,16 @@ pub(super) enum MobCommand {
     ProjectMachineSignal {
         signal: mob_dsl::MobMachineSignal,
     },
+    /// Ready-wait observed a missing bridge-session snapshot for an active member.
+    /// Routed through the actor's binding-currency-guarded
+    /// `record_missing_member_bridge_session` (the same path `member_status` uses)
+    /// so a concurrent rebind during the `read` cannot tip a still-current member
+    /// into `RecoverMemberRestoreFailure`. Shell observation only — the actor owns
+    /// whether to emit the restore-failure signal.
+    RecordMissingMemberBridgeSession {
+        agent_identity: crate::ids::AgentIdentity,
+        bridge_session_id: SessionId,
+    },
     FlowFinished {
         run_id: RunId,
     },
@@ -555,6 +565,7 @@ impl MobCommand {
             Self::AuthorizeMemberTrustCleanupForTest { .. } => "AuthorizeMemberTrustCleanupForTest",
             Self::ApplyExternalPeerReciprocalTrust { .. } => "ApplyExternalPeerReciprocalTrust",
             Self::ProjectMachineSignal { .. } => "ProjectMachineSignal",
+            Self::RecordMissingMemberBridgeSession { .. } => "RecordMissingMemberBridgeSession",
             Self::FlowFinished { .. } => "FlowFinished",
             Self::FlowCanceledCleanup { .. } => "FlowCanceledCleanup",
             #[cfg(test)]

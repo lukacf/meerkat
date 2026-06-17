@@ -7674,11 +7674,13 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
-        #[cfg(feature = "memory-store")]
-        RealmBackend::Memory => paths.root,
-        #[cfg(feature = "session-store")]
-        RealmBackend::Sqlite => paths.root,
-        #[cfg(not(feature = "jsonl-store"))]
+        // Every non-Jsonl backend (Memory, Sqlite, …) materializes under the
+        // realm root. This catch-all is UNCONDITIONAL: `RealmBackend`'s variants
+        // are gated by meerkat-store's own `jsonl`/`memory`/`sqlite` features,
+        // which can diverge from the CLI's `jsonl-store`/`memory-store`/
+        // `session-store` features (e.g. `mob` pulls in meerkat-store `memory`
+        // without the CLI `memory-store`). Gating the arms on the CLI features
+        // left the match non-exhaustive for `jsonl-store + mob` w/o `memory-store`.
         _ => paths.root,
     }
 }

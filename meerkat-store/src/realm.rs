@@ -763,6 +763,9 @@ pub async fn open_realm_session_store_in(
     {
         let manifest =
             ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
+        // Only the jsonl/sqlite backends consume realm paths; the memory backend
+        // is path-free, so binding `paths` under a memory-only build would be dead.
+        #[cfg(any(feature = "jsonl", feature = "sqlite"))]
         let paths = realm_paths_in(realms_root, realm_id);
 
         #[cfg(feature = "jsonl")]

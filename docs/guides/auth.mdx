@@ -14,7 +14,13 @@ login` or the REST/RPC surfaces, and pass `--auth-binding
 binding.
 
 <Note>
-Today, CLI `rkat auth login` is primarily a convenience bootstrap flow for the default `dev:*` credential namespace. If you need explicit realm/profile-targeted auth persistence such as `prod:openai`, use the REST/RPC auth surfaces or manage the realm config entries directly.
+`rkat auth login` provisions the reserved `global` realm in the home-rooted doc
+at `~/.rkat/config.toml`. Because `global` is the universal tail of every realm
+chain, a single sign-in is inherited by every workspace realm (credential reads
+inherit down the chain). For a binding owned by a specific realm such as
+`prod:openai`, manage that realm's config entries directly; credential *writes*
+are strict-owner and land only in the realm that defines the binding. See
+[Realm inheritance](/concepts/realm-inheritance).
 </Note>
 
 ## What this guide is for
@@ -131,7 +137,12 @@ rkat auth login anthropic
 rkat auth login openai --non-interactive --secret "$OPENAI_KEY"
 ```
 
-The current CLI login flow is convenient for local setup, but it does not yet let you choose an arbitrary target realm/profile name at login time. It seeds the runtime-managed default `dev:*` identities and is best thought of as the easiest way to get persisted credentials into Meerkat quickly.
+`rkat auth login` persists credentials and the matching `[realm.global]`
+binding section into the home-rooted `global` realm doc (`~/.rkat/config.toml`),
+so the sign-in is inherited by every workspace realm via the chain tail. To use
+a binding owned by another realm (for example `prod:openai`), declare that
+binding in the owning realm's config; credential writes are strict-owner and
+land only in the realm that defines the binding.
 
 ### Use the binding
 

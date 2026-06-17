@@ -35,6 +35,7 @@
               "concepts/overview",
               "concepts/composability",
               "concepts/realms",
+              "concepts/realm-inheritance",
               "concepts/sessions",
               "concepts/auth-and-bindings",
               "concepts/memory-and-compaction",

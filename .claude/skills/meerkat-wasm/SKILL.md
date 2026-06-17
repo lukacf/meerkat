@@ -135,6 +135,7 @@ const session = runtime.createSession(withAuthBinding(
 
 Notes:
 
+- WASM synthesizes its api-key binding section under the reserved `global` realm (`GLOBAL_REALM_SLUG`, the universal default head), in `meerkat-web-runtime/src/lib.rs`. A session built without an explicit `authBinding` heads to `global` and resolves there; this is a degenerate single-realm chain (no filesystem `global` doc, no parent edges) behaviorally identical to the pre-inheritance path. Do not synthesize under any other slug — historically `"default"`, which an omitted-auth-binding session can no longer reach.
 - `authBinding` is structural and supported on `runtime.createSession({...})`, `mob.spawnHelper(...)`, and `mob.forkHelper(...)`. Plain `mob.spawn([...])` specs do not currently carry an auth binding.
 - `RuntimeConfig` in `@rkat/web` still exposes `apiKey` / `baseUrl` compatibility fields, but the current raw WASM config contract is provider-specific snake_case (`anthropic_api_key` / `openai_api_key` / `gemini_api_key` and matching base URLs). Do not add `apiKey` / `baseUrl` to `SessionConfig`; per-session credentials were removed in 0.6.
 - Use `clearExternalAuthResolver(wasm)` from `@rkat/web`, or pass `JsValue::NULL` / `undefined` to the raw WASM export, to clear the registration.

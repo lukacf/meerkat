@@ -266,6 +266,37 @@ rkat config patch --json '{"agent":{"model":"gpt-5.5"}}'
 rkat config patch --json '{"self_hosted":{"servers":{"ollama":{"transport":"openai_compatible","base_url":"http://127.0.0.1:11434","api_style":"chat_completions"}}}}'
 ```
 
+## auth
+
+```bash
+rkat auth realms                       # list realms defined in config
+rkat auth profiles                     # list profiles/backends/bindings
+rkat auth profile <PROFILE_ID>         # inspect one profile
+rkat auth login [<PROVIDER>] [--backend <KIND>] [--method <METHOD>] [--non-interactive --secret <SECRET>]
+rkat auth status <PROFILE_ID>          # realm config shape + AuthMachine lease lifecycle state
+rkat auth test <BINDING_ID>            # dry-run resolve the binding
+rkat auth refresh <PROFILE_ID>         # force-refresh OAuth tokens
+rkat auth logout <PROFILE_ID>          # clear persisted credentials
+rkat auth profile-delete <PROFILE_ID> -y
+```
+
+`rkat auth login` provisions the reserved **`global`** realm in the home-rooted
+doc at `~/.rkat/config.toml` — both the credential token and the
+`[realm.global]` binding section. Because `global` is the universal tail of
+every realm chain, a single sign-in is inherited by every workspace realm,
+across workspaces, without a per-realm re-login. Earlier `dev`-realm logins are
+migrated to `global` on the run path (one-time, idempotent, no-clobber), so an
+existing sign-in keeps working without re-auth.
+
+Credential **reads inherit** down the realm chain (a child realm resolves a
+binding defined in a parent or in `global`), but credential **writes are
+strict-owner**: a write targets the realm that defines the binding. `--realm`
+on an `auth` command selects the realm and composes its chain for resolution,
+without changing where an owned credential is persisted.
+
+See [Realm inheritance](/concepts/realm-inheritance) and the
+[auth guide](/guides/auth) for the full model.
+
 ## models
 
 ```bash

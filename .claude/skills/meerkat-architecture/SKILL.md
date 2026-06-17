@@ -226,6 +226,73 @@ Member lifecycle facts (kickoff phases, restore failures, revival obligations,
 `Broken` terminality) are MobMachine-owned and keyed on `AgentIdentity`;
 `MemberHandle::internal_turn` is the in-process member turn path.
 
+## Realm config inheritance
+
+A realm is a config + state namespace. Config inherits along a parent chain;
+state never does. The chain authority is `RealmChain` in
+`meerkat-core/src/connection.rs`.
+
+- **`global` is the universal default head.** Reserved slug
+  `GLOBAL_REALM_SLUG = "global"` (`RealmId::global()` / `RealmId::is_global()`,
+  mirroring `is_env_default`). Its config doc is the single HOME-rooted
+  `~/.rkat/config.toml` (`Config::global_config_path()`), not a per-workspace
+  file.
+- **`RealmChain::resolve(config, head)`** walks `RealmConfigSection.parent`
+  edges head → parent chain → implicit `global` tail, in `[head, parent.., global?]`
+  order (fully edge-determined, no map-iteration dependence). There is no flat
+  sibling scan and no literal `default` realm. Fail-closed, panic-free,
+  `BTreeSet`-deduped, depth-capped at `MAX_REALM_CHAIN_DEPTH = 16`; typed
+  `RealmChainError` (Cycle / DepthExceeded / MissingParent / GlobalHasParent /
+  ParentIsEnvDefault). Iterative (wasm stack-safe). An absent head yields a
+  single-node chain that contributes nothing, then the global tail.
+- **Two consumers, one chain.** (a) The connection/credential resolvers walk the
+  chain lazily, feeding `materialize_connection_target` the OWNING realm's own
+  `RealmConnectionSet`. (b) `EffectiveConfigReader::effective_config_over_head`
+  (`config_store.rs`, via `compose_effective_config` in `config.rs`) eagerly folds
+  the per-realm `Config` docs (parent-first, child-wins) into the flat config the
+  agent reads. Both call the same chain authority.
+- **Owning-realm credential provenance.** A resolved binding's
+  `AuthBindingRef.realm` is the realm that DEFINES it, not the requesting realm,
+  because materialize is fed the owner's own set (`realm.realm_id == owner` by
+  construction). This keeps the strict equality at
+  `meerkat-llm-core/.../registry.rs` (`auth_binding.realm != realm.realm_id`) a
+  real invariant with no relaxation, and `RealmConnectionSet`/`AuthBindingRef`
+  gain no field — zero wire/schema churn. Env/InlineSecret/Command material is
+  realm-agnostic (provenance only bites for the realm-namespaced TokenKey/LeaseKey).
+- **Reads inherit, writes are strict-owner.** `resolve_write_owner` +
+  `WriteOwnerError` (`connection.rs`) reject writing into an inherited realm's
+  doc from a child: `auth login` / config `set`/`patch` go to the realm that owns
+  the binding. `ConfigStore.get` returns the RAW head doc (read/write split) so an
+  inherited entry is never flattened into a child; only the agent-build path reads
+  the composed `EffectiveConfigReader` view.
+- **Config inherits, state never does.** Models, mcp servers, hooks, skills,
+  limits, and auth bindings inherit (per the merge table in
+  `compose_effective_config`); children may add/override but cannot remove
+  inherited mcp/hook entries (no tombstones). Sessions, SQLite/JSONL stores, and
+  event stores are realm-local (`meerkat-store` `realm_paths_in(head)`).
+- **Presence-based merge (MF-4).** `Config.max_tokens` and
+  `AgentConfig.max_tokens_per_turn` are `Option<u32>` (`None` = inherit; resolved
+  at point-of-use via `Config::resolved_max_tokens()` /
+  `AgentConfig::resolved_max_tokens_per_turn()`), so a child can override a
+  non-default parent value back down to the template default — merge is
+  presence-based (`is_some`), not a `!= default` heuristic.
+- **All surfaces compose.** CLI, REST, RPC, and MCP-server compose the effective
+  config over the head realm via `effective_config_over_head` on the build path
+  (`meerkat/src/service_factory.rs` plus each surface), so inheritance is not
+  CLI-only. WASM (`meerkat-web-runtime`) synthesizes its api-key binding section
+  under `global`, giving a degenerate single-realm chain identical to today.
+- **Migration.** Legacy `dev`-realm logins migrate to `global` on the run path
+  (both the credential token and the `[realm.global]` binding section),
+  no-clobber + idempotent.
+
+Machine authority is untouched: chain invariants are enforced by plain Rust
+(typed `RealmChain` newtype, private field, fallible ctor, typed error), not a new
+DSL/machine domain. Key files: `meerkat-core/src/connection.rs` (`RealmChain`,
+`RealmChainError`, resolvers, `resolve_write_owner`),
+`meerkat-core/src/config.rs` (`compose_effective_config`, `global_config_path`),
+`meerkat-core/src/config_store.rs` (`RealmConfigSource`, `EffectiveConfigReader`),
+`meerkat-store/src/realm.rs` (filesystem source + `realm_paths_in`).
+
 ## Crate Ownership
 
 | Crate | Owns | Key Trait |

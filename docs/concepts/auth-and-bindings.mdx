@@ -33,6 +33,29 @@ session / turn / mob member
   -> provider runtime resolution
 ```
 
+## Inheritance: reads inherit, writes are strict-owner
+
+Realms can form a parent chain ending at the reserved `global` realm, and
+**credentials inherit down that chain** while **writes do not**:
+
+- A child realm can resolve a binding defined in a parent or in `global`
+  (read-inherit). This is what makes `rkat auth login` — which provisions the
+  home-rooted `global` realm — usable from every workspace realm via the chain
+  tail.
+- `auth login` and config writes target the realm that **owns** the binding
+  (where its config section is defined). You cannot write into an inherited
+  binding's doc from a child; persisting a credential for a child realm whose
+  binding is inherited is rejected with a typed error naming the owning realm
+  (write-strict-owner).
+- A resolved binding records **owning-realm provenance**: its `realm` is the
+  realm that defines it, not the requesting realm. So an inherited `global`
+  binding used from realm `team` resolves and persists under `global`.
+
+Store-backed credentials (`ManagedStore`, OAuth leases) are realm-namespaced and
+follow owning-realm provenance; `Env`, inline-secret, and command sources are
+realm-agnostic. See [Realm inheritance](/concepts/realm-inheritance) for the
+full model.
+
 ## What this concept owns
 
 - binding identity
@@ -48,5 +71,6 @@ session / turn / mob member
 ## See also
 
 - [Realms](/concepts/realms)
+- [Realm inheritance](/concepts/realm-inheritance)
 - [Providers](/concepts/providers)
 - [Auth guide](/guides/auth)

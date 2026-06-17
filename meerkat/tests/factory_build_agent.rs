@@ -1875,7 +1875,9 @@ async fn build_agent_uses_config_default_max_tokens() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
-    let expected_max_tokens = config.max_tokens;
+    // The factory resolves the operative per-turn limit from the (now optional)
+    // config field at point-of-use; mirror that here.
+    let expected_max_tokens = config.resolved_max_tokens();
 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),

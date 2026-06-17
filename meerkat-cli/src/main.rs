@@ -3356,7 +3356,7 @@ async fn handle_run_command(
     // forward on the credential-READ path so users who upgraded but never
     // re-logged in are still migrated (the login-time trigger alone misses
     // them). Runs at most once per process; failures are logged, not fatal.
-    ensure_legacy_login_credentials_migrated_once().await;
+    ensure_legacy_login_credentials_migrated_once(scope).await;
     let output = resolve_cli_output_selection(
         output,
         json,
@@ -3450,7 +3450,7 @@ async fn handle_run_command(
         .transpose()?;
     let model =
         resolve_cli_effective_model(&config, model, provider, auth_binding_selection.as_ref());
-    let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
+    let max_tokens = max_tokens.unwrap_or_else(|| config.agent.resolved_max_tokens_per_turn());
     let resolved_provider = resolve_cli_provider_with_auth_binding(
         &config,
         &model,
@@ -5529,6 +5529,56 @@ async fn migrate_one_legacy_login_credential(
     Ok(0)
 }
 
+/// Provision the `[realm.global]` OAuth binding SECTION for every migrated
+/// credential, so a migrated `global:<provider>_oauth` token is resolvable.
+///
+/// The dev->global token copy moves credentials, but the resolver only
+/// generates the candidates the config NAMES — a bare `global:anthropic_oauth`
+/// token with no `[realm.global]` binding section is orphaned (no candidate
+/// references it). For each compiled OAuth provider that now has a `global`
+/// credential, this writes the matching backend/auth/binding section into the
+/// HOME-rooted global doc (reusing the same provisioning login performs),
+/// no-clobber + idempotent. Best-effort: failures are logged, never fatal.
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn ensure_migrated_global_oauth_sections_provisioned(
+    token_store: &dyn meerkat_providers::auth_store::TokenStore,
+    config_store: &dyn ConfigStore,
+) {
+    use meerkat_providers::auth_store::TokenKey;
+    let mut config = match config_store.get().await {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::warn!(error = %e, "skipping migrated global OAuth section provisioning (config read failed)");
+            return;
+        }
+    };
+    let mut changed = false;
+    for &provider in ALL_LOGIN_PROVIDERS {
+        let binding_id = provider.binding_id();
+        let key = match TokenKey::parse(meerkat_core::connection::GLOBAL_REALM_SLUG, binding_id) {
+            Ok(key) => key,
+            Err(_) => continue,
+        };
+        // Only anchor a section to a credential that actually exists under
+        // `global` (migrated or freshly signed in). No token => nothing to
+        // resolve, so don't synthesize a dangling section.
+        match token_store.load(&key).await {
+            Ok(Some(_)) => {
+                if ensure_cli_interactive_oauth_config(provider, &mut config) {
+                    changed = true;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(binding = %binding_id, error = %e, "skipping global OAuth section probe (token load failed)");
+            }
+        }
+    }
+    if changed && let Err(e) = config_store.set(config).await {
+        tracing::warn!(error = %e, "failed to persist migrated global OAuth section");
+    }
+}
+
 /// Process-level guard so the read-path migration trigger opens the
 /// TokenStore and runs the (idempotent) copy at most once per CLI process,
 /// regardless of how many credential-read paths fire. The migration is
@@ -5545,7 +5595,7 @@ static LEGACY_LOGIN_MIGRATION_DONE: std::sync::atomic::AtomicBool =
 /// reads credentials, so existing sign-ins keep working without a re-login.
 /// Failures are logged and swallowed — a migration hiccup must never block a
 /// run.
-async fn ensure_legacy_login_credentials_migrated_once() {
+async fn ensure_legacy_login_credentials_migrated_once(scope: &RuntimeScope) {
     use std::sync::atomic::Ordering;
     if LEGACY_LOGIN_MIGRATION_DONE
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -5565,6 +5615,19 @@ async fn ensure_legacy_login_credentials_migrated_once() {
     if let Err(e) = migrate_legacy_login_credentials_to_global(store.as_ref()).await {
         tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
     }
+    // Anchor each migrated credential with its `[realm.global]` binding section
+    // in the scope-correct global doc, BEFORE this run composes its config — so
+    // an upgraded-but-never-re-logged-in user resolves on the FIRST run, not the
+    // second. Writes never compose (read/write split): the section lands in the
+    // raw global head doc.
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    {
+        let config_store = cli_global_config_store(scope);
+        ensure_migrated_global_oauth_sections_provisioned(store.as_ref(), config_store.as_ref())
+            .await;
+    }
+    #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+    let _ = scope;
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -13965,7 +14028,7 @@ fn apply_pack_deploy_policy(
     if let Some(max_tokens) = policy.max_tokens
         && config.max_tokens == baseline.max_tokens
     {
-        config.max_tokens = max_tokens;
+        config.max_tokens = Some(max_tokens);
     }
     if let Some(model) = policy.models.anthropic.as_ref()
         && config.models.anthropic == baseline.models.anthropic
@@ -20322,7 +20385,7 @@ capabilities = ["rpc"]
             move |config: &Config| {
                 *observed.lock().expect("lock observed") = Some((
                     config.tools.mob_enabled,
-                    config.max_tokens,
+                    config.resolved_max_tokens(),
                     config.agent.model.clone(),
                 ));
             }

@@ -350,10 +350,11 @@ where
             .effective_params()
             .map_err(|err| AgentError::ConfigError(err.to_string()))?;
         let provider_params = (!provider_params.is_empty()).then_some(provider_params);
+        let configured_max_tokens = self.config.resolved_max_tokens_per_turn();
         let max_tokens = switch
             .max_output_tokens
-            .map(|limit| self.config.max_tokens_per_turn.min(limit))
-            .unwrap_or(self.config.max_tokens_per_turn);
+            .map(|limit| configured_max_tokens.min(limit))
+            .unwrap_or(configured_max_tokens);
 
         let skipped_targets = switch
             .skipped_targets
@@ -2126,7 +2127,7 @@ where
                         });
                     }
 
-                    let effective_max_tokens = self.config.max_tokens_per_turn;
+                    let effective_max_tokens = self.config.resolved_max_tokens_per_turn();
                     let mut effective_temperature = self.config.temperature;
                     // Typed field-wise merge on the carrier: explicit params
                     // win, build-derived tool defaults fill unset slots. A

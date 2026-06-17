@@ -438,7 +438,16 @@ fn populate_realm_from_api_keys(
             }
         }
     }
-    config.realm.insert("default".to_string(), section);
+    // Anchor the synthesized bindings under the reserved `global` realm — the
+    // resolver's universal default head. A session built without an explicit
+    // auth-binding has `realm_id == None`, so the connection resolver heads to
+    // `global`; synthesizing under any other slug (historically `"default"`)
+    // leaves those omitted-auth-binding sessions unable to resolve. WASM has no
+    // filesystem `global` doc, so this in-memory section IS the global config.
+    config.realm.insert(
+        meerkat_core::connection::GLOBAL_REALM_SLUG.to_string(),
+        section,
+    );
 }
 
 /// Resolve per-provider API keys into a map consumed by
@@ -3048,7 +3057,7 @@ capabilities = [{capability_values}]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_auth_binding() -> meerkat_core::AuthBindingRef {
         meerkat_core::AuthBindingRef {
-            realm: meerkat_core::connection::RealmId::parse("default").expect("test realm id"),
+            realm: meerkat_core::connection::RealmId::parse("global").expect("test realm id"),
             binding: meerkat_core::connection::BindingId::parse("default_anthropic")
                 .expect("test binding id"),
             profile: None,
@@ -3070,7 +3079,7 @@ capabilities = [{capability_values}]
         )]);
         populate_realm_from_api_keys(&mut config, &api_keys, Some(&base_urls));
 
-        let section = config.realm.get("default").expect("default realm");
+        let section = config.realm.get("global").expect("global realm");
         // base_url landed on the openai backend, matched by typed provider
         // identity, not by reconstructing a `default_openai` id name.
         let openai_backend = section
@@ -3088,6 +3097,36 @@ capabilities = [{capability_values}]
             .find(|bp| bp.provider == "anthropic")
             .expect("anthropic backend");
         assert_eq!(anthropic_backend.base_url, None);
+    }
+
+    #[test]
+    fn omitted_auth_binding_resolves_synthesized_global_realm() {
+        // MF-2 regression guard. api-keys synthesize the binding section under
+        // the reserved `global` realm, and a session built WITHOUT an explicit
+        // auth-binding (`realm_id == None`) heads the connection resolver to
+        // `global`. If the section lived under any other slug (historically
+        // `"default"`) this resolution would fail with no candidates — exactly
+        // the omitted-auth-binding regression.
+        let mut config = Config::default();
+        let api_keys = HashMap::from([("anthropic".to_string(), "sk-ant".to_string())]);
+        populate_realm_from_api_keys(&mut config, &api_keys, None);
+
+        let target = meerkat_core::connection::resolve_realm_binding_target_for_provider(
+            &config,
+            meerkat_core::Provider::Anthropic,
+            None,  // explicit_realm
+            None,  // explicit_binding
+            None,  // explicit_profile
+            None,  // preferred_realm — omitted: head defaults to `global`
+            false, // allow_env_default — the synthesized section must resolve on its own
+        )
+        .expect("omitted-auth-binding session resolves under the global head");
+
+        assert_eq!(
+            target.auth_binding.realm.as_str(),
+            meerkat_core::connection::GLOBAL_REALM_SLUG,
+            "synthesized binding resolves under the global head"
+        );
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3945,7 +3984,7 @@ capabilities = [{capability_values}]
             ("anthropic".to_string(), "a".to_string()),
         ]);
         populate_realm_from_api_keys(&mut config, &api_keys, None);
-        let section = config.realm.get("default").expect("default realm");
+        let section = config.realm.get("global").expect("global realm");
 
         // The highest-priority configured provider (anthropic) seeds the
         // per-realm default_binding.
@@ -3977,7 +4016,7 @@ capabilities = [{capability_values}]
             ("anthropic".to_string(), "a".to_string()),
         ]);
         populate_realm_from_api_keys(&mut config, &api_keys, None);
-        let section = config.realm.get("default").expect("default realm");
+        let section = config.realm.get("global").expect("global realm");
         // A recognized provider (anthropic) wins the default over the
         // unrecognized key, which sorts last.
         assert_eq!(
@@ -3996,7 +4035,7 @@ capabilities = [{capability_values}]
         let mut config = Config::default();
         let api_keys = HashMap::from([("openai".to_string(), "sk-oai".to_string())]);
         populate_realm_from_api_keys(&mut config, &api_keys, None);
-        let section = config.realm.get("default").expect("default realm");
+        let section = config.realm.get("global").expect("global realm");
 
         // Exactly one backend, whose provider is the typed `openai` identity
         // (round-trips through Provider::parse_strict — no stringly invention).

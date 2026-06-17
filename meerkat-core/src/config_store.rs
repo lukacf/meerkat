@@ -526,13 +526,22 @@ mod tests {
 
     #[test]
     fn apply_config_patch_preview_applies_patch_without_mutating_input() {
-        let config = Config::default();
+        let config = Config {
+            max_tokens: Some(8192),
+            ..Config::default()
+        };
         let original_max_tokens = config.max_tokens;
-        let bumped = original_max_tokens.saturating_add(1);
+        let bumped = original_max_tokens
+            .expect("max_tokens set above")
+            .saturating_add(1);
         let previewed =
             apply_config_patch_preview(&config, serde_json::json!({ "max_tokens": bumped }))
                 .expect("scalar patch should preview cleanly");
-        assert_eq!(previewed.max_tokens, bumped, "preview reflects the patch");
+        assert_eq!(
+            previewed.max_tokens,
+            Some(bumped),
+            "preview reflects the patch"
+        );
         assert_eq!(
             config.max_tokens, original_max_tokens,
             "input config is not mutated by preview"

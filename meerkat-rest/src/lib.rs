@@ -499,7 +499,7 @@ impl AppState {
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
 
-        let max_tokens = config.agent.max_tokens_per_turn;
+        let max_tokens = config.agent.resolved_max_tokens_per_turn();
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
 
@@ -9639,7 +9639,7 @@ mod tests {
         )
         .await
         .expect("config set");
-        assert_eq!(after_set.config.max_tokens, 2048);
+        assert_eq!(after_set.config.max_tokens, Some(2048));
 
         let Json(after_patch) = patch_config(
             State(state.clone()),
@@ -9650,7 +9650,7 @@ mod tests {
         )
         .await
         .expect("config patch");
-        assert_eq!(after_patch.config.max_tokens, 3072);
+        assert_eq!(after_patch.config.max_tokens, Some(3072));
     }
 
     #[tokio::test]

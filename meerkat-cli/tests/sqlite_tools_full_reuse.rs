@@ -56,7 +56,7 @@ async fn write_test_config(
     tokio::fs::create_dir_all(&rkat_dir).await?;
 
     let mut config = Config::default();
-    config.agent.max_tokens_per_turn = 128;
+    config.agent.max_tokens_per_turn = Some(128);
     let config_toml = toml::to_string_pretty(&config)?;
     tokio::fs::write(rkat_dir.join("config.toml"), config_toml).await?;
     Ok(())

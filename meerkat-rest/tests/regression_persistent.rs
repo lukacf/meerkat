@@ -97,7 +97,7 @@ fn build_state(
 
     AppState {
         store_path: store_path.to_path_buf(),
-        max_tokens: max_tokens.unwrap_or(config.agent.max_tokens_per_turn),
+        max_tokens: max_tokens.unwrap_or(config.agent.resolved_max_tokens_per_turn()),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: true,

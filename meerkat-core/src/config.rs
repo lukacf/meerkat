@@ -35,7 +35,17 @@ pub struct Config {
     pub tools: ToolsConfig,
     // New schema fields for interface consolidation.
     pub models: ModelDefaults,
-    pub max_tokens: u32,
+    /// Top-level per-turn output-token limit.
+    ///
+    /// `None` means "inherit / use the template default"; an explicit value
+    /// (including one equal to the template default) is an override that wins
+    /// over an inherited parent realm value. The operative runtime value is
+    /// resolved at point-of-use via [`Config::resolved_max_tokens`] — keeping
+    /// the field optional is what lets realm inheritance distinguish "unset"
+    /// from "explicitly set to the default" (presence, not a `!= default`
+    /// heuristic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     pub shell: ShellDefaults,
     pub store: StoreConfig,
     pub comms: CommsRuntimeConfig,
@@ -59,12 +69,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let defaults = template_defaults();
         let agent = AgentConfig::default();
-        let max_tokens = defaults
-            .max_tokens
-            .filter(|value| *value > 0)
-            .unwrap_or(agent.max_tokens_per_turn);
         Self {
             agent,
             storage: StorageConfig::default(),
@@ -72,7 +77,11 @@ impl Default for Config {
             retry: RetryConfig::default(),
             tools: ToolsConfig::default(),
             models: ModelDefaults::default(),
-            max_tokens,
+            // `None` = use the template/resolved default at point-of-use. Do
+            // NOT materialize the template value here: a concrete default would
+            // make realm inheritance unable to tell "unset" from "explicitly set
+            // to the default". See [`Config::resolved_max_tokens`].
+            max_tokens: None,
             shell: ShellDefaults::default(),
             store: StoreConfig::default(),
             comms: CommsRuntimeConfig::default(),
@@ -286,7 +295,7 @@ impl Config {
         if other.agent.model != AgentConfig::default().model {
             self.agent.model = other.agent.model;
         }
-        if other.agent.max_tokens_per_turn != AgentConfig::default().max_tokens_per_turn {
+        if other.agent.max_tokens_per_turn.is_some() {
             self.agent.max_tokens_per_turn = other.agent.max_tokens_per_turn;
         }
         if other.agent.extraction_prompt.is_some() {
@@ -328,7 +337,7 @@ impl Config {
         for (id, entry) in other.models.custom {
             self.models.custom.insert(id, entry);
         }
-        if other.max_tokens != Config::default().max_tokens {
+        if other.max_tokens.is_some() {
             self.max_tokens = other.max_tokens;
         }
         if other.shell != ShellDefaults::default() {
@@ -731,6 +740,20 @@ impl Config {
 }
 
 impl Config {
+    /// Resolve the operative top-level per-turn output-token limit.
+    ///
+    /// Precedence: explicit `max_tokens` → embedded template `max_tokens` →
+    /// the agent's [`AgentConfig::resolved_max_tokens_per_turn`]. Keeping the
+    /// field `Option` (rather than materializing a default) is what lets realm
+    /// inheritance distinguish an unset child (inherit the parent) from a child
+    /// that explicitly pins the default (override the parent).
+    pub fn resolved_max_tokens(&self) -> u32 {
+        self.max_tokens
+            .or_else(|| template_defaults().max_tokens)
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| self.agent.resolved_max_tokens_per_turn())
+    }
+
     /// Validate configuration invariants.
     ///
     /// Called after loading and after persisting. Checks:
@@ -740,14 +763,14 @@ impl Config {
     /// - The effective model registry (custom + self-hosted entries merged
     ///   over the injected catalog) constructs without conflicts
     pub fn validate(&self, catalog: crate::model_profile::ModelCatalog) -> Result<(), ConfigError> {
-        if self.max_tokens == 0 {
+        if self.max_tokens == Some(0) {
             return Err(ConfigError::Validation(
-                "max_tokens must be greater than 0".to_string(),
+                "max_tokens must be greater than 0 when set".to_string(),
             ));
         }
-        if self.agent.max_tokens_per_turn == 0 {
+        if self.agent.max_tokens_per_turn == Some(0) {
             return Err(ConfigError::Validation(
-                "agent.max_tokens_per_turn must be greater than 0".to_string(),
+                "agent.max_tokens_per_turn must be greater than 0 when set".to_string(),
             ));
         }
         if self.budget.max_tokens == Some(0) {
@@ -826,6 +849,12 @@ pub fn default_structured_output_retries() -> u32 {
 /// run-loop seam.
 pub const DEFAULT_MAX_TURNS: u32 = 100;
 
+/// Final fallback for the per-turn output-token limit when neither the config
+/// nor the embedded template provides one. Materialized at point-of-use only;
+/// the config fields stay `Option` so realm inheritance keeps presence
+/// semantics (see [`Config::max_tokens`] / [`AgentConfig::max_tokens_per_turn`]).
+pub const DEFAULT_MAX_TOKENS_PER_TURN: u32 = 16384;
+
 /// Agent behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -838,8 +867,13 @@ pub struct AgentConfig {
     pub tool_instructions: Option<String>,
     /// Model identifier (provider-specific)
     pub model: String,
-    /// Maximum tokens to generate per turn
-    pub max_tokens_per_turn: u32,
+    /// Maximum tokens to generate per turn.
+    ///
+    /// `None` means "inherit / use the template default"; an explicit value is
+    /// an override that wins over an inherited parent realm value. Resolve the
+    /// operative value via [`AgentConfig::resolved_max_tokens_per_turn`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_per_turn: Option<u32>,
     /// Temperature for sampling
     pub temperature: Option<f32>,
     /// Warning threshold for budget (0.0-1.0)
@@ -894,9 +928,10 @@ impl Default for AgentConfig {
             system_prompt_file: None,
             tool_instructions: None,
             model: agent.and_then(|cfg| cfg.model.clone()).unwrap_or_default(),
-            max_tokens_per_turn: agent
-                .and_then(|cfg| cfg.max_tokens_per_turn)
-                .unwrap_or_default(),
+            // `None` = inherit / resolve the template default at point-of-use
+            // (see [`AgentConfig::resolved_max_tokens_per_turn`]); never
+            // materialize a concrete default into the field (presence semantics).
+            max_tokens_per_turn: None,
             temperature: None,
             budget_warning_threshold: agent
                 .and_then(|cfg| cfg.budget_warning_threshold)
@@ -907,6 +942,24 @@ impl Default for AgentConfig {
             structured_output_retries: default_structured_output_retries(),
             extraction_prompt: None,
         }
+    }
+}
+
+impl AgentConfig {
+    /// Resolve the operative per-turn output-token limit.
+    ///
+    /// Precedence: explicit field → embedded template → [`DEFAULT_MAX_TOKENS_PER_TURN`].
+    /// A `Some(0)` is rejected by [`Config::validate`], so it never reaches here.
+    pub fn resolved_max_tokens_per_turn(&self) -> u32 {
+        self.max_tokens_per_turn
+            .or_else(|| {
+                template_defaults()
+                    .agent
+                    .as_ref()
+                    .and_then(|cfg| cfg.max_tokens_per_turn)
+            })
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_TOKENS_PER_TURN)
     }
 }
 
@@ -2480,7 +2533,10 @@ mod tests {
             "core embeds no provider data: the default agent model is empty \
              and resolves through the injected catalog at build time"
         );
-        assert_eq!(config.agent.max_tokens_per_turn, 16384);
+        // The field is `None` by default (presence semantics for realm
+        // inheritance); the operative default resolves to the template's 16384.
+        assert_eq!(config.agent.max_tokens_per_turn, None);
+        assert_eq!(config.agent.resolved_max_tokens_per_turn(), 16384);
         assert_eq!(config.retry.max_retries, 3);
         assert_eq!(config.max_sessions(), DEFAULT_MAX_SESSIONS);
     }
@@ -3200,7 +3256,7 @@ api_style = "chat_completions"
     #[test]
     fn test_validate_rejects_zero_max_tokens() {
         let config = Config {
-            max_tokens: 0,
+            max_tokens: Some(0),
             ..Config::default()
         };
         let err = config
@@ -3225,7 +3281,7 @@ api_style = "chat_completions"
     #[test]
     fn test_validate_rejects_zero_agent_max_tokens_per_turn() {
         let mut config = Config::default();
-        config.agent.max_tokens_per_turn = 0;
+        config.agent.max_tokens_per_turn = Some(0);
         let err = config
             .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect_err("agent.max_tokens_per_turn=0 should be invalid");

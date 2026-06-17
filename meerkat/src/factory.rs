@@ -4311,8 +4311,11 @@ impl AgentFactory {
             llm_adapter
         };
 
-        // 5. Resolve max_tokens
-        let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);
+        // 5. Resolve max_tokens (config field is Option for realm-inheritance
+        // presence; resolve the operative value here at point-of-use).
+        let max_tokens = build_config
+            .max_tokens
+            .unwrap_or_else(|| config.resolved_max_tokens());
         let _realm_scope_root = self.realm_scope_root(&build_config);
         let _conventions_context_root = self
             .context_root

@@ -85,11 +85,14 @@ impl BlockAssembler {
     /// Handle a text delta event.
     ///
     /// Text deltas can always succeed - no Result needed.
-    /// `meta` is used by Gemini for thoughtSignature on text parts.
+    /// `meta` is used for provider continuity metadata on text parts.
     pub fn on_text_delta(&mut self, delta: &str, meta: Option<Box<ProviderMeta>>) {
-        if meta.is_none()
-            && let Some(BlockSlot::Finalized(block)) = self.slots.last_mut()
-            && let AssistantBlock::Text { text, meta: None } = block.as_mut()
+        if let Some(BlockSlot::Finalized(block)) = self.slots.last_mut()
+            && let AssistantBlock::Text {
+                text,
+                meta: previous_meta,
+            } = block.as_mut()
+            && previous_meta == &meta
         {
             text.push_str(delta);
             return;
@@ -353,6 +356,78 @@ mod tests {
         // Third starts new block because previous has meta
         match &blocks[2] {
             AssistantBlock::Text { text, .. } => assert_eq!(text, "Third"),
+            _ => panic!("Expected Text block"),
+        }
+    }
+
+    #[test]
+    fn test_text_deltas_with_identical_meta_coalesce() {
+        let mut assembler = BlockAssembler::new();
+        let meta = Some(Box::new(ProviderMeta::OpenAiResponse {
+            response_id: "resp_123".to_string(),
+        }));
+
+        assembler.on_text_delta("Hello", meta.clone());
+        assembler.on_text_delta(" ", meta.clone());
+        assembler.on_text_delta("World", meta);
+
+        let blocks = assembler.finalize();
+        assert_eq!(blocks.len(), 1);
+
+        match &blocks[0] {
+            AssistantBlock::Text { text, meta } => {
+                assert_eq!(text, "Hello World");
+                match meta.as_deref() {
+                    Some(ProviderMeta::OpenAiResponse { response_id }) => {
+                        assert_eq!(response_id, "resp_123");
+                    }
+                    _ => panic!("Expected OpenAI response metadata"),
+                }
+            }
+            _ => panic!("Expected Text block"),
+        }
+    }
+
+    #[test]
+    fn test_text_deltas_with_different_meta_do_not_coalesce() {
+        let mut assembler = BlockAssembler::new();
+
+        assembler.on_text_delta(
+            "First",
+            Some(Box::new(ProviderMeta::OpenAiResponse {
+                response_id: "resp_first".to_string(),
+            })),
+        );
+        assembler.on_text_delta(
+            "Second",
+            Some(Box::new(ProviderMeta::OpenAiResponse {
+                response_id: "resp_second".to_string(),
+            })),
+        );
+
+        let blocks = assembler.finalize();
+        assert_eq!(blocks.len(), 2);
+
+        match &blocks[0] {
+            AssistantBlock::Text { text, meta } => {
+                assert_eq!(text, "First");
+                assert!(matches!(
+                    meta.as_deref(),
+                    Some(ProviderMeta::OpenAiResponse { response_id })
+                        if response_id == "resp_first"
+                ));
+            }
+            _ => panic!("Expected Text block"),
+        }
+        match &blocks[1] {
+            AssistantBlock::Text { text, meta } => {
+                assert_eq!(text, "Second");
+                assert!(matches!(
+                    meta.as_deref(),
+                    Some(ProviderMeta::OpenAiResponse { response_id })
+                        if response_id == "resp_second"
+                ));
+            }
             _ => panic!("Expected Text block"),
         }
     }

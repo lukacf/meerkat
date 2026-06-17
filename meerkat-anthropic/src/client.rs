@@ -5,8 +5,9 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{
-    AnthropicCompactionConfig, AnthropicContextWindow, AnthropicEffort, AnthropicInferenceGeo,
-    AnthropicProviderTag, AnthropicThinkingConfig, ProviderTag,
+    AnthropicCacheControlPolicy, AnthropicCompactionConfig, AnthropicContextWindow,
+    AnthropicEffort, AnthropicInferenceGeo, AnthropicProviderTag, AnthropicThinkingConfig,
+    ProviderTag,
 };
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
@@ -664,7 +665,7 @@ impl AnthropicClient {
         });
 
         if let Some(system) = system_prompt {
-            body["system"] = Value::String(system);
+            body["system"] = Self::anthropic_system_prompt_value(&system, anthropic_tag(request));
         }
 
         if Self::request_supports_temperature(request)
@@ -784,6 +785,17 @@ impl AnthropicClient {
         }
 
         Ok(body)
+    }
+
+    fn anthropic_system_prompt_value(system: &str, tag: Option<&AnthropicProviderTag>) -> Value {
+        match tag.and_then(|t| t.cache_control) {
+            Some(AnthropicCacheControlPolicy::SystemPrefix) => serde_json::json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"}
+            }]),
+            _ => Value::String(system.to_string()),
+        }
     }
 
     fn ensure_claude_ai_oauth_system_marker(body: &mut Value) {
@@ -2265,6 +2277,59 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_body_cache_control_system_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![
+                Message::System(SystemMessage::new("stable system prefix".to_string())),
+                Message::User(UserMessage::text("test".to_string())),
+            ],
+        )
+        .with_anthropic_tag_merge(|t| {
+            t.cache_control = Some(AnthropicCacheControlPolicy::SystemPrefix);
+        });
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(
+            body["system"],
+            serde_json::json!([{
+                "type": "text",
+                "text": "stable system prefix",
+                "cache_control": {"type": "ephemeral"}
+            }])
+        );
+        assert!(
+            body["messages"].to_string().find("cache_control").is_none(),
+            "dynamic conversation messages must not receive cache_control"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_cache_control_disabled_preserves_system_string()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![
+                Message::System(SystemMessage::new("stable system prefix".to_string())),
+                Message::User(UserMessage::text("test".to_string())),
+            ],
+        )
+        .with_anthropic_tag_merge(|t| {
+            t.cache_control = Some(AnthropicCacheControlPolicy::Disabled);
+        });
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(body["system"], "stable system prefix");
+        Ok(())
+    }
+
+    #[test]
     fn test_client_builder_creates_configured_client() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::builder("test-key".to_string())
             .connect_timeout(std::time::Duration::from_secs(5))
@@ -2859,6 +2924,50 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn stream_emits_cache_usage_fields() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":120,"output_tokens":0,"cache_creation_input_tokens":32,"cache_read_input_tokens":16}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":5},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut usage_updates = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::UsageUpdate { usage } => usage_updates.push(usage),
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert!(!usage_updates.is_empty(), "expected usage update");
+        let first = &usage_updates[0];
+        assert_eq!(first.input_tokens, 120);
+        assert_eq!(first.cache_creation_tokens, Some(32));
+        assert_eq!(first.cache_read_tokens, Some(16));
+        let last = usage_updates.last().expect("usage update");
+        assert_eq!(last.output_tokens, 5);
+        assert_eq!(last.cache_creation_tokens, Some(32));
+        assert_eq!(last.cache_read_tokens, Some(16));
     }
 
     /// Regression: message_delta with stop_reason (no "type" in delta) must yield Done.

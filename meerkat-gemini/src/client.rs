@@ -604,6 +604,10 @@ impl GeminiClient {
                     Value::String("application/json".to_string());
                 body["generationConfig"]["responseJsonSchema"] = compiled.schema;
             }
+
+            if let Some(name) = tag.cached_content_name.as_ref() {
+                body["cachedContent"] = Value::String(name.clone());
+            }
         }
 
         let has_function_declarations = !request.tools.is_empty();
@@ -1804,7 +1808,7 @@ impl LlmClient for GeminiClient {
                                     input_tokens: usage.prompt_token_count.unwrap_or(0),
                                     output_tokens: usage.candidates_token_count.unwrap_or(0),
                                     cache_creation_tokens: None,
-                                    cache_read_tokens: None,
+                                    cache_read_tokens: usage.cached_content_token_count,
                                 }
                             };
                         }
@@ -1975,6 +1979,7 @@ struct FunctionCall {
 #[serde(rename_all = "camelCase")]
 struct GeminiUsage {
     prompt_token_count: Option<u64>,
+    cached_content_token_count: Option<u64>,
     candidates_token_count: Option<u64>,
 }
 
@@ -3045,6 +3050,24 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_body_with_cached_content_name() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_gemini_tag_merge(|t| {
+            t.cached_content_name = Some("cachedContents/stable-prefix".to_string());
+        });
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(body["cachedContent"], "cachedContents/stable-prefix");
+        Ok(())
+    }
+
+    #[test]
     fn test_openai_reasoning_effort_provider_tag_does_not_affect_gemini_body()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
@@ -3155,11 +3178,48 @@ mod tests {
 
     #[test]
     fn test_parse_stream_line_with_usage() -> Result<(), Box<dyn std::error::Error>> {
-        let line = r#"{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#;
+        let line = r#"{"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":7,"candidatesTokenCount":5}}"#;
         let response = GeminiClient::parse_stream_line(line)?.ok_or("missing response")?;
         assert!(response.usage_metadata.is_some());
         let usage = response.usage_metadata.ok_or("missing usage")?;
         assert_eq!(usage.prompt_token_count, Some(10));
+        assert_eq!(usage.cached_content_token_count, Some(7));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_emits_cached_content_usage() -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":64,"candidatesTokenCount":5}}"#,
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}]}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, handle) =
+            spawn_gemini_stream_stub("gemini-3.5-flash", payload, seen.clone()).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gemini-3.5-flash",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut usage_update = None;
+        while let Some(event) = stream.next().await {
+            match event? {
+                LlmEvent::UsageUpdate { usage } => usage_update = Some(usage),
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        handle.abort();
+
+        let usage = usage_update.ok_or("missing usage update")?;
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_tokens, Some(64));
+        assert_eq!(usage.cache_creation_tokens, None);
         Ok(())
     }
 

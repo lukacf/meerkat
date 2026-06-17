@@ -243,3 +243,92 @@ fn wire_metadata_openai_reasoning_effort_none_and_xhigh_round_trip() {
         assert_eq!(tag.reasoning_effort, Some(effort));
     }
 }
+
+#[test]
+fn wire_metadata_prompt_cache_fields_round_trip() {
+    use meerkat_core::lifecycle::run_primitive::{
+        AnthropicCacheControlPolicy, AnthropicProviderTag, GeminiProviderTag,
+        OpenAiPromptCacheRetention, OpenAiProviderTag, ProviderTag,
+    };
+
+    let openai_params = ProviderParamsOverride {
+        provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            store: Some(false),
+            prompt_cache_key: Some("tenant-a:stable-prefix".to_string()),
+            prompt_cache_retention: Some(OpenAiPromptCacheRetention::TwentyFourHours),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let wire: WireRuntimeTurnMetadata = RuntimeTurnMetadata {
+        provider_params: Some(TurnMetadataOverride::Set(openai_params)),
+        ..Default::default()
+    }
+    .into();
+    let json = serde_json::to_value(&wire).expect("serialize openai wire metadata");
+    let openai_tag = &json["provider_params"]["value"]["provider_tag"];
+    assert_eq!(openai_tag["store"], serde_json::json!(false));
+    assert_eq!(
+        openai_tag["prompt_cache_key"],
+        serde_json::json!("tenant-a:stable-prefix")
+    );
+    assert_eq!(
+        openai_tag["prompt_cache_retention"],
+        serde_json::json!("24h")
+    );
+    let round_tripped: RuntimeTurnMetadata =
+        serde_json::from_value::<WireRuntimeTurnMetadata>(json)
+            .expect("deserialize openai wire metadata")
+            .into();
+    let Some(TurnMetadataOverride::Set(params)) = round_tripped.provider_params else {
+        panic!("openai provider params should survive wire round trip");
+    };
+    let Some(ProviderTag::OpenAi(tag)) = params.provider_tag else {
+        panic!("openai provider tag expected");
+    };
+    assert_eq!(tag.store, Some(false));
+    assert_eq!(
+        tag.prompt_cache_key.as_deref(),
+        Some("tenant-a:stable-prefix")
+    );
+    assert_eq!(
+        tag.prompt_cache_retention,
+        Some(OpenAiPromptCacheRetention::TwentyFourHours)
+    );
+
+    let anthropic_params = ProviderParamsOverride {
+        provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
+            cache_control: Some(AnthropicCacheControlPolicy::SystemPrefix),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let wire: WireRuntimeTurnMetadata = RuntimeTurnMetadata {
+        provider_params: Some(TurnMetadataOverride::Set(anthropic_params)),
+        ..Default::default()
+    }
+    .into();
+    let json = serde_json::to_value(&wire).expect("serialize anthropic wire metadata");
+    assert_eq!(
+        json["provider_params"]["value"]["provider_tag"]["cache_control"],
+        serde_json::json!("system_prefix")
+    );
+
+    let gemini_params = ProviderParamsOverride {
+        provider_tag: Some(ProviderTag::Gemini(GeminiProviderTag {
+            cached_content_name: Some("cachedContents/stable-prefix".to_string()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let wire: WireRuntimeTurnMetadata = RuntimeTurnMetadata {
+        provider_params: Some(TurnMetadataOverride::Set(gemini_params)),
+        ..Default::default()
+    }
+    .into();
+    let json = serde_json::to_value(&wire).expect("serialize gemini wire metadata");
+    assert_eq!(
+        json["provider_params"]["value"]["provider_tag"]["cached_content_name"],
+        serde_json::json!("cachedContents/stable-prefix")
+    );
+}

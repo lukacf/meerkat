@@ -120,7 +120,11 @@ pub fn normalize_agents_md_content(content: &str) -> Option<String> {
     }
 
     if content.len() > AGENTS_MD_MAX_BYTES {
-        return Some(content.chars().take(AGENTS_MD_MAX_BYTES).collect());
+        let mut end = AGENTS_MD_MAX_BYTES;
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        return Some(content[..end].to_string());
     }
 
     Some(content.to_string())
@@ -206,6 +210,15 @@ mod tests {
         let agents_section_start = prompt.find("# Project Instructions").unwrap();
         let agents_content = &prompt[agents_section_start..];
         assert!(agents_content.len() <= AGENTS_MD_MAX_BYTES + 100);
+    }
+
+    #[test]
+    fn test_normalize_agents_md_content_truncates_multibyte_on_byte_boundary() {
+        let large_content = "🤖".repeat(AGENTS_MD_MAX_BYTES);
+        let normalized = normalize_agents_md_content(&large_content).unwrap();
+
+        assert!(normalized.len() <= AGENTS_MD_MAX_BYTES);
+        assert!(normalized.is_char_boundary(normalized.len()));
     }
 
     #[test]

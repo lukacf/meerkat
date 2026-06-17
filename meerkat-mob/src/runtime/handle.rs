@@ -37,7 +37,11 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
-const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(not(test))]
+const READY_WAIT_BRIDGE_SESSION_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const READY_WAIT_BRIDGE_SESSION_RECHECK_INTERVAL: Duration = Duration::from_millis(25);
 
 fn adaptive_bundle_layer_terminal_store_plan()
 -> Result<adaptive_bundle::AdaptiveMobBundleStorePlan, MobError> {
@@ -5333,20 +5337,28 @@ impl MobHandle {
 
     fn ready_wait_is_satisfied(
         entry: &RosterEntry,
-        snapshot: &MobMemberSnapshot,
-        ready_runtime_ids: &BTreeSet<String>,
+        machine_state: &mob_dsl::MobMachineState,
     ) -> bool {
         if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
             return true;
         }
-        match snapshot.status {
-            MobMemberStatus::Unknown => false,
-            MobMemberStatus::Active => {
-                ready_runtime_ids.contains(&entry.agent_runtime_id.to_string())
-            }
-            MobMemberStatus::Retiring | MobMemberStatus::Broken | MobMemberStatus::Completed => {
-                true
-            }
+
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        let lifecycle = machine_state.member_lifecycle_for_identity(&dsl_identity);
+        match lifecycle.status {
+            mob_dsl::MobMemberLifecycleStatus::Unknown => false,
+            mob_dsl::MobMemberLifecycleStatus::Active => machine_state
+                .identity_to_runtime
+                .get(&dsl_identity)
+                .is_some_and(|runtime_id| {
+                    machine_state
+                        .member_startup_runtime_ready
+                        .contains(runtime_id)
+                        || machine_state.member_startup_ready.contains(runtime_id)
+                }),
+            mob_dsl::MobMemberLifecycleStatus::Retiring
+            | mob_dsl::MobMemberLifecycleStatus::Broken
+            | mob_dsl::MobMemberLifecycleStatus::Completed => true,
         }
     }
 
@@ -5409,28 +5421,25 @@ impl MobHandle {
         }
 
         let deadline = Instant::now() + timeout.unwrap_or(DEFAULT_READY_WAIT_TIMEOUT);
+        let mut machine_state_rx = self.machine_state_watch_rx.clone();
+        let mut observed_missing_bridge_sessions = BTreeSet::new();
         loop {
-            let snapshot = self.startup_kickoff_snapshot().await?;
-            let entries = self
-                .list_all_members()
-                .await
-                .into_iter()
-                .map(|entry| (entry.agent_identity.clone(), entry))
-                .collect::<HashMap<_, _>>();
+            let machine_state = machine_state_rx.borrow().clone();
+            let entries = {
+                let roster = self.roster.read().await;
+                roster
+                    .list_all()
+                    .cloned()
+                    .map(|entry| (entry.agent_identity.clone(), entry))
+                    .collect::<HashMap<_, _>>()
+            };
 
             let mut pending_member_ids = Vec::new();
             for id in target_ids {
                 let Some(entry) = entries.get(id) else {
                     continue;
                 };
-                let member_snapshot = self
-                    .member_status(&AgentIdentity::from(id.as_str()))
-                    .await?;
-                if !Self::ready_wait_is_satisfied(
-                    entry,
-                    &member_snapshot,
-                    &snapshot.ready_runtime_ids,
-                ) {
+                if !Self::ready_wait_is_satisfied(entry, &machine_state) {
                     pending_member_ids.push(id.clone());
                 }
             }
@@ -5439,13 +5448,96 @@ impl MobHandle {
                 return Ok(());
             }
 
+            self.reconcile_missing_ready_wait_bridge_sessions(
+                &entries,
+                &machine_state,
+                &pending_member_ids,
+                &mut observed_missing_bridge_sessions,
+            )
+            .await?;
+
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(MobError::ReadyWaitTimedOut { pending_member_ids });
             }
+            let sleep_for = std::cmp::min(remaining, READY_WAIT_BRIDGE_SESSION_RECHECK_INTERVAL);
 
-            tokio::time::sleep(std::cmp::min(remaining, Duration::from_millis(50))).await;
+            tokio::select! {
+                () = tokio::time::sleep(sleep_for) => {
+                    if sleep_for == remaining {
+                        return Err(MobError::ReadyWaitTimedOut { pending_member_ids });
+                    }
+                }
+                changed = machine_state_rx.changed() => {
+                    changed.map_err(|_| MobError::ActorCommandChannelClosed)?;
+                }
+            }
         }
+    }
+
+    async fn reconcile_missing_ready_wait_bridge_sessions(
+        &self,
+        entries: &HashMap<AgentIdentity, RosterEntry>,
+        machine_state: &mob_dsl::MobMachineState,
+        pending_member_ids: &[AgentIdentity],
+        observed_missing_bridge_sessions: &mut BTreeSet<(AgentIdentity, String)>,
+    ) -> Result<(), MobError> {
+        let probes = pending_member_ids
+            .iter()
+            .filter_map(|identity| {
+                let entry = entries.get(identity)?;
+                if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
+                    return None;
+                }
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+                let lifecycle = machine_state.member_lifecycle_for_identity(&dsl_identity);
+                if lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
+                    return None;
+                }
+                let bridge_session_id =
+                    Self::machine_bridge_session_id_for_identity(identity, machine_state)?;
+                Some((identity.clone(), dsl_identity, bridge_session_id))
+            })
+            .collect::<Vec<_>>();
+
+        for (identity, dsl_identity, bridge_session_id) in probes {
+            let bridge_session_key = bridge_session_id.to_string();
+            if observed_missing_bridge_sessions
+                .contains(&(identity.clone(), bridge_session_key.clone()))
+            {
+                continue;
+            }
+            match self.session_service.read(&bridge_session_id).await {
+                Ok(_) => {}
+                Err(SessionError::NotFound { .. }) => {
+                    let reason =
+                        format!("missing bridge session snapshot for '{bridge_session_id}'");
+                    match self.command_tx.try_send(MobCommand::ProjectMachineSignal {
+                        signal: mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                            agent_identity: dsl_identity,
+                            reason,
+                        },
+                    }) {
+                        Ok(()) => {
+                            observed_missing_bridge_sessions.insert((identity, bridge_session_key));
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            tracing::debug!(
+                                agent_identity = %identity,
+                                bridge_session_id = %bridge_session_id,
+                                "ready wait observed missing bridge session but actor command channel is full; will retry"
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            return Err(MobError::ActorCommandChannelClosed);
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        Ok(())
     }
 
     async fn wait_one_snapshot(
@@ -7318,6 +7410,134 @@ mod tests {
                 &crate::launch::MemberLaunchMode::Fresh,
             ),
             SpawnSource::AgentSpawnMember
+        );
+    }
+
+    fn ready_wait_test_entry(
+        identity: &AgentIdentity,
+        runtime_mode: MobRuntimeMode,
+    ) -> RosterEntry {
+        let agent_runtime_id = AgentRuntimeId::initial(identity.clone());
+        RosterEntry {
+            agent_identity: identity.clone(),
+            generation: Generation::INITIAL,
+            fence_token: FenceToken::new(0),
+            agent_runtime_id,
+            role: ProfileName::from("worker"),
+            runtime_mode,
+            wired_to: BTreeSet::new(),
+            labels: BTreeMap::new(),
+            kickoff: None,
+            member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
+            peer_id: None,
+            transport_public_key: None,
+            external_peer_specs: BTreeMap::new(),
+            effective_profile_override: None,
+        }
+    }
+
+    fn seed_ready_wait_machine(
+        identity: &AgentIdentity,
+        runtime_mode: mob_dsl::SpawnPolicyRuntimeMode,
+    ) -> mob_dsl::MobMachineAuthority {
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let runtime_id = AgentRuntimeId::initial(identity.clone());
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&runtime_id);
+        let fence_token = mob_dsl::FenceToken::from_domain(FenceToken::new(0));
+        let generation = mob_dsl::Generation::from_domain(runtime_id.generation);
+        let profile_digest = "ready-wait-profile-digest".to_string();
+
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: dsl_identity.clone(),
+                profile_name: "worker-profile".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: profile_digest.clone(),
+                tool_config_digest: "tools".to_string(),
+                skills_digest: "skills".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+            },
+        )
+        .expect("profile authority should admit");
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::BeginSpawnExec {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: dsl_runtime_id.clone(),
+                fence_token,
+                generation,
+                profile_material_digest: profile_digest.clone(),
+                external_addressable: false,
+                runtime_mode,
+                bridge_session_id: Some(mob_dsl::SessionId("ready-session".to_string())),
+                replacing: None,
+            },
+        )
+        .expect("begin spawn exec should admit");
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::CommitSpawnMembership {
+                agent_identity: dsl_identity,
+                agent_runtime_id: dsl_runtime_id,
+                fence_token,
+                generation,
+                profile_material_digest: profile_digest,
+                external_addressable: false,
+                runtime_mode,
+                bridge_session_id: Some(mob_dsl::SessionId("ready-session".to_string())),
+                replacing: None,
+            },
+        )
+        .expect("commit spawn membership should admit");
+
+        authority
+    }
+
+    #[test]
+    fn default_ready_wait_timeout_is_bounded_for_agent_tool_callers() {
+        assert_eq!(DEFAULT_READY_WAIT_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn ready_wait_requires_startup_ready_for_active_autonomous_members() {
+        let identity = AgentIdentity::from("worker-ready-wait");
+        let entry = ready_wait_test_entry(&identity, MobRuntimeMode::AutonomousHost);
+        let mut authority =
+            seed_ready_wait_machine(&identity, mob_dsl::SpawnPolicyRuntimeMode::AutonomousHost);
+
+        assert!(
+            !MobHandle::ready_wait_is_satisfied(&entry, authority.state()),
+            "an active autonomous member should remain pending until startup readiness is observed"
+        );
+
+        let runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        authority
+            .apply_signal(mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+                agent_runtime_id: runtime_id,
+                fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+            })
+            .expect("runtime ready observation should admit for current runtime");
+
+        assert!(
+            MobHandle::ready_wait_is_satisfied(&entry, authority.state()),
+            "ready wait should be satisfied from machine startup-ready state without actor polling"
+        );
+    }
+
+    #[test]
+    fn ready_wait_treats_turn_driven_members_as_ready_without_startup_marker() {
+        let identity = AgentIdentity::from("worker-ready-td");
+        let entry = ready_wait_test_entry(&identity, MobRuntimeMode::TurnDriven);
+        let authority =
+            seed_ready_wait_machine(&identity, mob_dsl::SpawnPolicyRuntimeMode::TurnDriven);
+
+        assert!(
+            MobHandle::ready_wait_is_satisfied(&entry, authority.state()),
+            "turn-driven members do not require autonomous startup readiness"
         );
     }
 }

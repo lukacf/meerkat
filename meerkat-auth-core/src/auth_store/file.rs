@@ -167,3 +167,73 @@ async fn write_file_with_mode(path: &Path, bytes: &[u8]) -> Result<(), TokenStor
     file.sync_all().await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::auth_store::PersistedAuthMode;
+    use meerkat_core::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
+
+    fn token(secret: &str) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some(secret.into()),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: None,
+            scopes: vec![],
+            account_id: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    // RCT-19: the on-disk layout is keyed by the OWNING realm.
+    #[tokio::test]
+    async fn file_token_store_path_for_uses_owning_realm() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileTokenStore::new(dir.path());
+        let key = TokenKey::new(
+            RealmId::parse("global").unwrap(),
+            BindingId::parse("anthropic").unwrap(),
+        );
+        store.save(&key, &token("sek")).await.unwrap();
+        let expected = dir.path().join("global").join("anthropic.json");
+        assert!(
+            expected.exists(),
+            "token must persist under the owning-realm directory"
+        );
+    }
+
+    // RCT-17: an inherited binding (owner = the defining realm, stamped by the
+    // chain walk) resolves its credential at the OWNING realm's namespace; a
+    // different (consuming) realm does not see it.
+    #[tokio::test]
+    async fn managed_store_inherited_binding_reads_owning_realm_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileTokenStore::new(dir.path());
+
+        let owner = AuthBindingRef {
+            realm: RealmId::parse("global").unwrap(),
+            binding: BindingId::parse("anthropic").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        let key = TokenKey::from_auth_binding(&owner);
+        assert_eq!(key.realm.as_str(), "global");
+
+        store.save(&key, &token("owner-secret")).await.unwrap();
+        let loaded = store.load(&key).await.unwrap().expect("found at owner");
+        assert_eq!(loaded.primary_secret.as_deref(), Some("owner-secret"));
+
+        let consuming = TokenKey::new(
+            RealmId::parse("child").unwrap(),
+            BindingId::parse("anthropic").unwrap(),
+        );
+        assert!(
+            store.load(&consuming).await.unwrap().is_none(),
+            "a consuming child realm must not see the global-owned token"
+        );
+    }
+}

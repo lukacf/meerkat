@@ -479,7 +479,7 @@ const MACHINE_SPECS = [
           columns: 1,
           anchors: ["Running", "Stopped", "Completed", "Destroyed"],
           triggers: [
-            "Spawn",
+            "BeginSpawnExec",
             "Retire",
             "Respawn",
             "RetireAll",

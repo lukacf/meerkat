@@ -269,7 +269,7 @@ mod tests {
             "openai",
             "test-openai-key",
         )]);
-        config.realm.insert("global".to_string(), section);
+        config.realm.insert("default".to_string(), section);
 
         let service = build_persistent_service(factory, config, 4, persistence);
         let created = service
@@ -311,7 +311,7 @@ mod tests {
             "openai",
             "test-openai-key",
         )]);
-        config.realm.insert("global".to_string(), section);
+        config.realm.insert("default".to_string(), section);
 
         let factory_a = AgentFactory::new(temp.path().join("sessions-a")).builtins(false);
         let factory_b = AgentFactory::new(temp.path().join("sessions-b")).builtins(false);

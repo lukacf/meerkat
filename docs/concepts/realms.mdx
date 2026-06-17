@@ -13,7 +13,7 @@ For task-oriented CLI behavior, filesystem layout, and troubleshooting, see the
 
 1. Same `realm_id` means shared sessions, config, and runtime metadata.
 2. Different `realm_id` means strict isolation, even from the same folder.
-3. Backend (`sqlite` or `jsonl`) is pinned once per realm via `realm_manifest.json`.
+3. Persistent backends (`sqlite` or `jsonl`) are pinned once per realm via `realm_manifest.json`; `memory` is an explicit ephemeral backend for single-process runs.
 4. Realm IDs are user-chosen stable identifiers with syntax constraints. Reuse the same value to collaborate across surfaces.
 
 Realm IDs must be 1-64 characters, start with an ASCII alphanumeric character, and may contain only ASCII alphanumerics, `_`, and `-`. They cannot contain whitespace or `:`, and UUID-like opaque values are rejected for explicit user-facing realm IDs.
@@ -65,6 +65,7 @@ On first use, a realm writes a manifest with backend choice. Later opens must ho
 |------------|----------------|
 | `--realm-backend sqlite` | `sqlite` |
 | `--realm-backend jsonl` | `jsonl` |
+| `--realm-backend memory` | `memory` |
 | No hint | `sqlite` when compiled, otherwise `jsonl` |
 
 After pinning, all surfaces use the manifest backend for that realm.
@@ -75,6 +76,7 @@ When SQLite support is compiled in, new persistent realms default to `sqlite`.
 
 - `sqlite` is the recommended backend for the normal Meerkat operating mode where multiple processes share one realm.
 - `jsonl` remains explicitly selectable for inspectable file-based persistence.
+- `memory` uses in-process session/blob/artifact stores and is useful for throwaway runs that should not persist conversation state.
 
 Existing realms stay pinned to the backend recorded in their manifest. Changing the default does not migrate old realms.
 

@@ -292,7 +292,7 @@ pub struct SessionBuildOptions {
     /// Typed realm-pinned session-store backend for this build.
     ///
     /// Carries the single typed owner ([`RecoveryBackendKind`]) rather than a
-    /// bare `"sqlite"`/`"jsonl"` string, so a recovery-environment hint cannot
+    /// bare backend string, so a recovery-environment hint cannot
     /// silently become durable identity: any raw backend string is parsed
     /// fail-closed at its ingress boundary before it reaches this field.
     pub backend: Option<crate::session_recovery::RecoveryBackendKind>,

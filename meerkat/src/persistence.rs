@@ -5,11 +5,23 @@ use std::path::{Path, PathBuf};
 
 use crate::SessionStore;
 use meerkat_core::{ArtifactStore, BlobStore};
+#[cfg(all(
+    feature = "session-store",
+    feature = "memory-store",
+    not(target_arch = "wasm32")
+))]
+use meerkat_schedule::MemoryScheduleStore;
 use meerkat_schedule::{DisabledScheduleStore, ScheduleStore};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::event_store::{EventStore, FileEventStore};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::projector::SessionProjector;
+#[cfg(all(
+    feature = "session-store",
+    feature = "memory-store",
+    not(target_arch = "wasm32")
+))]
+use meerkat_workgraph::MemoryWorkGraphStore;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_workgraph::SqliteWorkGraphStore;
 use meerkat_workgraph::{DisabledWorkGraphStore, WorkGraphStore};
@@ -31,6 +43,12 @@ use meerkat_store::{
     FsArtifactStore, FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, SqliteScheduleStore,
     StoreError, ensure_realm_manifest_in, realm_paths_in,
 };
+#[cfg(all(
+    feature = "session-store",
+    feature = "memory-store",
+    not(target_arch = "wasm32")
+))]
+use meerkat_store::{MemoryBlobStore, MemoryStore};
 
 #[cfg(feature = "session-store")]
 #[derive(Debug, thiserror::Error)]
@@ -279,6 +297,8 @@ pub async fn open_realm_persistence_in(
     let store_path = match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir.clone(),
+        #[cfg(feature = "memory-store")]
+        RealmBackend::Memory => paths.root.clone(),
         RealmBackend::Sqlite => paths.root.clone(),
     };
 
@@ -307,6 +327,28 @@ pub async fn open_realm_persistence_in(
                     workgraph_store,
                 },
             );
+            bundle.artifact_store = artifact_store;
+            bundle
+        }
+        #[cfg(feature = "memory-store")]
+        RealmBackend::Memory => {
+            let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+            let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
+            let artifact_store: Arc<dyn ArtifactStore> =
+                Arc::new(meerkat_store::MemoryArtifactStore::new());
+            let schedule_store: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+            let workgraph_store: Arc<dyn WorkGraphStore> = Arc::new(MemoryWorkGraphStore::new());
+            let runtime_store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new())
+                as Arc<dyn RuntimeStore>;
+            let mut bundle = PersistenceBundle::new_with_subsystem_stores(
+                session_store,
+                Some(runtime_store),
+                blob_store,
+                schedule_store,
+                workgraph_store,
+            );
+            bundle.manifest = Some(manifest.clone());
+            bundle.store_path = Some(store_path);
             bundle.artifact_store = artifact_store;
             bundle
         }
@@ -508,6 +550,39 @@ mod tests {
         assert!(
             bundle.event_projection().is_some(),
             "jsonl realms still need the append-only event projection bridge"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "memory-store")]
+    #[tokio::test]
+    async fn open_realm_persistence_memory_has_no_durable_companions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+
+        let (manifest, bundle) = open_realm_persistence_in(
+            temp.path(),
+            "memory-realm",
+            Some(RealmBackend::Memory),
+            Some(RealmOrigin::Explicit),
+        )
+        .await?;
+
+        assert_eq!(manifest.backend, RealmBackend::Memory);
+        assert!(bundle.runtime_store().is_some());
+        assert!(!bundle.blob_store().is_persistent());
+        assert!(!bundle.artifact_store().is_persistent());
+        assert_eq!(
+            bundle.schedule_store().kind(),
+            meerkat_schedule::ScheduleStoreKind::Memory
+        );
+        assert_eq!(
+            bundle.workgraph_store().kind(),
+            meerkat_workgraph::WorkGraphStoreKind::Memory
+        );
+        assert!(
+            bundle.event_projection().is_none(),
+            "memory realms must not persist conversation events through the file projection bridge"
         );
         Ok(())
     }

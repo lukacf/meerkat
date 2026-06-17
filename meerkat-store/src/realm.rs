@@ -1,5 +1,7 @@
 #[cfg(feature = "jsonl")]
 use crate::JsonlStore;
+#[cfg(feature = "memory")]
+use crate::MemoryStore;
 #[cfg(feature = "sqlite")]
 use crate::SqliteSessionStore;
 use crate::{SessionStore, StoreError};
@@ -19,6 +21,8 @@ use uuid::Uuid;
 pub enum RealmBackend {
     #[cfg(feature = "jsonl")]
     Jsonl,
+    #[cfg(feature = "memory")]
+    Memory,
     #[cfg(feature = "sqlite")]
     Sqlite,
 }
@@ -28,6 +32,8 @@ impl RealmBackend {
         match self {
             #[cfg(feature = "jsonl")]
             Self::Jsonl => "jsonl",
+            #[cfg(feature = "memory")]
+            Self::Memory => "memory",
             #[cfg(feature = "sqlite")]
             Self::Sqlite => "sqlite",
         }
@@ -720,6 +726,8 @@ fn parse_realm_backend(realm_id: &str, backend: &str) -> Result<RealmBackend, St
     match backend {
         #[cfg(feature = "jsonl")]
         "jsonl" => Ok(RealmBackend::Jsonl),
+        #[cfg(feature = "memory")]
+        "memory" => Ok(RealmBackend::Memory),
         #[cfg(feature = "sqlite")]
         "sqlite" => Ok(RealmBackend::Sqlite),
         _ => Err(StoreError::UnsupportedRealmBackend {
@@ -743,15 +751,15 @@ pub async fn open_realm_session_store_in(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<(RealmManifest, Arc<dyn SessionStore>), StoreError> {
-    #[cfg(not(any(feature = "jsonl", feature = "sqlite")))]
+    #[cfg(not(any(feature = "jsonl", feature = "memory", feature = "sqlite")))]
     {
         let _ = (realms_root, realm_id, backend_hint, origin_hint);
         Err(StoreError::Internal(
-            "realm support requires at least one persistent backend".to_string(),
+            "realm support requires at least one backend".to_string(),
         ))
     }
 
-    #[cfg(any(feature = "jsonl", feature = "sqlite"))]
+    #[cfg(any(feature = "jsonl", feature = "memory", feature = "sqlite"))]
     {
         let manifest =
             ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
@@ -769,6 +777,11 @@ pub async fn open_realm_session_store_in(
         if manifest.backend == RealmBackend::Sqlite {
             let sqlite_store = SqliteSessionStore::open(paths.sessions_sqlite_path)?;
             return Ok((manifest, Arc::new(sqlite_store)));
+        }
+
+        #[cfg(feature = "memory")]
+        if manifest.backend == RealmBackend::Memory {
+            return Ok((manifest, Arc::new(MemoryStore::new())));
         }
 
         Err(StoreError::Internal(

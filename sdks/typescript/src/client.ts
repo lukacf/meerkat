@@ -257,7 +257,7 @@ interface PlatformTarget {
 export interface ConnectOptions {
   realmId?: string;
   instanceId?: string;
-  realmBackend?: "jsonl" | "sqlite";
+  realmBackend?: "jsonl" | "memory" | "sqlite";
   isolated?: boolean;
   stateRoot?: string;
   contextRoot?: string;

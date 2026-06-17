@@ -917,7 +917,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     ``,
     `filegroup(`,
     `    name = "workspace_runfiles",`,
-    `    srcs = glob(`,
+    `    srcs = ["BUILD.bazel"] + glob(`,
     `        [`,
     `            ".github/workflows/*",`,
     `            "**/*",`,

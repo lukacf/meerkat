@@ -115,6 +115,7 @@ case "${lane}" in
           exit 0
           ;;
       esac
+      export MEERKAT_E2E_EXECUTION_MODE="${MEERKAT_E2E_EXECUTION_MODE:-prebuilt}"
     fi
     exec "${root}/scripts/e2e-smoke-lane"
     ;;

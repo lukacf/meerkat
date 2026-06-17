@@ -219,6 +219,157 @@ sh_test(
     timeout = "eternal",
 )
 
+E2E_SMOKE_REMOTE_DATA = [
+    ":workspace_runfiles",
+    "@node_darwin_arm64//:bin/node",
+    "@node_darwin_arm64//:lib/node_modules/npm/bin/npm-cli.js",
+    "@node_darwin_arm64//:lib/node_modules/npm/bin/npx-cli.js",
+    "@node_darwin_arm64//:node",
+    "@node_darwin_arm64//:npm_runtime",
+    "@node_linux_x86_64//:bin/node",
+    "@node_linux_x86_64//:lib/node_modules/npm/bin/npm-cli.js",
+    "@node_linux_x86_64//:lib/node_modules/npm/bin/npx-cli.js",
+    "@node_linux_x86_64//:node",
+    "@node_linux_x86_64//:npm_runtime",
+    "@python_darwin_arm64//:python/bin/python3",
+    "@python_darwin_arm64//:python",
+    "@python_linux_x86_64//:python/bin/python3",
+    "@python_linux_x86_64//:python",
+    "@rules_rust//rust/toolchain:current_cargo_files",
+    "@rules_rust//rust/toolchain:current_rust_stdlib_files",
+    "@rules_rust//rust/toolchain:current_rust_toolchain",
+    "@rules_rust//rust/toolchain:current_rustc_files",
+    "@rules_rust//rust/toolchain:current_rustc_lib_files",
+    "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",
+    "@wasm_pack_darwin_arm64//:wasm-pack",
+    "@wasm_pack_linux_x86_64//:wasm-pack",
+    "//meerkat-cli:cli_mobpack_live_smoke_test",
+    "//meerkat-cli:live_smoke_cli_test",
+    "//meerkat-cli:rkat",
+    "//meerkat-comms:e2e_test",
+    "//meerkat:live_meerkat_regression_test",
+    "//meerkat-mcp-server:rkat_mcp_bin",
+    "//meerkat-mob:smoke_mob_flow_runtime_test",
+    "//meerkat-mob:smoke_mob_generated_image_comms_test",
+    "//meerkat-mob:smoke_mob_resume_test",
+    "//meerkat-rest:rkat_rest_bin",
+    "//meerkat-rpc:live_smoke_rpc_test",
+    "//meerkat-rpc:rkat_rpc_bin",
+    "//tests/integration:e2e_artifacts_bin",
+    "//tests/integration:e2e_smoke_lane_test",
+    "//tests/integration:smoke_shared_realm_test",
+]
+
+E2E_SMOKE_REMOTE_ENV = {
+    "MEERKAT_E2E_ARTIFACTS_BIN": "$(rootpath //tests/integration:e2e_artifacts_bin)",
+    "MEERKAT_E2E_DARWIN_NODE_BIN": "$(rootpath @node_darwin_arm64//:bin/node)",
+    "MEERKAT_E2E_DARWIN_NPM_CLI": "$(rootpath @node_darwin_arm64//:lib/node_modules/npm/bin/npm-cli.js)",
+    "MEERKAT_E2E_DARWIN_NPX_CLI": "$(rootpath @node_darwin_arm64//:lib/node_modules/npm/bin/npx-cli.js)",
+    "MEERKAT_E2E_DARWIN_PYTHON_BIN": "$(rootpath @python_darwin_arm64//:python/bin/python3)",
+    "MEERKAT_E2E_DARWIN_WASM_PACK_BIN": "$(rootpath @wasm_pack_darwin_arm64//:wasm-pack)",
+    "MEERKAT_E2E_LINUX_NODE_BIN": "$(rootpath @node_linux_x86_64//:bin/node)",
+    "MEERKAT_E2E_LINUX_NPM_CLI": "$(rootpath @node_linux_x86_64//:lib/node_modules/npm/bin/npm-cli.js)",
+    "MEERKAT_E2E_LINUX_NPX_CLI": "$(rootpath @node_linux_x86_64//:lib/node_modules/npm/bin/npx-cli.js)",
+    "MEERKAT_E2E_LINUX_PYTHON_BIN": "$(rootpath @python_linux_x86_64//:python/bin/python3)",
+    "MEERKAT_E2E_LINUX_WASM_PACK_BIN": "$(rootpath @wasm_pack_linux_x86_64//:wasm-pack)",
+}
+
+E2E_SMOKE_TURBO_S_SCENARIOS = [
+    16, 21, 22, 27, 28, 30, 44, 47, 48, 49, 50, 51, 52,
+    53, 54, 55, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81,
+    82, 83, 84, 85, 86, 87, 88, 89, 90,
+]
+
+E2E_SMOKE_TURBO_S_SUITES = [
+    ("rpc_dynamic_tool_pickup", "rpc-dynamic-tool-pickup"),
+    ("rpc_deferred_catalog_session", "rpc-deferred-catalog-session"),
+    ("cli_background_job_active_turn", "cli-background-job-active-turn"),
+    ("cli_background_job_idle_keepalive", "cli-background-job-idle-keepalive"),
+    ("mob_live_smoke", "mob-live-smoke"),
+    ("mob_external_tcp_production_drain", "mob-external-tcp-production-drain"),
+]
+
+E2E_SMOKE_TURBO_S_FLOW_RUNTIME_TESTS = [
+    ("adaptive_layer_marquee", "e2e_flow_runtime_adaptive_layer_marquee_smoke"),
+    ("fanout_parallel_review_loop", "e2e_flow_runtime_fanout_parallel_review_loop_smoke"),
+    ("dual_sibling_loops_join", "e2e_flow_runtime_dual_sibling_loops_join_smoke"),
+    ("branch_then_review_loop", "e2e_flow_runtime_branch_then_review_loop_smoke"),
+    ("parallel_body_siblings_join", "e2e_flow_runtime_parallel_body_siblings_join_smoke"),
+    ("nested_outer_inner_loop", "e2e_flow_runtime_nested_outer_inner_loop_smoke"),
+    ("fanin_after_parallel_loops", "e2e_flow_runtime_fanin_after_parallel_loops_smoke"),
+    ("conditional_skip_inside_body_loop", "e2e_flow_runtime_conditional_skip_inside_body_loop_smoke"),
+    ("three_way_branch_loop_audit", "e2e_flow_runtime_three_way_branch_loop_audit_smoke"),
+    ("sequential_loop_chain", "e2e_flow_runtime_sequential_loop_chain_smoke"),
+    ("three_sibling_loops_join", "e2e_flow_runtime_three_sibling_loops_join_smoke"),
+    ("outer_branch_inner_loop", "e2e_flow_runtime_outer_branch_inner_loop_smoke"),
+    ("maximal_matrix", "e2e_flow_runtime_maximal_matrix_smoke"),
+    ("persisted_branch_parallel_review_loop", "e2e_flow_runtime_persisted_branch_parallel_review_loop_smoke"),
+    ("persisted_dual_loops_fanin", "e2e_flow_runtime_persisted_dual_loops_fanin_smoke"),
+    ("persisted_sequential_loop_chain", "e2e_flow_runtime_persisted_sequential_loop_chain_smoke"),
+    ("persisted_three_sibling_loops_join", "e2e_flow_runtime_persisted_three_sibling_loops_join_smoke"),
+    ("persisted_branch_dual_loops_audit", "e2e_flow_runtime_persisted_branch_dual_loops_audit_smoke"),
+]
+
+[
+    sh_test(
+        name = "e2e_smoke_turbo_s_s%s" % scenario,
+        srcs = ["scripts/buildbuddy-e2e-smoke-remote-test"],
+        data = E2E_SMOKE_REMOTE_DATA,
+        env = dict(
+            E2E_SMOKE_REMOTE_ENV,
+            SCENARIO = str(scenario),
+            MEERKAT_E2E_SMOKE_TURBO_DEFAULTS = "1",
+        ),
+        size = "enormous",
+        tags = ["buildbuddy", "e2e", "integration", "live", "turbo-s"],
+        timeout = "eternal",
+    )
+    for scenario in E2E_SMOKE_TURBO_S_SCENARIOS
+]
+
+[
+    sh_test(
+        name = "e2e_smoke_turbo_s_%s" % name,
+        srcs = ["scripts/buildbuddy-e2e-smoke-remote-test"],
+        data = E2E_SMOKE_REMOTE_DATA,
+        env = dict(
+            E2E_SMOKE_REMOTE_ENV,
+            SUITE = suite,
+            MEERKAT_E2E_SMOKE_TURBO_DEFAULTS = "1",
+        ),
+        size = "enormous",
+        tags = ["buildbuddy", "e2e", "integration", "live", "turbo-s"],
+        timeout = "eternal",
+    )
+    for name, suite in E2E_SMOKE_TURBO_S_SUITES
+]
+
+[
+    sh_test(
+        name = "e2e_smoke_turbo_s_flow_%s" % name,
+        srcs = ["scripts/buildbuddy-e2e-smoke-flow-runtime-shard-test"],
+        data = ["//meerkat-mob:smoke_mob_flow_runtime_test"],
+        env = {
+            "FLOW_RUNTIME_TEST_BIN": "$(rootpath //meerkat-mob:smoke_mob_flow_runtime_test)",
+            "FLOW_RUNTIME_TEST_NAME": test_name,
+        },
+        size = "enormous",
+        tags = ["buildbuddy", "e2e", "integration", "live", "turbo-s"],
+        timeout = "eternal",
+    )
+    for name, test_name in E2E_SMOKE_TURBO_S_FLOW_RUNTIME_TESTS
+]
+
+test_suite(
+    name = "e2e_smoke_turbo_s",
+    tests = (
+        [":e2e_smoke_turbo_s_s%s" % scenario for scenario in E2E_SMOKE_TURBO_S_SCENARIOS] +
+        [":e2e_smoke_turbo_s_%s" % name for name, _ in E2E_SMOKE_TURBO_S_SUITES] +
+        [":e2e_smoke_turbo_s_flow_%s" % name for name, _ in E2E_SMOKE_TURBO_S_FLOW_RUNTIME_TESTS]
+    ),
+    tags = ["buildbuddy", "e2e", "integration", "live", "turbo-s"],
+)
+
 test_suite(
     name = "fast_tests",
     tests = [

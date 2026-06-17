@@ -20,6 +20,7 @@ Common lanes:
                             Run integration-fast tests.
   e2e-fast, e2e-system      Run deterministic e2e lanes.
   e2e-live, e2e-smoke       Run live-provider lanes when keys are configured.
+  e2e-smoke-turbo-s         Run sharded live smoke on BuildBuddy RBE.
   e2e-auth                  Run release-grade auth smoke lane.
   workspace-fast            Run the Cargo-fast-equivalent Bazel suite.
   fmt-static                Run static formatting/source gates.
@@ -99,7 +100,7 @@ shift
 extra_args=("$@")
 
 case "${lane}" in
-  e2e-live|e2e-smoke)
+  e2e-live|e2e-smoke|e2e-smoke-turbo-s)
     meerkat_load_local_secrets_env "${workspace_root}"
     ;;
 esac
@@ -202,6 +203,9 @@ case "${lane}" in
   e2e-smoke)
     e2e_smoke_test_filter >/dev/null
     run_bazel_with_extra e2e-smoke-rbe
+    ;;
+  e2e-smoke-turbo-s|smoke-turbo-s)
+    run_bazel_with_extra e2e-smoke-turbo-s-rbe
     ;;
   e2e-auth)
     run_bazel_with_extra e2e-auth-rbe

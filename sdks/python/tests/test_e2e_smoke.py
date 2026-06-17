@@ -410,6 +410,7 @@ if include_scenario(40):
                         },
                         "reviewer": {
                             "model": openai_model(),
+                            "provider_params": {"reasoning_effort": "low"},
                             "tools": {"comms": True},
                             "peer_description": "Review worker",
                             "external_addressable": True,
@@ -425,13 +426,13 @@ if include_scenario(40):
             lead = await mob.spawn(
                 profile="lead",
                 agent_identity="lead-1",
-                initial_message="Acknowledge the lead role in one sentence.",
-                runtime_mode="autonomous_host",
+                initial_message=None,
+                runtime_mode="turn_driven",
             )
             reviewer = await mob.spawn(
                 profile="reviewer",
                 agent_identity="reviewer-1",
-                initial_message="Acknowledge the reviewer role in one sentence.",
+                initial_message=None,
                 runtime_mode="turn_driven",
             )
             assert lead["agent_identity"] == "lead-1"
@@ -451,8 +452,11 @@ if include_scenario(40):
             assert append["agent_identity"] == "reviewer-1"
 
             async with await mob.subscribe_member_events("reviewer-1") as subscription:
-                reviewer_receipt = await mob.member("reviewer-1").send(
-                    "Reply with REVIEWER_READY_40 and include [PY-SWARM-40].",
+                reviewer_receipt = await asyncio.wait_for(
+                    mob.member("reviewer-1").send(
+                        "Reply exactly: REVIEWER_READY_40 [PY-SWARM-40].",
+                    ),
+                    timeout=180.0,
                 )
                 assert reviewer_receipt["agent_identity"] == "reviewer-1"
                 assert reviewer_receipt["member_ref"] == reviewer_member_ref
@@ -496,9 +500,12 @@ if include_scenario(40):
             assert "unknown_model" in str(broken_create.value)
             assert "definitely-invalid-live-smoke-model" in str(broken_create.value)
 
-            respawn_result = await mob.respawn(
-                "reviewer-1",
-                "Come back online and say REVIEWER_RESPAWN_40.",
+            respawn_result = await asyncio.wait_for(
+                mob.respawn(
+                    "reviewer-1",
+                    "Come back online and say REVIEWER_RESPAWN_40.",
+                ),
+                timeout=180.0,
             )
             respawned_member_ref = respawn_result["receipt"]["member_ref"]
             respawned_snapshot = await wait_for(
@@ -509,8 +516,9 @@ if include_scenario(40):
                 != reviewer_state.get("current_session_id"),
                 timeout_secs=60.0,
             )
-            respawn_receipt = await mob.member("reviewer-1").send(
-                "Reply with REVIEWER_RESPAWN_40.",
+            respawn_receipt = await asyncio.wait_for(
+                mob.member("reviewer-1").send("Reply exactly: REVIEWER_RESPAWN_40."),
+                timeout=180.0,
             )
             assert respawn_receipt["agent_identity"] == "reviewer-1"
             assert respawn_receipt["member_ref"] == respawned_member_ref
@@ -539,6 +547,7 @@ if include_scenario(40):
             assert all(
                 entry["agent_identity"] != "reviewer-1" for entry in members_after_retire
             )
+            await mob.retire("lead-1")
 
             with pytest.raises(MeerkatError) as exc_info:
                 await client.read_session("00000000-0000-0000-0000-000000000000")

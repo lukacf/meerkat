@@ -2213,6 +2213,7 @@ fn bazel_rust_test_path(
         }
         "meerkat-mob:smoke_mob_pictionary" => "meerkat-mob/smoke_mob_pictionary_test",
         "meerkat-mob:smoke_mob_resume" => "meerkat-mob/smoke_mob_resume_test",
+        "meerkat:live_meerkat_regression" => "meerkat/live_meerkat_regression_test",
         "meerkat-rpc:live_smoke_rpc" => "meerkat-rpc/live_smoke_rpc_test",
         "rkat:cli_mobpack_live_smoke" => "meerkat-cli/cli_mobpack_live_smoke_test",
         "rkat:live_smoke_cli" => "meerkat-cli/live_smoke_cli_test",

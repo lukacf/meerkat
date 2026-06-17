@@ -892,6 +892,9 @@ fn e2e_smoke_lane_launchers_allow_parallel_test_processes() {
     let root = repo_root();
     let cargo_config = read(root.join(".cargo/config.toml"));
     let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let build = read(root.join("BUILD.bazel"));
+    let buildbuddy_dev = read(root.join("scripts/buildbuddy-dev"));
+    let run_backend_lane = read(root.join("scripts/run-build-backend-lane"));
     let readme = read(root.join("tests/live_smoke/README.md"));
 
     let smoke_alias = cargo_config
@@ -908,6 +911,25 @@ fn e2e_smoke_lane_launchers_allow_parallel_test_processes() {
     assert!(
         !smoke_rbe_block.contains("--test_arg=--test-threads=1"),
         "BuildBuddy e2e-smoke-rbe must not serialize the whole smoke lane: {smoke_rbe_block}"
+    );
+    let smoke_turbo_block = find_all_between(&launcher, "e2e-smoke-turbo-s-rbe)", ";;")
+        .expect("e2e-smoke-turbo-s-rbe block");
+    assert!(
+        smoke_turbo_block.contains("default_target=\"//:e2e_smoke_turbo_s\""),
+        "Turbo S must target the sharded smoke suite: {smoke_turbo_block}"
+    );
+    assert!(
+        build.contains("name = \"e2e_smoke_turbo_s\"")
+            && build.contains("E2E_SMOKE_TURBO_S_SCENARIOS")
+            && build.contains("E2E_SMOKE_TURBO_S_FLOW_RUNTIME_TESTS")
+            && build.contains("scripts/buildbuddy-e2e-smoke-flow-runtime-shard-test"),
+        "root BUILD must declare Turbo S scenario and flow-runtime shards"
+    );
+    assert!(
+        buildbuddy_dev.contains("e2e-smoke-turbo-s-rbe")
+            && run_backend_lane
+                .contains("MEERKAT_E2E_EXECUTION_MODE=\"${MEERKAT_E2E_EXECUTION_MODE:-prebuilt}\""),
+        "BuildBuddy smoke developer launchers must expose Turbo S and use prebuilt follow-up mode"
     );
 
     let serialized_smoke_doc = readme

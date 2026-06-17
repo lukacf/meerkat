@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${FLOW_RUNTIME_TEST_BIN:-}" ]]; then
+  echo "error: FLOW_RUNTIME_TEST_BIN is required" >&2
+  exit 2
+fi
+if [[ -z "${FLOW_RUNTIME_TEST_NAME:-}" ]]; then
+  echo "error: FLOW_RUNTIME_TEST_NAME is required" >&2
+  exit 2
+fi
+
+if [[ "${FLOW_RUNTIME_TEST_BIN}" != /* ]]; then
+  if [[ -n "${RUNFILES_DIR:-}" && -x "${RUNFILES_DIR}/_main/${FLOW_RUNTIME_TEST_BIN}" ]]; then
+    FLOW_RUNTIME_TEST_BIN="${RUNFILES_DIR}/_main/${FLOW_RUNTIME_TEST_BIN}"
+  elif [[ -n "${RUNFILES_DIR:-}" && -x "${RUNFILES_DIR}/${FLOW_RUNTIME_TEST_BIN}" ]]; then
+    FLOW_RUNTIME_TEST_BIN="${RUNFILES_DIR}/${FLOW_RUNTIME_TEST_BIN}"
+  fi
+fi
+
+if [[ ! -x "${FLOW_RUNTIME_TEST_BIN}" ]]; then
+  echo "error: missing flow runtime test binary at ${FLOW_RUNTIME_TEST_BIN}" >&2
+  exit 1
+fi
+
+export MEERKAT_FLOW_RUNTIME_SMOKE_CONCURRENCY="${MEERKAT_FLOW_RUNTIME_SMOKE_CONCURRENCY:-1}"
+export MEERKAT_FLOW_RUNTIME_SMOKE_RUN_TIMEOUT_SECS="${MEERKAT_FLOW_RUNTIME_SMOKE_RUN_TIMEOUT_SECS:-900}"
+export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
+
+if [[ -z "${FLOW_SMOKE_MODEL:-}" ]]; then
+  if [[ -n "${RKAT_GEMINI_API_KEY:-${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}}" ]]; then
+    export FLOW_SMOKE_MODEL="${MEERKAT_FLOW_RUNTIME_TURBO_MODEL:-gemini-3.1-flash-lite-preview}"
+  elif [[ -n "${RKAT_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}" ]]; then
+    export FLOW_SMOKE_MODEL="claude-haiku-4-5-20251001"
+  elif [[ -n "${RKAT_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}" ]]; then
+    export FLOW_SMOKE_MODEL="gpt-5.4-mini"
+  fi
+fi
+
+exec "${FLOW_RUNTIME_TEST_BIN}" "${FLOW_RUNTIME_TEST_NAME}" --ignored --nocapture

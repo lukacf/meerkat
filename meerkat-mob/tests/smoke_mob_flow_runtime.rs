@@ -19,9 +19,11 @@ use meerkat_mob::definition::{
     RepeatUntilSpec, WiringRules,
 };
 use meerkat_mob::{
-    AgentIdentity, FlowId, LoopId, MobBackendKind, MobBuilder, MobDefinition, MobHandle, MobId,
-    MobRun, MobRunStatus, MobRuntimeMode, MobSessionService, MobStorage, Profile, ProfileBinding,
-    ProfileName, RuntimeBinding, SpawnMemberSpec, StepId, ToolConfig,
+    AdaptiveLayerPhaseView, AdaptiveRunPhaseView, AdaptiveStopReasonView, AgentIdentity, FlowId,
+    LoopId, MobBackendKind, MobBuilder, MobDefinition, MobHandle, MobId, MobRun, MobRunStatus,
+    MobRuntimeMode, MobSessionService, MobStorage, MobpackCallableConfig, MobpackRunSpec, Profile,
+    ProfileBinding, ProfileName, RuntimeBinding, SpawnMemberSpec, StepId, ToolConfig,
+    run_mobpack_callable,
 };
 use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_session::PersistentSessionService;
@@ -550,6 +552,149 @@ fn flow_definition(models: &FlowSmokeModels) -> MobDefinition {
         max_active_nodes: Some(4),
         max_active_frames: Some(4),
         max_frame_depth: Some(4),
+    });
+    definition
+}
+
+fn adaptive_marquee_policy(model: &str) -> Vec<u8> {
+    format!(
+        r#"allowed_model_classes = ["{model}"]
+allowed_tool_classes = ["comms"]
+allowed_skill_classes = []
+allowed_auth_bindings = []
+allow_inline_profiles = false
+
+[limits]
+max_depth = 3
+max_total_decisions = 4
+max_repair_attempts = 1
+max_layer_failures = 1
+max_attempts_per_layer = 1
+max_members_per_layer = 2
+max_total_spawned_members = 4
+max_active_members = 2
+max_retained_layer_mobs = 1
+max_wall_clock_ms = 180000
+max_aggregate_tokens = 200000
+max_aggregate_tool_calls = 100
+"#
+    )
+    .into_bytes()
+}
+
+fn adaptive_marquee_schema_files() -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::from([
+        (
+            "schemas/registry.json".to_string(),
+            br#"{"adaptive-finding":"schemas/adaptive-finding.schema.json"}"#.to_vec(),
+        ),
+        (
+            "schemas/adaptive-finding.schema.json".to_string(),
+            br#"{"type":"object","required":["marker","verdict"],"properties":{"marker":{"type":"string","const":"ADAPTIVE-FLOW-MARQUEE"},"verdict":{"type":"string","const":"layer-ok"}},"additionalProperties":false}"#.to_vec(),
+        ),
+    ])
+}
+
+fn adaptive_layer_run_decision_message() -> String {
+    let decision = serde_json::json!({
+        "decision": "run_layer",
+        "reason": "adaptive flow runtime marquee should provision one child layer",
+        "plan": {
+            "id": "marquee",
+            "objective": "Return raw JSON only. No markdown. Return exactly {\"marker\":\"ADAPTIVE-FLOW-MARQUEE\",\"verdict\":\"layer-ok\"}.",
+            "shape": { "kind": "solo" },
+            "collector": {
+                "profile": "worker",
+                "output_schema": { "registry": "adaptive-finding" }
+            },
+            "activation_params": {}
+        }
+    });
+    format!(
+        "Return raw JSON only. No markdown. This is the first adaptive planning turn; \
+return exactly this LayerDecision object:\n{}",
+        serde_json::to_string_pretty(&decision).expect("serialize adaptive run-layer decision")
+    )
+}
+
+fn adaptive_finish_decision_message() -> String {
+    r#"Return raw JSON only. No markdown.
+The previous adaptive layer result is {{params.previous_layer_result}}.
+Return exactly:
+{
+  "decision": "finish",
+  "reason": "adaptive flow runtime marquee consumed the prior layer result",
+  "result": {
+    "result": {
+      "marker": "{{params.previous_layer_result.marker}}",
+      "verdict": "{{params.previous_layer_result.verdict}}",
+      "summary": "adaptive-flow-marquee-ok"
+    }
+  }
+}"#
+    .to_string()
+}
+
+fn build_adaptive_marquee_control_flow() -> FlowSpec {
+    let mut steps = IndexMap::new();
+
+    let mut run_layer = json_step("flowmaster", adaptive_layer_run_decision_message());
+    run_layer.condition = Some(condition_eq(
+        "params.previous_layer_result",
+        serde_json::Value::Null,
+    ));
+    steps.insert(StepId::from("run_layer"), run_layer);
+
+    let mut finish = json_step("flowmaster", adaptive_finish_decision_message());
+    finish.condition = Some(condition_not_eq(
+        "params.previous_layer_result",
+        serde_json::Value::Null,
+    ));
+    steps.insert(StepId::from("finish"), finish);
+
+    FlowSpec::new(
+        Some("Adaptive flow runtime marquee planner".to_string()),
+        steps,
+        None,
+    )
+}
+
+fn adaptive_marquee_definition(models: &FlowSmokeModels) -> MobDefinition {
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        ProfileName::from("flowmaster"),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.lead,
+            "Adaptive FlowMaster planner",
+        ))),
+    );
+    profiles.insert(
+        ProfileName::from("worker"),
+        ProfileBinding::Inline(Box::new(flow_profile(
+            &models.lead,
+            "Adaptive layer worker",
+        ))),
+    );
+
+    let mut flows = BTreeMap::new();
+    flows.insert(FlowId::from("plan"), build_adaptive_marquee_control_flow());
+
+    let mut definition = MobDefinition::explicit(MobId::from("adaptive-flow-runtime-marquee"));
+    definition.orchestrator = Some(OrchestratorConfig {
+        profile: ProfileName::from("flowmaster"),
+    });
+    definition.profiles = profiles;
+    definition.wiring = WiringRules::default();
+    definition.backend = BackendConfig::default();
+    definition.flows = flows;
+    definition.limits = Some(LimitsSpec {
+        max_flow_duration_ms: Some(300_000),
+        max_step_retries: Some(0),
+        max_orphaned_turns: Some(4),
+        cancel_grace_timeout_ms: Some(1_500),
+        max_active_nodes: Some(2),
+        max_active_frames: Some(2),
+        max_frame_depth: Some(2),
     });
     definition
 }
@@ -2943,6 +3088,100 @@ async fn run_smoke_flow_or_skip(test_name: &str, flow_id: &str, params: Value) -
         .await
         .unwrap_or_else(|error| panic!("run {flow_id} flow for {test_name}: {error}"));
     Some(wait_for_run_terminal(&handle, &run_id).await)
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_flow_runtime_adaptive_layer_marquee_smoke() {
+    let test_name = "e2e_flow_runtime_adaptive_layer_marquee_smoke";
+    let Some(models) = flow_smoke_models() else {
+        eprintln!(
+            "Skipping {test_name}: no matching API key for FLOW_SMOKE_MODEL/SMOKE_MODEL or fast default models"
+        );
+        return;
+    };
+
+    let _permit = acquire_flow_runtime_smoke_permit(test_name).await;
+    eprintln!(
+        "Running {test_name} with {}",
+        flow_smoke_models_label(&models)
+    );
+
+    let temp = TempDir::new().expect("temp dir");
+    let paths = FlowSmokePaths::new(temp.path());
+    let session_service = persistent_service(&paths);
+    let mob_service: Arc<dyn MobSessionService> = session_service.clone();
+    let runtime_adapter = mob_service
+        .runtime_adapter()
+        .expect("persistent adaptive flow smoke service should expose a runtime adapter");
+    let storage =
+        MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage");
+    let definition = adaptive_marquee_definition(&models);
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(mob_service.clone())
+        .with_runtime_adapter(runtime_adapter)
+        .create()
+        .await
+        .expect("create adaptive marquee control mob");
+
+    let spec = MobpackRunSpec::new(
+        definition,
+        BTreeMap::new(),
+        Some(MobpackCallableConfig::new(ProfileName::from("flowmaster"))),
+        BTreeMap::from([(
+            "adaptive/policies.toml".to_string(),
+            adaptive_marquee_policy(&models.lead),
+        )]),
+        adaptive_marquee_schema_files(),
+    );
+
+    let outcome = tokio::time::timeout(
+        flow_runtime_smoke_run_timeout(),
+        run_mobpack_callable(
+            &spec,
+            handle.clone(),
+            mob_service,
+            "Exercise adaptive flow runtime marquee path ADAPTIVE-FLOW-MARQUEE.",
+        ),
+    )
+    .await
+    .expect("adaptive marquee callable should finish before smoke timeout")
+    .expect("adaptive marquee callable should succeed");
+
+    assert_eq!(
+        outcome.final_result,
+        Some(serde_json::json!({
+            "marker": "ADAPTIVE-FLOW-MARQUEE",
+            "verdict": "layer-ok",
+            "summary": "adaptive-flow-marquee-ok"
+        }))
+    );
+
+    let snapshot = handle
+        .adaptive_run_snapshot_by_id(&outcome.run_id)
+        .await
+        .expect("adaptive snapshot should be available for marquee run");
+    assert_eq!(snapshot.phase, Some(AdaptiveRunPhaseView::Finished));
+    assert_eq!(
+        snapshot.stop_reason,
+        Some(AdaptiveStopReasonView::FinishDecision)
+    );
+    assert_eq!(snapshot.total_decisions, 2);
+    assert_eq!(snapshot.layers.len(), 1);
+    let layer = snapshot
+        .layers
+        .values()
+        .next()
+        .expect("marquee run should record one adaptive layer");
+    assert_eq!(layer.phase, AdaptiveLayerPhaseView::Completed);
+    assert!(
+        layer.result_digest.is_some(),
+        "marquee adaptive layer should validate and record a result digest: {snapshot:?}"
+    );
+    assert!(
+        layer.child_run_id.is_some(),
+        "marquee adaptive layer should record the child flow run id: {snapshot:?}"
+    );
 }
 
 #[tokio::test]

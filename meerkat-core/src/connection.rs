@@ -979,31 +979,32 @@ pub fn resolve_realm_binding_target_for_provider(
     allow_env_default: bool,
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
     // Head of the chain: an explicit realm names it (and must exist); else the
-    // preferred realm. Resolution walks head -> parents -> global; an unrelated
-    // sibling realm is NOT a candidate (the flat scan is gone).
-    let head = explicit_realm.or(preferred_realm);
+    // preferred realm; else the reserved `global` root. Resolution walks
+    // head -> parents -> global; an unrelated sibling realm is NOT a candidate
+    // (the flat scan and the literal `default` realm are both gone — `global`
+    // is the universal default head).
+    let global = RealmId::global();
+    let head = explicit_realm.or(preferred_realm).unwrap_or(&global);
     let head_required = explicit_realm.is_some();
-    if let Some(head) = head {
-        if let Some(binding) = explicit_binding {
-            return resolve_explicit_binding_on_chain(
-                config,
-                provider,
-                head,
-                binding,
-                explicit_profile,
-                head_required,
-            );
-        }
-        let candidates =
-            collect_provider_candidates_on_chain(config, provider, head, head_required)?;
-        if let Some(first) = candidates.into_iter().next() {
-            return Ok(first);
-        }
-        if head_required {
-            return Err(ConnectionTargetError::MissingDefaultBinding {
-                realm: head.as_str().to_string(),
-            });
-        }
+
+    if let Some(binding) = explicit_binding {
+        return resolve_explicit_binding_on_chain(
+            config,
+            provider,
+            head,
+            binding,
+            explicit_profile,
+            head_required,
+        );
+    }
+    let candidates = collect_provider_candidates_on_chain(config, provider, head, head_required)?;
+    if let Some(first) = candidates.into_iter().next() {
+        return Ok(first);
+    }
+    if head_required {
+        return Err(ConnectionTargetError::MissingDefaultBinding {
+            realm: head.as_str().to_string(),
+        });
     }
 
     if allow_env_default && explicit_realm.is_none() && explicit_binding.is_none() {
@@ -1153,14 +1154,16 @@ pub fn resolve_auth_binding_candidates_for_provider(
         .map(|target| vec![target]);
     }
 
+    // Head defaults to the reserved `global` root when no realm is preferred,
+    // so an unscoped lookup still resolves the universal default. Candidate
+    // discovery never requires the head to exist (an unmaterialized session
+    // realm still inherits its chain / global); ancestors isolate.
+    let global = RealmId::global();
+    let head = preferred_realm.unwrap_or(&global);
     let mut candidates = Vec::new();
-    if let Some(head) = preferred_realm {
-        // Candidate discovery never requires the head to exist (an unmaterialized
-        // session realm still inherits its chain / global); ancestors isolate.
-        candidates.extend(collect_provider_candidates_on_chain(
-            config, provider, head, false,
-        )?);
-    }
+    candidates.extend(collect_provider_candidates_on_chain(
+        config, provider, head, false,
+    )?);
 
     if allow_env_default {
         candidates.push(env_default_target(provider, None)?);

@@ -594,6 +594,7 @@ fn openai_oauth_config() -> Config {
         auth: BTreeMap::new(),
         binding: BTreeMap::new(),
         default_binding: Some(BINDING_ID.to_string()),
+        parent: None,
     };
     section.backend.insert(
         "chatgpt_backend".to_string(),

@@ -66,6 +66,7 @@ fn code_assist_realm_no_refresh() -> RealmConnectionSet {
             auth,
             binding,
             default_binding: Some("default_code_assist".into()),
+            parent: None,
         },
     )
     .unwrap()
@@ -114,6 +115,7 @@ fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectio
             auth,
             binding,
             default_binding: Some("default_code_assist".into()),
+            parent: None,
         },
     )
     .unwrap()

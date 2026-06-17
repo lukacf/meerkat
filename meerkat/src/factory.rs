@@ -1834,39 +1834,36 @@ impl AgentFactory {
         provider: Provider,
         selected_realm: RealmId,
         purpose: &str,
-        select_binding_id: fn(&RealmConnectionSet, Provider) -> Result<String, String>,
+        // The image/web_search selector is no longer threaded here: the
+        // chain-aware connection resolver applies the one canonical
+        // default-selection policy (default_binding > provider_default >
+        // single) per chain member, so a separate purpose-labelled selector
+        // would be a second policy. Kept in the signature to preserve the
+        // image/web_search call sites unchanged.
+        _select_binding_id: fn(&RealmConnectionSet, Provider) -> Result<String, String>,
     ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
-        let selected_realm_id = selected_realm.as_str();
-        let section = config.realm.get(selected_realm_id).ok_or_else(|| {
+        // Walk the selected realm's parent chain (explicit realm => head
+        // required, fail-closed, NO env fallback) and stamp the OWNING realm,
+        // so an image/web_search binding inherited from a parent/global
+        // resolves at its owner (decision A) instead of the consuming realm.
+        let target = meerkat_core::resolve_realm_binding_target_for_provider(
+            config,
+            provider,
+            Some(&selected_realm),
+            None,
+            None,
+            None,
+            /* allow_env_default = */ false,
+        )
+        .map_err(|err| {
             format!(
-                "{purpose} for provider '{}' is unavailable in selected realm '{}': selected realm not found in config.realm",
+                "{purpose} for provider '{}' is unavailable in selected realm '{}': {err}",
                 provider.as_str(),
-                selected_realm_id,
+                selected_realm.as_str(),
             )
         })?;
-        let realm = RealmConnectionSet::from_config(selected_realm_id, section).map_err(|e| {
-            format!(
-                "{purpose} for provider '{}' is unavailable in selected realm '{}': selected realm config invalid: {e}",
-                provider.as_str(),
-                selected_realm_id,
-            )
-        })?;
-        let binding_id = select_binding_id(&realm, provider)?;
-        let binding = meerkat_core::BindingId::parse(binding_id.clone()).map_err(|e| {
-            format!(
-                "{purpose} for provider '{}' is unavailable in selected realm '{}': selected binding id '{}' is invalid: {e}",
-                provider.as_str(),
-                selected_realm_id,
-                binding_id,
-            )
-        })?;
-        let auth_binding = AuthBindingRef {
-            realm: selected_realm,
-            binding,
-            profile: None,
-            origin: meerkat_core::BindingOrigin::Configured,
-        };
-        Ok((realm, binding_id, auth_binding))
+        let binding_id = target.auth_binding.binding.as_str().to_string();
+        Ok((target.realm, binding_id, target.auth_binding))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3139,8 +3136,14 @@ impl AgentFactory {
                             .into_iter()
                             .find(|target| {
                                 if catalog_default_chain {
-                                    target.auth_binding.realm == *realm
-                                        && !target.auth_binding.is_env_default()
+                                    // Candidates are already chain-scoped
+                                    // (head -> ancestors -> global), in
+                                    // nearest-child-wins order. Accept the first
+                                    // configured one — an inherited binding is
+                                    // owner-stamped (owner != preferred realm),
+                                    // so a realm-equality filter would wrongly
+                                    // drop it.
+                                    !target.auth_binding.is_env_default()
                                 } else {
                                     true
                                 }
@@ -6925,9 +6928,14 @@ mod tests {
         assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
     }
 
+    // RCT-22: build_agent with an omitted auth_binding and a head realm that
+    // does not itself define a provider binding INHERITS the binding from the
+    // reserved `global` realm (implicit chain tail) and resolves it at its
+    // OWNING realm (global), beating the env fallback. (Replaces the old
+    // flat-scan-of-unrelated-realms behavior, which is gone.)
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn build_agent_without_auth_binding_scans_configured_realms_before_env_default() {
+    async fn build_agent_without_auth_binding_inherits_global_realm_binding() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let mut config = Config::default();
@@ -6963,7 +6971,9 @@ mod tests {
                 provider_default: false,
             },
         );
-        config.realm.insert("dev".to_string(), section);
+        // The binding lives in `global`; the head realm inherits it via the
+        // implicit tail.
+        config.realm.insert("global".to_string(), section);
 
         let mut build = AgentBuildConfig::new("gpt-5.4");
         build.realm_id = Some(RealmId::parse("missing").unwrap());
@@ -6972,7 +6982,7 @@ mod tests {
         let agent = factory
             .build_agent(build, &config)
             .await
-            .expect("configured realm binding should beat env fallback");
+            .expect("inherited global binding should beat env fallback");
         let metadata = agent
             .session()
             .session_metadata()
@@ -6986,7 +6996,44 @@ mod tests {
                     auth_binding.binding.as_str().to_string(),
                 )
             }),
-            Some(("dev".to_string(), "openai_oauth".to_string()))
+            Some(("global".to_string(), "openai_oauth".to_string())),
+            "inherited binding is owner-stamped at global, not the consuming head"
+        );
+    }
+
+    // RCT-20: an image-credential binding inherited from `global` by a child
+    // realm that exists but defines no image binding resolves at its OWNING
+    // realm (global) — the second stamping site walks the chain too.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[test]
+    fn image_binding_inherited_from_global_stamps_owner() {
+        let mut config = Config::default();
+        config.realm.insert(
+            "global".to_string(),
+            openai_realm_with_bindings(&[("primary", "sk-img")]),
+        );
+        let child = RealmConfigSection {
+            parent: Some(RealmId::global()),
+            ..Default::default()
+        };
+        config.realm.insert("child".to_string(), child);
+
+        let child_id = RealmId::parse("child").unwrap();
+        let (realm, _binding_id, auth_binding) = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some(&child_id),
+        )
+        .expect("image binding inherits from global");
+        assert_eq!(
+            auth_binding.realm.as_str(),
+            "global",
+            "image binding is owner-stamped at the defining realm"
+        );
+        assert_eq!(
+            realm.realm_id.as_str(),
+            auth_binding.realm.as_str(),
+            "registry equality holds for the inherited image binding"
         );
     }
 
@@ -7271,6 +7318,8 @@ mod tests {
                 provider_default: false,
             },
         );
+        // 'default' is now just an unrelated sibling realm (no longer a magic
+        // fallback) — session_a does not parent to it, so it must not be crossed.
         config.realm.insert("default".to_string(), default_section);
 
         let err = AgentFactory::resolve_image_binding_for_provider(
@@ -7278,20 +7327,21 @@ mod tests {
             Provider::OpenAI,
             Some(&RealmId::parse("session_a").unwrap()),
         )
-        .expect_err("image lookup must stay inside the selected realm");
+        .expect_err("image lookup must stay on the selected realm's chain");
 
+        // Fails closed for OpenAI on session_a's chain; never crosses to the
+        // unrelated 'default' realm's openai binding.
         assert!(
-            err.contains("binding 'session_a:default_anthropic'")
-                && err.contains("expected provider OpenAI"),
-            "unexpected error: {err}"
+            err.contains("session_a") && !err.contains("default_openai"),
+            "image lookup must not cross to the unrelated 'default' realm: {err}"
         );
     }
 
     #[test]
-    fn unconfigured_storage_realm_can_still_use_configured_default_realm() {
+    fn unconfigured_storage_realm_can_still_use_configured_global_realm() {
         let mut config = Config::default();
         config.realm.insert(
-            "default".to_string(),
+            "global".to_string(),
             inline_realm_section(&[("openai", "default-openai-key")]),
         );
 
@@ -7300,11 +7350,11 @@ mod tests {
             Provider::OpenAI,
             Some(&RealmId::parse("session_missing").unwrap()),
         )
-        .expect("unconfigured storage realm may use configured default credentials");
+        .expect("unconfigured storage realm inherits the global realm credentials");
 
-        assert_eq!(realm.realm_id.as_str(), "default");
+        assert_eq!(realm.realm_id.as_str(), "global");
         assert_eq!(binding_id, "default_openai");
-        assert_eq!(auth_binding.realm.as_str(), "default");
+        assert_eq!(auth_binding.realm.as_str(), "global");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
     }
 
@@ -7338,20 +7388,21 @@ mod tests {
     }
 
     #[test]
-    fn unscoped_image_binding_can_still_use_configured_default_realm() {
+    fn unscoped_image_binding_can_still_use_configured_global_realm() {
         let mut config = Config::default();
         config.realm.insert(
-            "default".to_string(),
+            "global".to_string(),
             inline_realm_section(&[("openai", "default-openai-key")]),
         );
 
+        // No selected realm: the head defaults to the reserved `global` root.
         let (realm, binding_id, auth_binding) =
             AgentFactory::resolve_image_binding_for_provider(&config, Provider::OpenAI, None)
-                .expect("unscoped image lookup may use the configured default realm");
+                .expect("unscoped image lookup resolves the global realm");
 
-        assert_eq!(realm.realm_id.as_str(), "default");
+        assert_eq!(realm.realm_id.as_str(), "global");
         assert_eq!(binding_id, "default_openai");
-        assert_eq!(auth_binding.realm.as_str(), "default");
+        assert_eq!(auth_binding.realm.as_str(), "global");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
     }
 
@@ -7611,7 +7662,7 @@ mod tests {
         });
         insert_self_hosted_realm_binding(
             &mut config,
-            "default",
+            "global",
             "default_local",
             "http://realm.example/v1",
             CredentialSourceSpec::InlineSecret {
@@ -8127,7 +8178,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_absent_auth_binding_uses_default_realm() {
+    async fn self_hosted_absent_auth_binding_uses_global_realm() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -8138,11 +8189,11 @@ mod tests {
         });
         insert_self_hosted_realm_binding(
             &mut config,
-            "default",
+            "global",
             "default_local",
-            "http://default-realm.example/v1",
+            "http://global-realm.example/v1",
             CredentialSourceSpec::InlineSecret {
-                secret: "default-realm-token".to_string(),
+                secret: "global-realm-token".to_string(),
             },
         );
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
@@ -8154,18 +8205,18 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
-        assert_eq!(call.auth_binding.realm.as_str(), "default");
+        assert_eq!(call.auth_binding.realm.as_str(), "global");
         assert_eq!(call.auth_binding.binding.as_str(), "default_local");
         assert_eq!(
             call.backend_base_url.as_deref(),
-            Some("http://default-realm.example/v1")
+            Some("http://global-realm.example/v1")
         );
         assert!(
             matches!(
                 &call.auth_source,
-                CredentialSourceSpec::InlineSecret { secret } if secret == "default-realm-token"
+                CredentialSourceSpec::InlineSecret { secret } if secret == "global-realm-token"
             ),
-            "default realm auth must resolve through the realm binding"
+            "global realm auth must resolve through the realm binding"
         );
         assert_eq!(
             agent
@@ -8178,8 +8229,8 @@ mod tests {
                     auth_binding.realm.as_str().to_string(),
                     auth_binding.binding.as_str().to_string()
                 )),
-            Some(("default".to_string(), "default_local".to_string())),
-            "default realm binding must become durable session identity"
+            Some(("global".to_string(), "default_local".to_string())),
+            "global realm binding must become durable session identity"
         );
     }
 

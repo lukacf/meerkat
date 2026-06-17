@@ -113,6 +113,7 @@ fn config_with_realm() -> Config {
         auth,
         binding,
         default_binding: Some("default_openai".into()),
+        parent: None,
     };
 
     let mut config = Config::default();
@@ -355,16 +356,17 @@ async fn llm_client_override_beats_auth_binding() {
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn build_agent_without_auth_binding_uses_default_realm_binding() {
+async fn build_agent_without_auth_binding_uses_global_realm_binding() {
     // A missing auth_binding is not an ambient-credential bypass. It resolves
     // through the same typed realm binding machinery as explicit auth_binding
-    // builds, choosing config.realm["default"].default_binding when present and
-    // persisting the resolved ref into SessionMetadata.
+    // builds: with no preferred realm the head defaults to the reserved
+    // `global` root, whose default binding is chosen and persisted into
+    // SessionMetadata.
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = config_with_realm();
     let section = meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "flat-key")]);
-    config.realm.insert("default".to_string(), section);
+    config.realm.insert("global".to_string(), section);
 
     let build = AgentBuildConfig::new("gpt-5.4");
     assert!(build.auth_binding.is_none());
@@ -372,7 +374,7 @@ async fn build_agent_without_auth_binding_uses_default_realm_binding() {
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("default realm binding should resolve without explicit auth_binding");
+        .expect("global realm binding should resolve without explicit auth_binding");
     let metadata = agent
         .session()
         .session_metadata()
@@ -385,7 +387,7 @@ async fn build_agent_without_auth_binding_uses_default_realm_binding() {
                 conn_ref.binding.as_str().to_string(),
             )
         }),
-        Some(("default".to_string(), "default_openai".to_string()))
+        Some(("global".to_string(), "default_openai".to_string()))
     );
 }
 

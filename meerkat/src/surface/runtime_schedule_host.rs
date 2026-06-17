@@ -215,8 +215,88 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
             )
             .await
             .map_err(schedule_internal)?;
-        self.update_peer_ingress_context(session_id).await?;
+        self.ensure_schedule_peer_ingress(session_id).await?;
         Ok(())
+    }
+
+    async fn ensure_schedule_peer_ingress(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ScheduleDomainError> {
+        #[cfg(feature = "comms")]
+        {
+            match self.runtime_adapter.peer_ingress_owner(session_id).await {
+                meerkat_runtime::PeerIngressOwner::Unattached => {}
+                meerkat_runtime::PeerIngressOwner::SessionOwned { .. } => {
+                    if !self.session_keep_alive(session_id).await? {
+                        return self.detach_schedule_peer_ingress(session_id).await;
+                    }
+                    // Scheduled delivery injects through the runtime input
+                    // queue. If session-owned peer ingress already exists,
+                    // refresh the authorized drain task without re-attaching
+                    // with a possibly different CommsRuntime handle.
+                    self.runtime_adapter
+                        .refresh_session_owned_peer_ingress(session_id)
+                        .await
+                        .map_err(schedule_internal)?;
+                    return Ok(());
+                }
+                meerkat_runtime::PeerIngressOwner::MobOwned { .. } => {
+                    // Mob ownership is authoritative. Schedule delivery must
+                    // not claim or downgrade the peer-ingress transport.
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+
+        self.update_peer_ingress_context(session_id).await
+    }
+
+    async fn detach_schedule_peer_ingress(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ScheduleDomainError> {
+        #[cfg(feature = "comms")]
+        {
+            self.runtime_adapter
+                .update_peer_ingress_context(session_id, false, None)
+                .await
+                .map_err(schedule_internal)?;
+        }
+        #[cfg(not(feature = "comms"))]
+        let _ = session_id;
+        Ok(())
+    }
+
+    async fn session_keep_alive(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, ScheduleDomainError> {
+        #[cfg(feature = "comms")]
+        {
+            let session = self
+                .service
+                .load_authoritative_session(session_id)
+                .await
+                .map_err(schedule_internal)?
+                .ok_or_else(|| {
+                    ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}"))
+                })?;
+            session
+                .session_metadata()
+                .map(|metadata| metadata.keep_alive)
+                .ok_or_else(|| {
+                    ScheduleDomainError::Internal(format!(
+                        "session {session_id} is missing session metadata"
+                    ))
+                })
+        }
+        #[cfg(not(feature = "comms"))]
+        {
+            let _ = session_id;
+            Ok(false)
+        }
     }
 
     async fn update_peer_ingress_context(
@@ -562,6 +642,242 @@ mod tests {
             chrono::Utc::now(),
         )
         .expect("sample occurrence planning should pass generated authority")
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    async fn build_comms_test_service(
+        temp: &tempfile::TempDir,
+        shared_runtime: Arc<crate::CommsRuntime>,
+    ) -> (
+        Arc<PersistentSessionService<crate::FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+    ) {
+        let jsonl_store = Arc::new(crate::JsonlStore::new(temp.path().join("sessions")));
+        jsonl_store.init().await.expect("init jsonl store");
+        let persistence = crate::PersistenceBundle::new(
+            jsonl_store as Arc<dyn crate::SessionStore>,
+            Some(Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
+                as Arc<dyn meerkat_runtime::RuntimeStore>),
+            Arc::new(crate::MemoryBlobStore::new()),
+        );
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"))
+            .with_comms_runtime(shared_runtime);
+        let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+        let (service, runtime_adapter) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence);
+        (Arc::new(service), runtime_adapter)
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    fn make_runtime_backed_request(comms_name: &str, keep_alive: bool) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "gpt-5.4".to_string(),
+            prompt: ContentInput::Text(String::new()),
+            system_prompt: crate::SystemPromptOverride::Set(
+                "scheduled attached-session regression".to_string(),
+            ),
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                comms_name: Some(comms_name.to_string()),
+                keep_alive,
+                ..Default::default()
+            }),
+            labels: None,
+        }
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn deliver_prompt_to_already_session_owned_ingress_does_not_reattach() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service_runtime = Arc::new(
+            crate::CommsRuntime::inproc_only("schedule-service-runtime")
+                .expect("service comms runtime"),
+        );
+        let preattached_runtime = Arc::new(
+            crate::CommsRuntime::inproc_only("schedule-preattached-runtime")
+                .expect("preattached comms runtime"),
+        );
+        let (service, runtime_adapter) =
+            build_comms_test_service(&temp, Arc::clone(&service_runtime)).await;
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let result = Box::pin(materialize_session(
+            &service,
+            &runtime_adapter,
+            session,
+            make_runtime_backed_request("scheduled-attached-session", true),
+            {
+                let service = Arc::clone(&service);
+                let runtime_adapter = Arc::clone(&runtime_adapter);
+                move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize runtime-backed session");
+
+        let preattached_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> = preattached_runtime;
+        runtime_adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&preattached_runtime)))
+            .await
+            .expect("pre-attach session-owned ingress");
+        assert!(matches!(
+            runtime_adapter.peer_ingress_owner(&session_id).await,
+            meerkat_runtime::PeerIngressOwner::SessionOwned { .. }
+        ));
+
+        let host = RuntimeBackedScheduleSessionHost::new(
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            SessionBuildOptions::default(),
+        );
+        let occurrence = sample_occurrence();
+        let dispatch = host
+            .deliver_prompt(
+                &result.session_id,
+                &occurrence,
+                ScheduledPromptDispatch {
+                    prompt: ContentInput::Text("scheduled prompt".to_string()),
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                    materialized_session_id: None,
+                },
+            )
+            .await
+            .expect("scheduled prompt delivery should enqueue without reattaching ingress");
+
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch.completion)
+            .await
+            .expect("scheduled prompt should complete")
+            .expect("delivery terminal should resolve");
+        assert_eq!(
+            terminal.phase,
+            meerkat_schedule::OccurrencePhase::AwaitingCompletion
+        );
+        assert_eq!(
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::Completed)
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        runtime_adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn deliver_prompt_to_session_owned_non_keep_alive_ingress_detaches_without_reattach() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service_runtime = Arc::new(
+            crate::CommsRuntime::inproc_only("schedule-service-runtime-detach")
+                .expect("service comms runtime"),
+        );
+        let preattached_runtime = Arc::new(
+            crate::CommsRuntime::inproc_only("schedule-preattached-runtime-detach")
+                .expect("preattached comms runtime"),
+        );
+        let (service, runtime_adapter) =
+            build_comms_test_service(&temp, Arc::clone(&service_runtime)).await;
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let result = Box::pin(materialize_session(
+            &service,
+            &runtime_adapter,
+            session,
+            make_runtime_backed_request("scheduled-detach-session", false),
+            {
+                let service = Arc::clone(&service);
+                let runtime_adapter = Arc::clone(&runtime_adapter);
+                move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize runtime-backed session");
+
+        let preattached_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> = preattached_runtime;
+        runtime_adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&preattached_runtime)))
+            .await
+            .expect("pre-attach session-owned ingress");
+        assert!(matches!(
+            runtime_adapter.peer_ingress_owner(&session_id).await,
+            meerkat_runtime::PeerIngressOwner::SessionOwned { .. }
+        ));
+
+        let host = RuntimeBackedScheduleSessionHost::new(
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            SessionBuildOptions::default(),
+        );
+        let occurrence = sample_occurrence();
+        let dispatch = host
+            .deliver_prompt(
+                &result.session_id,
+                &occurrence,
+                ScheduledPromptDispatch {
+                    prompt: ContentInput::Text("scheduled prompt".to_string()),
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                    materialized_session_id: None,
+                },
+            )
+            .await
+            .expect("scheduled prompt delivery should detach without reattaching ingress");
+
+        let owner = runtime_adapter.peer_ingress_owner(&session_id).await;
+        assert!(
+            matches!(owner, meerkat_runtime::PeerIngressOwner::Unattached),
+            "non-keep-alive session-owned ingress must detach instead of reattaching, got {owner:?}"
+        );
+
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch.completion)
+            .await
+            .expect("scheduled prompt should complete")
+            .expect("delivery terminal should resolve");
+        assert_eq!(
+            terminal.phase,
+            meerkat_schedule::OccurrencePhase::AwaitingCompletion
+        );
+        assert_eq!(
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::Completed)
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        runtime_adapter.unregister_session(&result.session_id).await;
     }
 
     #[test]

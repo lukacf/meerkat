@@ -687,7 +687,9 @@ rust_test(
         "integration",
         "required-feature",
     ],
-    data = [],
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "16777216",
     },
@@ -759,7 +761,9 @@ rust_test(
         "integration",
         "required-feature",
     ],
-    data = [],
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "16777216",
     },
@@ -903,7 +907,9 @@ rust_test(
         "integration",
         "required-feature",
     ],
-    data = [],
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "16777216",
     },

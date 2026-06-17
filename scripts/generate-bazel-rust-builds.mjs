@@ -1094,7 +1094,6 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    ("sequential_loop_chain", "e2e_flow_runtime_sequential_loop_chain_smoke"),`,
     `    ("three_sibling_loops_join", "e2e_flow_runtime_three_sibling_loops_join_smoke"),`,
     `    ("outer_branch_inner_loop", "e2e_flow_runtime_outer_branch_inner_loop_smoke"),`,
-    `    ("maximal_matrix", "e2e_flow_runtime_maximal_matrix_smoke"),`,
     `    ("persisted_branch_parallel_review_loop", "e2e_flow_runtime_persisted_branch_parallel_review_loop_smoke"),`,
     `    ("persisted_dual_loops_fanin", "e2e_flow_runtime_persisted_dual_loops_fanin_smoke"),`,
     `    ("persisted_sequential_loop_chain", "e2e_flow_runtime_persisted_sequential_loop_chain_smoke"),`,

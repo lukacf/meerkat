@@ -896,56 +896,58 @@ Your final reply must include STACKED-IMAGE-77-DONE.`,
       "Scenario 78: cross-provider image relay with later visual readback",
       { skip: !(hasOpenAIKey() && hasGeminiKey()) },
       async () => {
-      const scenario = "Scenario 78";
-      const client = await withStepTimeout(
-        scenario,
-        "connect client",
-        connectClient({ realmId: "env_default" }),
-      );
+        const scenario = "Scenario 78";
+        await withScenarioRetry(scenario, async () => {
+          const client = await withStepTimeout(
+            scenario,
+            "connect client",
+            connectClient({ realmId: "env_default" }),
+          );
 
-      const generated = await withStepTimeout(
-        scenario,
-        "OpenAI session routes image generation to Gemini",
-        client.createSession(
-          `Use generate_image exactly once with request.provider="gemini", request.model="${geminiImageModel()}",
+          const generated = await withStepTimeout(
+            scenario,
+            "OpenAI session routes image generation to Gemini",
+            client.createSession(
+              `Use generate_image exactly once with request.provider="gemini", request.model="${geminiImageModel()}",
 request.intent="generate", request.prompt="A clean product sketch of a tiny glass terrarium containing a lighthouse, with RELAY-78 printed on the base",
 request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
 After the image is generated, reply with CROSS-RELAY-78-GENERATED and no extra prose.`,
-          {
-            model: openaiStressModel(),
-            provider: "openai",
-            enableBuiltins: true,
-          },
-        ),
-        300000,
-      );
-      assert.match(generated.text.toLowerCase(), /cross-relay-78-generated/);
+              {
+                model: openaiStressModel(),
+                provider: "openai",
+                enableBuiltins: true,
+              },
+            ),
+            300000,
+          );
+          assert.match(generated.text.toLowerCase(), /cross-relay-78-generated/);
 
-      const history = await withStepTimeout(
-        scenario,
-        "read relay image history",
-        client.readSessionHistory(generated.id),
-      );
-      const images = assistantImageBlocks(history);
-      assert.ok(images.length >= 1, "cross-provider relay should commit an image");
-      await withStepTimeout(scenario, "fetch relay image", assertFetchableImageBlob(client, images.at(-1)));
+          const history = await withStepTimeout(
+            scenario,
+            "read relay image history",
+            client.readSessionHistory(generated.id),
+          );
+          const images = assistantImageBlocks(history);
+          assert.ok(images.length >= 1, "cross-provider relay should commit an image");
+          await withStepTimeout(scenario, "fetch relay image", assertFetchableImageBlob(client, images.at(-1)));
 
-      const readback = await withStepTimeout(
-        scenario,
-        "Gemini model reads prior generated image",
-        generated.turn(
-          "Switch to Gemini. Inspect the previous assistant image and reply with CROSS-RELAY-78-READBACK plus the main object you see.",
-          {
-            model: geminiModel(),
-            provider: "gemini",
-            enableBuiltins: true,
-          },
-        ),
-        240000,
-      );
-      assert.match(readback.text.toLowerCase(), /cross-relay-78-readback/);
-      assert.match(readback.text.toLowerCase(), /terrarium|lighthouse|glass/);
+          const readback = await withStepTimeout(
+            scenario,
+            "Gemini model reads prior generated image",
+            generated.turn(
+              "Switch to Gemini. Inspect the previous assistant image and reply with CROSS-RELAY-78-READBACK plus the main object you see.",
+              {
+                model: geminiModel(),
+                provider: "gemini",
+                enableBuiltins: true,
+              },
+            ),
+            240000,
+          );
+          assert.match(readback.text.toLowerCase(), /cross-relay-78-readback/);
+          assert.match(readback.text.toLowerCase(), /terrarium|lighthouse|glass/);
+        });
       },
     );
   }

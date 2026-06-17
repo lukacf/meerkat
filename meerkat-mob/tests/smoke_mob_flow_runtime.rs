@@ -30,6 +30,7 @@ use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
@@ -216,6 +217,17 @@ impl FlowSmokePaths {
             mob_db_path: root.join("mob.db"),
         }
     }
+
+    fn materialize_project_context(&self) {
+        for root in [&self.project_root, &self.context_root] {
+            fs::create_dir_all(root).expect("create flow smoke project/context root");
+            fs::write(
+                root.join("AGENTS.md"),
+                "# Flow Runtime Smoke\n\nUse concise responses for live flow smoke tests.\n",
+            )
+            .expect("write flow smoke AGENTS.md");
+        }
+    }
 }
 
 fn smoke_factory(paths: &FlowSmokePaths) -> AgentFactory {
@@ -231,6 +243,7 @@ fn smoke_factory(paths: &FlowSmokePaths) -> AgentFactory {
 fn persistent_service(
     paths: &FlowSmokePaths,
 ) -> Arc<PersistentSessionService<FactoryAgentBuilder>> {
+    paths.materialize_project_context();
     let factory = smoke_factory(paths);
     let mut builder = FactoryAgentBuilder::new(factory, Config::default());
     let store = Arc::new(JsonlStore::new(paths.sessions_root.clone()));

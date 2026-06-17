@@ -5,7 +5,9 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+use meerkat_core::lifecycle::run_primitive::{
+    OpenAiPromptCacheRetention, OpenAiProviderTag, ProviderTag,
+};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, ImageGenerationIntent,
@@ -88,6 +90,12 @@ enum OpenAiBackendWire {
 enum SystemMessageMode {
     IncludeInInput,
     ExtractToInstructions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenAiContinuationPlan {
+    previous_response_id: String,
+    replay_from_message_index: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -173,6 +181,74 @@ fn openai_server_tool_content_replayable(
         ),
         OpenAiReplayProjectionMode::ChatCompletions => false,
     }
+}
+
+fn openai_response_id_from_meta(meta: &Option<Box<ProviderMeta>>) -> Option<&str> {
+    match meta.as_deref() {
+        Some(
+            ProviderMeta::OpenAi {
+                response_id: Some(response_id),
+                ..
+            }
+            | ProviderMeta::OpenAiResponse { response_id },
+        ) => Some(response_id.as_str()),
+        _ => None,
+    }
+}
+
+fn openai_response_id_from_block(block: &AssistantBlock) -> Option<&str> {
+    match block {
+        AssistantBlock::Text { meta, .. }
+        | AssistantBlock::Reasoning { meta, .. }
+        | AssistantBlock::ToolUse { meta, .. }
+        | AssistantBlock::Transcript { meta, .. }
+        | AssistantBlock::ServerToolContent { meta, .. } => openai_response_id_from_meta(meta),
+        AssistantBlock::Image { .. } | _ => None,
+    }
+}
+
+fn openai_response_meta(response_id: Option<&str>) -> Option<Box<ProviderMeta>> {
+    response_id.map(|response_id| {
+        Box::new(ProviderMeta::OpenAiResponse {
+            response_id: response_id.to_string(),
+        })
+    })
+}
+
+fn openai_response_id_from_response(response: &Value) -> Option<String> {
+    response
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn openai_continuation_plan(request: &LlmRequest) -> Option<OpenAiContinuationPlan> {
+    let tag = openai_tag(request)?;
+    if tag.store != Some(true) {
+        return None;
+    }
+
+    request
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            let Message::BlockAssistant(assistant) = message else {
+                return None;
+            };
+            assistant
+                .blocks
+                .iter()
+                .rev()
+                .find_map(openai_response_id_from_block)
+                .map(|response_id| OpenAiContinuationPlan {
+                    previous_response_id: response_id.to_string(),
+                    replay_from_message_index: index + 1,
+                })
+        })
+        .filter(|plan| plan.replay_from_message_index < request.messages.len())
 }
 
 fn project_openai_assistant_blocks(
@@ -594,6 +670,24 @@ impl OpenAiClient {
         }
 
         if let Some(tag) = openai_tag(request) {
+            if let Some(store) = tag.store {
+                body["store"] = Value::Bool(store);
+            }
+
+            if let Some(prompt_cache_key) = tag.prompt_cache_key.as_ref() {
+                body["prompt_cache_key"] = Value::String(prompt_cache_key.clone());
+            }
+
+            if let Some(retention) = tag.prompt_cache_retention {
+                body["prompt_cache_retention"] = Value::String(
+                    match retention {
+                        OpenAiPromptCacheRetention::InMemory => "in_memory",
+                        OpenAiPromptCacheRetention::TwentyFourHours => "24h",
+                    }
+                    .to_string(),
+                );
+            }
+
             if reasoning_enabled && let Some(effort) = tag.reasoning_effort {
                 let s = effort.as_legacy_str();
                 body["reasoning"]["effort"] = Value::String(s.to_string());
@@ -636,6 +730,100 @@ impl OpenAiClient {
         }
 
         Ok(body)
+    }
+
+    fn build_request_body_with_continuation(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<(Value, Option<OpenAiContinuationPlan>), LlmError> {
+        let Some(plan) = openai_continuation_plan(request) else {
+            return self.build_request_body(request).map(|body| (body, None));
+        };
+
+        let mut continuation_request = request.clone();
+        continuation_request.messages = request.messages[plan.replay_from_message_index..].to_vec();
+        let mut body = self.build_request_body(&continuation_request)?;
+        if self.is_chatgpt_backend_wire() {
+            let full_body = self.build_request_body(request)?;
+            if let Some(instructions) = full_body.get("instructions").cloned() {
+                body["instructions"] = instructions;
+            }
+        }
+        body["previous_response_id"] = Value::String(plan.previous_response_id.clone());
+        Ok((body, Some(plan)))
+    }
+
+    fn previous_response_id_retriable_error(status_code: u16, text: &str) -> bool {
+        if !matches!(status_code, 400 | 404 | 409 | 422) {
+            return false;
+        }
+        let lowered = text.to_ascii_lowercase();
+        lowered.contains("previous_response_id")
+            || lowered.contains("previous response")
+            || lowered.contains("response id")
+    }
+
+    async fn send_responses_request(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        let mut request_builder = self
+            .http
+            .post(endpoint)
+            .header("Content-Type", "application/json");
+        request_builder = self
+            .apply_request_headers(request_builder, endpoint, &[])
+            .await?;
+        request_builder.json(body).send().await.map_err(|e| {
+            if e.is_timeout() {
+                LlmError::NetworkTimeout { duration_ms: 30000 }
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                if e.is_connect() {
+                    return LlmError::ConnectionReset;
+                }
+                LlmError::Unknown {
+                    message: e.to_string(),
+                }
+            }
+        })
+    }
+
+    async fn responses_response_with_fallback(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        fallback_body: Option<Value>,
+    ) -> Result<reqwest::Response, LlmError> {
+        let response = self.send_responses_request(endpoint, body).await?;
+        let status_code = response.status().as_u16();
+        if (200..=299).contains(&status_code) {
+            return Ok(response);
+        }
+
+        let headers = response.headers().clone();
+        let text = response.text().await.unwrap_or_default();
+        if let Some(fallback_body) = fallback_body
+            && Self::previous_response_id_retriable_error(status_code, &text)
+        {
+            let retry = self
+                .send_responses_request(endpoint, &fallback_body)
+                .await?;
+            let retry_status = retry.status().as_u16();
+            if (200..=299).contains(&retry_status) {
+                return Ok(retry);
+            }
+            let retry_headers = retry.headers().clone();
+            let retry_text = retry.text().await.unwrap_or_default();
+            return Err(LlmError::from_http_response(
+                retry_status,
+                retry_text,
+                &retry_headers,
+            ));
+        }
+
+        Err(LlmError::from_http_response(status_code, text, &headers))
     }
 
     /// Convert messages to Responses API input format.
@@ -1555,42 +1743,22 @@ impl LlmClient for OpenAiClient {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
             let request = &projected_request;
-            let body = self.build_request_body(request)?;
+            let (body, continuation_plan) = self.build_request_body_with_continuation(request)?;
+            let fallback_body = if continuation_plan.is_some() {
+                Some(self.build_request_body(request)?)
+            } else {
+                None
+            };
 
             let endpoint = self.responses_endpoint();
-            let mut request_builder = self
-                .http
-                .post(&endpoint)
-                .header("Content-Type", "application/json");
-            request_builder = self.apply_request_headers(request_builder, &endpoint, &[]).await?;
-            let response = request_builder
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        LlmError::NetworkTimeout { duration_ms: 30000 }
-                    } else {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if e.is_connect() {
-                            return LlmError::ConnectionReset;
-                        }
-                        LlmError::Unknown { message: e.to_string() }
-                    }
-                })?;
-
-            let status_code = response.status().as_u16();
-            let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
-            } else {
-                let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_response(status_code, text, &headers))
-            };
-            let mut stream = stream_result?;
+            let response = self
+                .responses_response_with_fallback(&endpoint, &body, fallback_body)
+                .await?;
+            let mut stream = response.bytes_stream();
             let mut buffer = String::with_capacity(512);
             let mut assembler = BlockAssembler::new();
             let mut usage = Usage::default();
+            let mut active_response_id: Option<String> = None;
             let mut saw_stream_text_delta = false;
             let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
             let mut response_item_tool_calls: HashMap<String, (String, String)> =
@@ -1630,6 +1798,13 @@ impl LlmClient for OpenAiClient {
                     buffer.drain(..=newline_pos);
 
                     if let Some(event) = parsed_event {
+                        if let Some(response_id) = event
+                            .response
+                            .as_ref()
+                            .and_then(openai_response_id_from_response)
+                        {
+                            active_response_id = Some(response_id);
+                        }
                         // Handle response.completed event (non-streaming final response)
                         if event.event_type == "response.completed" {
                             if done_emitted {
@@ -1659,24 +1834,26 @@ impl LlmClient for OpenAiClient {
                                                                                     "type": "message_annotations",
                                                                                     "annotations": annotations
                                                                                 }),
-                                                                                meta: None,
+                                                                                meta: openai_response_meta(active_response_id.as_deref()),
                                                                             };
                                                                         }
                                                                         if let Some(text) = part.get("text").and_then(|t| t.as_str())
                                                                             && !saw_stream_text_delta
                                                                         {
+                                                                            let meta = openai_response_meta(active_response_id.as_deref());
                                                                             saw_terminal_fallback_output = true;
-                                                                            assembler.on_text_delta(text, None);
-                                                                            yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
+                                                                            assembler.on_text_delta(text, meta.clone());
+                                                                            yield LlmEvent::TextDelta { delta: text.to_string(), meta };
                                                                         }
                                                                     }
                                                                     "refusal" => {
                                                                         if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str())
                                                                             && !saw_stream_text_delta
                                                                         {
+                                                                            let meta = openai_response_meta(active_response_id.as_deref());
                                                                             saw_terminal_fallback_output = true;
-                                                                            assembler.on_text_delta(refusal, None);
-                                                                            yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
+                                                                            assembler.on_text_delta(refusal, meta.clone());
+                                                                            yield LlmEvent::TextDelta { delta: refusal.to_string(), meta };
                                                                         }
                                                                     }
                                                                     _ => {}
@@ -1722,6 +1899,7 @@ impl LlmClient for OpenAiClient {
                                                         id: reasoning_id.to_string(),
                                                         encrypted_content: encrypted,
                                                         phase,
+                                                        response_id: active_response_id.clone(),
                                                     }));
 
                                                     assembler.on_reasoning_start();
@@ -1767,14 +1945,14 @@ impl LlmClient for OpenAiClient {
                                                         call_id.to_string(),
                                                         name.to_string(),
                                                         args.clone(),
-                                                        None,
+                                                        openai_response_meta(active_response_id.as_deref()),
                                                     );
 
                                                     yield LlmEvent::ToolCallComplete {
                                                         id: call_id.to_string(),
                                                         name: name.into(),
                                                         args: args_value,
-                                                        meta: None,
+                                                        meta: openai_response_meta(active_response_id.as_deref()),
                                                     };
                                                     saw_terminal_fallback_output = true;
                                                 }
@@ -1790,7 +1968,7 @@ impl LlmClient for OpenAiClient {
                                                         id,
                                                         kind: ServerToolKind::WebSearch,
                                                         content: item.clone(),
-                                                        meta: None,
+                                                        meta: openai_response_meta(active_response_id.as_deref()),
                                                     };
                                                 }
                                                 _ => {}
@@ -1801,12 +1979,7 @@ impl LlmClient for OpenAiClient {
 
                                 // Extract usage
                                 if let Some(usage_obj) = response_obj.get("usage") {
-                                    usage.input_tokens = usage_obj.get("input_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
-                                    usage.output_tokens = usage_obj.get("output_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
+                                    apply_responses_usage(&mut usage, usage_obj);
                                     yield LlmEvent::UsageUpdate { usage: usage.clone() };
                                 }
 
@@ -1860,8 +2033,9 @@ impl LlmClient for OpenAiClient {
                             if let Some(delta) = &event.delta {
                                 saw_stream_text_delta = true;
                                 saw_terminal_fallback_output = true;
-                                assembler.on_text_delta(delta, None);
-                                yield LlmEvent::TextDelta { delta: delta.clone(), meta: None };
+                                let meta = openai_response_meta(active_response_id.as_deref());
+                                assembler.on_text_delta(delta, meta.clone());
+                                yield LlmEvent::TextDelta { delta: delta.clone(), meta };
                             }
                         }
                         else if event.event_type == "response.reasoning_summary_text.delta" {
@@ -1922,7 +2096,7 @@ impl LlmClient for OpenAiClient {
                                     call_id.clone(),
                                     name.clone(),
                                     args.clone(),
-                                    None,
+                                    openai_response_meta(active_response_id.as_deref()),
                                 );
 
                                 streamed_tool_ids.insert(call_id.clone());
@@ -1931,7 +2105,7 @@ impl LlmClient for OpenAiClient {
                                     id: call_id.clone(),
                                     name,
                                     args: args_value,
-                                    meta: None,
+                                    meta: openai_response_meta(active_response_id.as_deref()),
                                 };
                             }
                         }
@@ -1966,7 +2140,7 @@ impl LlmClient for OpenAiClient {
                                     call_id.to_string(),
                                     name.to_string(),
                                     args,
-                                    None,
+                                    openai_response_meta(active_response_id.as_deref()),
                                 );
 
                                 streamed_tool_ids.insert(call_id.to_string());
@@ -1975,7 +2149,7 @@ impl LlmClient for OpenAiClient {
                                     id: call_id.to_string(),
                                     name: name.to_string(),
                                     args: args_value,
-                                    meta: None,
+                                    meta: openai_response_meta(active_response_id.as_deref()),
                                 };
                             }
                         }
@@ -2011,6 +2185,7 @@ impl LlmClient for OpenAiClient {
                                     id: reasoning_id.to_string(),
                                     encrypted_content: encrypted,
                                     phase,
+                                    response_id: active_response_id.clone(),
                                 }));
 
                                 assembler.on_reasoning_start();
@@ -2046,19 +2221,14 @@ impl LlmClient for OpenAiClient {
                                 id: event.item_id.clone(),
                                 kind: ServerToolKind::WebSearch,
                                 content: Value::Object(content),
-                                meta: None,
+                                meta: openai_response_meta(active_response_id.as_deref()),
                             };
                         }
                         else if event.event_type == "response.done" {
                             // Final done event — always update usage
                             if let Some(response_obj) = &event.response {
                                 if let Some(usage_obj) = response_obj.get("usage") {
-                                    usage.input_tokens = usage_obj.get("input_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
-                                    usage.output_tokens = usage_obj.get("output_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
+                                    apply_responses_usage(&mut usage, usage_obj);
                                     yield LlmEvent::UsageUpdate { usage: usage.clone() };
                                 }
 
@@ -2235,6 +2405,26 @@ struct ResponsesStreamEvent {
     sequence_number: Option<u64>,
 }
 
+fn apply_responses_usage(target: &mut Usage, usage: &Value) {
+    target.input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    target.output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let cached_tokens = usage
+        .get("input_tokens_details")
+        .or_else(|| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64);
+    if let Some(cached_tokens) = cached_tokens {
+        target.cache_read_tokens = Some(cached_tokens);
+    }
+}
+
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 fn empty_tool_args_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
@@ -2267,7 +2457,11 @@ fn parse_tool_call_arguments(
 mod tests {
     use super::*;
     use axum::{
-        Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
     };
     use meerkat_core::{
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, MediaType, ProviderImageMetadata,
@@ -2338,6 +2532,7 @@ mod tests {
                             id: "rs_1".to_string(),
                             encrypted_content: Some("ciphertext".to_string()),
                             phase: Some("reasoning".to_string()),
+                            response_id: None,
                         })),
                     },
                     AssistantBlock::ServerToolContent {
@@ -2520,6 +2715,7 @@ mod tests {
                         id: "rs_1".to_string(),
                         encrypted_content: Some("enc".to_string()),
                         phase: Some("reasoning".to_string()),
+                        response_id: None,
                     })),
                 },
                 AssistantBlock::ServerToolContent {
@@ -2611,6 +2807,34 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct FallbackStreamStubState {
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    async fn responses_sse_with_previous_response_fallback(
+        State(state): State<FallbackStreamStubState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.seen.lock().expect("seen mutex").push(body.clone());
+        let mut calls = state.calls.lock().expect("calls mutex");
+        *calls += 1;
+        if *calls == 1 && body.get("previous_response_id").is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "previous_response_id was not found"
+                    }
+                })),
+            )
+                .into_response();
+        }
+        ([("content-type", "text/event-stream")], state.payload).into_response()
+    }
+
+    #[derive(Clone)]
     struct HeaderStreamStubState {
         payload: String,
         seen: Arc<Mutex<Vec<Value>>>,
@@ -2656,6 +2880,30 @@ mod tests {
         let app = Router::new()
             .route("/v1/responses", post(responses_sse))
             .with_state(payload);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn spawn_openai_fallback_stub_server(
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                post(responses_sse_with_previous_response_fallback),
+            )
+            .with_state(FallbackStreamStubState {
+                payload,
+                seen,
+                calls: Arc::new(Mutex::new(0)),
+            });
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -3350,6 +3598,144 @@ mod tests {
         );
     }
 
+    #[test]
+    fn openai_prompt_cache_knobs_are_explicit_and_store_defaults_false() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|t| {
+            t.store = Some(true);
+            t.prompt_cache_key = Some("tenant-a:stable-prefix".to_string());
+            t.prompt_cache_retention = Some(OpenAiPromptCacheRetention::TwentyFourHours);
+        });
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["store"], true);
+        assert_eq!(body["prompt_cache_key"], "tenant-a:stable-prefix");
+        assert_eq!(body["prompt_cache_retention"], "24h");
+
+        let default_body = client
+            .build_request_body(&LlmRequest::new(
+                "gpt-5.4",
+                vec![Message::User(UserMessage::text("Hello".to_string()))],
+            ))
+            .expect("build default request");
+        assert_eq!(default_body["store"], false);
+        assert!(default_body.get("prompt_cache_key").is_none());
+        assert!(default_body.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn openai_continuation_uses_previous_response_id_and_new_turn_only() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![
+                Message::User(UserMessage::text("old question".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
+                        text: "old answer".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAiResponse {
+                            response_id: "resp_previous".to_string(),
+                        })),
+                    }],
+                    StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        )
+        .with_openai_tag_merge(|t| t.store = Some(true));
+
+        let (body, plan) = client
+            .build_request_body_with_continuation(&request)
+            .expect("build continuation request");
+
+        assert_eq!(
+            plan.expect("continuation plan").previous_response_id,
+            "resp_previous"
+        );
+        assert_eq!(body["store"], true);
+        assert_eq!(body["previous_response_id"], "resp_previous");
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"], "new question");
+    }
+
+    #[test]
+    fn chatgpt_backend_continuation_preserves_full_request_instructions() {
+        let client = OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire();
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![
+                Message::System(meerkat_core::SystemMessage::new(
+                    "You are a careful assistant.".to_string(),
+                )),
+                Message::User(UserMessage::text("old question".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
+                        text: "old answer".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAiResponse {
+                            response_id: "resp_previous".to_string(),
+                        })),
+                    }],
+                    StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        )
+        .with_openai_tag_merge(|t| t.store = Some(true));
+
+        let (body, plan) = client
+            .build_request_body_with_continuation(&request)
+            .expect("build continuation request");
+
+        assert_eq!(
+            plan.expect("continuation plan").previous_response_id,
+            "resp_previous"
+        );
+        assert_eq!(body["store"], true);
+        assert_eq!(body["previous_response_id"], "resp_previous");
+        assert_eq!(body["instructions"], "You are a careful assistant.");
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"], "new question");
+    }
+
+    #[test]
+    fn openai_store_false_keeps_full_replay_without_previous_response_id() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![
+                Message::User(UserMessage::text("old question".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
+                        text: "old answer".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAiResponse {
+                            response_id: "resp_previous".to_string(),
+                        })),
+                    }],
+                    StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        );
+
+        let (body, plan) = client
+            .build_request_body_with_continuation(&request)
+            .expect("build request");
+
+        assert!(plan.is_none());
+        assert_eq!(body["store"], false);
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["input"].as_array().expect("input array").len(), 3);
+    }
+
     #[tokio::test]
     async fn chatgpt_backend_wire_uses_codex_responses_path()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3401,6 +3787,66 @@ mod tests {
                 .all(|item| item.get("role").and_then(Value::as_str) != Some("system")),
             "ChatGPT Codex backend rejects system messages in input; they must be lifted to instructions"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn openai_previous_response_id_rejection_falls_back_to_full_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = [
+            r#"data: {"type":"response.created","response":{"id":"resp_retry"}}"#,
+            r#"data: {"type":"response.output_text.delta","delta":"Recovered"}"#,
+            r#"data: {"type":"response.done","response":{"id":"resp_retry","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) = spawn_openai_fallback_stub_server(payload, seen.clone()).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![
+                Message::User(UserMessage::text("old question".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
+                        text: "old answer".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAiResponse {
+                            response_id: "resp_missing".to_string(),
+                        })),
+                    }],
+                    StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("new question".to_string())),
+            ],
+        )
+        .with_openai_tag_merge(|t| t.store = Some(true));
+
+        let mut stream = client.stream(&request);
+        let mut deltas = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                LlmEvent::TextDelta { delta, meta } => {
+                    deltas.push(delta);
+                    assert!(matches!(
+                        meta.as_deref(),
+                        Some(ProviderMeta::OpenAiResponse { response_id })
+                            if response_id == "resp_retry"
+                    ));
+                }
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(deltas, vec!["Recovered"]);
+        let bodies = seen.lock().expect("seen mutex");
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["previous_response_id"], "resp_missing");
+        assert_eq!(bodies[0]["input"].as_array().expect("input array").len(), 1);
+        assert!(bodies[1].get("previous_response_id").is_none());
+        assert_eq!(bodies[1]["input"].as_array().expect("input array").len(), 3);
         Ok(())
     }
 
@@ -3864,6 +4310,7 @@ mod tests {
                                 id: "rs_abc123".to_string(),
                                 encrypted_content: Some("encrypted_data".to_string()),
                                 phase: None,
+                                response_id: None,
                             })),
                         },
                         AssistantBlock::Text {
@@ -4443,6 +4890,25 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_usage_maps_cached_tokens() {
+        let usage_value = serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 7,
+            "input_tokens_details": {
+                "cached_tokens": 64
+            }
+        });
+        let mut usage = Usage::default();
+
+        apply_responses_usage(&mut usage, &usage_value);
+
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_tokens, Some(64));
+        assert_eq!(usage.cache_creation_tokens, None);
+    }
+
+    #[test]
     fn test_parse_responses_sse_line_done_marker() {
         let line = "data: [DONE]";
         let event = OpenAiClient::parse_responses_sse_line(line);
@@ -4515,6 +4981,66 @@ mod tests {
         server.abort();
 
         assert_eq!(deltas, vec!["Hello"]);
+    }
+
+    #[tokio::test]
+    async fn test_stream_maps_cached_tokens_from_completed_usage() {
+        let payload = [
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":40}}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut usage_updates = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::UsageUpdate { usage } = event.expect("stream event") {
+                usage_updates.push(usage);
+            }
+        }
+        server.abort();
+
+        assert_eq!(usage_updates.len(), 1);
+        assert_eq!(usage_updates[0].input_tokens, 100);
+        assert_eq!(usage_updates[0].output_tokens, 5);
+        assert_eq!(usage_updates[0].cache_read_tokens, Some(40));
+    }
+
+    #[tokio::test]
+    async fn test_stream_maps_cached_tokens_from_done_usage() {
+        let payload = [
+            r#"data: {"type":"response.done","response":{"status":"completed","output":[],"usage":{"input_tokens":101,"output_tokens":6,"input_tokens_details":{"cached_tokens":41}}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut usage_updates = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::UsageUpdate { usage } = event.expect("stream event") {
+                usage_updates.push(usage);
+            }
+        }
+        server.abort();
+
+        assert_eq!(usage_updates.len(), 1);
+        assert_eq!(usage_updates[0].input_tokens, 101);
+        assert_eq!(usage_updates[0].output_tokens, 6);
+        assert_eq!(usage_updates[0].cache_read_tokens, Some(41));
     }
 
     #[tokio::test]
@@ -4835,6 +5361,7 @@ mod tests {
                             id: "rs_orphan".to_string(),
                             encrypted_content: None,
                             phase: None,
+                            response_id: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -4869,6 +5396,7 @@ mod tests {
                             id: "rs_mid".to_string(),
                             encrypted_content: None,
                             phase: None,
+                            response_id: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -4917,6 +5445,7 @@ mod tests {
                             id: "rs_before_tool".to_string(),
                             encrypted_content: None,
                             phase: None,
+                            response_id: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -4963,6 +5492,7 @@ mod tests {
                                 id: "rs_valid".to_string(),
                                 encrypted_content: Some("enc_valid".to_string()),
                                 phase: None,
+                                response_id: None,
                             })),
                         },
                         AssistantBlock::ToolUse {
@@ -5044,6 +5574,7 @@ mod tests {
                             id: "rs_first".to_string(),
                             encrypted_content: Some("enc_1".to_string()),
                             phase: None,
+                            response_id: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -5056,6 +5587,7 @@ mod tests {
                             id: "rs_second".to_string(),
                             encrypted_content: None,
                             phase: None,
+                            response_id: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -5125,6 +5657,7 @@ mod tests {
                                 id: "rs_no_enc".to_string(),
                                 encrypted_content: None,
                                 phase: None,
+                                response_id: None,
                             })),
                         },
                         AssistantBlock::ToolUse {
@@ -5168,6 +5701,7 @@ mod tests {
                                 id: "rs_enc".to_string(),
                                 encrypted_content: Some("enc_data_here".to_string()),
                                 phase: None,
+                                response_id: None,
                             })),
                         },
                         AssistantBlock::Text {

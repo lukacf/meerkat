@@ -748,6 +748,69 @@ impl From<WireAnthropicContextWindow>
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+pub enum WireAnthropicCacheControlPolicy {
+    Disabled,
+    SystemPrefix,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy>
+    for WireAnthropicCacheControlPolicy
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy as Core;
+        match value {
+            Core::Disabled => Self::Disabled,
+            Core::SystemPrefix => Self::SystemPrefix,
+        }
+    }
+}
+
+impl From<WireAnthropicCacheControlPolicy>
+    for meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy
+{
+    fn from(value: WireAnthropicCacheControlPolicy) -> Self {
+        match value {
+            WireAnthropicCacheControlPolicy::Disabled => Self::Disabled,
+            WireAnthropicCacheControlPolicy::SystemPrefix => Self::SystemPrefix,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireOpenAiPromptCacheRetention {
+    InMemory,
+    #[serde(rename = "24h")]
+    TwentyFourHours,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheRetention>
+    for WireOpenAiPromptCacheRetention
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheRetention) -> Self {
+        use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheRetention as Core;
+        match value {
+            Core::InMemory => Self::InMemory,
+            Core::TwentyFourHours => Self::TwentyFourHours,
+        }
+    }
+}
+
+impl From<WireOpenAiPromptCacheRetention>
+    for meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheRetention
+{
+    fn from(value: WireOpenAiPromptCacheRetention) -> Self {
+        match value {
+            WireOpenAiPromptCacheRetention::InMemory => Self::InMemory,
+            WireOpenAiPromptCacheRetention::TwentyFourHours => Self::TwentyFourHours,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum WireGeminiThinkingLevel {
     Minimal,
     Low,
@@ -851,6 +914,8 @@ pub enum WireProviderTag {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<WireAnthropicContextWindow>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<WireAnthropicCacheControlPolicy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         supports_temperature_override: Option<bool>,
     },
     OpenAi {
@@ -889,6 +954,12 @@ pub enum WireProviderTag {
         )]
         thinking: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        store: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_cache_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_cache_retention: Option<WireOpenAiPromptCacheRetention>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         supports_temperature_override: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supports_reasoning_override: Option<bool>,
@@ -914,6 +985,8 @@ pub enum WireProviderTag {
         google_search: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate_count: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_content_name: Option<String>,
     },
     /// Wire projection of `ProviderTag::Unknown { bag }` — the typed
     /// escape hatch for V3 legacy-row provider knobs that don't (yet) map
@@ -935,6 +1008,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
                 inference_geo: t.inference_geo.map(Into::into),
                 compaction: t.compaction.map(Into::into),
                 context: t.context.map(Into::into),
+                cache_control: t.cache_control.map(Into::into),
                 supports_temperature_override: t.supports_temperature_override,
             },
             Core::OpenAi(t) => Self::OpenAi {
@@ -947,6 +1021,9 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
                 reasoning: t.reasoning.map(|v| v.as_value()),
                 chat_template_kwargs: t.chat_template_kwargs.map(|v| v.as_value()),
                 thinking: t.thinking.map(|v| v.as_value()),
+                store: t.store,
+                prompt_cache_key: t.prompt_cache_key,
+                prompt_cache_retention: t.prompt_cache_retention.map(Into::into),
                 supports_temperature_override: t.supports_temperature_override,
                 supports_reasoning_override: t.supports_reasoning_override,
             },
@@ -959,6 +1036,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
                 structured_output: t.structured_output,
                 google_search: t.google_search.map(|v| v.as_value()),
                 candidate_count: t.candidate_count,
+                cached_content_name: t.cached_content_name,
             },
             Core::Unknown { bag } => Self::Unknown { bag },
         }
@@ -981,6 +1059,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 inference_geo,
                 compaction,
                 context,
+                cache_control,
                 supports_temperature_override,
             } => Self::Anthropic(AnthropicProviderTag {
                 thinking: thinking.map(Into::into),
@@ -992,6 +1071,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 inference_geo: inference_geo.map(Into::into),
                 compaction: compaction.map(Into::into),
                 context: context.map(Into::into),
+                cache_control: cache_control.map(Into::into),
                 supports_temperature_override,
             }),
             WireProviderTag::OpenAi {
@@ -1004,6 +1084,9 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 reasoning,
                 chat_template_kwargs,
                 thinking,
+                store,
+                prompt_cache_key,
+                prompt_cache_retention,
                 supports_temperature_override,
                 supports_reasoning_override,
             } => Self::OpenAi(OpenAiProviderTag {
@@ -1017,6 +1100,9 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 chat_template_kwargs: chat_template_kwargs
                     .map(|v| OpaqueProviderBody::from_value(&v)),
                 thinking: thinking.map(|v| OpaqueProviderBody::from_value(&v)),
+                store,
+                prompt_cache_key,
+                prompt_cache_retention: prompt_cache_retention.map(Into::into),
                 supports_temperature_override,
                 supports_reasoning_override,
             }),
@@ -1029,6 +1115,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 structured_output,
                 google_search,
                 candidate_count,
+                cached_content_name,
             } => Self::Gemini(GeminiProviderTag {
                 thinking: thinking.map(Into::into),
                 thinking_budget,
@@ -1038,6 +1125,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 structured_output,
                 google_search: google_search.map(|v| OpaqueProviderBody::from_value(&v)),
                 candidate_count,
+                cached_content_name,
             }),
             WireProviderTag::Unknown { bag } => Self::Unknown { bag },
         }

@@ -384,6 +384,17 @@ pub enum AnthropicCompactionConfig {
     Custom { edit: OpaqueProviderBody },
 }
 
+/// Typed shape of Anthropic's prompt-cache breakpoint policy.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicCacheControlPolicy {
+    /// Do not request Anthropic prompt-cache breakpoints.
+    Disabled,
+    /// Mark the stable top-level system prompt as an ephemeral cache prefix.
+    SystemPrefix,
+}
+
 /// Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -419,11 +430,26 @@ pub struct AnthropicProviderTag {
     /// Context-window opt-in (1M beta).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<AnthropicContextWindow>,
+    /// Prompt-cache breakpoint policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<AnthropicCacheControlPolicy>,
     /// Internal override: force-enable temperature for this request even
     /// when the model profile says unsupported. Used by proxied /
     /// custom deployments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_temperature_override: Option<bool>,
+}
+
+/// Typed shape of OpenAI's prompt-cache retention hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiPromptCacheRetention {
+    /// Retain only in memory.
+    InMemory,
+    /// Retain for 24 hours.
+    #[serde(rename = "24h")]
+    TwentyFourHours,
 }
 
 /// Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.
@@ -461,6 +487,17 @@ pub struct OpenAiProviderTag {
     /// forwarded verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<OpaqueProviderBody>,
+    /// Responses API persistence override. Absent means the client sends
+    /// `store: false` by default; callers may explicitly opt in with
+    /// `Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// OpenAI prompt-cache affinity routing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// OpenAI prompt-cache retention hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<OpenAiPromptCacheRetention>,
     /// Internal override: force-enable temperature for this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_temperature_override: Option<bool>,
@@ -539,6 +576,9 @@ pub struct GeminiProviderTag {
     /// read by the Gemini client today — preserved for V3 round-trip).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_count: Option<u32>,
+    /// Gemini explicit context-cache resource name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_content_name: Option<String>,
 }
 
 /// Typed projection of OpenAI's reasoning-effort knob.
@@ -751,6 +791,7 @@ impl ProviderTag {
                 fill(&mut target.inference_geo, &default.inference_geo);
                 fill(&mut target.compaction, &default.compaction);
                 fill(&mut target.context, &default.context);
+                fill(&mut target.cache_control, &default.cache_control);
                 fill(
                     &mut target.supports_temperature_override,
                     &default.supports_temperature_override,
@@ -770,6 +811,12 @@ impl ProviderTag {
                     &default.chat_template_kwargs,
                 );
                 fill(&mut target.thinking, &default.thinking);
+                fill(&mut target.store, &default.store);
+                fill(&mut target.prompt_cache_key, &default.prompt_cache_key);
+                fill(
+                    &mut target.prompt_cache_retention,
+                    &default.prompt_cache_retention,
+                );
                 fill(
                     &mut target.supports_temperature_override,
                     &default.supports_temperature_override,
@@ -789,6 +836,10 @@ impl ProviderTag {
                 fill(&mut target.structured_output, &default.structured_output);
                 fill(&mut target.google_search, &default.google_search);
                 fill(&mut target.candidate_count, &default.candidate_count);
+                fill(
+                    &mut target.cached_content_name,
+                    &default.cached_content_name,
+                );
                 Ok(())
             }
             // An opaque pass-through bag cannot be field-merged; the explicit
@@ -2023,12 +2074,14 @@ mod tests {
                 temperature: Some(0.3),
                 provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
                     effort: Some(AnthropicEffort::High),
+                    cache_control: Some(AnthropicCacheControlPolicy::Disabled),
                     ..Default::default()
                 })),
                 ..Default::default()
             },
             tool_defaults: Some(ProviderTag::Anthropic(AnthropicProviderTag {
                 effort: Some(AnthropicEffort::Low),
+                cache_control: Some(AnthropicCacheControlPolicy::SystemPrefix),
                 web_search: Some(OpaqueProviderBody::from_value(
                     &serde_json::json!({"type": "web_search_20250305"}),
                 )),
@@ -2043,6 +2096,10 @@ mod tests {
         };
         // Explicit knob wins over the default.
         assert_eq!(tag.effort, Some(AnthropicEffort::High));
+        assert_eq!(
+            tag.cache_control,
+            Some(AnthropicCacheControlPolicy::Disabled)
+        );
         // Unset slot is filled from the build-derived default.
         assert_eq!(
             tag.web_search,
@@ -2071,6 +2128,31 @@ mod tests {
                 defaults: "openai",
             }
         );
+    }
+
+    #[test]
+    fn carrier_effective_params_preserves_explicit_openai_store_false() {
+        let carrier = ProviderParamsCarrier {
+            params: ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    store: Some(false),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                store: Some(true),
+                prompt_cache_key: Some("default-key".to_string()),
+                ..Default::default()
+            })),
+        };
+
+        let effective = carrier.effective_params().expect("merge succeeds");
+        let Some(ProviderTag::OpenAi(tag)) = effective.provider_tag else {
+            panic!("openai tag expected");
+        };
+        assert_eq!(tag.store, Some(false));
+        assert_eq!(tag.prompt_cache_key.as_deref(), Some("default-key"));
     }
 
     /// K2 invariant: the carrier's durable face is exactly the typed override

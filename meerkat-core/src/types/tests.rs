@@ -898,6 +898,7 @@ mod ordered_transcript_types {
             id: "reasoning_item_123".to_string(),
             encrypted_content: Some("encrypted_tokens_abc".to_string()),
             phase: Some("reasoning".to_string()),
+            response_id: None,
         };
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -918,6 +919,7 @@ mod ordered_transcript_types {
             id: "reasoning_item_456".to_string(),
             encrypted_content: None,
             phase: None,
+            response_id: None,
         };
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -932,6 +934,21 @@ mod ordered_transcript_types {
         // Roundtrip still works
         let parsed: ProviderMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(meta, parsed);
+    }
+
+    #[test]
+    fn test_provider_meta_openai_response_roundtrip() {
+        let meta = ProviderMeta::OpenAiResponse {
+            response_id: "resp_123".to_string(),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: ProviderMeta = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(meta, parsed);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["provider"], "open_ai_response");
+        assert_eq!(value["response_id"], "resp_123");
     }
 
     // -----------------------------------------------------------------------
@@ -999,6 +1016,7 @@ mod ordered_transcript_types {
                 id: "reasoning_123".to_string(),
                 encrypted_content: Some("encrypted".to_string()),
                 phase: None,
+                response_id: None,
             })),
         };
 
@@ -1016,6 +1034,7 @@ mod ordered_transcript_types {
                 id: "reasoning_123".to_string(),
                 encrypted_content: Some("encrypted".to_string()),
                 phase: None,
+                response_id: None,
             })),
         }];
 
@@ -1180,6 +1199,7 @@ mod ordered_transcript_types {
                 id: "item_abc".to_string(),
                 encrypted_content: None,
                 phase: Some("response".to_string()),
+                response_id: None,
             })),
         };
 

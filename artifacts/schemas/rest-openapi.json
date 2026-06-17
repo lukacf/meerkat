@@ -1,6 +1,21 @@
 {
   "components": {
     "schemas": {
+      "AnthropicCacheControlPolicy": {
+        "description": "Typed shape of Anthropic's prompt-cache breakpoint policy.",
+        "oneOf": [
+          {
+            "const": "disabled",
+            "description": "Do not request Anthropic prompt-cache breakpoints.",
+            "type": "string"
+          },
+          {
+            "const": "system_prefix",
+            "description": "Mark the stable top-level system prompt as an ephemeral cache prefix.",
+            "type": "string"
+          }
+        ]
+      },
       "AnthropicCompactionConfig": {
         "description": "Typed shape of Anthropic's automatic-compaction knob.",
         "oneOf": [
@@ -4209,6 +4224,21 @@
         ],
         "type": "object"
       },
+      "OpenAiPromptCacheRetention": {
+        "description": "Typed shape of OpenAI's prompt-cache retention hint.",
+        "oneOf": [
+          {
+            "const": "in_memory",
+            "description": "Retain only in memory.",
+            "type": "string"
+          },
+          {
+            "const": "24h",
+            "description": "Retain for 24 hours.",
+            "type": "string"
+          }
+        ]
+      },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
@@ -4585,6 +4615,17 @@
             "additionalProperties": false,
             "description": "Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.",
             "properties": {
+              "cache_control": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnthropicCacheControlPolicy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Prompt-cache breakpoint policy."
+              },
               "compaction": {
                 "anyOf": [
                   {
@@ -4728,6 +4769,24 @@
                   "null"
                 ]
               },
+              "prompt_cache_key": {
+                "description": "OpenAI prompt-cache affinity routing key.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prompt_cache_retention": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OpenAiPromptCacheRetention"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "OpenAI prompt-cache retention hint."
+              },
               "provider": {
                 "const": "open_ai",
                 "type": "string"
@@ -4759,6 +4818,13 @@
                 "format": "int64",
                 "type": [
                   "integer",
+                  "null"
+                ]
+              },
+              "store": {
+                "description": "Responses API persistence override. Absent means the client sends\n`store: false` by default; callers may explicitly opt in with\n`Some(true)`.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -4819,6 +4885,13 @@
             "additionalProperties": false,
             "description": "Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.",
             "properties": {
+              "cached_content_name": {
+                "description": "Gemini explicit context-cache resource name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "candidate_count": {
                 "description": "Number of candidate completions (runtime/persistence knob, not\nread by the Gemini client today — preserved for V3 round-trip).",
                 "format": "uint32",
@@ -8097,6 +8170,13 @@
         "title": "UpdateScheduleRequest",
         "type": "object"
       },
+      "WireAnthropicCacheControlPolicy": {
+        "enum": [
+          "disabled",
+          "system_prefix"
+        ],
+        "type": "string"
+      },
       "WireAnthropicCompactionConfig": {
         "oneOf": [
           {
@@ -9367,6 +9447,13 @@
           }
         ]
       },
+      "WireOpenAiPromptCacheRetention": {
+        "enum": [
+          "in_memory",
+          "24h"
+        ],
+        "type": "string"
+      },
       "WireProviderBinding": {
         "description": "Wire projection of [`meerkat_core::ProviderBinding`].",
         "properties": {
@@ -9492,11 +9579,33 @@
               "provider": {
                 "const": "open_ai",
                 "type": "string"
+              },
+              "response_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
               "provider",
               "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "open_ai_response",
+                "type": "string"
+              },
+              "response_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "response_id"
             ],
             "type": "object"
           },
@@ -9575,6 +9684,16 @@
         "oneOf": [
           {
             "properties": {
+              "cache_control": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireAnthropicCacheControlPolicy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "compaction": {
                 "anyOf": [
                   {
@@ -9685,6 +9804,22 @@
                   "null"
                 ]
               },
+              "prompt_cache_key": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prompt_cache_retention": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireOpenAiPromptCacheRetention"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "provider": {
                 "const": "open_ai",
                 "type": "string"
@@ -9704,6 +9839,12 @@
                 "format": "int64",
                 "type": [
                   "integer",
+                  "null"
+                ]
+              },
+              "store": {
+                "type": [
+                  "boolean",
                   "null"
                 ]
               },
@@ -9739,6 +9880,12 @@
           },
           {
             "properties": {
+              "cached_content_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "candidate_count": {
                 "format": "uint32",
                 "minimum": 0,

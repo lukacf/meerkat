@@ -974,6 +974,7 @@ mod tests {
                             id: "rs_1".to_string(),
                             encrypted_content: Some("enc_data".to_string()),
                             phase: None,
+                            response_id: None,
                         })),
                     },
                     AssistantBlock::Text {
@@ -1012,6 +1013,7 @@ mod tests {
                         id: "rs_orphan".to_string(),
                         encrypted_content: Some("enc".to_string()),
                         phase: None,
+                        response_id: None,
                     })),
                 }],
                 StopReason::EndTurn,

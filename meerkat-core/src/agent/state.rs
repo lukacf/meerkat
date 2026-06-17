@@ -8219,6 +8219,7 @@ mod tests {
                         id: "rs_reasoning_only".to_string(),
                         encrypted_content: Some("encrypted-reasoning".to_string()),
                         phase: None,
+                        response_id: None,
                     })),
                 }],
                 StopReason::EndTurn,

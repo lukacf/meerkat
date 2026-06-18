@@ -5622,6 +5622,16 @@
               "null"
             ]
           },
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthBindingRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "backend": {
             "anyOf": [
               {
@@ -5679,6 +5689,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AuthBindingRef"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "backend": {

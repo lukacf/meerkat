@@ -1881,6 +1881,8 @@ pub struct MobSpawnHelperParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<WireAuthBindingRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<WireMobRuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<WireMobBackendKind>,
@@ -1898,6 +1900,8 @@ pub struct MobForkHelperParams {
     pub agent_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2400,6 +2404,47 @@ pub struct MobListMembersMatchingResult {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mob_helper_params_carry_structural_auth_binding() {
+        let parsed: MobSpawnHelperParams = serde_json::from_value(serde_json::json!({
+            "mob_id": "mob-1",
+            "prompt": "help",
+            "agent_identity": "helper",
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "default_anthropic",
+                "profile": "console"
+            }
+        }))
+        .expect("spawn helper params parse");
+        let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
+        assert_eq!(
+            auth_binding
+                .profile
+                .as_ref()
+                .map(|profile| profile.as_str()),
+            Some("console")
+        );
+
+        let parsed: MobForkHelperParams = serde_json::from_value(serde_json::json!({
+            "mob_id": "mob-1",
+            "source_member_id": "source",
+            "prompt": "help",
+            "agent_identity": "helper",
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "default_anthropic"
+            }
+        }))
+        .expect("fork helper params parse");
+        let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
+        assert!(auth_binding.profile.is_none());
+    }
 
     #[test]
     fn wire_mob_profile_parses_provider_fields_fail_closed() {

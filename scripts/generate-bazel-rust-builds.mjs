@@ -1429,6 +1429,10 @@ for (const pkg of localPackages.values()) {
         data.push("//:workspace_runfiles");
         env.push(`        "WORKSPACE_ROOT": ".",`);
       }
+      if (key === "meerkat-machine-schema" && target.name === "docs_machine_authority_alignment") {
+        data.push("//:workspace_runfiles");
+        env.push(`        "WORKSPACE_ROOT": ".",`);
+      }
       if (key === "xtask" && target.name === "buildbuddy_static_lanes") {
         data.push("BUILD.bazel");
         data.push("//tools/buildbuddy:build_file");

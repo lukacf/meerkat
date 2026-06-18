@@ -69,6 +69,11 @@ if scripts/machine-authority-changed -- xtask/src/rmat_policy.rs >/dev/null; the
 else
   bad "machine-authority-changed did not flag xtask/src/rmat_policy.rs"
 fi
+if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/dev/null; then
+  ok "machine-authority-changed exits 0 (changed) for machine-authority docs"
+else
+  bad "machine-authority-changed did not flag machine-authority docs"
+fi
 edge_out=$(printf 'xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_out" | grep -Fq 'changed=true'; then
   ok "buildbuddy-edge-changes marks rmat_policy.rs as changed"
@@ -118,13 +123,13 @@ done
 # ── #296: governance/spec changes route formal/governance checks ─────────────
 echo "#296 agent gates route governance/spec changes:"
 if grep -Fq 'is_governance_path' scripts/cargo-agent-gate \
-  && grep -Fq 'machine-check-drift runtime-authority-bypass seam-inventory rmat-audit' scripts/cargo-agent-gate; then
+  && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/cargo-agent-gate; then
   ok "cargo-agent-gate has governance allowlist + formal gate routing"
 else
   bad "cargo-agent-gate missing governance allowlist or formal gate routing"
 fi
 if grep -Fq 'is_governance_path' scripts/buildbuddy-agent-gate \
-  && grep -Fq 'machine-check-drift runtime-authority-bypass seam-inventory rmat-audit' scripts/buildbuddy-agent-gate; then
+  && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/buildbuddy-agent-gate; then
   ok "buildbuddy-agent-gate has governance allowlist + formal gate routing"
 else
   bad "buildbuddy-agent-gate missing governance allowlist or formal gate routing"
@@ -132,25 +137,38 @@ fi
 # Behavioral: a spec-only change is no longer reported as "no changes" and is
 # routed to the governance gate (dry-run avoids invoking cargo/make work).
 gate_out=$(scripts/cargo-agent-gate --dry-run -- specs/machines/example.tla 2>&1 || true)
-if printf '%s' "$gate_out" | grep -Fq 'machine-check-drift runtime-authority-bypass seam-inventory rmat-audit' \
+if printf '%s' "$gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
   && ! printf '%s' "$gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
   ok "cargo-agent-gate dry-run routes specs/machines change to governance gate"
 else
   bad "cargo-agent-gate dry-run did not route specs/machines change to governance gate"
 fi
+docs_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- docs/reference/machine-authority.mdx 2>&1 || true)
+if printf '%s' "$docs_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
+  && ! printf '%s' "$docs_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
+  ok "buildbuddy-agent-gate dry-run routes machine-authority docs to governance gate"
+else
+  bad "buildbuddy-agent-gate dry-run did not route machine-authority docs"
+fi
 generated_machine_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs 2>&1 || true)
-if printf '%s' "$generated_machine_gate_out" | grep -Fq 'machine-check-drift seam-inventory rmat-audit' \
+if printf '%s' "$generated_machine_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
   && ! printf '%s' "$generated_machine_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
   ok "cargo-agent-gate dry-run routes generated machine catalog changes to governance gate"
 else
   bad "cargo-agent-gate dry-run did not route generated machine catalog changes"
 fi
 generated_buildbuddy_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- meerkat-core/src/generated/protocol_runtime.rs 2>&1 || true)
-if printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'machine-check-drift seam-inventory rmat-audit' \
+if printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
   && ! printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes generated protocol changes to governance gate"
 else
   bad "buildbuddy-agent-gate dry-run did not route generated protocol changes"
+fi
+if grep -Fq '//meerkat-machine-schema:docs_machine_authority_alignment_test' scripts/buildbuddy-bazel-poc \
+  && grep -Fq 'docs_machine_authority_alignment' scripts/buildbuddy-ci-full; then
+  ok "BuildBuddy machine-authority lanes include machine-authority docs alignment"
+else
+  bad "BuildBuddy machine-authority lanes omit machine-authority docs alignment"
 fi
 schema_gate_out=$(scripts/cargo-agent-gate --dry-run -- artifacts/schemas/rest-openapi.json 2>&1 || true)
 if printf '%s' "$schema_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \

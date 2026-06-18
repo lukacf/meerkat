@@ -5,6 +5,7 @@ use crate::RpcRequestLifecycleRule;
 #[derive(Debug, Clone, Copy)]
 pub struct RpcMethodCatalogOptions {
     pub runtime_available: bool,
+    pub live_enabled: bool,
     pub mob_enabled: bool,
     pub mcp_enabled: bool,
     pub comms_enabled: bool,
@@ -24,6 +25,7 @@ impl RpcMethodCatalogOptions {
     pub const fn documented_surface() -> Self {
         Self {
             runtime_available: true,
+            live_enabled: true,
             mob_enabled: true,
             mcp_enabled: true,
             comms_enabled: true,
@@ -533,7 +535,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         )]);
     }
 
-    if options.runtime_available {
+    if options.runtime_available && options.live_enabled {
         methods.extend([
             RpcMethodDescriptor::typed(
                 "live/open",
@@ -586,7 +588,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ]);
     }
 
-    if options.runtime_available && options.live_webrtc_enabled {
+    if options.runtime_available && options.live_enabled && options.live_webrtc_enabled {
         methods.extend([RpcMethodDescriptor::typed(
             "live/webrtc/answer",
             "Answer a browser WebRTC offer for an already-open live channel",

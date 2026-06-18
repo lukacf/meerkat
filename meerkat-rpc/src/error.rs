@@ -31,5 +31,8 @@ pub const REQUEST_CANCELLED: i32 = meerkat_contracts::ErrorCode::RequestCancelle
 pub const BUDGET_EXHAUSTED: i32 = meerkat_contracts::ErrorCode::BudgetExhausted.jsonrpc_code();
 /// Hook denied the operation
 pub const HOOK_DENIED: i32 = meerkat_contracts::ErrorCode::HookDenied.jsonrpc_code();
+/// Skill resolution failed before the turn could start.
+pub const SKILL_RESOLUTION_FAILED: i32 =
+    meerkat_contracts::ErrorCode::SkillResolutionFailed.jsonrpc_code();
 /// Duplicate input (already processed)
 pub const DUPLICATE_INPUT: i32 = meerkat_contracts::ErrorCode::DuplicateInput.jsonrpc_code();

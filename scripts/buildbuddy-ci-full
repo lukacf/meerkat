@@ -86,7 +86,7 @@ run_logged rust-release-packaging \
   make check-rust-release-packaging
 
 run_logged machine-authority \
-  bash -lc './scripts/repo-cargo xtask machine-codegen --all && git diff --exit-code && ./scripts/repo-cargo xtask machine-check-drift --all && ./scripts/repo-cargo xtask machine-verify --all && ./scripts/repo-cargo xtask protocol-codegen && git diff --exit-code && ./scripts/repo-cargo xtask audit-generated-headers'
+  bash -lc './scripts/repo-cargo xtask machine-codegen --all && git diff --exit-code && ./scripts/repo-cargo xtask machine-check-drift --all && ./scripts/repo-cargo test -p meerkat-machine-schema --test docs_machine_authority_alignment -- --quiet && ./scripts/repo-cargo xtask machine-verify --all && ./scripts/repo-cargo xtask protocol-codegen && git diff --exit-code && ./scripts/repo-cargo xtask audit-generated-headers'
 
 run_logged rmat-audit \
   bash -lc './scripts/repo-cargo run -p xtask -- effect-authority && ./scripts/repo-cargo run -p xtask -- ownership-ledger --check-drift && { ulimit -s unlimited 2>/dev/null || ulimit -s 65520; } && ./scripts/repo-cargo run -p xtask -- rmat-audit --strict'

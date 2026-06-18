@@ -887,6 +887,7 @@ pub enum RunFailureSourceKind {
     ConcurrencyLimitExceeded,
     ConfigError,
     InvalidToolAccess,
+    SkillResolutionFailed,
     InternalError,
     BuildError,
     AuthReauthRequired,

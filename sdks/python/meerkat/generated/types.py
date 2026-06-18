@@ -14,6 +14,9 @@ from .errors import MeerkatError
 CONTRACT_VERSION = "0.7.9"
 
 
+Value = Any
+
+
 @dataclass
 class WireUsage:
     """Token usage information."""
@@ -509,6 +512,591 @@ class WorkItemsResult:
 # Parameters for the RPC `config/set` method — replace the config (bare
 # config or wrapped with an optimistic-concurrency generation).
 ConfigSetParams = dict[str, Any]
+
+# Typed event envelope for the generic `session/external_event` and
+# `/sessions/{id}/external-events` surfaces.
+#
+# Not `PartialEq`: the `GenericJson.payload` and
+# `PeerResponseTerminal.result` bodies ride as `Box<RawValue>` — opaque
+# caller-supplied JSON that never gets pattern-matched at this layer.
+# Allow-listed per `dogma-blind-spots` §7.
+class SessionExternalEventEnvelopeGenericJson(TypedDict, total=False):
+    blocks: NotRequired[list[WireContentBlock]]
+    event_type: Required[str]
+    kind: Required[Literal['generic_json']]
+    payload: Required[Any]
+
+class SessionExternalEventEnvelopePeerResponseTerminal(TypedDict, total=False):
+    display_name: NotRequired[PeerName]
+    kind: Required[Literal['peer_response_terminal']]
+    peer_id: Required[PeerId]
+    request_id: Required[str]
+    result: Required[Any]
+    status: Required[Literal['completed', 'failed', 'cancelled']]
+
+SessionExternalEventEnvelope = SessionExternalEventEnvelopeGenericJson | SessionExternalEventEnvelopePeerResponseTerminal
+
+# `auth/login/device_complete` success body.
+class WireDeviceCompleteResultPending(TypedDict, total=False):
+    state: Required[Literal['pending']]
+
+class WireDeviceCompleteResultSlowDown(TypedDict, total=False):
+    state: Required[Literal['slow_down']]
+
+class WireDeviceCompleteResultAccessDenied(TypedDict, total=False):
+    state: Required[Literal['access_denied']]
+
+class WireDeviceCompleteResultExpired(TypedDict, total=False):
+    state: Required[Literal['expired']]
+
+class WireDeviceCompleteResultReady(TypedDict, total=False):
+    auth_binding: Required[WireAuthBindingRef]
+    binding_id: Required[str]
+    expires_at: NotRequired[str]
+    has_refresh_token: Required[bool]
+    profile_id: Required[str]
+    provider: Required[str]
+    realm_id: Required[str]
+    scopes: Required[list[str]]
+    state: Required[Literal['ready']]
+
+WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady
+
+@dataclass
+class ApprovalDecideParams:
+    """`approval/decide` parameters."""
+    actor: str
+    approval_id: str
+    decision: Literal['approve', 'deny']
+    provenance: Optional[Any] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class ApprovalGetParams:
+    """`approval/get` parameters."""
+    approval_id: str
+
+
+@dataclass
+class ApprovalListParams:
+    """`approval/list` parameters."""
+    filter: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class ApprovalListResult:
+    """`approval/list` result."""
+    approvals: list[dict[str, Any]]
+
+
+@dataclass
+class ApprovalRecord:
+    """Durable approval record."""
+    allowed_decisions: list[Literal['approve', 'deny']]
+    approval_id: str
+    created_at: str
+    metadata: dict[str, Any]
+    owner: dict[str, Any]
+    proposed_action: dict[str, Any]
+    requester: str
+    resource: dict[str, Any]
+    risk: Literal['low', 'medium', 'high', 'critical']
+    status: Literal['pending', 'approved', 'denied', 'expired', 'cancelled']
+    updated_at: str
+    decision: Optional[dict[str, Any]] = None
+    expires_at: Optional[str] = None
+    request_body: Optional[Any] = None
+    request_provenance: Optional[Any] = None
+
+
+@dataclass
+class ApprovalRequestParams:
+    """`approval/request` parameters."""
+    allowed_decisions: list[Literal['approve', 'deny']]
+    owner: dict[str, Any]
+    proposed_action: dict[str, Any]
+    requester: str
+    resource: dict[str, Any]
+    risk: Literal['low', 'medium', 'high', 'critical']
+    expires_at: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+    request_body: Optional[Any] = None
+    request_provenance: Optional[Any] = None
+
+
+@dataclass
+class ArchiveSessionParams:
+    """Parameters for `session/archive`."""
+    session_id: str
+
+
+@dataclass
+class ArtifactDownloadParams:
+    """Request payload for ArtifactDownloadParams."""
+    artifact_id: str
+    expected_media_type: Optional[str] = None
+
+
+@dataclass
+class ArtifactDownloadResult:
+    """Wire payload for ArtifactDownloadResult."""
+    payload: dict[str, Any]
+    record: dict[str, Any]
+
+
+@dataclass
+class ArtifactIdParams:
+    """Request payload for ArtifactIdParams."""
+    artifact_id: str
+
+
+@dataclass
+class ArtifactListParams:
+    """Request payload for ArtifactListParams."""
+    label_equals: Optional[dict[str, str]] = None
+    session_id: Optional[str] = None
+
+
+@dataclass
+class ArtifactListResult:
+    """Wire payload for ArtifactListResult."""
+    artifacts: list[dict[str, Any]]
+
+
+@dataclass
+class ArtifactRecord:
+    """Stable artifact record."""
+    artifact_id: str
+    artifact_type: Literal['text', 'log', 'command_output', 'diff', 'patch', 'generated_file', 'test_report', 'screenshot', 'image', 'json', 'binary'] | dict[str, str]
+    content_handle: dict[str, Any]
+    created_at: str
+    handle: dict[str, Any]
+    media_type: str
+    size_bytes: int
+    title: str
+    hash: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+    owner: Optional[dict[str, Any]] = None
+    producer: Optional[str] = None
+    provenance: Optional[dict[str, str]] = None
+
+
+@dataclass
+class BindingIdParams:
+    """Request payload for binding-scoped auth methods."""
+    binding_id: str
+    realm_id: str
+    profile_id: Optional[str] = None
+
+
+@dataclass
+class BlobGetParams:
+    """Parameters for `blob/get`."""
+    blob_id: str
+
+
+@dataclass
+class BlobPayload:
+    """Resolved blob bytes returned by the blob store."""
+    blob_id: BlobId
+    data: str
+    media_type: str
+
+
+@dataclass
+class CreateProfileParams:
+    """Request payload for `auth/profile/create`."""
+    auth_method: str
+    binding_id: str
+    realm_id: str
+    secret: str
+    profile_id: Optional[str] = None
+
+
+@dataclass
+class CreateScheduleRequest:
+    """Request payload for CreateScheduleRequest."""
+    target: dict[str, Any]
+    trigger: dict[str, Any]
+    description: Optional[str] = None
+    labels: Optional[dict[str, str]] = None
+    misfire_policy: Optional[dict[str, Any]] = None
+    missing_target_policy: Optional[Literal['skip', 'mark_misfired']] = None
+    name: Optional[str] = None
+    overlap_policy: Optional[Literal['allow_concurrent', 'skip_if_running']] = None
+    planning_horizon_days: Optional[int] = None
+    planning_horizon_occurrences: Optional[int] = None
+
+
+@dataclass
+class DeferredCreateResult:
+    """Result for deferred `session/create` (no turn executed)."""
+    session_id: str
+    session_ref: Optional[str] = None
+
+
+@dataclass
+class DeviceCompleteParams:
+    """Request payload for `auth/login/device_complete`."""
+    binding_id: str
+    device_code: str
+    provider: str
+    realm_id: str
+    profile_id: Optional[str] = None
+
+
+@dataclass
+class DeviceStartParams:
+    """Request payload for `auth/login/device_start`."""
+    binding_id: str
+    provider: str
+    realm_id: str
+    profile_id: Optional[str] = None
+
+
+@dataclass
+class EventsLatestCursorParams:
+    """Parameters for `events/latest_cursor`."""
+    scope: dict[str, Any]
+
+
+@dataclass
+class EventsLatestCursorResult:
+    """Result for `events/latest_cursor`."""
+    contract_version: dict[str, Any]
+    cursor: dict[str, Any]
+
+
+@dataclass
+class EventsListSinceParams:
+    """Parameters for `events/list_since`."""
+    scope: dict[str, Any]
+    cursor: Optional[dict[str, Any]] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class EventsListSinceResult:
+    """Result for `events/list_since`."""
+    contract_version: dict[str, Any]
+    from_cursor: dict[str, Any]
+    has_more: bool
+    latest_cursor: dict[str, Any]
+    scope: dict[str, Any]
+    events: Optional[list[dict[str, Any]]] = None
+
+
+@dataclass
+class EventsSnapshotParams:
+    """Parameters for `events/snapshot`."""
+    scope: dict[str, Any]
+
+
+@dataclass
+class EventsSnapshotResult:
+    """Result for `events/snapshot`."""
+    contract_version: dict[str, Any]
+    cursor: dict[str, Any]
+    scope: dict[str, Any]
+    snapshot: dict[str, Any]
+
+
+@dataclass
+class ForkSessionAtParams:
+    """Request payload for `session/fork_at`."""
+    message_index: int
+    session_id: str
+    running_behavior: Optional[Literal['reject']] = None
+
+
+@dataclass
+class ForkSessionReplaceParams:
+    """Request payload for `session/fork_replace`.
+
+`replacement` rides as the typed [`WireTranscriptReplacement`] mirror so
+the emitted JSON schema is the closed replacement enum rather than a bare
+`serde_json::Value`. The consuming surface lowers it into the core
+[`TranscriptReplacement`] via [`WireTranscriptReplacement::into_core`]."""
+    message_index: int
+    replacement: dict[str, Any]
+    session_id: str
+    running_behavior: Optional[Literal['reject']] = None
+
+
+@dataclass
+class HelpRequest:
+    """Request body for dedicated help surfaces."""
+    question: str
+    execution_mode: Optional[Literal['explain_only', 'plan_execution']] = None
+    max_tokens: Optional[int] = None
+    model: Optional[str] = None
+    prompt: Optional[str] = None
+    provider: Optional[str] = None
+
+
+@dataclass
+class HelpResponse:
+    """Canonical run result for wire protocol."""
+    session_id: str
+    text: str
+    tool_calls: int
+    turns: int
+    usage: dict[str, Any]
+    extraction_error: Optional[dict[str, Any]] = None
+    schema_warnings: Optional[list[dict[str, Any]]] = None
+    session_ref: Optional[str] = None
+    skill_diagnostics: Optional[dict[str, Any]] = None
+    structured_output: Optional[Any] = None
+    terminal_cause_kind: Optional[Literal['unknown', 'hook_denied', 'hook_failure', 'llm_failure', 'tool_failure', 'structured_output_validation_failed', 'budget_exhausted', 'time_budget_exceeded', 'retry_exhausted', 'turn_limit_reached', 'runtime_apply_failure', 'fatal_failure']] = None
+
+
+@dataclass
+class InjectSystemContextParams:
+    """Parameters for `session/inject_context`.
+
+The injected body is the typed [`CoreRenderable`] owner rather than a bare
+`text` string: surfaces parse their inbound payload into the renderable at
+the ingress boundary and the handler threads it straight through to
+`AppendSystemContextRequest.content`. A plain-text client payload still
+deserializes via `CoreRenderable`'s tagged `text` variant."""
+    content: dict[str, Any]
+    session_id: str
+    idempotency_key: Optional[str] = None
+    source: Optional[str] = None
+
+
+@dataclass
+class InjectSystemContextResult:
+    """Result for `session/inject_context`."""
+    status: Literal['applied', 'staged', 'duplicate']
+
+
+@dataclass
+class InterruptParams:
+    """Parameters for `turn/interrupt`."""
+    session_id: str
+
+
+@dataclass
+class ListSessionsParams:
+    """Parameters for `session/list` (all optional)."""
+    labels: Optional[dict[str, str]] = None
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+
+
+@dataclass
+class ListSessionsResult:
+    """Result for `session/list`."""
+    sessions: list[dict[str, Any]]
+
+
+@dataclass
+class LoginCompleteParams:
+    """Request payload for `auth/login/complete`."""
+    binding_id: str
+    code: str
+    provider: str
+    realm_id: str
+    redirect_uri: str
+    state: str
+    profile_id: Optional[str] = None
+
+
+@dataclass
+class LoginStartParams:
+    """Request payload for `auth/login/start`."""
+    binding_id: str
+    provider: str
+    realm_id: str
+    redirect_uri: str
+    profile_id: Optional[str] = None
+
+
+@dataclass
+class ProvisionApiKeyParams:
+    """Request payload for `auth/login/provision_api_key`."""
+    access_token: str
+    binding_id: Optional[str] = None
+    profile_id: Optional[str] = None
+    realm_id: Optional[str] = None
+
+
+@dataclass
+class ReadSessionHistoryParams:
+    """Parameters for `session/history`."""
+    session_id: str
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+
+
+@dataclass
+class ReadSessionParams:
+    """Parameters for `session/read`."""
+    session_id: str
+
+
+@dataclass
+class ReadSessionTranscriptRevisionParams:
+    """Request payload for `session/transcript_revision`."""
+    revision: str
+    session_id: str
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+
+
+@dataclass
+class RealmIdParams:
+    """Request payload for `auth/profile/list` and `realm/get`."""
+    realm_id: str
+
+
+@dataclass
+class RestoreSessionTranscriptRevisionParams:
+    """Request payload for `session/restore_transcript_revision`."""
+    reason: dict[str, Any]
+    revision: str
+    session_id: str
+    actor: Optional[str] = None
+    expected_parent_revision: Optional[str] = None
+    running_behavior: Optional[Literal['reject']] = None
+
+
+@dataclass
+class RewriteSessionTranscriptParams:
+    """Request payload for `session/rewrite_transcript`."""
+    reason: dict[str, Any]
+    replacement: list[dict[str, Any]]
+    selection: dict[str, Any]
+    session_id: str
+    actor: Optional[str] = None
+    expected_parent_revision: Optional[str] = None
+    running_behavior: Optional[Literal['reject']] = None
+
+
+@dataclass
+class RuntimeHostCapabilities:
+    """Runtime capability surface for a host."""
+    contract_version: dict[str, Any]
+    features: dict[str, Any]
+
+
+@dataclass
+class RuntimeHostHealth:
+    """Runtime health projection for a host."""
+    contract_version: dict[str, Any]
+    status: Literal['ok', 'degraded', 'unhealthy']
+    checks: Optional[dict[str, Literal['ok', 'degraded', 'unhealthy']]] = None
+
+
+@dataclass
+class RuntimeHostInfo:
+    """Read-only host information. This is a projection, not a registry entry."""
+    capabilities: dict[str, Any]
+    contract_version: dict[str, Any]
+    endpoints: dict[str, Any]
+    health: dict[str, Any]
+    host_id: str
+    host_id_scope: Literal['process', 'realm_instance']
+    process_name: str
+    process_version: str
+    realm: dict[str, Any]
+    placement_labels: Optional[dict[str, str]] = None
+    policy_profile_summary: Optional[str] = None
+
+
+@dataclass
+class Schedule:
+    """Wire payload for Schedule."""
+    config: dict[str, Any]
+    misfire_policy: dict[str, Any]
+    missing_target_policy: Literal['skip', 'mark_misfired']
+    next_occurrence_ordinal: int
+    overlap_policy: Literal['allow_concurrent', 'skip_if_running']
+    phase: Literal['active', 'paused', 'deleted']
+    revision: int
+    schedule_id: str
+    superseded_ack_ids: list[str]
+    target: dict[str, Any]
+    trigger: dict[str, Any]
+    planning_cursor_utc: Optional[str] = None
+
+
+@dataclass
+class ScheduleToolCallParams:
+    """Parameters for `schedule/call`."""
+    name: str
+    arguments: Optional[Any] = None
+
+
+@dataclass
+class ScheduleToolsResult:
+    """Result for `schedule/tools`."""
+    tools: list[Any]
+
+
+@dataclass
+class SessionForkResult:
+    """Result of creating an edited transcript branch."""
+    message_count: int
+    session_id: str
+    source_session_id: str
+    session_ref: Optional[str] = None
+
+
+@dataclass
+class SessionPeerResponseTerminalParams:
+    """Dedicated request payload for `session/peer_response_terminal`.
+
+Not `PartialEq`: `result` is opaque peer-returned bytes carried as
+`Box<RawValue>` (pass-through fidelity — the peer is the typed
+authority over its own payload shape). Allow-listed per
+`dogma-blind-spots` §7 alongside tool-call args."""
+    peer_id: PeerId
+    request_id: str
+    result: Any
+    session_id: str
+    status: Literal['completed', 'failed', 'cancelled']
+    display_name: Optional[PeerName] = None
+
+
+@dataclass
+class SessionTranscriptRewriteResult:
+    """Result of committing a same-session transcript rewrite."""
+    commit: dict[str, Any]
+    message_count: int
+    parent_revision: str
+    revision: str
+    session_id: str
+
+
+@dataclass
+class WireProvisionApiKeyResult:
+    """`auth/login/provision_api_key` success body."""
+    auth_binding: WireAuthBindingRef
+    auth_mode: str
+    binding_id: str
+    has_api_key: bool
+    profile_id: str
+    provider: str
+    realm_id: str
+    scopes: list[str]
+
+
+@dataclass
+class WireSessionTranscriptRevision:
+    """Full transcript revision body in canonical wire format."""
+    has_more: bool
+    head_revision: str
+    message_count: int
+    messages: list[dict[str, Any]]
+    offset: int
+    revision: str
+    session_id: str
+    limit: Optional[int] = None
+    session_ref: Optional[str] = None
+
 
 @dataclass
 class MobWireParams:
@@ -1052,6 +1640,7 @@ class MobSpawnHelperParams:
     mob_id: str
     prompt: str
     agent_identity: Optional[str] = None
+    auth_binding: Optional[WireAuthBindingRef] = None
     backend: Optional[WireMobBackendKind] = None
     role_name: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
@@ -1064,6 +1653,7 @@ class MobForkHelperParams:
     prompt: str
     source_member_id: str
     agent_identity: Optional[str] = None
+    auth_binding: Optional[WireAuthBindingRef] = None
     backend: Optional[WireMobBackendKind] = None
     fork_context: Optional[Any] = None
     role_name: Optional[str] = None

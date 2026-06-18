@@ -2,9 +2,9 @@
 
 use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
-    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams, WireContentInput,
-    WireMemberRef, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
-    WireTrustedPeerIdentity,
+    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams,
+    WireAuthBindingRef, WireContentInput, WireMemberRef, WireMobBackendKind, WireMobRuntimeMode,
+    WireRuntimeBinding, WireTrustedPeerIdentity,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -67,6 +67,8 @@ struct MeerkatMobSpawnInput {
     context: Option<Value>,
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    auth_binding: Option<WireAuthBindingRef>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -95,6 +97,8 @@ struct MeerkatMobSpawnInputSpec {
     context: Option<Value>,
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    auth_binding: Option<WireAuthBindingRef>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -604,6 +608,7 @@ pub async fn handle_public_tools_call(
                 input.labels,
                 input.context,
                 input.additional_instructions,
+                input.auth_binding,
             )?;
             let spawn_result = state
                 .mob_spawn_spec(&mob_id, spec)
@@ -628,6 +633,7 @@ pub async fn handle_public_tools_call(
                         spec.labels,
                         spec.context,
                         spec.additional_instructions,
+                        spec.auth_binding,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1083,6 +1089,7 @@ fn build_spawn_spec(
     labels: Option<BTreeMap<String, String>>,
     context: Option<Value>,
     additional_instructions: Option<Vec<String>>,
+    auth_binding: Option<WireAuthBindingRef>,
 ) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
     let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), agent_identity.as_str());
     spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;
@@ -1117,6 +1124,7 @@ fn build_spawn_spec(
     spec.labels = labels;
     spec.context = context;
     spec.additional_instructions = additional_instructions;
+    spec.auth_binding = auth_binding.map(Into::into);
     Ok(spec)
 }
 

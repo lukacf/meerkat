@@ -4347,8 +4347,11 @@ impl AgentFactory {
                             {
                                 Ok(source) => source.map(Arc::new),
                                 Err(e) => {
-                                    tracing::warn!("Failed to resolve skill repositories: {e}");
-                                    None
+                                    tracing::warn!(
+                                        "Failed to resolve skill repositories: {e}; \
+                                         degrading to embedded-only skill source"
+                                    );
+                                    Self::embedded_only_skill_source(&config.skills)?
                                 }
                             }
                         }

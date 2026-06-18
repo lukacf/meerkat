@@ -81,6 +81,9 @@ machine_authority_path() {
     specs/machines/*|specs/compositions/*)
       return 0
       ;;
+    docs/reference/machine-authority.mdx)
+      return 0
+      ;;
     meerkat-machine-codegen/*|meerkat-machine-derive/*|meerkat-machine-dsl/*|meerkat-machine-dsl-core/*|meerkat-machine-kernels/*|meerkat-machine-schema/*)
       return 0
       ;;

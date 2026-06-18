@@ -8258,6 +8258,9 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
             meerkat_core::AgentError::SessionNotFound(_) => error::SESSION_NOT_FOUND,
             meerkat_core::AgentError::BuildError(_) => error::PROVIDER_ERROR,
             meerkat_core::AgentError::Cancelled => error::REQUEST_CANCELLED,
+            meerkat_core::AgentError::SkillResolutionFailed { .. } => {
+                error::SKILL_RESOLUTION_FAILED
+            }
             meerkat_core::AgentError::InternalError(_) => error::INTERNAL_ERROR,
             _ => error::INTERNAL_ERROR,
         },
@@ -22060,6 +22063,21 @@ mod tests {
         let rpc_err = session_error_to_rpc(session_err);
 
         assert_eq!(rpc_err.code, error::REQUEST_CANCELLED);
+    }
+
+    #[test]
+    fn session_error_to_rpc_surfaces_skill_resolution_failures_as_skill_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let skill_name = meerkat_core::skills::SkillName::parse("example")?;
+        let key = meerkat_core::skills::SkillKey::builtin(skill_name);
+        let session_err = SessionError::Agent(meerkat_core::AgentError::SkillResolutionFailed {
+            skill_key: Some(key.clone()),
+            reason: Box::new(meerkat_core::event::SkillResolutionFailureReason::NotFound { key }),
+        });
+        let rpc_err = session_error_to_rpc(session_err);
+
+        assert_eq!(rpc_err.code, error::SKILL_RESOLUTION_FAILED);
+        Ok(())
     }
 
     // -- P2-6: Typed BuildError → PROVIDER_ERROR classification --

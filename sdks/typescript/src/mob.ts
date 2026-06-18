@@ -18,7 +18,7 @@ import type {
   SpawnManySpec,
   SpawnSpec,
 } from "./types.js";
-import type { MobSpawnManyResultEntry } from "./generated/types.js";
+import type { MobSpawnManyResultEntry, WireAuthBindingRef } from "./generated/types.js";
 import type { MeerkatClient } from "./client.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -195,7 +195,14 @@ export class Mob {
 
   async spawnHelper(
     prompt: string,
-    options?: { agentIdentity?: string; roleName?: string; profileName?: string },
+    options?: {
+      agentIdentity?: string;
+      roleName?: string;
+      profileName?: string;
+      authBinding?: WireAuthBindingRef;
+      runtimeMode?: string;
+      backend?: string;
+    },
   ): Promise<MobHelperResult> {
     return this.client.spawnMobHelper(this.mobId, prompt, options);
   }
@@ -207,7 +214,10 @@ export class Mob {
       agentIdentity?: string;
       roleName?: string;
       profileName?: string;
+      authBinding?: WireAuthBindingRef;
       forkContext?: Record<string, unknown>;
+      runtimeMode?: string;
+      backend?: string;
     },
   ): Promise<MobHelperResult> {
     return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);

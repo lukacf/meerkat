@@ -17,10 +17,13 @@ pub use meerkat_contracts::wire::{ServerCapabilities, ServerInfo};
 pub fn handle_initialize(
     id: Option<RpcId>,
     runtime_available: bool,
+    live_enabled: bool,
+    live_webrtc_enabled: bool,
     skills_enabled: bool,
 ) -> RpcResponse {
     let options = meerkat_contracts::RpcMethodCatalogOptions {
         runtime_available,
+        live_enabled,
         mob_enabled: cfg!(feature = "mob"),
         mcp_enabled: cfg!(feature = "mcp"),
         comms_enabled: cfg!(feature = "comms"),
@@ -30,7 +33,7 @@ pub fn handle_initialize(
         schedule_enabled: cfg!(feature = "schedule"),
         workgraph_enabled: cfg!(feature = "workgraph"),
         skills_enabled,
-        live_webrtc_enabled: cfg!(feature = "live-webrtc"),
+        live_webrtc_enabled,
     };
     let caps = ServerCapabilities {
         server_info: ServerInfo {

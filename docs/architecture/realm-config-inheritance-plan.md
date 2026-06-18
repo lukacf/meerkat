@@ -1,3 +1,9 @@
+---
+title: "Realm Config Inheritance Plan"
+description: "Implementation plan for deterministic realm configuration inheritance and credential provenance."
+icon: "diagram-project"
+---
+
 # Realm Config Inheritance — Implementation Plan (amended)
 
 > Decisions: **(A)** owning-realm credential provenance, **(B)** general parent-chain inheritance.

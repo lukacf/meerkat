@@ -1804,6 +1804,7 @@ pub enum RunFailureSourceKind {
     ConcurrencyLimitExceeded,
     ConfigError,
     InvalidToolAccess,
+    SkillResolutionFailed,
     InternalError,
     BuildError,
     AuthReauthRequired,
@@ -1876,6 +1877,9 @@ impl From<meerkat_core::turn_execution_authority::TurnFailureSourceKind> for Run
             }
             meerkat_core::turn_execution_authority::TurnFailureSourceKind::InvalidToolAccess => {
                 Self::InvalidToolAccess
+            }
+            meerkat_core::turn_execution_authority::TurnFailureSourceKind::SkillResolutionFailed => {
+                Self::SkillResolutionFailed
             }
             meerkat_core::turn_execution_authority::TurnFailureSourceKind::InternalError => {
                 Self::InternalError

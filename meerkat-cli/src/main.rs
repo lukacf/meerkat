@@ -2796,6 +2796,9 @@ enum MobCommands {
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
+        /// Auth binding to use (REALM:BINDING[:PROFILE]).
+        #[arg(long)]
+        auth_binding: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -2815,6 +2818,9 @@ enum MobCommands {
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
+        /// Auth binding to use (REALM:BINDING[:PROFILE]).
+        #[arg(long)]
+        auth_binding: Option<String>,
         /// Fork context type (full-history or last-messages)
         #[arg(long, default_value = "full-history")]
         fork_context: String,
@@ -12946,6 +12952,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             prompt,
             agent_identity,
             profile,
+            auth_binding,
             json,
         } => {
             // #115: the surface must not mint mob-member identity; clap
@@ -12955,6 +12962,11 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             if let Some(p) = profile {
                 options.role_name = Some(meerkat_mob::ProfileName::from(p));
             }
+            options.auth_binding = auth_binding
+                .as_deref()
+                .map(cli_parse::parse_auth_binding_user_input)
+                .transpose()
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
             let result = state
                 .mob_spawn_helper(
                     &meerkat_mob::MobId::from(mob_id.clone()),
@@ -12977,6 +12989,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             prompt,
             agent_identity,
             profile,
+            auth_binding,
             fork_context,
             last_messages,
             json,
@@ -12996,6 +13009,11 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             if let Some(p) = profile {
                 options.role_name = Some(meerkat_mob::ProfileName::from(p));
             }
+            options.auth_binding = auth_binding
+                .as_deref()
+                .map(cli_parse::parse_auth_binding_user_input)
+                .transpose()
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
             let result = state
                 .mob_fork_helper(
                     &meerkat_mob::MobId::from(mob_id.clone()),

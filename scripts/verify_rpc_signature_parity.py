@@ -677,9 +677,11 @@ def innermost_ts_function(
     return best
 
 
-def ts_import_map(text: str, generated_names: set[str], reexports: set[str]) -> set[str]:
-    """Local identifiers in this file that resolve to generated types."""
-    resolved: set[str] = set()
+def ts_import_map(
+    text: str, generated_names: set[str], reexports: set[str]
+) -> dict[str, str]:
+    """Map local identifiers in this file to their generated type names."""
+    resolved: dict[str, str] = {}
     for match in re.finditer(
         r"import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*[\"']([^\"']+)[\"']",
         text,
@@ -698,14 +700,14 @@ def ts_import_map(text: str, generated_names: set[str], reexports: set[str]) -> 
         if "generated/" in source:
             for orig, local in pairs:
                 if orig in generated_names:
-                    resolved.add(local)
+                    resolved[local] = orig
         elif source.rstrip(".js").endswith("/types") or source in (
             "./types.js",
             "./types",
         ):
             for orig, local in pairs:
                 if orig in reexports:
-                    resolved.add(local)
+                    resolved[local] = orig
     return resolved
 
 
@@ -760,7 +762,11 @@ def ts_send_sites(
             else:
                 body = masked[func.start : func.body_end]
                 tokens = set(re.findall(r"[A-Za-z_$][\w$]*", body))
-                referenced = tokens & resolved_imports
+                referenced = {
+                    resolved_imports[token]
+                    for token in tokens
+                    if token in resolved_imports
+                }
                 wrapper = func.name
             line = text.count("\n", 0, offset) + 1
             sites.setdefault(method, []).append(
@@ -829,7 +835,11 @@ def web_auth_send_sites(
         else:
             body = masked[func.start : func.body_end]
             tokens = set(re.findall(r"[A-Za-z_$][\w$]*", body))
-            referenced = tokens & resolved_imports
+            referenced = {
+                resolved_imports[token]
+                for token in tokens
+                if token in resolved_imports
+            }
             wrapper = func.name
         line = text.count("\n", 0, match.start()) + 1
         sites.setdefault(method, []).append(
@@ -844,11 +854,13 @@ def web_auth_send_sites(
 
 
 def py_module_generated_imports(
-    text: str, generated_names: set[str], reexport_modules: dict[str, set[str]]
-) -> set[str]:
+    text: str,
+    generated_names: set[str],
+    reexport_modules: dict[str, dict[str, str]],
+) -> dict[str, str]:
     import ast
 
-    resolved: set[str] = set()
+    resolved: dict[str, str] = {}
     tree = ast.parse(text)
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or node.module is None:
@@ -859,12 +871,12 @@ def py_module_generated_imports(
         if "generated" in module:
             for alias in node.names:
                 if alias.name in generated_names:
-                    resolved.add(alias.asname or alias.name)
+                    resolved[alias.asname or alias.name] = alias.name
         elif module.lstrip(".") in reexport_modules:
             exported = reexport_modules[module.lstrip(".")]
             for alias in node.names:
                 if alias.name in exported:
-                    resolved.add(alias.asname or alias.name)
+                    resolved[alias.asname or alias.name] = exported[alias.name]
     return resolved
 
 
@@ -880,7 +892,7 @@ def py_send_sites(
     # First pass: which generated names do meerkat-local modules (types.py,
     # mob.py, ...) import directly? Importing through such a re-exporting
     # module still counts as referencing the generated type.
-    reexport_modules: dict[str, set[str]] = {}
+    reexport_modules: dict[str, dict[str, str]] = {}
     for path in sorted(pkg.glob("*.py")):
         text = path.read_text(encoding="utf-8")
         direct = py_module_generated_imports(text, generated_names, {})
@@ -922,7 +934,11 @@ def py_send_sites(
                     # String annotations under `from __future__ import annotations`.
                     if re.fullmatch(r"[A-Za-z_][\w\[\], .|]*", node.value or " "):
                         names.update(re.findall(r"[A-Za-z_]\w*", node.value))
-            return names & resolved_imports
+            return {
+                resolved_imports[name]
+                for name in names
+                if name in resolved_imports
+            }
 
         def record(method: str, lineno: int) -> None:
             fn = innermost(lineno)

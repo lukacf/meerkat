@@ -1,7 +1,7 @@
 // Generated raw event types for @rkat/web
 // Source: artifacts/schemas/events.json
 
-export type AgentErrorClass = "llm" | "store" | "tool" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
+export type AgentErrorClass = "llm" | "store" | "tool" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
 
 export type AgentErrorReason = {
   reason_type: "llm_rate_limited";

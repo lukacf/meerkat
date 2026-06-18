@@ -10,7 +10,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
-use meerkat_contracts::wire::WireMobProfile;
+use meerkat_contracts::wire::{WireAuthBindingRef, WireMobProfile};
 use meerkat_contracts::{
     ErrorCode, MobAppendSystemContextResult, MobCancelAllWorkResult, MobCancelWorkResult,
     MobCreateParams, MobCreateResult, MobDestroyResult, MobEventsResult, MobFlowCancelResult,
@@ -1357,7 +1357,7 @@ pub struct MobSpawnHelperParams {
     #[serde(default)]
     pub role_name: Option<String>,
     #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
@@ -1392,7 +1392,10 @@ pub async fn handle_spawn_helper(
     if let Some(role) = params.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.auth_binding = params.auth_binding;
+    // Reconstruct the server-owned `origin` provenance as Configured: clients
+    // name {realm, binding, profile} only and must never forge the env-default
+    // discriminant that drives is_env_default() credential-resolution authority.
+    options.auth_binding = params.auth_binding.map(Into::into);
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
     match state
@@ -1432,7 +1435,7 @@ pub struct MobForkHelperParams {
     #[serde(default)]
     pub role_name: Option<String>,
     #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default)]
     pub fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
@@ -1472,7 +1475,10 @@ pub async fn handle_fork_helper(
     if let Some(role) = params.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.auth_binding = params.auth_binding;
+    // Reconstruct the server-owned `origin` provenance as Configured: clients
+    // name {realm, binding, profile} only and must never forge the env-default
+    // discriminant that drives is_env_default() credential-resolution authority.
+    options.auth_binding = params.auth_binding.map(Into::into);
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
     match state

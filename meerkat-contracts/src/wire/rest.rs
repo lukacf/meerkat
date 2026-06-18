@@ -276,7 +276,7 @@ pub struct RestMobHelperRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<AuthBindingRef>,
+    pub auth_binding: Option<super::WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<WireMobRuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,7 +294,7 @@ pub struct RestMobForkHelperRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<AuthBindingRef>,
+    pub auth_binding: Option<super::WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_context: Option<WireForkContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

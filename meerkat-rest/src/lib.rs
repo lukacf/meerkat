@@ -2433,7 +2433,10 @@ async fn mob_spawn_helper(
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.auth_binding = req.auth_binding;
+    // Reconstruct the server-owned `origin` provenance as Configured (the client
+    // names {realm, binding, profile} only and cannot forge the env-default
+    // discriminant that drives is_env_default() credential-resolution authority).
+    options.auth_binding = req.auth_binding.map(Into::into);
     options.runtime_mode = req.runtime_mode.map(mob_runtime_mode_from_wire);
     options.backend = req.backend.map(mob_backend_kind_from_wire);
     let result = state
@@ -2558,7 +2561,10 @@ async fn mob_fork_helper(
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.auth_binding = req.auth_binding;
+    // Reconstruct the server-owned `origin` provenance as Configured (the client
+    // names {realm, binding, profile} only and cannot forge the env-default
+    // discriminant that drives is_env_default() credential-resolution authority).
+    options.auth_binding = req.auth_binding.map(Into::into);
     options.runtime_mode = req.runtime_mode.map(mob_runtime_mode_from_wire);
     options.backend = req.backend.map(mob_backend_kind_from_wire);
     let result = state

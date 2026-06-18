@@ -552,6 +552,24 @@ mod tests {
     }
 
     #[test]
+    fn wire_auth_binding_ref_drops_client_supplied_origin() {
+        // A client cannot forge the server-owned `origin` provenance: the wire
+        // projection has no `origin` field, so a forged value is dropped on
+        // deserialize and `From<WireAuthBindingRef>` always reconstructs
+        // `BindingOrigin::Configured` — closing the env-default laundering path the
+        // mob spawn/fork-helper RPC + REST surfaces would otherwise expose.
+        let json = r#"{"realm":"dev","binding":"default_openai","profile":"ci","origin":"synthetic_env_default"}"#;
+        let wire: WireAuthBindingRef =
+            serde_json::from_str(json).expect("unknown origin field is ignored on deserialize");
+        let core: meerkat_core::AuthBindingRef = wire.into();
+        assert_eq!(
+            core.origin,
+            meerkat_core::connection::BindingOrigin::Configured,
+            "client-supplied origin must be dropped and reconstructed as Configured"
+        );
+    }
+
+    #[test]
     fn auth_binding_wire_json_has_no_string_form() {
         let w = WireAuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("prod").unwrap(),

@@ -5625,7 +5625,7 @@
           "auth_binding": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/AuthBindingRef"
+                "$ref": "#/components/schemas/WireAuthBindingRef"
               },
               {
                 "type": "null"
@@ -5694,7 +5694,7 @@
           "auth_binding": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/AuthBindingRef"
+                "$ref": "#/components/schemas/WireAuthBindingRef"
               },
               {
                 "type": "null"

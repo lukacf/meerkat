@@ -802,15 +802,33 @@ async fn e2e_scenario_16_kitchen_sink() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "config/get failed: {resp}");
-    let original_max = resp["result"]["config"]["max_tokens"]
+    // `max_tokens` is optional (None => inherit / template default) and is
+    // omitted from the serialized config when unset (#803 made it Option<u32>),
+    // so config/get on a fresh server need not include it. Seed an explicit
+    // value first, then verify a patch merges over it — mirroring the in-CI
+    // config/patch roundtrip unit test #803 migrated to the same contract.
+    let seed_max: u64 = 4096;
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"config/patch","params":{"max_tokens": seed_max}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        resp["error"].is_null(),
+        "config/patch (seed) failed: {resp}"
+    );
+    let seeded_max = resp["result"]["config"]["max_tokens"]
         .as_u64()
         .or_else(|| resp["result"]["max_tokens"].as_u64())
-        .expect("config/get should include max_tokens");
+        .expect("config/patch (seed) should include max_tokens");
+    assert_eq!(seeded_max, seed_max);
 
     let id = next_id();
     send_request(
         &mut writer,
-        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"config/patch","params":{"max_tokens": original_max + 100}}),
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"config/patch","params":{"max_tokens": seeded_max + 100}}),
     )
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
@@ -819,7 +837,7 @@ async fn e2e_scenario_16_kitchen_sink() {
         .as_u64()
         .or_else(|| resp["result"]["max_tokens"].as_u64())
         .expect("config/patch should include max_tokens");
-    assert_eq!(patched_max, original_max + 100);
+    assert_eq!(patched_max, seeded_max + 100);
 
     eprintln!(
         "[scenario 16] kitchen-sink test complete: tool calling + structured output + session CRUD + capabilities + config"

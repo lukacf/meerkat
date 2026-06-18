@@ -2264,13 +2264,20 @@ async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, S
 }
 
 async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value, String> {
-    // A ConfigError is a TRUE fault: an empty/default catalog must not masquerade as success.
-    let config = state
+    // A ConfigError is a TRUE fault: an empty/default catalog must not masquerade
+    // as success. Compose the realm chain so an inherited (ancestor-realm)
+    // self-hosted alias / per-provider default is listed identically to the other
+    // surfaces and matches what a session build resolves.
+    let head_config = state
         .config_runtime
         .get()
         .await
         .map_err(|e| format!("Failed to read config: {e}"))?
         .config;
+    let config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm_id, head_config)
+        .await
+        .map_err(|e| format!("Failed to compose realm config chain: {e}"))?;
     let response =
         meerkat::surface::build_models_catalog_response(&config).map_err(|e| e.to_string())?;
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))

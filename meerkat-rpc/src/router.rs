@@ -1864,9 +1864,12 @@ impl MethodRouter {
             "approval/decide" => {
                 handlers::approval::handle_decide(id, params, self.runtime.clone()).await
             }
-            "models/catalog" => match self.config_store.get().await {
+            // Compose the realm chain so an inherited (ancestor-realm) self-hosted
+            // alias / per-provider default is listed identically to the other
+            // surfaces and matches what a session build resolves.
+            "models/catalog" => match self.runtime.effective_config().await {
                 Ok(config) => handlers::models::handle_catalog(id, &config),
-                Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+                Err(e) => RpcResponse::error(id, e.code, e.message),
             },
             // Auth + realm methods (Phase 4d).
             "auth/profile/list" => {

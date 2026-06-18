@@ -3358,9 +3358,10 @@ async fn get_runtime_health() -> Json<meerkat_contracts::RuntimeHostHealth> {
 async fn get_models_catalog(
     State(state): State<AppState>,
 ) -> Result<Json<meerkat_contracts::ModelsCatalogResponse>, ApiError> {
-    let config = state
-        .config_store
-        .get()
+    // Compose the realm chain so an inherited (ancestor-realm) self-hosted alias
+    // or per-provider default model is listed identically to the CLI `models`
+    // output (interchangeable surfaces) and matches what a session build resolves.
+    let config = effective_config_for_state(&state)
         .await
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
     let response = meerkat::surface::build_models_catalog_response(&config)

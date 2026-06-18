@@ -75,6 +75,23 @@ async fn realm_config_inheritance_real_fs_chain() {
     // MF-7: a parent disables a provider tool whose struct default is `true`; the
     // child below must be able to re-enable it (presence override-to-default).
     global.provider_tools.anthropic.web_search = false;
+    // MF-14: a self-hosted model alias declared only in `global` must be visible
+    // in the composed config every surface's models/catalog listing reads.
+    global.self_hosted.servers.insert(
+        "local".to_string(),
+        meerkat_core::SelfHostedServerConfig {
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            ..Default::default()
+        },
+    );
+    global.self_hosted.models.insert(
+        "my-local-model".to_string(),
+        meerkat_core::SelfHostedModelConfig {
+            server: "local".to_string(),
+            remote_model: "llama-3".to_string(),
+            ..Default::default()
+        },
+    );
     global.realm.insert(
         GLOBAL_REALM_SLUG.to_string(),
         RealmConfigSection::from_inline_api_keys(&[("anthropic", "sk-ant-test-global")]),
@@ -184,6 +201,24 @@ async fn realm_config_inheritance_real_fs_chain() {
     assert!(
         effective.provider_tools.anthropic.web_search,
         "child re-enables an inherited disabled provider web_search"
+    );
+
+    // MF-14: the inherited self-hosted alias survives composition AND appears in
+    // the models/catalog response built from the composed config (the listing all
+    // surfaces now serve), so interchangeable skins report the same catalog.
+    assert!(
+        effective.self_hosted.models.contains_key("my-local-model"),
+        "inherited self-hosted model alias survives composition"
+    );
+    let catalog = meerkat::surface::build_models_catalog_response(&effective)
+        .expect("models catalog builds from the composed config");
+    let listed = catalog
+        .providers
+        .iter()
+        .any(|provider| provider.models.iter().any(|m| m.id == "my-local-model"));
+    assert!(
+        listed,
+        "inherited self-hosted model alias appears in the composed models catalog"
     );
 
     // The chain's realm sections are all present in the composed config.

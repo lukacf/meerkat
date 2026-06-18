@@ -40,8 +40,21 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+/// Effective config the auth-resolution read path consumes.
+///
+/// When a per-realm config-document source is attached (decision 2/3), compose
+/// the active realm's parent chain (workspace head ⊕ home-rooted `global`) into
+/// a flat [`Config`] so an inherited (`global`-owned) binding is visible to
+/// `resolve_oauth_target` and the strict-owner `resolve_write_owner` guard.
+/// Composition is read-only; `config get/set` stay on the raw `config_runtime`
+/// (the write path never composes — read/write split). When no source is
+/// attached, fall back to the raw `config_runtime` snapshot (today's behavior).
 async fn load_config(runtime: &SessionRuntime) -> Result<meerkat_core::Config, RpcResponse> {
-    if let Some(cfg_runtime) = runtime.config_runtime() {
+    // The HEAD realm's config is the authoritative one from config_runtime (may
+    // be in-memory). When a source is attached, compose the ancestor chain (the
+    // `global` tail) OVER that head; composing purely from the source would drop
+    // an in-memory head config.
+    let head_config = if let Some(cfg_runtime) = runtime.config_runtime() {
         cfg_runtime
             .get()
             .await
@@ -52,10 +65,36 @@ async fn load_config(runtime: &SessionRuntime) -> Result<meerkat_core::Config, R
                     error::INTERNAL_ERROR,
                     format!("Failed to load config: {e}"),
                 )
-            })
+            })?
     } else {
-        Ok(meerkat_core::Config::default())
+        meerkat_core::Config::default()
+    };
+    if let Some(source) = runtime.realm_config_source() {
+        let head = runtime
+            .realm_id()
+            .unwrap_or_else(meerkat_core::connection::RealmId::global);
+        let reader = meerkat_core::EffectiveConfigReader::new(source);
+        let mut config = reader
+            .effective_config_over_head(&head, head_config)
+            .await
+            .map_err(|e| {
+                RpcResponse::error(
+                    None,
+                    error::INTERNAL_ERROR,
+                    format!("Failed to compose effective config: {e}"),
+                )
+            })?;
+        config.apply_env_overrides().map_err(|e| {
+            RpcResponse::error(
+                None,
+                error::INTERNAL_ERROR,
+                format!("Failed to apply env overrides: {e}"),
+            )
+        })?;
+        return Ok(config);
     }
+    // No source attached: the raw head config is the effective config.
+    Ok(head_config)
 }
 
 /// Resolve the typed [`NormalizedAuthMethod`] for a resolved [`AuthProfile`],
@@ -154,14 +193,25 @@ async fn resolve_binding_identity(
         profile: profile_typed,
         origin: meerkat_core::connection::BindingOrigin::Configured,
     };
-    let (binding, _, auth_profile) = realm.lookup_auth_binding(&auth_binding).map_err(|e| {
-        RpcResponse::error(
-            None,
-            error::INVALID_PARAMS,
-            format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
-        )
-    })?;
-    Ok((auth_binding, binding.clone(), auth_profile.clone()))
+    match realm.lookup_auth_binding(&auth_binding) {
+        Ok((binding, _, auth_profile)) => Ok((auth_binding, binding.clone(), auth_profile.clone())),
+        Err(e) => {
+            // Strict-owner write (decision 5) is owned by ONE core seam; this
+            // surface only maps the typed verdict to an RPC error.
+            let config = load_config(runtime).await?;
+            let message = match meerkat_core::connection::resolve_write_owner(
+                &config,
+                &auth_binding.realm,
+                &auth_binding.binding,
+            ) {
+                Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => {
+                    inherited.to_string()
+                }
+                _ => format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
+            };
+            Err(RpcResponse::error(None, error::INVALID_PARAMS, message))
+        }
+    }
 }
 
 async fn resolve_oauth_target(
@@ -203,6 +253,51 @@ fn target_error_response(error: ConnectionTargetError) -> RpcResponse {
         _ => error::INVALID_PARAMS,
     };
     RpcResponse::error(None, code, error.to_string())
+}
+
+/// Strict-owner write guard (decision 5) for OAuth login / device / provision
+/// persistence.
+///
+/// Credential READS inherit down the realm chain, so `resolve_oauth_target`
+/// happily resolves a binding that the requested realm only INHERITS from an
+/// ancestor (e.g. the home-rooted `global` realm). Persisting against that
+/// requested realm would either fork the credential into a child doc or write
+/// it to a realm that does not own it. The single owner of "may this realm
+/// write this binding?" is `meerkat_core::connection::resolve_write_owner`; this
+/// surface only loads the composed (chain-folded) config and maps the typed
+/// `Inherited` verdict to an `INVALID_PARAMS` error naming the owning realm
+/// (mirrors [`resolve_binding_identity`]). `Ok` (head owns the binding) and the
+/// other verdicts let the persist proceed unchanged.
+#[allow(clippy::result_large_err)]
+async fn guard_strict_owner_write(
+    runtime: &SessionRuntime,
+    id: &Option<RpcId>,
+    realm_id: &str,
+    binding_id: &str,
+) -> Result<(), RpcResponse> {
+    let realm = meerkat_core::connection::RealmId::parse(realm_id).map_err(|e| {
+        RpcResponse::error(
+            id.clone(),
+            error::INVALID_PARAMS,
+            format!("Invalid realm id {realm_id}: {e}"),
+        )
+    })?;
+    let binding = meerkat_core::connection::BindingId::parse(binding_id).map_err(|e| {
+        RpcResponse::error(
+            id.clone(),
+            error::INVALID_PARAMS,
+            format!("Invalid binding id {binding_id}: {e}"),
+        )
+    })?;
+    let config = load_config(runtime)
+        .await
+        .map_err(|r| r.with_id(id.clone()))?;
+    match meerkat_core::connection::resolve_write_owner(&config, &realm, &binding) {
+        Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => Err(
+            RpcResponse::error(id.clone(), error::INVALID_PARAMS, inherited.to_string()),
+        ),
+        _ => Ok(()),
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -1039,6 +1134,19 @@ pub async fn handle_auth_login_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    // Strict-owner write guard (decision 5): reject an OAuth login that targets
+    // a realm which only INHERITS this binding from an ancestor (e.g. `global`),
+    // naming the owning realm. Reads inherit; writes are strict-owner.
+    if let Err(r) = guard_strict_owner_write(
+        runtime,
+        &id,
+        parsed.realm_id.as_str(),
+        parsed.binding_id.as_str(),
+    )
+    .await
+    {
+        return r;
+    }
     if let Err(e) =
         validate_oauth_login_binding(&target.backend, &target.auth_profile, resolved.identity)
     {
@@ -1106,6 +1214,18 @@ pub async fn handle_auth_login_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    // Strict-owner write guard (decision 5): reject persisting an OAuth login
+    // against a realm that only INHERITS this binding, naming the owner.
+    if let Err(r) = guard_strict_owner_write(
+        runtime,
+        &id,
+        parsed.realm_id.as_str(),
+        parsed.binding_id.as_str(),
+    )
+    .await
+    {
+        return r;
+    }
     let auth_binding = target.auth_binding;
     let binding = target.binding;
     let backend_profile = target.backend;
@@ -1290,6 +1410,18 @@ pub async fn handle_auth_login_device_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    // Strict-owner write guard (decision 5): reject a device-flow login that
+    // targets a realm which only INHERITS this binding, naming the owner.
+    if let Err(r) = guard_strict_owner_write(
+        runtime,
+        &id,
+        parsed.realm_id.as_str(),
+        parsed.binding_id.as_str(),
+    )
+    .await
+    {
+        return r;
+    }
     if let Err(e) =
         validate_oauth_login_binding(&target.backend, &target.auth_profile, resolved.identity)
     {
@@ -1378,6 +1510,18 @@ pub async fn handle_auth_login_device_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    // Strict-owner write guard (decision 5): reject persisting an OAuth login
+    // against a realm that only INHERITS this binding, naming the owner.
+    if let Err(r) = guard_strict_owner_write(
+        runtime,
+        &id,
+        parsed.realm_id.as_str(),
+        parsed.binding_id.as_str(),
+    )
+    .await
+    {
+        return r;
+    }
     let auth_binding = target.auth_binding;
     let binding = target.binding;
     let backend_profile = target.backend;
@@ -1557,6 +1701,11 @@ pub async fn handle_auth_login_provision_api_key(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    // Strict-owner write guard (decision 5): reject provisioning an API key into
+    // a realm that only INHERITS this binding, naming the owner.
+    if let Err(r) = guard_strict_owner_write(runtime, &id, realm_id, binding_id).await {
+        return r;
+    }
     let auth_binding = target.auth_binding;
     let backend_profile = target.backend;
     let auth_profile = target.auth_profile;
@@ -2748,6 +2897,113 @@ mod tests {
             )
             .expect("runtime AuthMachine authority owns the RPC login flow");
         assert!(!flow.pkce_verifier.is_empty());
+    }
+
+    /// In-test [`meerkat_core::RealmConfigSource`] backed by an in-memory
+    /// realm→doc map, mirroring the filesystem source's per-realm projection
+    /// without touching disk. `None` for an absent realm preserves the
+    /// absent-ancestor semantics the composition fold relies on.
+    struct MapRealmConfigSource {
+        docs: std::collections::HashMap<String, meerkat_core::Config>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::RealmConfigSource for MapRealmConfigSource {
+        async fn config_for_realm(
+            &self,
+            realm: &meerkat_core::connection::RealmId,
+        ) -> Result<Option<meerkat_core::Config>, meerkat_core::config::ConfigError> {
+            Ok(self.docs.get(realm.as_str()).cloned())
+        }
+    }
+
+    /// Build a runtime whose active realm is `dev` and whose composed config
+    /// inherits an OpenAI OAuth binding from the reserved `global` realm — `dev`
+    /// itself defines no binding (`parent = global`). The strict-owner write
+    /// guard must therefore reject an OAuth login targeting `dev`, naming
+    /// `global` as the owner.
+    fn test_runtime_with_inherited_global_oauth_binding() -> SessionRuntime {
+        // `global` OWNS the binding; reuse the standard oauth section but key it
+        // under the reserved `global` realm.
+        let mut global_doc = config_with_openai_oauth_binding(CredentialSourceSpec::ManagedStore);
+        let global_section = global_doc
+            .realm
+            .remove("dev")
+            .expect("oauth fixture defines a dev section");
+        global_doc.realm.insert("global".into(), global_section);
+
+        // `dev` defines NO binding; it only links to `global` as its parent so
+        // reads inherit down the chain while writes stay strict-owner.
+        let mut dev_doc = meerkat_core::Config::default();
+        let dev_section = meerkat_core::RealmConfigSection {
+            parent: Some(meerkat_core::connection::RealmId::global()),
+            ..Default::default()
+        };
+        dev_doc.realm.insert("dev".into(), dev_section);
+
+        let source: Arc<dyn meerkat_core::RealmConfigSource> = Arc::new(MapRealmConfigSource {
+            docs: std::collections::HashMap::from([
+                ("global".to_string(), global_doc),
+                ("dev".to_string(), dev_doc.clone()),
+            ]),
+        });
+
+        // The runtime's raw config_runtime holds the head (`dev`) doc only —
+        // composition is what surfaces the inherited binding to the guard.
+        let mut runtime = test_runtime_with_config(dev_doc);
+        runtime.set_realm_config_source(source);
+        runtime.set_realm_context(
+            Some(meerkat_core::connection::RealmId::parse("dev").unwrap()),
+            None,
+            None,
+        );
+        runtime
+    }
+
+    // RCT-28: an OAuth login targeting a realm that only INHERITS the binding
+    // from `global` must be rejected by the strict-owner write guard (naming the
+    // owning realm) and must NOT admit any OAuth flow state.
+    #[tokio::test]
+    async fn login_start_rejects_inherited_binding_naming_owner_without_persisting() {
+        let runtime = test_runtime_with_inherited_global_oauth_binding();
+        let redirect_uri = "http://127.0.0.1:0/callback";
+        let params = raw_params(serde_json::json!({
+            "provider": "openai",
+            "redirect_uri": redirect_uri,
+            "realm_id": "dev",
+            "binding_id": "default_openai"
+        }));
+
+        let resp =
+            handle_auth_login_start(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        let err = resp
+            .error
+            .expect("inherited-binding login must be rejected");
+        assert_eq!(err.code, error::INVALID_PARAMS, "error: {err:?}");
+        assert!(
+            err.message.contains("global"),
+            "rejection must name the owning realm 'global', got: {}",
+            err.message
+        );
+        assert!(
+            resp.result.is_none(),
+            "rejected login must not return a flow result"
+        );
+
+        // The flow authority must hold NO admitted state for the inherited
+        // binding — the guard fired before any state token was minted, so the
+        // owning-realm binding is unconsumable here.
+        let consumed = runtime.oauth_flow_authority().consume(
+            "any-state",
+            &openai_auth_binding(),
+            meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri,
+        );
+        assert!(
+            consumed.is_err(),
+            "rejected login must not admit any OAuth flow state"
+        );
     }
 
     #[tokio::test]

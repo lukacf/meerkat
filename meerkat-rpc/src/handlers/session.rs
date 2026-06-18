@@ -238,14 +238,13 @@ pub async fn create_session_with_params(
     // ladder (provider-priority -> config.agent.model -> catalog global default)
     // — the single owner of the create-session default-model fact. Surfaces MUST
     // NOT re-derive their own default ladder from `config.agent.model`.
-    let runtime_default_model = match runtime.config_runtime() {
-        Some(config_runtime) => match config_runtime.get().await {
-            Ok(snapshot) => Some(meerkat::resolve_create_session_default_model(
-                &snapshot.config,
-            )),
-            Err(_) => None,
-        },
-        None => None,
+    // Compose the realm chain so an operator default model inherited from an
+    // ancestor realm (e.g. `[agent].model` / `[models].*` in `global`) is honored
+    // instead of silently substituting the catalog default — matching the agent
+    // build path and the model registry.
+    let runtime_default_model = match runtime.effective_config().await {
+        Ok(config) => Some(meerkat::resolve_create_session_default_model(&config)),
+        Err(_) => None,
     };
     let model_name = match params.model.clone().or(runtime_default_model) {
         Some(model) => model,

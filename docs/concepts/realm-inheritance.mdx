@@ -1,0 +1,149 @@
+---
+title: "Realm inheritance"
+description: "How realm config and credentials inherit along a parent chain rooted at the global realm, while state stays realm-local."
+icon: "diagram-project"
+---
+
+A realm is a config + state namespace. By default every realm is independent,
+but a realm can declare a `parent` so it **inherits config and credentials**
+from another realm. Resolution walks a single chain that always ends at the
+reserved `global` realm.
+
+This is what lets you sign in once and have every workspace pick up the
+credential, share an MCP server or hook across many realms, and override one
+model default in a child without redeclaring the rest.
+
+## The chain
+
+Resolution for any realm `head` produces an ordered chain:
+
+```text
+head -> parent -> ... -> global
+```
+
+- A realm config doc may declare a parent edge:
+
+  ```toml
+  [realm.team]
+  parent = "org"
+  ```
+
+- A realm with no explicit `parent` that is not itself `global` implicitly
+  parents to `global`. So `global` is the **universal default head** of every
+  realm chain — it is always the tail when it is configured.
+- `global` is the root: it may not declare a parent.
+
+The chain is a linear sequence of single edges (not a flat scan of sibling
+realms), so ordering is fully deterministic and independent of map iteration
+order. There is no longer a flat sibling scan and no literal `default` realm:
+shared credentials and config belong in a named parent or in `global`.
+
+Resolution is fail-closed and panic-free:
+
+| Condition | Result |
+|-----------|--------|
+| A realm names itself, or a cycle (`A -> B -> A`) | rejected (`Cycle`) |
+| A `parent` points at a realm that is not configured (and isn't `global`) | rejected (`MissingParent`) |
+| `global` declares a parent | rejected (`GlobalHasParent`) |
+| A `parent` points at the synthetic env-default realm | rejected (`ParentIsEnvDefault`) |
+| Chain depth exceeds the cap (`MAX_REALM_CHAIN_DEPTH = 16`) | rejected (`DepthExceeded`) |
+
+An **absent head** realm is not an error on the non-explicit path: the chain is
+just `[head]` (contributing nothing) plus the implicit `global` tail, then the
+env-default fallback applies as before. An explicitly named realm that does not
+exist still errors.
+
+## What inherits and what does not
+
+<Note>
+**State never inherits. Config inherits.**
+</Note>
+
+- **State is realm-local (no inheritance):** sessions, SQLite/JSONL session
+  stores, event stores, ops snapshots, and the `.rkat/` projection are all keyed
+  by the consuming (head) realm. A child realm never sees a parent's sessions or
+  leases.
+- **Config inherits down the chain:** models, MCP servers, hooks, skills,
+  limits, and auth bindings are composed parent-first with child-wins.
+
+The composer reads only the **config sections** of ancestor realms; it never
+touches an ancestor's state directories except to read config.
+
+## Credentials: reads inherit, writes are strict-owner
+
+Credential resolution follows the chain, but writing a credential does not.
+
+- **Reads inherit:** a child realm can resolve a binding defined in a parent or
+  in `global`. This is what makes a single sign-in usable everywhere.
+- **Writes are strict-owner:** `auth login` and config writes go to the realm
+  that **owns** the binding (the realm whose config section defines it). You
+  cannot write into an inherited binding's doc from a child. Attempting to
+  persist a credential for a child realm whose binding is inherited is rejected
+  with a typed error naming the owning realm.
+- **`config get` / `config set` use the raw head store** (a read/write split),
+  so an inherited entry is read through composition but never flattened into the
+  child's own doc on write. A read-modify-write cannot accidentally copy
+  inherited entries down into the child.
+
+### Owning-realm provenance
+
+When a binding is resolved, its identity records the realm that **owns** it
+(where it is defined), not the realm that requested it. So an inherited binding
+defined in `global` and used from realm `team` resolves and persists its token
+under `global`, not `team`. This keeps the credential's on-disk namespace and
+its lease keyed to a single owning realm.
+
+<Note>
+Provenance keys the realm-namespaced lease/`TokenKey` (the OAuth-lease and
+command-freshness leases). The resolved credential *material* for `Env`,
+inline-secret, and command-output sources is realm-agnostic — an inherited
+env-source binding yields the same credentials regardless of owning realm.
+</Note>
+
+## MCP servers and hooks: add or override, never remove
+
+A child realm composes MCP servers, hooks, and skill sources over its parents:
+
+- **MCP servers** are keyed by name: a child adds new servers and can override a
+  same-named parent server, while inheriting the rest.
+- **Hooks** append parent-first, then child (parents run before child hooks).
+- **Skill sources** append parent-first; a child shadows a colliding source by
+  identity without dropping the rest.
+
+A child **cannot remove** an inherited MCP server, hook, or skill source. There
+are no tombstones, and an empty `[tools]` or `[hooks]` table does not delete
+inherited entries — emptiness is not removal.
+
+## The global realm and single sign-in
+
+`global` is a normal configured realm (unlike the ephemeral `env_default`
+fallback), but it has two special properties:
+
+1. It is the implicit tail of every realm chain.
+2. Its config document is **home-rooted** at `~/.rkat/config.toml`, a single
+   well-known location, not a per-workspace file.
+
+`rkat auth login` provisions the `global` realm in that home-rooted doc — both
+the credential token and the `[realm.global]` binding section. Because `global`
+is the tail of every chain, that single sign-in is inherited by every workspace
+realm, across workspaces, with no per-realm re-login.
+
+## Migration from `dev`
+
+Earlier versions persisted logins under a `dev` realm. On the run path, Meerkat
+performs a one-time, idempotent migration to `global`:
+
+- The credential **token** is copied from `dev:<binding>` to `global:<binding>`
+  when the global target is absent (no-clobber).
+- The matching `[realm.global]` binding **section** is provisioned in the
+  home-rooted global doc so the migrated token is resolvable.
+
+The migration runs once per process and is no-clobber and idempotent, so an
+existing sign-in keeps working without re-login and re-running copies nothing.
+
+## See also
+
+- [Realms](/concepts/realms) — identity and storage model
+- [Auth and bindings](/concepts/auth-and-bindings) — credential resolution
+- [Configuration](/concepts/configuration) — realm-scoped config and merge
+- [Auth guide](/guides/auth) — login, OAuth, and per-binding usage

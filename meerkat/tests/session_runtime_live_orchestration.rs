@@ -194,7 +194,7 @@ fn should_fire_live_propagation_returns_false_for_unrelated_field_change() {
     // (here: `max_tokens`) must leave the predicate false.
     let prior = meerkat_core::config::Config::default();
     let mut new = prior.clone();
-    new.max_tokens = prior.max_tokens.saturating_add(1);
+    new.max_tokens = Some(prior.max_tokens.unwrap_or_default().saturating_add(1));
     assert_ne!(prior.max_tokens, new.max_tokens);
     assert_eq!(prior.agent.model, new.agent.model);
     assert!(!should_fire_live_propagation(&prior, &new));

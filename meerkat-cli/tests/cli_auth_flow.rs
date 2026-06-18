@@ -79,7 +79,7 @@ fn token_file_path(root: &std::path::Path) -> PathBuf {
     token_file_path_for_binding(root, "default_openai")
 }
 
-fn token_file_path_for_binding(root: &std::path::Path, binding_id: &str) -> PathBuf {
+fn token_file_path_in_realm(root: &std::path::Path, realm: &str, binding_id: &str) -> PathBuf {
     #[cfg(target_os = "macos")]
     let config_root = root.join("Library").join("Application Support");
     #[cfg(not(target_os = "macos"))]
@@ -88,8 +88,13 @@ fn token_file_path_for_binding(root: &std::path::Path, binding_id: &str) -> Path
     config_root
         .join("meerkat")
         .join("credentials")
-        .join("dev")
+        .join(realm)
         .join(format!("{binding_id}.json"))
+}
+
+fn token_file_path_for_binding(root: &std::path::Path, binding_id: &str) -> PathBuf {
+    // Explicit-realm tests seed/assert under `dev`.
+    token_file_path_in_realm(root, "dev", binding_id)
 }
 
 fn seed_token_file(root: &std::path::Path, body: &str) {
@@ -172,7 +177,11 @@ fn rkat_auth_logout_clears_malformed_token_file() {
     };
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    seed_token_file(tmp.path(), "{ malformed token json");
+    // A bare `auth logout <binding>` (no realm) targets the reserved `global`
+    // realm now, so seed the malformed token under global.
+    let token = token_file_path_in_realm(tmp.path(), "global", "default_openai");
+    std::fs::create_dir_all(token.parent().expect("token parent")).expect("mkdir token dir");
+    std::fs::write(&token, "{ malformed token json").expect("write token");
 
     let logout = Command::new(&rkat)
         .args(["auth", "logout", "default_openai"])
@@ -191,7 +200,7 @@ fn rkat_auth_logout_clears_malformed_token_file() {
     }
 
     assert!(
-        !token_file_exists(tmp.path()),
+        !token.exists(),
         "logout must remove malformed persisted credentials"
     );
 }

@@ -389,12 +389,31 @@ fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
     }
 }
 
+/// Shared filesystem realm-config source for the MCP server.
+///
+/// Mirrors REST: maps the reserved `global` realm to the home-rooted doc (or a
+/// never-existent path when no HOME-rooted path exists, so `global` yields None
+/// and behaves like a leaf realm) and every other realm to its per-realm config.
+/// Surfaces inject this rather than re-deriving the projection.
+fn mcp_realm_config_source(
+    realms_root: &std::path::Path,
+) -> Arc<dyn meerkat_core::RealmConfigSource> {
+    let global_doc = meerkat_core::Config::global_config_path()
+        .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
+    Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+        realms_root.to_path_buf(),
+        global_doc,
+        meerkat_models::canonical(),
+    ))
+}
+
 async fn load_config_async(
     realm_id: &meerkat_core::connection::RealmId,
     realms_root: &std::path::Path,
     backend_hint: Option<meerkat_store::RealmBackend>,
     origin_hint: Option<meerkat_store::RealmOrigin>,
     instance_id: Option<&str>,
+    source: &Arc<dyn meerkat_core::RealmConfigSource>,
 ) -> Config {
     let store = match realm_config_store(
         realm_id,
@@ -408,7 +427,21 @@ async fn load_config_async(
         Ok(store) => store,
         Err(_) => return Config::default(),
     };
-    let mut config = store.get().await.unwrap_or_else(|_| Config::default());
+    let head_config = store.get().await.unwrap_or_else(|_| Config::default());
+    // Fold the head realm's parent chain (head ⊕ ancestors ⊕ `global` tail) into
+    // the effective config so top-level fields inherit before env overrides win.
+    // A compose failure (e.g. malformed parent edge) falls back to the head
+    // realm's own config rather than nuking everything to defaults.
+    let mut config = match meerkat_core::EffectiveConfigReader::new(Arc::clone(source))
+        .effective_config_over_head(realm_id, head_config.clone())
+        .await
+    {
+        Ok(effective) => effective,
+        Err(err) => {
+            tracing::warn!("Failed to compose realm inheritance; using head config: {err}");
+            head_config
+        }
+    };
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }
@@ -519,6 +552,10 @@ pub struct MeerkatMcpState {
     instance_id: Option<String>,
     expose_paths: bool,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    /// Realm config source for composing the effective config on model-resolution
+    /// read paths (create default-model), so an inherited (ancestor-realm) default
+    /// model / self-hosted alias resolves like the agent build path.
+    realm_config_source: Arc<dyn meerkat_core::RealmConfigSource>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
@@ -678,12 +715,14 @@ impl MeerkatMcpState {
             .as_deref()
             .and_then(parse_backend_hint);
         let origin_hint = Some(realm_origin_from_selection(&bootstrap.realm.selection));
+        let realm_config_source = mcp_realm_config_source(&realms_root);
         let config = load_config_async(
             &realm_id,
             &realms_root,
             backend_hint,
             origin_hint,
             bootstrap.realm.instance_id.as_deref(),
+            &realm_config_source,
         )
         .await;
         let (manifest, persistence) = meerkat::open_realm_persistence_in(
@@ -749,7 +788,8 @@ impl MeerkatMcpState {
         let skill_runtime = factory.build_skill_runtime(&config).await?;
 
         let max_sessions = config.max_sessions();
-        let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store)
+            .with_realm_inheritance(Arc::clone(&realm_config_source), realm_id.clone());
         builder.default_llm_client = default_llm_client;
         #[cfg(feature = "mob")]
         let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
@@ -798,6 +838,7 @@ impl MeerkatMcpState {
             instance_id: bootstrap.realm.instance_id,
             expose_paths,
             config_runtime,
+            realm_config_source,
             skill_runtime,
             #[cfg(feature = "mob")]
             mob_state,
@@ -858,12 +899,14 @@ impl MeerkatMcpState {
         };
         let realm_id = locator.realm.clone();
         let realms_root = locator.state_root;
+        let realm_config_source = mcp_realm_config_source(&realms_root);
         let mut config = load_config_async(
             &realm_id,
             &realms_root,
             Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
             bootstrap.realm.instance_id.as_deref(),
+            &realm_config_source,
         )
         .await;
         if let Some(max_sessions) = max_sessions_override {
@@ -897,7 +940,8 @@ impl MeerkatMcpState {
         }
 
         let max_sessions = config.max_sessions();
-        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store)
+            .with_realm_inheritance(Arc::clone(&realm_config_source), realm_id.clone());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
@@ -936,6 +980,7 @@ impl MeerkatMcpState {
             instance_id: bootstrap.realm.instance_id,
             expose_paths: false,
             config_runtime,
+            realm_config_source,
             skill_runtime: None,
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
@@ -2208,24 +2253,37 @@ async fn handle_meerkat_skills(
 async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, String> {
     // A ConfigError is a TRUE fault (benign absence is already Ok(default) inside the
     // store), so it must surface as an error, never as a phantom default-config payload.
-    let config = state
+    // Compose the realm chain so a capability gated on an inherited config field
+    // reports the same status as the other surfaces.
+    let head_config = state
         .config_runtime
         .get()
         .await
         .map_err(|e| format!("Failed to read config: {e}"))?
         .config;
+    let config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm_id, head_config)
+        .await
+        .map_err(|e| format!("Failed to compose realm config chain: {e}"))?;
     let response = meerkat::surface::build_capabilities_response(&config);
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
 async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value, String> {
-    // A ConfigError is a TRUE fault: an empty/default catalog must not masquerade as success.
-    let config = state
+    // A ConfigError is a TRUE fault: an empty/default catalog must not masquerade
+    // as success. Compose the realm chain so an inherited (ancestor-realm)
+    // self-hosted alias / per-provider default is listed identically to the other
+    // surfaces and matches what a session build resolves.
+    let head_config = state
         .config_runtime
         .get()
         .await
         .map_err(|e| format!("Failed to read config: {e}"))?
         .config;
+    let config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm_id, head_config)
+        .await
+        .map_err(|e| format!("Failed to compose realm config chain: {e}"))?;
     let response =
         meerkat::surface::build_models_catalog_response(&config).map_err(|e| e.to_string())?;
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
@@ -3253,13 +3311,21 @@ async fn handle_meerkat_run(
         ));
     }
     // A ConfigError is a TRUE fault and must not be laundered into a default config
-    // that silently picks a phantom default model.
-    let config = state
+    // that silently picks a phantom default model. Compose the realm chain so an
+    // inherited (ancestor-realm) default model / self-hosted alias resolves like
+    // the agent build path.
+    let head_config = state
         .config_runtime
         .get()
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to read config: {e}")))?
         .config;
+    let config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm_id, head_config)
+        .await
+        .map_err(|e| {
+            ToolCallError::internal(format!("Failed to compose realm config chain: {e}"))
+        })?;
     let model = input
         .model
         .as_ref()

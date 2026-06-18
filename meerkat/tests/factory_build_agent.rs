@@ -549,8 +549,11 @@ async fn agent_llm_client_decorator_wraps_registry_resolved_provider_client() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = Config::default();
+    // The build omits `realm_id`, so the connection resolver heads to the
+    // reserved `global` realm; the inline binding must live there to resolve via
+    // the configured key (rather than falling through to an absent env key).
     config.realm.insert(
-        "default".to_string(),
+        meerkat_core::connection::GLOBAL_REALM_SLUG.to_string(),
         meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]),
     );
     config.model_fallback.enabled = false;
@@ -684,24 +687,24 @@ async fn build_agent_without_override_fails_missing_api_key() {
     );
 }
 
-/// 2b. A missing auth_binding resolves through the configured default realm
-///     binding. This is a valid typed auth path, distinct from first-provider
-///     ambient credential search.
+/// 2b. A missing auth_binding resolves through the reserved `global` realm
+///     binding (the universal default head). This is a valid typed auth path,
+///     distinct from first-provider ambient credential search.
 #[tokio::test]
-async fn build_agent_without_auth_binding_uses_default_realm_config_api_key() {
+async fn build_agent_without_auth_binding_uses_global_realm_config_api_key() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = Config::default();
     let section =
         meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]);
-    config.realm.insert("default".to_string(), section);
+    config.realm.insert("global".to_string(), section);
 
     let build_config = AgentBuildConfig::new("gpt-5.4");
     assert!(build_config.auth_binding.is_none());
     let agent = factory
         .build_agent(build_config, &config)
         .await
-        .expect("default realm config API key should resolve without explicit auth_binding");
+        .expect("global realm config API key should resolve without explicit auth_binding");
     let metadata = agent
         .session()
         .session_metadata()
@@ -714,7 +717,7 @@ async fn build_agent_without_auth_binding_uses_default_realm_config_api_key() {
                 conn_ref.binding.as_str().to_string(),
             )
         }),
-        Some(("default".to_string(), "default_openai".to_string()))
+        Some(("global".to_string(), "default_openai".to_string()))
     );
 }
 
@@ -1875,7 +1878,9 @@ async fn build_agent_uses_config_default_max_tokens() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
-    let expected_max_tokens = config.max_tokens;
+    // The factory resolves the operative per-turn limit from the (now optional)
+    // config field at point-of-use; mirror that here.
+    let expected_max_tokens = config.resolved_max_tokens();
 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),

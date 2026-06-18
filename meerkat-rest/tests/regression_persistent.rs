@@ -24,6 +24,19 @@ use tempfile::TempDir;
 use tokio::time::{Duration, timeout};
 use tower::ServiceExt;
 
+/// An empty filesystem realm-config source rooted at a non-existent path, so
+/// every realm (including `global`) resolves to `None` and the composed config
+/// collapses to `Config::default()`. These regression tests assert structural
+/// REST behavior, not realm-config inheritance.
+fn empty_realm_config_source(base: &std::path::Path) -> Arc<dyn meerkat_core::RealmConfigSource> {
+    let root = base.join("empty-realms");
+    Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+        root.clone(),
+        root.join("__no_global__"),
+        meerkat_models::canonical(),
+    ))
+}
+
 /// Build an `AppState` backed by the given `MemoryStore`, with an optional
 /// `max_tokens` override on the `AppState` itself.
 ///
@@ -84,7 +97,7 @@ fn build_state(
 
     AppState {
         store_path: store_path.to_path_buf(),
-        max_tokens: max_tokens.unwrap_or(config.agent.max_tokens_per_turn),
+        max_tokens: max_tokens.unwrap_or(config.agent.resolved_max_tokens_per_turn()),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: true,
@@ -106,6 +119,7 @@ fn build_state(
         ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
+        realm_config_source: empty_realm_config_source(store_path),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {

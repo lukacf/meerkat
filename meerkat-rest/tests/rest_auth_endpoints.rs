@@ -38,12 +38,84 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 fn build_app() -> axum::Router {
+    // Empty realm-config chain: the source's realms-root is empty and the
+    // global doc is absent, so every realm resolves to `None` (the composed
+    // head config collapses to `Config::default()`), preserving prior behavior.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_dir = Box::leak(Box::new(temp_dir));
+    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            temp_dir.path().join("empty-realms"),
+            temp_dir.path().join("empty-realms").join("__no_global__"),
+            meerkat_models::canonical(),
+        ));
+    build_app_inner(
+        meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
+        Config::default(),
+        realm_config_source,
+    )
+}
+
+/// Build the REST app, seeding a filesystem realm-config chain so the COMPOSED
+/// config (and the strict-owner write gate) sees realm-scoped `[realm.*]`
+/// sections inherited along the parent chain. `realm_docs` maps each realm to
+/// its OWN [`Config`] document; the reserved `global` realm is written to a
+/// HOME-rooted doc the source maps to, every other realm to
+/// `<realms_root>/<realm>/config.toml`. `head_realm` becomes `AppState.realm`
+/// (the composition head).
+///
+/// Async because docs are seeded through [`meerkat_core::FileConfigStore`] (the
+/// same TOML codec the source parses) — so the test never hand-rolls TOML and
+/// the writes run on the live tokio reactor.
+async fn build_app_with_realm_docs(
+    head_realm: meerkat_core::RealmId,
+    realm_docs: &[(meerkat_core::RealmId, Config)],
+) -> axum::Router {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let temp_dir = Box::leak(Box::new(temp_dir));
+
+    let realms_root = temp_dir.path().join("realms");
+    let global_doc = temp_dir.path().join("home").join("config.toml");
+    for (realm, doc) in realm_docs {
+        let path = if realm.is_global() {
+            global_doc.clone()
+        } else {
+            realms_root.join(realm.as_str()).join("config.toml")
+        };
+        let store = meerkat_core::FileConfigStore::new(path, meerkat_models::canonical());
+        meerkat_core::ConfigStore::set(&store, doc.clone())
+            .await
+            .expect("seed realm config doc");
+    }
+    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            realms_root,
+            global_doc,
+            meerkat_models::canonical(),
+        ));
+
+    // The agent-build config seeded into the session service is the composed
+    // head-chain config.
+    let config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&realm_config_source))
+        .effective_config(&head_realm)
+        .await
+        .unwrap_or_else(|_| Config::default());
+
+    build_app_inner(head_realm, config, realm_config_source)
+}
+
+/// Shared body for the two harnesses: wires `AppState` + router from an already
+/// resolved `(head_realm, composed config, realm_config_source)`.
+fn build_app_inner(
+    head_realm: meerkat_core::RealmId,
+    config: Config,
+    realm_config_source: Arc<dyn meerkat_core::RealmConfigSource>,
+) -> axum::Router {
     let temp_dir = TempDir::new().expect("temp dir");
     let temp_dir = Box::leak(Box::new(temp_dir));
     let project_root = temp_dir.path().join("project");
     std::fs::create_dir_all(project_root.join(".rkat")).expect("mkdir");
 
-    let config = Config::default();
     let store_path = temp_dir.path().join("sessions");
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
@@ -85,7 +157,7 @@ fn build_app() -> axum::Router {
 
     let state = AppState {
         store_path: store_path.clone(),
-        max_tokens: config.agent.max_tokens_per_turn,
+        max_tokens: config.agent.resolved_max_tokens_per_turn(),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: false,
@@ -106,7 +178,8 @@ fn build_app() -> axum::Router {
             meerkat::WorkNamespace::default(),
         ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
-        realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
+        realm: head_realm,
+        realm_config_source,
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {
@@ -287,5 +360,170 @@ async fn post_sessions_accepts_auth_binding_field() {
     assert!(
         status.is_success() || status.is_client_error() || status.is_server_error(),
         "status must be valid HTTP code for auth_binding body, got {status}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RCT-27: hierarchical realm config inheritance through the REST surface.
+//
+// Reads inherit DOWN the chain (a child realm sees a binding defined only on
+// its `global` ancestor through the COMPOSED config); writes are STRICT-OWNER
+// (an OAuth login/persist for a child realm whose binding is inherited from
+// `global` is REJECTED with 409 naming the owner, never persisted into the
+// child). This proves both MF-A (compose the auth-resolution config) and MF-B
+// (strict-owner write gate on the OAuth persist endpoints) end to end.
+// ---------------------------------------------------------------------------
+
+/// `[realm.global]` defining a single anthropic binding `default_anthropic`
+/// (the inherited owner) — written to the HOME-rooted global doc by the
+/// harness. Built via `from_inline_api_keys` so the doc is guaranteed valid.
+fn global_realm_doc() -> Config {
+    let mut config = Config::default();
+    let section = meerkat_core::RealmConfigSection::from_inline_api_keys(&[("anthropic", "sk-x")]);
+    config.realm.insert("global".to_string(), section);
+    config
+}
+
+/// Child realm `child-realm` whose OWN section defines NO binding and inherits
+/// from `global` via its `parent` edge. The composed config therefore exposes
+/// `default_anthropic` to `child-realm` for READS, while a WRITE targeting it
+/// must be rejected (strict-owner).
+fn child_realm_doc() -> (meerkat_core::RealmId, Config) {
+    let child = meerkat_core::RealmId::parse("child-realm").expect("valid child realm");
+    let mut config = Config::default();
+    let section = meerkat_core::RealmConfigSection {
+        parent: Some(meerkat_core::RealmId::global()),
+        ..Default::default()
+    };
+    config.realm.insert(child.as_str().to_string(), section);
+    (child, config)
+}
+
+/// READ half: an inherited `[realm.global]` binding is visible to the child
+/// realm through the COMPOSED config (MF-A). Asserted at the composition layer
+/// the auth-resolution path consumes: `resolve_realm_binding_target_for_provider`
+/// resolves the inherited binding for the child head and owner-stamps it to
+/// `global` — proving inheritance flows DOWN the chain on reads.
+#[tokio::test]
+async fn rct27_inherited_global_binding_visible_through_composed_config() {
+    use std::sync::Arc;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let realms_root = temp_dir.path().join("realms");
+    let global_doc = temp_dir.path().join("home").join("config.toml");
+
+    // Seed `[realm.global]` (owner) + child realm (inherits via parent edge).
+    let (child, child_doc) = child_realm_doc();
+    for (realm, doc) in [
+        (meerkat_core::RealmId::global(), global_realm_doc()),
+        (child.clone(), child_doc),
+    ] {
+        let path = if realm.is_global() {
+            global_doc.clone()
+        } else {
+            realms_root.join(realm.as_str()).join("config.toml")
+        };
+        let store = meerkat_core::FileConfigStore::new(path, meerkat_models::canonical());
+        meerkat_core::ConfigStore::set(&store, doc)
+            .await
+            .expect("seed realm doc");
+    }
+
+    let source: Arc<dyn meerkat_core::RealmConfigSource> =
+        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            realms_root,
+            global_doc,
+            meerkat_models::canonical(),
+        ));
+    let composed = meerkat_core::EffectiveConfigReader::new(source)
+        .effective_config(&child)
+        .await
+        .expect("compose child chain");
+
+    // The inherited binding resolves for the child head and is owner-stamped to
+    // the owning `global` realm — reads inherit DOWN the chain.
+    let target = meerkat_core::resolve_realm_binding_target_for_provider(
+        &composed,
+        meerkat_core::Provider::Anthropic,
+        Some(&child),
+        Some(&meerkat_core::connection::BindingId::parse("default_anthropic").unwrap()),
+        None,
+        None,
+        false,
+    )
+    .expect("inherited binding must resolve for the child realm");
+    assert!(
+        target.auth_binding.realm.is_global(),
+        "inherited binding must be owner-stamped to the global realm, got {}",
+        target.auth_binding.realm.as_str()
+    );
+}
+
+/// WRITE half: an OAuth login for the child realm targeting the inherited
+/// `default_anthropic` binding is REJECTED with 409 naming the owning `global`
+/// realm — the strict-owner write gate (MF-B) runs before any persist. The same
+/// login targeting the OWNING `global` realm is NOT rejected by the gate
+/// (it proceeds past the strict-owner check).
+#[tokio::test]
+async fn rct27_oauth_login_for_inherited_child_binding_is_rejected_409() {
+    let (child, child_doc) = child_realm_doc();
+    let app = build_app_with_realm_docs(
+        child.clone(),
+        &[
+            (meerkat_core::RealmId::global(), global_realm_doc()),
+            (child.clone(), child_doc),
+        ],
+    )
+    .await;
+
+    // Child realm + inherited binding: strict-owner write gate must REJECT.
+    let body = serde_json::json!({
+        "provider": "anthropic",
+        "redirect_uri": "http://localhost:1455/callback",
+        "realm_id": child.as_str(),
+        "binding_id": "default_anthropic",
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/auth/login/start")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "OAuth login for a child realm's inherited binding must be rejected (strict-owner)"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).expect("structured JSON error");
+    let err = body
+        .get("error")
+        .and_then(Value::as_str)
+        .expect("error field");
+    assert!(
+        err.contains("global"),
+        "409 error must name the owning realm 'global', got: {err}"
+    );
+
+    // Same login targeting the OWNING global realm passes the strict-owner gate
+    // (it is NOT a CONFLICT; it proceeds to the OAuth flow / downstream checks).
+    let owner_body = serde_json::json!({
+        "provider": "anthropic",
+        "redirect_uri": "http://localhost:1455/callback",
+        "realm_id": "global",
+        "binding_id": "default_anthropic",
+    });
+    let owner_req = Request::builder()
+        .method("POST")
+        .uri("/auth/login/start")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&owner_body).unwrap()))
+        .unwrap();
+    let owner_resp = app.oneshot(owner_req).await.unwrap();
+    assert_ne!(
+        owner_resp.status(),
+        StatusCode::CONFLICT,
+        "OAuth login targeting the OWNING realm must not hit the strict-owner gate"
     );
 }

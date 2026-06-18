@@ -1832,9 +1832,11 @@ impl MethodRouter {
                     "skills/inspect is no longer served; resolve skills through the typed registry surface".to_string(),
                 )
             }
-            "capabilities/get" => match self.config_store.get().await {
+            // Compose the realm chain so a capability gated on an inherited config
+            // field reports the same status as the other surfaces.
+            "capabilities/get" => match self.runtime.effective_config().await {
                 Ok(config) => handlers::capabilities::handle_get(id, &config),
-                Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+                Err(e) => RpcResponse::error(id, e.code, e.message),
             },
             "runtime/host_info" => handlers::runtime_host::handle_info(
                 id,
@@ -1864,9 +1866,12 @@ impl MethodRouter {
             "approval/decide" => {
                 handlers::approval::handle_decide(id, params, self.runtime.clone()).await
             }
-            "models/catalog" => match self.config_store.get().await {
+            // Compose the realm chain so an inherited (ancestor-realm) self-hosted
+            // alias / per-provider default is listed identically to the other
+            // surfaces and matches what a session build resolves.
+            "models/catalog" => match self.runtime.effective_config().await {
                 Ok(config) => handlers::models::handle_catalog(id, &config),
-                Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+                Err(e) => RpcResponse::error(id, e.code, e.message),
             },
             // Auth + realm methods (Phase 4d).
             "auth/profile/list" => {
@@ -9875,14 +9880,20 @@ mod tests {
     async fn config_patch_merges_delta() {
         let (router, _notif_rx) = test_router().await;
 
-        // Get initial max_tokens
-        let get_req = make_request_no_params("config/get");
-        let get_resp = router.dispatch(get_req).await.unwrap();
-        let initial = result_value(&get_resp);
-        let initial_max_tokens = initial["config"]["max_tokens"].as_u64().unwrap();
+        // `max_tokens` is optional (None => inherit / template default) and is
+        // omitted from the serialized config when unset, so seed an explicit
+        // value first, then verify a patch merges over it.
+        let seed_max_tokens = 4096u64;
+        let seed_req = make_request(
+            "config/patch",
+            serde_json::json!({"max_tokens": seed_max_tokens}),
+        );
+        let seed_resp = router.dispatch(seed_req).await.unwrap();
+        let seeded = result_value(&seed_resp);
+        assert_eq!(seeded["config"]["max_tokens"], seed_max_tokens);
 
         // Patch max_tokens to a different value
-        let new_max_tokens = initial_max_tokens + 1000;
+        let new_max_tokens = seed_max_tokens + 1000;
         let patch_req = make_request(
             "config/patch",
             serde_json::json!({"max_tokens": new_max_tokens}),

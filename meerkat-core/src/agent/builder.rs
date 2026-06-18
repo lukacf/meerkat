@@ -288,7 +288,7 @@ impl AgentBuilder {
 
     /// Set max tokens per turn
     pub fn max_tokens_per_turn(mut self, tokens: u32) -> Self {
-        self.config.max_tokens_per_turn = tokens;
+        self.config.max_tokens_per_turn = Some(tokens);
         self
     }
 

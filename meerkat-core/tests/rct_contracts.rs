@@ -35,7 +35,7 @@ fn test_agent_factory_config_contract() {
     assert!(config.models.anthropic.is_empty());
     assert!(config.models.openai.is_empty());
     assert!(config.models.gemini.is_empty());
-    assert!(config.max_tokens > 0);
+    assert!(config.resolved_max_tokens() > 0);
     assert!(!config.shell.program.is_empty());
     assert!(!config.tools.builtins_enabled);
     assert!(!config.tools.shell_enabled);
@@ -200,7 +200,7 @@ async fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> 
                 .get("max_tokens")
                 .and_then(serde_json::Value::as_u64)
             {
-                guard.max_tokens = max_tokens as u32;
+                guard.max_tokens = Some(max_tokens as u32);
             }
             Ok(guard.clone())
         }
@@ -211,11 +211,11 @@ async fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let mut config = store.get().await?;
-    config.max_tokens = 777;
+    config.max_tokens = Some(777);
     store.set(config).await?;
 
     let updated = store.patch(ConfigDelta(json!({"max_tokens": 888}))).await?;
-    assert_eq!(updated.max_tokens, 888);
+    assert_eq!(updated.max_tokens, Some(888));
     Ok(())
 }
 

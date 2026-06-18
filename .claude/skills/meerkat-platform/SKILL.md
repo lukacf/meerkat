@@ -18,8 +18,15 @@ References:
 `realm_id` is the sharing key across all surfaces.
 
 - Same `realm_id` => shared sessions/config/backend.
-- Different `realm_id` => strict isolation.
+- Different `realm_id` => strict STATE isolation (sessions, stores, event logs are realm-local).
 - Backend (`sqlite` or `jsonl`) is pinned per realm in `realm_manifest.json`.
+
+Config inheritance (state still never inherits):
+
+- A realm config doc may declare a parent (`[realm.<id>] parent = "<other>"`). Resolution walks head → parent chain → the implicit `global` tail (the universal default head; its config is the single HOME-rooted `~/.rkat/config.toml`). No flat sibling scan, no literal `default` realm.
+- CONFIG inherits down the chain: models, mcp servers, hooks, skills, limits, and auth bindings. Surfaces compose the effective config over the head realm on the agent-build path, so inheritance applies everywhere, not just to auth.
+- Credential READS inherit (a child resolves a binding defined in a parent or `global`); a resolved binding's owning realm is where it is DEFINED. Credential/config WRITES are strict-owner — they land only in the realm that owns the binding, and `config get`/`set` use the raw head doc (read/write split), so an inherited entry is never flattened into a child.
+- Children may add/override but cannot remove inherited mcp/hook entries (no tombstones).
 
 Default persistent backend:
 
@@ -488,13 +495,14 @@ realm config; raw merge patch uses `rkat config patch --json '{...}'`.
 
 Every session resolves credentials through realm-scoped bindings. Two onramps:
 
-**Quick start — env keys**: Meerkat resolves API keys from provider-specific env vars. Anthropic: `RKAT_ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY`. OpenAI: `RKAT_OPENAI_API_KEY`, then `OPENAI_API_KEY`. Gemini: `RKAT_GEMINI_API_KEY`, `GEMINI_API_KEY`, `RKAT_GOOGLE_API_KEY`, then `GOOGLE_API_KEY`. Meerkat synthesizes a default realm + binding. No config edits.
+**Quick start — env keys**: Meerkat resolves API keys from provider-specific env vars. Anthropic: `RKAT_ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY`. OpenAI: `RKAT_OPENAI_API_KEY`, then `OPENAI_API_KEY`. Gemini: `RKAT_GEMINI_API_KEY`, `GEMINI_API_KEY`, `RKAT_GOOGLE_API_KEY`, then `GOOGLE_API_KEY`. Meerkat synthesizes an ephemeral env-default binding (resolved via the global chain head). No config edits.
 
-**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config and pass `--auth-binding <realm>:<binding>[:profile]` on `rkat run` / `session/create` / `mob_spawn_member` to scope a session or mob member to that binding. CLI `rkat auth login <provider>` is a convenience bootstrap for fixed `dev:*` bindings: interactive OAuth writes `dev:anthropic_oauth`, `dev:openai_oauth`, or `dev:google_oauth`; non-interactive api-key login writes `dev:default_<provider>`.
+**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config and pass `--auth-binding <realm>:<binding>[:profile]` on `rkat run` / `session/create` / `mob_spawn_member` to scope a session or mob member to that binding. CLI `rkat auth login <provider>` provisions the reserved `global` realm in the HOME-rooted doc (`~/.rkat/config.toml`), so one sign-in is inherited by every workspace realm via the chain tail: interactive OAuth writes `global:anthropic_oauth`, `global:openai_oauth`, or `global:google_oauth`; non-interactive api-key login writes `global:default_<provider>`. Credential reads inherit down the chain; a binding's owning realm is where it is DEFINED. Legacy `dev`-realm logins migrate to `global` on the run path (token + `[realm.global]` section), idempotent and no-clobber, so an existing sign-in keeps working.
 
 ```bash
-rkat auth login anthropic                                            # OAuth (PKCE S256)
-rkat run --auth-binding dev:anthropic_oauth "ship the release notes"
+rkat auth login anthropic                                            # OAuth (PKCE S256) → global
+rkat run "ship the release notes"                                   # inherits global:anthropic_oauth via the chain tail
+rkat run --auth-binding global:anthropic_oauth "ship the release notes"  # or scope explicitly
 ```
 
 Supported auth methods:
@@ -573,7 +581,7 @@ provider = "anthropic"
 [[model_fallback.chain]]
 model = "gpt-5.5"
 provider = "openai"
-auth_binding = { realm = "dev", binding = "openai_oauth" }
+auth_binding = { realm = "global", binding = "openai_oauth" }
 ```
 
 Operational rules to remember:
@@ -595,9 +603,12 @@ Operational rules to remember:
   tools.
 - A smaller-context backup target is skipped for a context-overflow failure
   when its catalog context window cannot satisfy the requested size.
-- Catalog-default candidates stay in the selected non-env auth realm when that
-  realm has a provider binding. Explicit chains may set `auth_binding`; missing
-  explicit targets fail configuration instead of being silently skipped.
+- Catalog-default candidates stay scoped to the selected non-env auth realm's
+  parent chain when a chain member has a provider binding. The model-swap filter
+  accepts inherited candidates (binding owned by an ancestor or `global`), so a
+  hot swap does not drop inherited bindings; each keeps its owning-realm
+  provenance. Explicit chains may set `auth_binding`; missing explicit targets
+  fail configuration instead of being silently skipped.
 
 ### Mid-session model hot-swap
 

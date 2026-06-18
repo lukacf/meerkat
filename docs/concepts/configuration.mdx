@@ -30,13 +30,44 @@ root is the platform data directory:
 
 Use [realms](/concepts/realms) to choose whether state is shared or isolated.
 
+## Realm config inheritance
+
+A realm config doc may declare a `parent`, and resolution walks a single chain
+`head -> parent -> ... -> global` rooted at the reserved `global` realm. A realm
+with no explicit parent that is not itself `global` implicitly parents to
+`global`, so `global` is the universal default head of every chain.
+
+```toml
+[realm.team]
+parent = "org"
+```
+
+- **Config inherits** along the chain: models, MCP servers, hooks, skills,
+  limits, and auth bindings are composed parent-first with child-wins.
+- **State never inherits**: sessions, session stores, event stores, and the
+  `.rkat/` projection stay realm-local to the consuming (head) realm.
+
+The `global` realm's config document is **home-rooted** at `~/.rkat/config.toml`
+(a single well-known location, not a per-workspace file), which is why a single
+`rkat auth login` is inherited by every workspace realm via the chain tail. See
+[Realm inheritance](/concepts/realm-inheritance) for the full model, including
+credential read-inherit / write-strict-owner and the add/override-but-not-remove
+rules for MCP servers and hooks.
+
 ## Effective precedence
 
 For a given realm, effective persisted configuration is:
 
 1. Built-in defaults
-2. Realm `config.toml`
-3. Per-request runtime parameters (for example model/system prompt/tool toggles on create/resume calls)
+2. Inherited parent-chain config (parent-first, child-wins, ending at `global`)
+3. Realm `config.toml` (the head realm's own doc)
+4. Per-request runtime parameters (for example model/system prompt/tool toggles on create/resume calls)
+
+The agent build path on every surface (CLI, REST, RPC, MCP server) composes this
+effective config over the head realm, so model/MCP/hook/skill/limit inheritance
+applies on every build, not just the auth path. `config get` / `config set`
+operate on the **raw head doc** (a read/write split), so an inherited entry is
+read through composition but never flattened into the child's own doc on write.
 
 Environment variables still matter, but they are primarily part of **runtime credential resolution**, not a general config layer that mutates the loaded realm config. In practice:
 
@@ -65,15 +96,30 @@ This gives deterministic behavior when multiple clients or processes update conf
 
 ## Merge semantics
 
-Meerkat uses two distinct update models:
+Meerkat uses three update models:
 
 1. Layered config loading (`defaults -> file -> runtime`) uses **field-wise merge**:
   - scalar/option values: last non-default wins
-  - section values (for example `providers`, `store`, `comms`, `compaction`): replace whole section
+  - section values (for example `store`, `comms`, `compaction`): replace whole section
   - hook entries: append/extend
-2. Runtime patch APIs (`config/patch`, `PATCH /config`) use **RFC 7396 JSON merge-patch** semantics.
+2. Realm-chain composition folds each realm doc parent-first with **child-wins**:
+  - per-provider model defaults: union, child-wins per provider (a child overrides its anthropic default while inheriting the parent's openai default)
+  - MCP servers: map-key union, child-wins per name (add or override, never remove)
+  - hooks and skill sources: append parent-first (child cannot remove inherited entries)
+  - limits and other config sections: per-field child-wins (a child can tighten `max_sessions` while inheriting other caps)
+  - the binding/backend/auth maps are **not** merged across realms: each realm's binding resolves its `backend_profile` / `auth_profile` only within its own section (the owning realm)
+3. Runtime patch APIs (`config/patch`, `PATCH /config`) use **RFC 7396 JSON merge-patch** semantics.
 
 Use `config/set` when replacing the whole config intentionally, and `config/patch` for surgical updates.
+
+### Presence-based override (Option fields)
+
+`Config.max_tokens` and `agent.max_tokens_per_turn` are optional. `None` means
+"inherit / use the template default" and is resolved at point-of-use
+(`resolved_max_tokens` / `resolved_max_tokens_per_turn`). Because merge is
+**presence-based** (an explicit value wins, regardless of whether it equals the
+default), a child realm can override a non-default parent value back **down to
+the default** — something a `!= default` heuristic could not express.
 
 ## CLI behavior
 
@@ -90,7 +136,12 @@ current directory, or from `--context-root` when supplied.
 
 ## What about `~/.rkat/config.toml` and `.rkat/config.toml`?
 
-Those files still exist for compatibility and developer ergonomics (`rkat init`, legacy flows, and some layered hook loading behavior), but realm config is the canonical runtime configuration for CLI/RPC/REST/MCP surfaces.
+`~/.rkat/config.toml` is the home-rooted config document for the reserved
+`global` realm — the universal tail of every realm chain. `rkat auth login`
+writes the `[realm.global]` binding section here, and every workspace realm
+inherits it. The project-local `.rkat/config.toml` still exists for developer
+ergonomics (`rkat init`, layered hook loading), but the active realm's config
+remains the canonical runtime configuration for CLI/RPC/REST/MCP surfaces.
 
 ## Backend and storage settings
 
@@ -128,7 +179,7 @@ provider = "anthropic"
 [[model_fallback.chain]]
 model = "gpt-5.5"
 provider = "openai"
-auth_binding = { realm = "dev", binding = "openai_oauth" }
+auth_binding = { realm = "global", binding = "openai_oauth" }
 ```
 
 A fallback target is identified by model, provider, self-hosted server, and
@@ -152,5 +203,6 @@ the active model's tool capability filter and token limits before retrying.
 ## See also
 
 - [Realms](/concepts/realms)
+- [Realm inheritance](/concepts/realm-inheritance)
 - [Sessions](/concepts/sessions)
 - [CLI configuration](/cli/configuration)

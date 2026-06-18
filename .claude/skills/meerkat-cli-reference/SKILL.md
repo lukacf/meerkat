@@ -160,7 +160,7 @@ Defaults:
 - `--tools safe`
 - default model is OpenAI `gpt-5.5` unless realm config/auth binding selects another model
 - current recommended Gemini model is `gemini-3.5-flash`
-- CLI realm state is project-local by default: `<context-root>/.rkat/realms/<ws-...>/`
+- CLI realm state is project-local by default: `<context-root>/.rkat/realms/<ws-...>/`; that head realm's config composes over its parent chain and the HOME-rooted `global` doc (`~/.rkat/config.toml`)
 - stream on in a TTY, off in pipes/scripts
 - piped stdin is blob context unless `--stdin lines`
 - short session handles are UUID tails; resume accepts full UUID, prefix/tail, `realm:<uuid>`, `last`, `~`, or `~N`
@@ -240,6 +240,27 @@ rkat realm delete <REALM_ID> [--force]
 rkat realm prune [--isolated-only] [--older-than-hours N] [--force]
 ```
 
+A realm is a config + state namespace. The reserved realm slug `global` is the
+universal default head of every realm chain; its config is the single HOME-rooted
+doc at `~/.rkat/config.toml`. A realm config doc may declare a parent in its own
+section:
+
+```toml
+[realm.team]
+parent = "global"
+# ... default_binding, [realm.team.backend.*], [realm.team.binding.*], etc.
+```
+
+Resolution walks the head realm to its parent chain to the implicit `global`
+tail (depth-capped, fail-closed; no flat sibling scan, no literal `default`
+realm). CONFIG inherits down the chain: models, mcp servers, hooks, skills,
+limits, and auth bindings. STATE never inherits: sessions, SQLite/JSONL stores,
+and event stores are realm-LOCAL. Children may ADD or OVERRIDE inherited
+mcp/hook entries but cannot REMOVE them (no tombstones). `rkat config get`/`set`
+operate on the RAW head realm doc (read/write split), so an inherited entry is
+never flattened into a child doc; a write to an inherited binding is rejected as
+strict-owner.
+
 ## Live channels
 
 There is no `rkat live` CLI group. Live channels are controlled through JSON-RPC
@@ -297,7 +318,11 @@ rkat config patch [FILE | --json <JSON>] [--expected-generation <N>]
 ```
 
 `set <FILE>` imports a file into the active realm config. Raw JSON merge patch
-uses `rkat config patch --json '{...}'`.
+uses `rkat config patch --json '{...}'`. `config get`/`set`/`patch` use the RAW
+head realm doc (read/write split): they show and write only the head realm's own
+fields, never the chain-composed effective config — so a read-modify-write cannot
+flatten inherited mcp/hook/skill/binding entries into the head doc. Inherited
+config is composed only on the agent-build path.
 
 ## Models And Capabilities
 
@@ -337,9 +362,23 @@ rkat auth logout <PROFILE_ID>
 rkat auth refresh <PROFILE_ID>
 ```
 
-`rkat auth login <provider>` is a convenience bootstrap for `dev:*` bindings.
-Interactive OAuth writes `dev:anthropic_oauth`, `dev:openai_oauth`, or
-`dev:google_oauth`; non-interactive api-key login writes `dev:default_<provider>`.
+`rkat auth login <provider>` provisions the reserved `global` realm in the
+HOME-rooted doc (`~/.rkat/config.toml`), so one sign-in is inherited by every
+workspace realm via the chain tail (cross-workspace). Interactive OAuth writes
+`global:anthropic_oauth`, `global:openai_oauth`, or `global:google_oauth`;
+non-interactive api-key login writes `global:default_<provider>`. Legacy logins
+persisted under `dev`; on the run path those credentials and the `[realm.global]`
+binding section migrate to `global` once (idempotent, no-clobber), so an existing
+sign-in keeps working without re-login. There is no `dev` default anymore.
+
+`rkat auth realms` lists every configured realm section; `rkat auth status`,
+`test`, `refresh`, and `logout` are binding-scoped (AuthMachine leases are
+binding-scoped). Credential READS inherit down the chain (a child realm resolves
+a binding defined in a parent or in `global`); a resolved binding's reported
+owning realm is the realm that DEFINES it, not the requesting realm. Credential
+WRITES are strict-owner: `auth login` and config writes land only in the realm
+that OWNS the binding — you cannot write into an inherited realm's doc from a
+child.
 
 Runtime env fallback order:
 

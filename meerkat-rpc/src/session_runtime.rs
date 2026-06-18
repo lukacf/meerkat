@@ -1319,6 +1319,19 @@ pub struct SessionRuntime {
     /// Phase 4 R1: slot-shared with the inner [`MeerkatSessionRuntime`].
     backend: Arc<StdRwLock<Option<String>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+    /// Per-realm config-document source for inheritance composition (decision
+    /// 2/3). When present, the auth-resolution read path composes the active
+    /// realm's parent chain (workspace head ⊕ home-rooted `global`) into the
+    /// effective [`Config`] consumed by `resolve_oauth_target` /
+    /// `resolve_write_owner` so an inherited (`global`-owned) binding is visible
+    /// to the strict-owner write guard. The raw `config_runtime` stays the
+    /// authority for `config get/set` (writes never compose — read/write split).
+    realm_config_source: Arc<StdRwLock<Option<Arc<dyn meerkat_core::RealmConfigSource>>>>,
+    /// Builder-shared inheritance slot. Populated by [`Self::set_realm_config_source`]
+    /// so the agent-BUILD path (`FactoryAgentBuilder::resolve_config`) composes the
+    /// active realm's parent chain into the effective config — not just the
+    /// auth-resolution read path. Same `Arc` the live builder reads.
+    builder_realm_inheritance: Arc<StdRwLock<Option<meerkat::RealmInheritance>>>,
     runtime_adapter: Arc<MeerkatMachine>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
@@ -1711,11 +1724,13 @@ impl SessionRuntime {
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+        let builder_realm_inheritance = Arc::clone(&builder.realm_inheritance);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let builder_agent_llm_client_decorator_slot =
             Arc::clone(&builder.default_agent_llm_client_decorator);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
+        let realm_config_source = Arc::new(StdRwLock::new(None));
         let staged_sessions = Arc::new(StagedSessionRegistry::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
@@ -1747,6 +1762,7 @@ impl SessionRuntime {
                 default_llm_client: Arc::clone(&default_llm_client),
                 agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
                 config_runtime: Arc::clone(&config_runtime),
+                realm_inheritance: Arc::clone(&builder_realm_inheritance),
             },
         ));
 
@@ -1807,6 +1823,8 @@ impl SessionRuntime {
             instance_id,
             backend,
             config_runtime,
+            realm_config_source,
+            builder_realm_inheritance,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry,
@@ -1846,11 +1864,13 @@ impl SessionRuntime {
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+        let builder_realm_inheritance = Arc::clone(&builder.realm_inheritance);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let builder_agent_llm_client_decorator_slot =
             Arc::clone(&builder.default_agent_llm_client_decorator);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
+        let realm_config_source = Arc::new(StdRwLock::new(None));
         let staged_sessions = Arc::new(StagedSessionRegistry::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
@@ -1882,6 +1902,7 @@ impl SessionRuntime {
                 default_llm_client: Arc::clone(&default_llm_client),
                 agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
                 config_runtime: Arc::clone(&config_runtime),
+                realm_inheritance: Arc::clone(&builder_realm_inheritance),
             },
         ));
 
@@ -1942,6 +1963,8 @@ impl SessionRuntime {
             instance_id,
             backend,
             config_runtime,
+            realm_config_source,
+            builder_realm_inheritance,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry,
@@ -2056,6 +2079,41 @@ impl SessionRuntime {
     /// Shared config runtime used by config handlers.
     pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
         self.config_runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Attach the per-realm config-document source used by the auth-resolution
+    /// read path AND the agent-BUILD path to compose the active realm's parent
+    /// chain (inheritance).
+    ///
+    /// Also populates the builder-shared inheritance slot so
+    /// `FactoryAgentBuilder::resolve_config` folds the active realm's parent
+    /// chain (head ⊕ ancestors ⊕ `global` tail) into the effective config on
+    /// every build. The head realm is this runtime's active realm, defaulting to
+    /// the reserved `global` realm when none is configured — matching the
+    /// connection resolver's head default.
+    ///
+    /// Writes never compose — `config get/set` stay on the raw `config_runtime`.
+    pub fn set_realm_config_source(&mut self, source: Arc<dyn meerkat_core::RealmConfigSource>) {
+        let head = self
+            .realm_id()
+            .unwrap_or_else(meerkat_core::connection::RealmId::global);
+        *self
+            .realm_config_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&source));
+        *self
+            .builder_realm_inheritance
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(meerkat::RealmInheritance::new(source, head));
+    }
+
+    /// Per-realm config-document source for inheritance composition, if attached.
+    pub fn realm_config_source(&self) -> Option<Arc<dyn meerkat_core::RealmConfigSource>> {
+        self.realm_config_source
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -3262,8 +3320,14 @@ impl SessionRuntime {
             .clone()
     }
 
-    async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RpcError> {
-        let config = if let Some(runtime) = self.config_runtime() {
+    /// Compose the active realm chain over the durable head config — the
+    /// effective config every model-resolution read path (registry, create
+    /// default-model) must use so an inherited (ancestor-realm) self-hosted alias
+    /// or default model resolves like the agent build + hot-swap paths. The
+    /// `config get/set` path keeps reading the RAW head store (read/write split).
+    /// Fail-closed: a compose error propagates.
+    pub async fn effective_config(&self) -> Result<meerkat_core::Config, RpcError> {
+        let head_config = if let Some(runtime) = self.config_runtime() {
             runtime
                 .get()
                 .await
@@ -3277,7 +3341,28 @@ impl SessionRuntime {
             meerkat_core::Config::default()
         };
 
-        config
+        let inheritance = self
+            .builder_realm_inheritance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(inheritance) = inheritance {
+            inheritance
+                .compose_over(head_config)
+                .await
+                .map_err(|e| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("Failed to compose realm config chain: {e}"),
+                    data: None,
+                })
+        } else {
+            Ok(head_config)
+        }
+    }
+
+    async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RpcError> {
+        self.effective_config()
+            .await?
             .model_registry(meerkat_models::canonical())
             .map_err(|e| RpcError {
                 code: error::INTERNAL_ERROR,
@@ -3597,6 +3682,7 @@ impl SessionRuntime {
             default_llm_client: Arc::clone(&self.default_llm_client),
             agent_llm_client_decorator: Arc::clone(&self.agent_llm_client_decorator),
             config_runtime: Arc::clone(&self.config_runtime),
+            realm_inheritance: Arc::clone(&self.builder_realm_inheritance),
         }
     }
 

@@ -75,7 +75,7 @@ fn canonical_toml_populates_config_realm_without_regressing_flat_provider() {
     let config = load_config();
 
     // Top-level scalar fields parse alongside [realm.*] tables.
-    assert_eq!(config.max_tokens, 4096);
+    assert_eq!(config.max_tokens, Some(4096));
 
     // Realm path populated.
     let section = dev_section(&config);

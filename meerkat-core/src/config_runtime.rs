@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(baseline.generation, 0);
 
         let mut updated = baseline.config.clone();
-        updated.agent.max_tokens_per_turn = 777;
+        updated.agent.max_tokens_per_turn = Some(777);
         let after = runtime.set(updated, Some(0)).await.unwrap();
         assert_eq!(after.generation, 1);
 

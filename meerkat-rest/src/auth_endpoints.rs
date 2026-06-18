@@ -44,11 +44,29 @@ use meerkat_providers::oauth_flow::{
 use crate::AppState;
 
 async fn load_config(state: &AppState) -> Result<meerkat_core::Config, (StatusCode, String)> {
-    state
+    // Auth resolution reads the COMPOSED chain config (workspace head ⊕
+    // home-rooted `global`) so a binding inherited from an ancestor realm is
+    // visible to reads. The strict-owner WRITE gate (resolve_write_owner) then
+    // rejects persists that would target an inherited binding. Composition is
+    // read-only; `config get/set` stay on the RAW head store (`config_runtime`).
+    // The HEAD realm's config comes from the surface's own config_runtime
+    // (authoritative — may be in-memory in tests); the source supplies only the
+    // ancestor docs (the `global` tail). Composing purely from the filesystem
+    // source would drop a head config held in memory.
+    let head = state
         .config_runtime
         .get()
         .await
         .map(|snap| snap.config)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load config: {e}"),
+            )
+        })?;
+    meerkat_core::EffectiveConfigReader::new(std::sync::Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm, head)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -94,13 +112,50 @@ async fn resolve_binding_identity(
         profile: profile_id.cloned(),
         origin: meerkat_core::BindingOrigin::Configured,
     };
-    let (binding, _, auth_profile) = realm.lookup_auth_binding(&auth_binding).map_err(|e| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
-        )
-    })?;
-    Ok((auth_binding, binding.clone(), auth_profile.clone()))
+    match realm.lookup_auth_binding(&auth_binding) {
+        Ok((binding, _, auth_profile)) => Ok((auth_binding, binding.clone(), auth_profile.clone())),
+        Err(e) => {
+            // Strict-owner write (decision 5) is owned by ONE core seam; this
+            // surface only maps the typed verdict to an HTTP status.
+            let config = load_config(state).await?;
+            match meerkat_core::connection::resolve_write_owner(&config, realm_id, binding_id) {
+                Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => {
+                    Err((StatusCode::CONFLICT, inherited.to_string()))
+                }
+                _ => Err((
+                    StatusCode::NOT_FOUND,
+                    format!("Unknown auth identity {realm_id}:{binding_id}: {e}"),
+                )),
+            }
+        }
+    }
+}
+
+/// Strict-owner WRITE gate (decision 5) for the OAuth credential-persist
+/// endpoints. Credential READS inherit down the realm chain, but WRITES are
+/// strict-owner: a persist that targets a `(requested_realm, binding)` whose
+/// binding is only inherited from an ancestor must be REJECTED (the client must
+/// re-target the owning realm), not silently persisted into the consuming child
+/// — otherwise a child realm could shadow the owner's credential.
+///
+/// `requested_realm` is the realm the client asked for (pre owner-stamping);
+/// the OAuth target resolution owner-stamps `auth_binding.realm` to the owner,
+/// which would mask the inheritance, so this gate runs against the requested
+/// realm. Mirrors the `resolve_binding_identity` mapping: only the typed
+/// `Inherited` verdict is fatal (CONFLICT, naming the owner); `Unknown`/`Chain`
+/// are left to the resolve path that already classified the target as valid.
+async fn ensure_oauth_write_owner(
+    state: &AppState,
+    requested_realm: &RealmId,
+    binding_id: &BindingId,
+) -> Result<(), (StatusCode, String)> {
+    let config = load_config(state).await?;
+    match meerkat_core::connection::resolve_write_owner(&config, requested_realm, binding_id) {
+        Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => {
+            Err((StatusCode::CONFLICT, inherited.to_string()))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
@@ -112,7 +167,8 @@ fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
         ConnectionTargetError::MissingRealm
         | ConnectionTargetError::InvalidRealmId { .. }
         | ConnectionTargetError::InvalidBindingId { .. }
-        | ConnectionTargetError::ProviderMismatch { .. } => StatusCode::BAD_REQUEST,
+        | ConnectionTargetError::ProviderMismatch { .. }
+        | ConnectionTargetError::RealmChain(_) => StatusCode::BAD_REQUEST,
     }
 }
 
@@ -984,6 +1040,11 @@ pub async fn start_login(
                 .into_response();
         }
     };
+    // Strict-owner write gate: reject before starting an OAuth flow that would
+    // persist credentials for a binding inherited from an ancestor realm.
+    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
+        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
     let target = match resolve_oauth_target(
         &state,
         resolved.provider,
@@ -1074,6 +1135,11 @@ pub async fn complete_login(
         }
     };
     let provider = resolved.provider;
+    // Strict-owner write gate: reject persisting credentials for a binding
+    // inherited from an ancestor realm (the client must target the owner).
+    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
+        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
     let target = match resolve_oauth_target(
         &state,
         provider,
@@ -1294,6 +1360,11 @@ pub async fn start_device_login(
         )
             .into_response();
     }
+    // Strict-owner write gate: reject before starting a device-code flow that
+    // would persist credentials for a binding inherited from an ancestor realm.
+    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
+        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
     let target = match resolve_oauth_target(
         &state,
         resolved.provider,
@@ -1412,6 +1483,11 @@ pub async fn complete_device_login(
             })),
         )
             .into_response();
+    }
+    // Strict-owner write gate: reject persisting credentials for a binding
+    // inherited from an ancestor realm (the client must target the owner).
+    if let Err((status, msg)) = ensure_oauth_write_owner(&state, &realm_id, &binding_id).await {
+        return (status, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     let target = match resolve_oauth_target(
         &state,

@@ -35,7 +35,17 @@ pub struct Config {
     pub tools: ToolsConfig,
     // New schema fields for interface consolidation.
     pub models: ModelDefaults,
-    pub max_tokens: u32,
+    /// Top-level per-turn output-token limit.
+    ///
+    /// `None` means "inherit / use the template default"; an explicit value
+    /// (including one equal to the template default) is an override that wins
+    /// over an inherited parent realm value. The operative runtime value is
+    /// resolved at point-of-use via [`Config::resolved_max_tokens`] — keeping
+    /// the field optional is what lets realm inheritance distinguish "unset"
+    /// from "explicitly set to the default" (presence, not a `!= default`
+    /// heuristic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     pub shell: ShellDefaults,
     pub store: StoreConfig,
     pub comms: CommsRuntimeConfig,
@@ -59,12 +69,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let defaults = template_defaults();
         let agent = AgentConfig::default();
-        let max_tokens = defaults
-            .max_tokens
-            .filter(|value| *value > 0)
-            .unwrap_or(agent.max_tokens_per_turn);
         Self {
             agent,
             storage: StorageConfig::default(),
@@ -72,7 +77,11 @@ impl Default for Config {
             retry: RetryConfig::default(),
             tools: ToolsConfig::default(),
             models: ModelDefaults::default(),
-            max_tokens,
+            // `None` = use the template/resolved default at point-of-use. Do
+            // NOT materialize the template value here: a concrete default would
+            // make realm inheritance unable to tell "unset" from "explicitly set
+            // to the default". See [`Config::resolved_max_tokens`].
+            max_tokens: None,
             shell: ShellDefaults::default(),
             store: StoreConfig::default(),
             comms: CommsRuntimeConfig::default(),
@@ -286,7 +295,7 @@ impl Config {
         if other.agent.model != AgentConfig::default().model {
             self.agent.model = other.agent.model;
         }
-        if other.agent.max_tokens_per_turn != AgentConfig::default().max_tokens_per_turn {
+        if other.agent.max_tokens_per_turn.is_some() {
             self.agent.max_tokens_per_turn = other.agent.max_tokens_per_turn;
         }
         if other.agent.extraction_prompt.is_some() {
@@ -312,10 +321,23 @@ impl Config {
         self.merge_tools(&other.tools);
 
         // New schema fields (replace if non-default)
-        if other.models != ModelDefaults::default() {
-            self.models = other.models;
+        // Per-provider union, child-wins: a child overriding its anthropic
+        // default still inherits the parent's openai default. Custom model
+        // registry entries union by id (child overrides the same id).
+        let default_models = ModelDefaults::default();
+        if other.models.anthropic != default_models.anthropic {
+            self.models.anthropic = other.models.anthropic;
         }
-        if other.max_tokens != Config::default().max_tokens {
+        if other.models.openai != default_models.openai {
+            self.models.openai = other.models.openai;
+        }
+        if other.models.gemini != default_models.gemini {
+            self.models.gemini = other.models.gemini;
+        }
+        for (id, entry) in other.models.custom {
+            self.models.custom.insert(id, entry);
+        }
+        if other.max_tokens.is_some() {
             self.max_tokens = other.max_tokens;
         }
         if other.shell != ShellDefaults::default() {
@@ -330,8 +352,16 @@ impl Config {
         if other.compaction != CompactionRuntimeConfig::default() {
             self.compaction = other.compaction;
         }
-        if other.limits != LimitsConfig::default() {
-            self.limits = other.limits;
+        // Per-field child-wins so a child tightens one limit while inheriting
+        // the rest of the caps.
+        if other.limits.budget.is_some() {
+            self.limits.budget = other.limits.budget;
+        }
+        if other.limits.max_sessions.is_some() {
+            self.limits.max_sessions = other.limits.max_sessions;
+        }
+        if other.limits.max_duration.is_some() {
+            self.limits.max_duration = other.limits.max_duration;
         }
         if other.rest != RestServerConfig::default() {
             self.rest = other.rest;
@@ -353,6 +383,41 @@ impl Config {
             self.model_fallback = ModelFallbackConfig::default();
         } else if other.model_fallback != ModelFallbackConfig::default() {
             self.model_fallback = other.model_fallback;
+        }
+
+        // Skills: scalar toggles child-wins when non-default; repositories
+        // append parent-first, with a child shadowing a same-named parent
+        // source rather than dropping the rest. No removal of inherited sources.
+        let default_skills = crate::skills_config::SkillsConfig::default();
+        if other.skills.enabled != default_skills.enabled {
+            self.skills.enabled = other.skills.enabled;
+        }
+        if other.skills.max_injection_bytes != default_skills.max_injection_bytes {
+            self.skills.max_injection_bytes = other.skills.max_injection_bytes;
+        }
+        if other.skills.inventory_threshold != default_skills.inventory_threshold {
+            self.skills.inventory_threshold = other.skills.inventory_threshold;
+        }
+        for repo in other.skills.repositories {
+            if let Some(existing) = self
+                .skills
+                .repositories
+                .iter_mut()
+                .find(|existing| existing.name == repo.name)
+            {
+                *existing = repo;
+            } else {
+                self.skills.repositories.push(repo);
+            }
+        }
+
+        // Realm sections: OUTER-KEY union, child-wins. A child's `[realm.X]`
+        // entry overrides/adds at the realm-id level; the backend/auth/binding
+        // sub-maps are NEVER merged across realms, so each section stays intact
+        // and the chain walk resolves a binding only within its owning realm
+        // (MF-11, preserves the no-inherit-for-backend/auth invariant).
+        for (realm_id, section) in other.realm {
+            self.realm.insert(realm_id, section);
         }
     }
 
@@ -377,8 +442,20 @@ impl Config {
 
     fn merge_tools(&mut self, other: &ToolsConfig) {
         let defaults = ToolsConfig::default();
-        if !other.mcp_servers.is_empty() {
-            self.tools.mcp_servers.clone_from(&other.mcp_servers);
+        // Union by server name, child-wins; never remove inherited servers
+        // (an empty child list keeps the parent's set — emptiness != removal,
+        // no tombstones).
+        for server in &other.mcp_servers {
+            if let Some(existing) = self
+                .tools
+                .mcp_servers
+                .iter_mut()
+                .find(|existing| existing.name == server.name)
+            {
+                existing.clone_from(server);
+            } else {
+                self.tools.mcp_servers.push(server.clone());
+            }
         }
         if other.default_timeout != defaults.default_timeout {
             self.tools.default_timeout = other.default_timeout;
@@ -413,9 +490,12 @@ impl Config {
         let Some(tools) = parsed.get("tools").and_then(toml::Value::as_table) else {
             return;
         };
-        if tools.contains_key("mcp_servers") {
-            self.tools.mcp_servers.clone_from(&layer.mcp_servers);
-        }
+        // NOTE: `mcp_servers` is deliberately NOT presence-replaced here. It is a
+        // union-by-name collection (no tombstones) handled by `merge_tools`
+        // (the value-merge); replacing it with only the current layer's servers
+        // would drop inherited parent-realm servers when this helper runs on the
+        // realm-composition path. The union is presence-correct on its own — a
+        // child realm ADDS/overrides servers and can never shed an inherited one.
         if tools.contains_key("default_timeout") {
             self.tools.default_timeout = layer.default_timeout;
         }
@@ -598,6 +678,9 @@ impl Config {
                     if model_table.contains_key("supports_reasoning") {
                         merged.supports_reasoning = model_layer.supports_reasoning;
                     }
+                    if model_table.contains_key("supports_web_search") {
+                        merged.supports_web_search = model_layer.supports_web_search;
+                    }
                     if model_table.contains_key("call_timeout_secs") {
                         merged.call_timeout_secs = model_layer.call_timeout_secs;
                     }
@@ -663,6 +746,20 @@ impl Config {
 }
 
 impl Config {
+    /// Resolve the operative top-level per-turn output-token limit.
+    ///
+    /// Precedence: explicit `max_tokens` → embedded template `max_tokens` →
+    /// the agent's [`AgentConfig::resolved_max_tokens_per_turn`]. Keeping the
+    /// field `Option` (rather than materializing a default) is what lets realm
+    /// inheritance distinguish an unset child (inherit the parent) from a child
+    /// that explicitly pins the default (override the parent).
+    pub fn resolved_max_tokens(&self) -> u32 {
+        self.max_tokens
+            .or_else(|| template_defaults().max_tokens)
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| self.agent.resolved_max_tokens_per_turn())
+    }
+
     /// Validate configuration invariants.
     ///
     /// Called after loading and after persisting. Checks:
@@ -672,14 +769,14 @@ impl Config {
     /// - The effective model registry (custom + self-hosted entries merged
     ///   over the injected catalog) constructs without conflicts
     pub fn validate(&self, catalog: crate::model_profile::ModelCatalog) -> Result<(), ConfigError> {
-        if self.max_tokens == 0 {
+        if self.max_tokens == Some(0) {
             return Err(ConfigError::Validation(
-                "max_tokens must be greater than 0".to_string(),
+                "max_tokens must be greater than 0 when set".to_string(),
             ));
         }
-        if self.agent.max_tokens_per_turn == 0 {
+        if self.agent.max_tokens_per_turn == Some(0) {
             return Err(ConfigError::Validation(
-                "agent.max_tokens_per_turn must be greater than 0".to_string(),
+                "agent.max_tokens_per_turn must be greater than 0 when set".to_string(),
             ));
         }
         if self.budget.max_tokens == Some(0) {
@@ -758,6 +855,12 @@ pub fn default_structured_output_retries() -> u32 {
 /// run-loop seam.
 pub const DEFAULT_MAX_TURNS: u32 = 100;
 
+/// Final fallback for the per-turn output-token limit when neither the config
+/// nor the embedded template provides one. Materialized at point-of-use only;
+/// the config fields stay `Option` so realm inheritance keeps presence
+/// semantics (see [`Config::max_tokens`] / [`AgentConfig::max_tokens_per_turn`]).
+pub const DEFAULT_MAX_TOKENS_PER_TURN: u32 = 16384;
+
 /// Agent behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -770,8 +873,13 @@ pub struct AgentConfig {
     pub tool_instructions: Option<String>,
     /// Model identifier (provider-specific)
     pub model: String,
-    /// Maximum tokens to generate per turn
-    pub max_tokens_per_turn: u32,
+    /// Maximum tokens to generate per turn.
+    ///
+    /// `None` means "inherit / use the template default"; an explicit value is
+    /// an override that wins over an inherited parent realm value. Resolve the
+    /// operative value via [`AgentConfig::resolved_max_tokens_per_turn`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_per_turn: Option<u32>,
     /// Temperature for sampling
     pub temperature: Option<f32>,
     /// Warning threshold for budget (0.0-1.0)
@@ -826,9 +934,10 @@ impl Default for AgentConfig {
             system_prompt_file: None,
             tool_instructions: None,
             model: agent.and_then(|cfg| cfg.model.clone()).unwrap_or_default(),
-            max_tokens_per_turn: agent
-                .and_then(|cfg| cfg.max_tokens_per_turn)
-                .unwrap_or_default(),
+            // `None` = inherit / resolve the template default at point-of-use
+            // (see [`AgentConfig::resolved_max_tokens_per_turn`]); never
+            // materialize a concrete default into the field (presence semantics).
+            max_tokens_per_turn: None,
             temperature: None,
             budget_warning_threshold: agent
                 .and_then(|cfg| cfg.budget_warning_threshold)
@@ -839,6 +948,24 @@ impl Default for AgentConfig {
             structured_output_retries: default_structured_output_retries(),
             extraction_prompt: None,
         }
+    }
+}
+
+impl AgentConfig {
+    /// Resolve the operative per-turn output-token limit.
+    ///
+    /// Precedence: explicit field → embedded template → [`DEFAULT_MAX_TOKENS_PER_TURN`].
+    /// A `Some(0)` is rejected by [`Config::validate`], so it never reaches here.
+    pub fn resolved_max_tokens_per_turn(&self) -> u32 {
+        self.max_tokens_per_turn
+            .or_else(|| {
+                template_defaults()
+                    .agent
+                    .as_ref()
+                    .and_then(|cfg| cfg.max_tokens_per_turn)
+            })
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_TOKENS_PER_TURN)
     }
 }
 
@@ -2248,6 +2375,91 @@ pub enum ConfigError {
 
     #[error("Validation error: {0}")]
     Validation(String),
+
+    #[error("realm inheritance chain error: {0}")]
+    RealmChain(#[from] crate::connection::RealmChainError),
+}
+
+/// Compose the effective flat [`Config`] for `head` by folding the per-realm
+/// config docs along `head`'s parent chain, root-first / child-wins.
+///
+/// `docs` is the set of fetched per-realm Configs keyed by realm id. An absent
+/// ancestor simply contributes nothing — it is NOT a `Config::default` clobber
+/// (the caller passes only the docs it actually found; see
+/// [`crate::config_store::RealmConfigSource`]). [`crate::connection::RealmChain`]
+/// is the single chain authority (cycle/depth/global/env_default validation),
+/// so this composition order can never diverge from the connection resolvers'
+/// chain order. The fold reuses the one [`Config::merge`] engine.
+pub fn compose_effective_config(
+    docs: &std::collections::BTreeMap<crate::connection::RealmId, Config>,
+    raw_docs: &std::collections::BTreeMap<crate::connection::RealmId, toml::Value>,
+    head: &crate::connection::RealmId,
+) -> Result<Config, crate::connection::RealmChainError> {
+    use crate::connection::RealmChain;
+    // Combined topology: union every fetched doc's realm sections so the chain
+    // authority sees each member's parent edge regardless of which doc carried
+    // it. Outer-key only — sub-maps are never merged across realms.
+    let mut topology = Config::default();
+    for doc in docs.values() {
+        for (realm_id, section) in &doc.realm {
+            topology.realm.insert(realm_id.clone(), section.clone());
+        }
+    }
+    let chain = RealmChain::resolve(&topology, head)?;
+    // Fold root-first (chain is head-first, so iterate reversed) — the
+    // most-derived head merges last and wins.
+    let mut effective = Config::default();
+    let default_self_hosted = SelfHostedConfig::default();
+    let default_provider_tools = ProviderToolsConfig::default();
+    for member in chain.realms().iter().rev() {
+        if let Some(doc) = docs.get(member) {
+            effective.merge(doc.clone());
+            // Presence-aware correction. `Config::merge` uses a `!= default`
+            // heuristic that cannot distinguish an unset scalar from one
+            // explicitly set to its struct default — so a child cannot override
+            // a parent's non-default `tools.*_enabled` toggle (or max_concurrent
+            // / timeouts / retry field) back to the default. When the doc's raw
+            // TOML is available (filesystem source), re-apply the same
+            // presence helpers `apply_toml` uses, so an EXPLICIT child key wins
+            // even when its value equals the default — honoring the plan's
+            // `child-wins-scalar` contract. Without raw TOML (e.g. an in-memory
+            // head supplied to `effective_config_over_head`) this is a no-op and
+            // the value-merge stands.
+            // `Config::merge` does NOT carry self_hosted/provider_tools at all,
+            // so when raw TOML is available the presence helpers are the sole
+            // composition path for them (and for the tools/retry presence-
+            // sensitive scalars). They honor an explicit child key even when its
+            // value equals the struct default — so a child realm can re-enable a
+            // parent-disabled provider web_search (default true) it inherited.
+            if let Some(raw) = raw_docs.get(member) {
+                effective.merge_tools_from_toml_presence(raw, &doc.tools);
+                effective.merge_retry_from_toml_presence(raw, &doc.retry);
+                effective.merge_provider_tools_from_toml_presence(raw, &doc.provider_tools);
+                effective.merge_self_hosted_from_toml_presence(raw, &doc.self_hosted);
+            } else {
+                // No raw TOML for this doc (e.g. a non-filesystem source): fall
+                // back to a whole-section child-wins swap so self_hosted /
+                // provider_tools still compose (the value-merge ignores them).
+                if doc.self_hosted != default_self_hosted {
+                    effective.self_hosted = doc.self_hosted.clone();
+                }
+                if doc.provider_tools != default_provider_tools {
+                    effective.provider_tools = doc.provider_tools.clone();
+                }
+            }
+        }
+    }
+    // NOTE (Finding D, non-blocking per adversarial review): `effective.realm`
+    // is the outer-key union of every folded doc's sections (via Config::merge),
+    // so a doc that hand-places a foreign `[realm.X]` (X != its owning realm)
+    // could shadow the authoritative ancestor section. Reachability is narrow —
+    // the standard tooling reads `global` from a dedicated home-rooted doc and
+    // each realm from its own path, never co-locating a foreign section — and a
+    // strict owner-only rebuild is INCOMPATIBLE with the supported
+    // single-file-multiple-realms model (one doc carrying `[realm.a]`,
+    // `[realm.b]`, ... is how the CLI and surfaces resolve a `--realm`/section
+    // that is not itself a chain member). Tracked, not gated.
+    Ok(effective)
 }
 
 /// Serde helpers for Option<Duration> with humantime format
@@ -2351,7 +2563,10 @@ mod tests {
             "core embeds no provider data: the default agent model is empty \
              and resolves through the injected catalog at build time"
         );
-        assert_eq!(config.agent.max_tokens_per_turn, 16384);
+        // The field is `None` by default (presence semantics for realm
+        // inheritance); the operative default resolves to the template's 16384.
+        assert_eq!(config.agent.max_tokens_per_turn, None);
+        assert_eq!(config.agent.resolved_max_tokens_per_turn(), 16384);
         assert_eq!(config.retry.max_retries, 3);
         assert_eq!(config.max_sessions(), DEFAULT_MAX_SESSIONS);
     }
@@ -2485,6 +2700,169 @@ model = "custom-model"
             .map(|entry| entry.id.0.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["base", "other"]);
+    }
+
+    // ---- P3a: Config::merge inheritance reworks ---------------------------
+
+    fn mcp_server(name: &str, command: &str) -> crate::mcp_config::McpServerConfig {
+        crate::mcp_config::McpServerConfig {
+            name: name.to_string(),
+            transport: crate::mcp_config::McpTransportConfig::Stdio(
+                crate::mcp_config::McpStdioConfig {
+                    command: command.to_string(),
+                    args: Vec::new(),
+                    env: std::collections::HashMap::new(),
+                },
+            ),
+            connect_timeout_secs: None,
+        }
+    }
+
+    fn skill_repo(
+        name: &str,
+        uuid: &str,
+        path: &str,
+    ) -> crate::skills_config::SkillRepositoryConfig {
+        crate::skills_config::SkillRepositoryConfig {
+            name: name.to_string(),
+            source_uuid: crate::skills::SourceUuid::parse(uuid).expect("valid uuid"),
+            transport: crate::skills_config::SkillRepoTransport::Filesystem {
+                path: path.to_string(),
+            },
+        }
+    }
+
+    // RCT-12
+    #[test]
+    fn effective_config_unions_model_defaults_child_wins() {
+        let mut base = Config::default();
+        base.models.openai = "parent-openai".to_string();
+        base.models.anthropic = "parent-anthropic".to_string();
+        let mut child = Config::default();
+        child.models.anthropic = "child-anthropic".to_string();
+        base.merge(child);
+        assert_eq!(
+            base.models.openai, "parent-openai",
+            "child inherits the parent's openai default"
+        );
+        assert_eq!(
+            base.models.anthropic, "child-anthropic",
+            "child overrides only its anthropic default"
+        );
+    }
+
+    // RCT-14
+    #[test]
+    fn effective_config_unions_mcp_limits_skills() {
+        let mut base = Config::default();
+        base.limits.budget = Some(1000);
+        base.tools.mcp_servers = vec![mcp_server("shared", "base-cmd")];
+        base.skills.repositories = vec![skill_repo(
+            "base-repo",
+            "00000000-0000-4000-8000-000000000001",
+            "/b",
+        )];
+
+        let mut child = Config::default();
+        child.limits.max_sessions = Some(7);
+        child.tools.mcp_servers = vec![mcp_server("shared", "child-cmd"), mcp_server("extra", "x")];
+        child.skills.repositories = vec![skill_repo(
+            "child-repo",
+            "00000000-0000-4000-8000-000000000002",
+            "/c",
+        )];
+
+        base.merge(child);
+
+        // limits: per-field child-wins (both survive).
+        assert_eq!(base.limits.budget, Some(1000));
+        assert_eq!(base.limits.max_sessions, Some(7));
+
+        // mcp: union by name, child overrides same name, appends new.
+        let names: Vec<&str> = base
+            .tools
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["shared", "extra"]);
+        let shared = base
+            .tools
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == "shared")
+            .unwrap();
+        assert!(
+            matches!(
+                &shared.transport,
+                crate::mcp_config::McpTransportConfig::Stdio(c) if c.command == "child-cmd"
+            ),
+            "child overrides the same-named inherited server"
+        );
+
+        // skills: repositories append parent-first.
+        let repos: Vec<&str> = base
+            .skills
+            .repositories
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(repos, vec!["base-repo", "child-repo"]);
+    }
+
+    // RCT-15
+    #[test]
+    fn config_merge_folds_realm_map_child_wins() {
+        let mut base = Config::default();
+        base.realm.insert(
+            "global".to_string(),
+            crate::connection::RealmConfigSection::default(),
+        );
+        let mut child = Config::default();
+        child.realm.insert(
+            "team".to_string(),
+            crate::connection::RealmConfigSection {
+                parent: Some(crate::connection::RealmId::global()),
+                ..Default::default()
+            },
+        );
+        base.merge(child);
+        assert!(base.realm.contains_key("global"), "inherited realm visible");
+        assert!(base.realm.contains_key("team"));
+        assert_eq!(
+            base.realm.get("team").and_then(|s| s.parent.clone()),
+            Some(crate::connection::RealmId::global())
+        );
+    }
+
+    // RCT-37
+    #[test]
+    fn child_cannot_remove_inherited_mcp_or_hook_entries() {
+        let mut base = Config::default();
+        base.tools.mcp_servers = vec![mcp_server("inherited", "cmd")];
+        base.hooks.entries.push(HookEntryConfig {
+            id: HookId::new("inherited-hook"),
+            ..HookEntryConfig::default()
+        });
+
+        // Child sets nothing: an empty child must NOT drop inherited entries
+        // (emptiness != removal, no tombstones).
+        let child = Config::default();
+        base.merge(child);
+
+        assert_eq!(
+            base.tools.mcp_servers.len(),
+            1,
+            "empty child must not remove an inherited mcp server"
+        );
+        assert_eq!(base.tools.mcp_servers[0].name, "inherited");
+        assert!(
+            base.hooks
+                .entries
+                .iter()
+                .any(|h| h.id.0.as_str() == "inherited-hook"),
+            "empty child must not remove an inherited hook"
+        );
     }
 
     #[test]
@@ -2908,7 +3286,7 @@ api_style = "chat_completions"
     #[test]
     fn test_validate_rejects_zero_max_tokens() {
         let config = Config {
-            max_tokens: 0,
+            max_tokens: Some(0),
             ..Config::default()
         };
         let err = config
@@ -2933,7 +3311,7 @@ api_style = "chat_completions"
     #[test]
     fn test_validate_rejects_zero_agent_max_tokens_per_turn() {
         let mut config = Config::default();
-        config.agent.max_tokens_per_turn = 0;
+        config.agent.max_tokens_per_turn = Some(0);
         let err = config
             .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect_err("agent.max_tokens_per_turn=0 should be invalid");

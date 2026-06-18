@@ -355,9 +355,13 @@ rkat auth logout <PROFILE_ID>
 rkat auth refresh <PROFILE_ID>
 ```
 
-CLI `login` bootstraps fixed `dev:*` bindings. Interactive OAuth writes
-`dev:anthropic_oauth`, `dev:openai_oauth`, or `dev:google_oauth`;
-non-interactive api-key login writes `dev:default_<provider>`.
+CLI `login` provisions the reserved `global` realm in the HOME-rooted doc
+(`~/.rkat/config.toml`), inherited by every workspace realm via the chain tail.
+Interactive OAuth writes `global:anthropic_oauth`, `global:openai_oauth`, or
+`global:google_oauth`; non-interactive api-key login writes
+`global:default_<provider>`. Legacy `dev`-realm logins migrate to `global` on the
+run path (idempotent, no-clobber). Credential reads inherit down the chain;
+writes are strict-owner (land only in the realm that defines the binding).
 
 ### Scheduling
 

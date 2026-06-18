@@ -111,7 +111,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
     std::env::set_current_dir(&project_dir)?;
 
     let mut config = Config::default();
-    config.agent.max_tokens_per_turn = 128;
+    config.agent.max_tokens_per_turn = Some(128);
     let config_toml = toml::to_string_pretty(&config)?;
     tokio::fs::write(project_dir.join(".rkat/config.toml"), config_toml).await?;
 
@@ -207,7 +207,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
 
     let mut config_alt = config.clone();
     config_alt.agent.model = "gpt-4o-mini".into();
-    config_alt.agent.max_tokens_per_turn = 7;
+    config_alt.agent.max_tokens_per_turn = Some(7);
     let config_toml = toml::to_string_pretty(&config_alt)?;
     tokio::fs::write(project_dir.join(".rkat/config.toml"), config_toml).await?;
 

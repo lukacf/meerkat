@@ -1034,7 +1034,9 @@ async fn config_get_patch_roundtrip() {
     let get_resp = read_response(&mut reader).await;
     assert_eq!(get_resp["id"], 1);
     assert!(get_resp["error"].is_null(), "config/get failed: {get_resp}");
-    let initial_max_tokens = get_resp["result"]["config"]["max_tokens"].as_u64().unwrap();
+    let initial_max_tokens = get_resp["result"]["config"]["max_tokens"]
+        .as_u64()
+        .unwrap_or(8192); // optional: absent when unset (None)
 
     // Patch max_tokens
     let new_max_tokens = initial_max_tokens + 1000;

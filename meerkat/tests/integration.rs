@@ -403,7 +403,7 @@ mod config_loading {
 
         // Default should have positive token limit
         assert!(
-            default_config.agent.max_tokens_per_turn > 0,
+            default_config.agent.resolved_max_tokens_per_turn() > 0,
             "Default config should have positive max_tokens"
         );
     }

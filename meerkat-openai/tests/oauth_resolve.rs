@@ -80,6 +80,7 @@ fn openai_realm_no_refresh(backend_kind: &str, auth_method: &str) -> RealmConnec
             auth,
             binding,
             default_binding: Some("default_chatgpt".into()),
+            parent: None,
         },
     )
     .unwrap()
@@ -132,6 +133,7 @@ fn openai_realm_with_source(
             auth,
             binding,
             default_binding: Some("default_chatgpt".into()),
+            parent: None,
         },
     )
     .unwrap()

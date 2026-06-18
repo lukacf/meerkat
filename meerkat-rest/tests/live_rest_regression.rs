@@ -44,7 +44,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
     std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
 
     let mut config = Config::default();
-    config.agent.max_tokens_per_turn = 256;
+    config.agent.max_tokens_per_turn = Some(256);
     config.agent.model = smoke_model();
     let config_store = MemoryConfigStore::new(config.clone(), meerkat_models::canonical());
 
@@ -86,7 +86,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
 
     let state = AppState {
         store_path: store_path.clone(),
-        max_tokens: config.agent.max_tokens_per_turn,
+        max_tokens: config.agent.resolved_max_tokens_per_turn(),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: false,
@@ -108,6 +108,11 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
         ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
+        realm_config_source: Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            temp_dir.path().join("empty-realms"),
+            temp_dir.path().join("empty-realms").join("__no_global__"),
+            meerkat_models::canonical(),
+        )),
         instance_id: None,
         backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {

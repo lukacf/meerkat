@@ -3321,7 +3321,7 @@ impl SessionRuntime {
     }
 
     async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RpcError> {
-        let config = if let Some(runtime) = self.config_runtime() {
+        let head_config = if let Some(runtime) = self.config_runtime() {
             runtime
                 .get()
                 .await
@@ -3333,6 +3333,30 @@ impl SessionRuntime {
                 })?
         } else {
             meerkat_core::Config::default()
+        };
+
+        // Compose the active realm chain so an inherited self-hosted/custom model
+        // alias (e.g. defined only in `global`) is visible to provider resolution
+        // on session create / turn model-override — matching the agent build and
+        // hot-swap registries. Fail-closed: a compose error propagates.
+        let inheritance = self
+            .builder_realm_inheritance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let config = if let Some(inheritance) = inheritance {
+            inheritance
+                .compose_over(head_config)
+                .await
+                .map_err(|e| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "Failed to compose realm config chain for model registry: {e}"
+                    ),
+                    data: None,
+                })?
+        } else {
+            head_config
         };
 
         config

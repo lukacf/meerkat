@@ -451,7 +451,7 @@ pub struct MobSpawnParams {
     /// that spawn live model-backed members must name the realm binding
     /// that owns auth resolution.
     #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    pub auth_binding: Option<WireAuthBindingRef>,
 }
 
 pub async fn handle_spawn(
@@ -516,7 +516,8 @@ pub async fn handle_spawn(
         }
     }
     if let Some(auth_binding) = params.auth_binding {
-        spec.auth_binding = Some(auth_binding);
+        // Reconstruct origin: Configured server-side (client cannot forge it).
+        spec.auth_binding = Some(auth_binding.into());
     }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
@@ -554,7 +555,7 @@ pub struct MobSpawnSpecParams {
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    pub auth_binding: Option<WireAuthBindingRef>,
 }
 
 /// Handle `mob/spawn_many` — batch spawn multiple members.
@@ -587,7 +588,7 @@ pub async fn handle_spawn_many(
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
         spec.additional_instructions = s.additional_instructions.clone();
-        spec.auth_binding = s.auth_binding.clone();
+        spec.auth_binding = s.auth_binding.clone().map(Into::into);
         specs.push(spec);
     }
 

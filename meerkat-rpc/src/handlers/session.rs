@@ -128,7 +128,7 @@ pub struct CreateSessionParams {
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// Override the realm-scoped auth binding for this session.
     #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    pub auth_binding: Option<meerkat_contracts::wire::WireAuthBindingRef>,
     /// Structured skill keys to preload into the system prompt.
     #[serde(default)]
     pub preload_skills: Option<Vec<SkillKey>>,
@@ -319,7 +319,10 @@ pub async fn create_session_with_params(
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
     build_config.resume_override_mask.auth_binding = params.auth_binding.is_some();
-    build_config.auth_binding = params.auth_binding;
+    // Reconstruct the server-owned `origin` provenance as Configured; a client
+    // names {realm, binding, profile} only and cannot forge the env-default
+    // discriminant that drives is_env_default() credential-resolution authority.
+    build_config.auth_binding = params.auth_binding.map(Into::into);
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;

@@ -4426,7 +4426,7 @@ async fn create_session_inner(
         instance_id: state.instance_id.clone(),
         backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
-        auth_binding: req.auth_binding,
+        auth_binding: req.auth_binding.map(Into::into),
         // REST is not a mob runtime. On resume the factory preserves the
         // persisted mob_member_binding from the resumed session metadata.
         mob_member_binding: None,
@@ -5440,7 +5440,7 @@ async fn continue_session_inner(
                 )));
             }
         };
-        let auth_binding_override = req.auth_binding.clone();
+        let auth_binding_override = req.auth_binding.clone().map(Into::into);
         let mut build = SessionBuildOptions {
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
@@ -11009,11 +11009,10 @@ mod tests {
         assert!(rest_continue_requires_rebuild(&req));
         req.model = None;
 
-        req.auth_binding = Some(meerkat_core::AuthBindingRef {
+        req.auth_binding = Some(meerkat_contracts::WireAuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
-            origin: meerkat_core::connection::BindingOrigin::Configured,
         });
         assert!(rest_continue_requires_rebuild(&req));
         req.auth_binding = None;

@@ -235,36 +235,6 @@
         },
         "type": "object"
       },
-      "AuthBindingRef": {
-        "description": "Session-facing reference to a binding inside a realm.\n\n`AuthBindingRef` is purely structural — it does NOT carry a `\"realm:binding\"`\nstring form. Wave-b deleted `parse` and `Display` so that no code path\naccidentally ferries the opaque join through the runtime. CLI input that\narrives as `\"realm:binding[:profile]\"` must be split at the CLI boundary\nand constructed field-by-field.",
-        "properties": {
-          "binding": {
-            "$ref": "#/components/schemas/BindingId"
-          },
-          "origin": {
-            "$ref": "#/components/schemas/BindingOrigin",
-            "description": "Whether this ref names a configured durable identity or the synthetic\nenv-var fallback. Defaults to [`BindingOrigin::Configured`] for back-read\nof rows persisted before the discriminant existed."
-          },
-          "profile": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProfileId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "realm": {
-            "$ref": "#/components/schemas/RealmId"
-          }
-        },
-        "required": [
-          "realm",
-          "binding"
-        ],
-        "type": "object"
-      },
       "AuthStatusPhase": {
         "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
         "oneOf": [
@@ -309,21 +279,6 @@
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
-      },
-      "BindingOrigin": {
-        "description": "Origin discriminant for an [`AuthBindingRef`].\n\nDistinguishes a binding that names a durable, config-resolvable identity\n(`Configured`) from the synthetic env-var fallback the resolver mints when\nno realm config exists but a well-known API-key env var is set\n(`SyntheticEnvDefault`). The synthetic origin is ephemeral: it must never be\nrehydrated as a durable identity nor publish a durable auth lease.\n\nThis is the typed owner of the \"is this the env-var default?\" fact, replacing\nthe prior recovery-by-magic-slug (`realm == \"env_default\"`,\n`binding == \"default\"`). Identity slugs (`RealmId`/`BindingId`) are pure\nopaque identity again; origin is carried explicitly.",
-        "oneOf": [
-          {
-            "const": "configured",
-            "description": "A durable, config-resolvable binding. This is the back-read default so\nthat wire/persisted rows written before this field existed deserialize\nas a configured identity.",
-            "type": "string"
-          },
-          {
-            "const": "synthetic_env_default",
-            "description": "The synthetic env-var fallback binding (ephemeral, not durable).",
-            "type": "string"
-          }
-        ]
       },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
@@ -5235,7 +5190,7 @@
           "auth_binding": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/AuthBindingRef"
+                "$ref": "#/components/schemas/WireAuthBindingRef"
               },
               {
                 "type": "null"
@@ -5395,13 +5350,13 @@
           "auth_binding": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/AuthBindingRef"
+                "$ref": "#/components/schemas/WireAuthBindingRef"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Realm-scoped provider credential binding. Same structural\n`AuthBindingRef` used by RPC, SDKs, and session persistence."
+            "description": "Realm-scoped provider credential binding. Same structural\n`WireAuthBindingRef` ({realm, binding, profile}); the server-owned\n`origin` provenance is reconstructed as Configured and never client input."
           },
           "budget_limits": {
             "anyOf": [

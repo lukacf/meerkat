@@ -1034,7 +1034,8 @@ impl AgentMobToolSurface {
             spec.override_profile = resolved.override_profile;
         }
         if let Some(cref) = args.auth_binding {
-            spec.auth_binding = Some(cref);
+            // Reconstruct origin: Configured server-side (client cannot forge it).
+            spec.auth_binding = Some(cref.into());
         }
 
         let spawn_result = audit_handle
@@ -1913,7 +1914,7 @@ struct SpawnMemberArgs {
     /// config-realm fallback.
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
-    auth_binding: Option<meerkat_core::AuthBindingRef>,
+    auth_binding: Option<meerkat_contracts::wire::WireAuthBindingRef>,
 }
 
 #[derive(Deserialize, JsonSchema)]

@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{
-    AuthBindingRef, BudgetLimits, Config, ContentInput, HookRunOverrides, OutputSchema,
-    PeerCorrelationId, PeerMeta, Provider, PublicTurnToolOverlay,
+    BudgetLimits, Config, ContentInput, HookRunOverrides, OutputSchema, PeerCorrelationId,
+    PeerMeta, Provider, PublicTurnToolOverlay,
     comms::{PeerId, PeerName},
     config::SystemPromptOverride,
     connection::{BindingId, ProfileId, RealmId},
@@ -43,9 +43,10 @@ pub struct RestCreateSessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
     /// Realm-scoped provider credential binding. Same structural
-    /// `AuthBindingRef` used by RPC, SDKs, and session persistence.
+    /// `WireAuthBindingRef` ({realm, binding, profile}); the server-owned
+    /// `origin` provenance is reconstructed as Configured and never client input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<AuthBindingRef>,
+    pub auth_binding: Option<super::WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
@@ -156,7 +157,7 @@ pub struct RestContinueSessionRequest {
     /// Realm-scoped provider credential binding override for this resumed
     /// turn. Omit to inherit the persisted session binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<AuthBindingRef>,
+    pub auth_binding: Option<super::WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// Optional run-scoped hook overrides.

@@ -3479,12 +3479,10 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
 /// `config get/set` path keeps reading the RAW head store (read/write split).
 /// Fail-closed: a compose error is a typed fault, never the raw head.
 async fn effective_config_for_state(state: &AppState) -> Result<Config, meerkat_core::ConfigError> {
-    let head = state
-        .config_runtime
-        .get()
-        .await
-        .map_err(|err| meerkat_core::ConfigError::Validation(err.to_string()))?
-        .config;
+    // Head = the raw head store (the same head the agent BUILD path composes over
+    // via FactoryAgentBuilder::new_with_config_store), so model resolution /
+    // listings match what a session build sees and a head-store fault propagates.
+    let head = state.config_store.get().await?;
     meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
         .effective_config_over_head(&state.realm, head)
         .await

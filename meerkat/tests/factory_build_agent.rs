@@ -549,8 +549,11 @@ async fn agent_llm_client_decorator_wraps_registry_resolved_provider_client() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = Config::default();
+    // The build omits `realm_id`, so the connection resolver heads to the
+    // reserved `global` realm; the inline binding must live there to resolve via
+    // the configured key (rather than falling through to an absent env key).
     config.realm.insert(
-        "default".to_string(),
+        meerkat_core::connection::GLOBAL_REALM_SLUG.to_string(),
         meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]),
     );
     config.model_fallback.enabled = false;

@@ -2253,12 +2253,18 @@ async fn handle_meerkat_skills(
 async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, String> {
     // A ConfigError is a TRUE fault (benign absence is already Ok(default) inside the
     // store), so it must surface as an error, never as a phantom default-config payload.
-    let config = state
+    // Compose the realm chain so a capability gated on an inherited config field
+    // reports the same status as the other surfaces.
+    let head_config = state
         .config_runtime
         .get()
         .await
         .map_err(|e| format!("Failed to read config: {e}"))?
         .config;
+    let config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm_id, head_config)
+        .await
+        .map_err(|e| format!("Failed to compose realm config chain: {e}"))?;
     let response = meerkat::surface::build_capabilities_response(&config);
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }

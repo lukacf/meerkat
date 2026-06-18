@@ -3240,9 +3240,9 @@ fn skill_entry(
 async fn get_capabilities(
     State(state): State<AppState>,
 ) -> Result<Json<meerkat_contracts::CapabilitiesResponse>, ApiError> {
-    let config = state
-        .config_store
-        .get()
+    // Compose the realm chain so a capability gated on an inherited (ancestor-
+    // realm) config field reports the same status as the other surfaces.
+    let config = effective_config_for_state(&state)
         .await
         .map_err(|e| ApiError::Configuration(e.to_string()))?;
     Ok(Json(meerkat::surface::build_capabilities_response(&config)))

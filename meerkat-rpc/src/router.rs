@@ -1832,9 +1832,11 @@ impl MethodRouter {
                     "skills/inspect is no longer served; resolve skills through the typed registry surface".to_string(),
                 )
             }
-            "capabilities/get" => match self.config_store.get().await {
+            // Compose the realm chain so a capability gated on an inherited config
+            // field reports the same status as the other surfaces.
+            "capabilities/get" => match self.runtime.effective_config().await {
                 Ok(config) => handlers::capabilities::handle_get(id, &config),
-                Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+                Err(e) => RpcResponse::error(id, e.code, e.message),
             },
             "runtime/host_info" => handlers::runtime_host::handle_info(
                 id,

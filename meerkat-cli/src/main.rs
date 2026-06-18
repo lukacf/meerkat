@@ -4393,15 +4393,46 @@ async fn handle_auth_command(
                 );
                 return Ok(());
             }
-            println!("REALM_ID          DEFAULT_BINDING    BACKENDS  AUTH_PROFILES  BINDINGS");
+            // Size the two variable-length string columns to their content so a
+            // long realm id (e.g. a 19-char `ws-<16hex>` workspace realm) or
+            // binding id can't overrun a fixed header width and collide with the
+            // next column. The count columns stay fixed (header-dominated).
+            let realm_w = config
+                .realm
+                .keys()
+                .map(String::len)
+                .max()
+                .unwrap_or(0)
+                .max("REALM_ID".len())
+                + 2;
+            let bind_w = config
+                .realm
+                .values()
+                .map(|s| s.default_binding.as_deref().unwrap_or("-").len())
+                .max()
+                .unwrap_or(0)
+                .max("DEFAULT_BINDING".len())
+                + 2;
+            println!(
+                "{:<rw$}{:<bw$}{:<10}{:<15}{}",
+                "REALM_ID",
+                "DEFAULT_BINDING",
+                "BACKENDS",
+                "AUTH_PROFILES",
+                "BINDINGS",
+                rw = realm_w,
+                bw = bind_w,
+            );
             for (realm_id, section) in &config.realm {
                 println!(
-                    "{:<18}{:<20}{:<10}{:<15}{}",
+                    "{:<rw$}{:<bw$}{:<10}{:<15}{}",
                     realm_id,
                     section.default_binding.as_deref().unwrap_or("-"),
                     section.backend.len(),
                     section.auth.len(),
                     section.binding.len(),
+                    rw = realm_w,
+                    bw = bind_w,
                 );
             }
         }

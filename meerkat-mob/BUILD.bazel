@@ -40,6 +40,9 @@ rust_library(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = [
+        "-Ccodegen-units=256",
+    ],
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -91,6 +94,9 @@ rust_library(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = [
+        "-Ccodegen-units=256",
+    ],
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",

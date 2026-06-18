@@ -1329,9 +1329,19 @@ for (const pkg of localPackages.values()) {
       `    deps = ${depsExpr},`,
     ];
     const bridgeRustcFlags = generatedAuthorityBridgeRustcFlags(key);
-    if (bridgeRustcFlags.length) {
+    const extraRustcFlags = [...bridgeRustcFlags];
+    // meerkat-mob is large; its `-opt` LLVM codegen OOM'd the smaller-memory
+    // Windows release executor (rustc-LLVM out of memory failed the
+    // 0.7.9/0.7.10 Windows binary builds). Split codegen into many units so
+    // peak rustc memory stays bounded. opt-only (fastbuild/dev already split),
+    // preserves -O optimization, applied to the main library the release
+    // binary links.
+    if (key === "meerkat-mob" && rule === "rust_library") {
+      extraRustcFlags.push("-Ccodegen-units=256");
+    }
+    if (extraRustcFlags.length) {
       const editionIndex = attrs.indexOf(`    edition = "2024",`);
-      attrs.splice(editionIndex + 1, 0, `    rustc_flags = ${listExpr(bridgeRustcFlags)},`);
+      attrs.splice(editionIndex + 1, 0, `    rustc_flags = ${listExpr(extraRustcFlags)},`);
     }
     if (rule === "rust_binary" || rule === "rust_test") {
       const packageRunfilesDir = relative(root, dir) || ".";

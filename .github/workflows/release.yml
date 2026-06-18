@@ -551,7 +551,12 @@ jobs:
           BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release
-          BUILDBUDDY_RELEASE_JOBS: ${{ vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || '64' }}
+          # The Windows x86_64 binary lane runs on a smaller-memory executor
+          # pool; at the default 64 concurrent actions, the large meerkat-mob
+          # `-opt` rustc OOM'd (rustc-LLVM out of memory) and failed the
+          # 0.7.9/0.7.10 binary builds. Cap Windows concurrency hard so fewer
+          # rustc share the executor's RAM. Other targets keep the fast default.
+          BUILDBUDDY_RELEASE_JOBS: ${{ matrix.bb_command == 'release-build-windows-x86' && (vars.MEERKAT_RELEASE_BUILDBUDDY_WINDOWS_JOBS || '4') || (vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || '64') }}
           TARGET: ${{ matrix.target }}
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |

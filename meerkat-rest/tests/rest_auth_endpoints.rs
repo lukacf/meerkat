@@ -391,8 +391,10 @@ fn global_realm_doc() -> Config {
 fn child_realm_doc() -> (meerkat_core::RealmId, Config) {
     let child = meerkat_core::RealmId::parse("child-realm").expect("valid child realm");
     let mut config = Config::default();
-    let mut section = meerkat_core::RealmConfigSection::default();
-    section.parent = Some(meerkat_core::RealmId::global());
+    let section = meerkat_core::RealmConfigSection {
+        parent: Some(meerkat_core::RealmId::global()),
+        ..Default::default()
+    };
     config.realm.insert(child.as_str().to_string(), section);
     (child, config)
 }

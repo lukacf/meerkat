@@ -542,6 +542,80 @@ mod tests {
         );
     }
 
+    // RealmConfigSource double that also serves raw TOML, so the presence-aware
+    // composition path (the one every network/runtime surface exercises via
+    // `effective_config_over_head`) can be tested — the plain `MapSource` uses the
+    // default `raw_config_for_realm` (None) and so only covers the value-merge.
+    struct RawMapSource {
+        docs: std::collections::BTreeMap<String, Config>,
+        raw: std::collections::BTreeMap<String, toml::Value>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl RealmConfigSource for RawMapSource {
+        async fn config_for_realm(
+            &self,
+            realm: &crate::connection::RealmId,
+        ) -> Result<Option<Config>, ConfigError> {
+            Ok(self.docs.get(realm.as_str()).cloned())
+        }
+        async fn raw_config_for_realm(
+            &self,
+            realm: &crate::connection::RealmId,
+        ) -> Result<Option<toml::Value>, ConfigError> {
+            Ok(self.raw.get(realm.as_str()).cloned())
+        }
+    }
+
+    // Regression (over the in-memory head path used by every network surface): a
+    // child realm must be able to re-enable a skills toggle its parent disabled,
+    // even though the child's value (`true`) equals the struct default — only the
+    // presence-aware merge can carry it. Before `merge_skills_from_toml_presence`
+    // existed, the `!= default` value-merge silently kept the parent's `false`.
+    #[tokio::test]
+    async fn over_head_child_re_enables_inherited_disabled_skills() {
+        use crate::connection::{RealmConfigSection, RealmId};
+
+        let mut global = Config::default();
+        global.skills.enabled = false;
+        global
+            .realm
+            .insert("global".to_string(), RealmConfigSection::default());
+
+        let mut child = Config::default();
+        child.skills.enabled = true; // == struct default; only presence can carry it
+        child.realm.insert(
+            "child".to_string(),
+            RealmConfigSection {
+                parent: Some(RealmId::global()),
+                ..Default::default()
+            },
+        );
+
+        let mut docs = std::collections::BTreeMap::new();
+        docs.insert("global".to_string(), global);
+        let mut raw = std::collections::BTreeMap::new();
+        raw.insert(
+            "global".to_string(),
+            toml::from_str("[skills]\nenabled = false\n").expect("parse global toml"),
+        );
+        raw.insert(
+            "child".to_string(),
+            toml::from_str("[skills]\nenabled = true\n").expect("parse child toml"),
+        );
+
+        let reader = EffectiveConfigReader::new(Arc::new(RawMapSource { docs, raw }));
+        let eff = reader
+            .effective_config_over_head(&RealmId::parse("child").unwrap(), child)
+            .await
+            .expect("compose over head");
+        assert!(
+            eff.skills.enabled,
+            "child must re-enable an inherited-disabled skills toggle via presence-aware merge"
+        );
+    }
+
     #[test]
     fn merge_patch_removes_keys_on_null_and_merges_nested_objects() {
         let mut base = serde_json::json!({

@@ -691,6 +691,29 @@ impl Config {
         }
     }
 
+    fn merge_skills_from_toml_presence(
+        &mut self,
+        parsed: &toml::Value,
+        layer: &crate::skills_config::SkillsConfig,
+    ) {
+        let Some(skills) = parsed.get("skills").and_then(toml::Value::as_table) else {
+            return;
+        };
+        // Presence-based scalar toggles: a child realm wins even when it sets a
+        // scalar back to its struct default (e.g. re-enabling `skills.enabled`
+        // that a parent disabled). The `!= default` value-merge in `Config::merge`
+        // cannot see a value-equals-default override; the explicit raw key can.
+        if skills.contains_key("enabled") {
+            self.skills.enabled = layer.enabled;
+        }
+        if skills.contains_key("max_injection_bytes") {
+            self.skills.max_injection_bytes = layer.max_injection_bytes;
+        }
+        if skills.contains_key("inventory_threshold") {
+            self.skills.inventory_threshold = layer.inventory_threshold;
+        }
+    }
+
     /// Apply environment variable overrides
     pub fn apply_env_overrides(&mut self) -> Result<(), ConfigError> {
         self.apply_env_overrides_from(|key| std::env::var(key).ok())
@@ -2436,6 +2459,7 @@ pub fn compose_effective_config(
                 effective.merge_retry_from_toml_presence(raw, &doc.retry);
                 effective.merge_provider_tools_from_toml_presence(raw, &doc.provider_tools);
                 effective.merge_self_hosted_from_toml_presence(raw, &doc.self_hosted);
+                effective.merge_skills_from_toml_presence(raw, &doc.skills);
             } else {
                 // No raw TOML for this doc (e.g. a non-filesystem source): fall
                 // back to a whole-section child-wins swap so self_hosted /

@@ -1275,8 +1275,14 @@ impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
         } else {
             realm_paths_in(&self.state_root, realm.as_str()).config_path
         };
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(None);
+        // Fail closed on an undeterminable existence probe (EACCES/ELOOP/ENOTDIR
+        // on the path or an ancestor): a present-but-unstat-able config doc must
+        // NOT silently drop its inherited credentials/limits from the fold — only
+        // a confirmed `Ok(false)` means the doc is genuinely absent.
+        match tokio::fs::try_exists(&path).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(err) => return Err(err.into()),
         }
         // FileConfigStore::get parses the toml; the existence check above means a
         // present-but-absent doc never collapses to Config::default().
@@ -1296,8 +1302,13 @@ impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
         } else {
             realm_paths_in(&self.state_root, realm.as_str()).config_path
         };
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(None);
+        // Fail closed on an undeterminable existence probe (see config_for_realm):
+        // only a confirmed `Ok(false)` means absent; an IO fault propagates so a
+        // present-but-unreadable doc cannot silently drop its inherited presence.
+        match tokio::fs::try_exists(&path).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(err) => return Err(err.into()),
         }
         let bytes = tokio::fs::read(&path).await?;
         let text = String::from_utf8(bytes)?;

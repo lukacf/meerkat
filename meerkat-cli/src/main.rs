@@ -4096,6 +4096,10 @@ fn cli_global_config_path(scope: &RuntimeScope) -> PathBuf {
 /// Raw (unfolded) head config store for the reserved `global` realm doc. Used by
 /// `auth login` to WRITE the `[realm.global]` binding — writes never compose
 /// (read/write split), so an inherited entry can never be flattened into a child.
+// Both call sites (`ensure_legacy_login_credentials_migrated_once`,
+// `interactive_login`) are gated all-providers, so gate the helper to match —
+// otherwise non-all-provider `rkat` builds compile it dead.
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn cli_global_config_store(scope: &RuntimeScope) -> Arc<dyn ConfigStore> {
     Arc::new(FileConfigStore::new(
         cli_global_config_path(scope),
@@ -4414,12 +4418,11 @@ async fn handle_auth_command(
                 .max("DEFAULT_BINDING".len())
                 + 2;
             println!(
-                "{:<rw$}{:<bw$}{:<10}{:<15}{}",
+                "{:<rw$}{:<bw$}{:<10}{:<15}BINDINGS",
                 "REALM_ID",
                 "DEFAULT_BINDING",
                 "BACKENDS",
                 "AUTH_PROFILES",
-                "BINDINGS",
                 rw = realm_w,
                 bw = bind_w,
             );

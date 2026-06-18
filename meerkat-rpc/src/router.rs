@@ -1074,6 +1074,17 @@ impl MethodRouter {
         }
     }
 
+    fn live_webrtc_enabled(&self) -> bool {
+        #[cfg(feature = "live-webrtc")]
+        {
+            self.live_webrtc_state.is_some()
+        }
+        #[cfg(not(feature = "live-webrtc"))]
+        {
+            false
+        }
+    }
+
     /// Attach a live session factory for creating provider adapters on `live/open`.
     pub fn with_live_session_factory(
         mut self,
@@ -1533,6 +1544,8 @@ impl MethodRouter {
                 id,
                 // Runtime-backed only: every session runs the v9 runtime.
                 true,
+                self.live_enabled(),
+                self.live_webrtc_enabled(),
                 self.skill_runtime.is_some(),
             ),
             "help/ask" => {
@@ -1844,6 +1857,8 @@ impl MethodRouter {
                 &self.config_store,
                 // Runtime-backed only: every session runs the v9 runtime.
                 true,
+                self.live_enabled(),
+                self.live_webrtc_enabled(),
                 self.skill_runtime.is_some(),
             ),
             "runtime/capabilities" => handlers::runtime_host::handle_capabilities(
@@ -1851,6 +1866,8 @@ impl MethodRouter {
                 &self.runtime,
                 // Runtime-backed only: every session runs the v9 runtime.
                 true,
+                self.live_enabled(),
+                self.live_webrtc_enabled(),
                 self.skill_runtime.is_some(),
             ),
             "runtime/health" => handlers::runtime_host::handle_health(id),
@@ -9589,8 +9606,8 @@ mod tests {
                 "skill_refs": [
                     {
                         "kind": "structured",
-                        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-                        "skill_name": "email-extractor"
+                        "source_uuid": "00000000-0000-4b11-8111-000000000001",
+                        "skill_name": "mcp-server-setup"
                     }
                 ]
             }),
@@ -10048,12 +10065,7 @@ mod tests {
     /// fall through to METHOD_NOT_FOUND), and an unknown method must reject
     /// with METHOD_NOT_FOUND. This replaces source-regex parity: adding a
     /// router arm without a catalog entry (or vice versa) turns this red.
-    #[tokio::test]
-    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
-        let (router, _notif_rx) = test_router().await;
-        // Wire a live transport so the `live/*` catalog methods are
-        // dispatchable exactly as the catalog advertises them
-        // (`runtime_available` => live surface present).
+    fn attach_test_live_ws(router: MethodRouter) -> MethodRouter {
         let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
             meerkat_live::NoOpProjectionSink,
         )));
@@ -10078,7 +10090,81 @@ mod tests {
             status_feedback,
             token_authority,
         ));
-        let router = router.with_live_ws(Arc::clone(&live_ws), "ws://127.0.0.1:0".to_string());
+        router.with_live_ws(Arc::clone(&live_ws), "ws://127.0.0.1:0".to_string())
+    }
+
+    fn assert_no_live_methods(methods: &[serde_json::Value]) {
+        assert!(
+            !methods
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|method| method.starts_with("live/")),
+            "no live transport is attached, but advertised methods included live/*: {methods:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_omits_live_methods_without_live_transport() {
+        let (router, _notif_rx) = test_router().await;
+
+        let response = router
+            .dispatch(make_request_no_params("initialize"))
+            .await
+            .expect("initialize should respond");
+        let result = result_value(&response);
+        let methods = result["methods"].as_array().expect("methods array");
+
+        assert_no_live_methods(methods);
+    }
+
+    #[tokio::test]
+    async fn runtime_host_info_omits_live_methods_without_live_transport() {
+        let (router, _notif_rx) = test_router().await;
+
+        let response = router
+            .dispatch(make_request_no_params("runtime/host_info"))
+            .await
+            .expect("runtime/host_info should respond");
+        let result = result_value(&response);
+        let methods = result["endpoints"]["rpc_methods"]
+            .as_array()
+            .expect("runtime host rpc_methods array");
+
+        assert_no_live_methods(methods);
+    }
+
+    #[tokio::test]
+    async fn runtime_host_info_advertises_live_methods_with_live_transport() {
+        let (router, _notif_rx) = test_router().await;
+        let router = attach_test_live_ws(router);
+
+        let response = router
+            .dispatch(make_request_no_params("runtime/host_info"))
+            .await
+            .expect("runtime/host_info should respond");
+        let result = result_value(&response);
+        let methods = result["endpoints"]["rpc_methods"]
+            .as_array()
+            .expect("runtime host rpc_methods array");
+
+        for expected in ["live/open", "live/status", "live/send_input"] {
+            assert!(
+                methods
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|method| method == expected),
+                "live transport is attached, but `{expected}` was not advertised: {methods:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
+        let (router, _notif_rx) = test_router().await;
+        // Wire a live transport so the `live/*` catalog methods are
+        // dispatchable exactly as the catalog advertises them
+        // (`runtime_available` => live surface present).
+        let router = attach_test_live_ws(router);
         #[cfg(feature = "live-webrtc")]
         let router = {
             let webrtc_host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
@@ -10102,6 +10188,7 @@ mod tests {
         };
         let options = meerkat_contracts::RpcMethodCatalogOptions {
             runtime_available: true,
+            live_enabled: router.live_enabled(),
             mob_enabled: cfg!(feature = "mob"),
             mcp_enabled: cfg!(feature = "mcp"),
             comms_enabled: cfg!(feature = "comms"),

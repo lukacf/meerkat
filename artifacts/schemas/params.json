@@ -10298,6 +10298,44 @@
   },
   "MobForkHelperParams": {
     "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -10321,6 +10359,16 @@
         "type": [
           "string",
           "null"
+        ]
+      },
+      "auth_binding": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          {
+            "type": "null"
+          }
         ]
       },
       "backend": {
@@ -13559,6 +13607,44 @@
   },
   "MobSpawnHelperParams": {
     "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -13582,6 +13668,16 @@
         "type": [
           "string",
           "null"
+        ]
+      },
+      "auth_binding": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAuthBindingRef"
+          },
+          {
+            "type": "null"
+          }
         ]
       },
       "backend": {

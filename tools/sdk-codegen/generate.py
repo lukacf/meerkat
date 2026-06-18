@@ -7,6 +7,7 @@ code for Python and TypeScript SDKs.
 
 import argparse
 import copy
+import datetime as _dt
 import json
 import keyword
 import re
@@ -181,6 +182,70 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
     "PeerTransport",
     "PeerDirectorySource",
     "PeerSendability",
+]
+
+PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
+    "ApprovalDecideParams",
+    "ApprovalGetParams",
+    "ApprovalListParams",
+    "ApprovalListResult",
+    "ApprovalRecord",
+    "ApprovalRequestParams",
+    "ArchiveSessionParams",
+    "ArtifactDownloadParams",
+    "ArtifactDownloadResult",
+    "ArtifactIdParams",
+    "ArtifactListParams",
+    "ArtifactListResult",
+    "ArtifactRecord",
+    "BindingIdParams",
+    "BlobGetParams",
+    "BlobPayload",
+    "CreateProfileParams",
+    "CreateScheduleRequest",
+    "DeferredCreateResult",
+    "DeviceCompleteParams",
+    "DeviceStartParams",
+    "EventsLatestCursorParams",
+    "EventsLatestCursorResult",
+    "EventsListSinceParams",
+    "EventsListSinceResult",
+    "EventsSnapshotParams",
+    "EventsSnapshotResult",
+    "ForkSessionAtParams",
+    "ForkSessionReplaceParams",
+    "HelpRequest",
+    "HelpResponse",
+    "InjectSystemContextParams",
+    "InjectSystemContextResult",
+    "InterruptParams",
+    "ListSessionsParams",
+    "ListSessionsResult",
+    "LoginCompleteParams",
+    "LoginStartParams",
+    "ProvisionApiKeyParams",
+    "ReadSessionHistoryParams",
+    "ReadSessionParams",
+    "ReadSessionTranscriptRevisionParams",
+    "RealmIdParams",
+    "RestoreSessionTranscriptRevisionParams",
+    "RewriteSessionTranscriptParams",
+    "RuntimeHostCapabilities",
+    "RuntimeHostHealth",
+    "RuntimeHostInfo",
+    "Schedule",
+    "ScheduleToolCallParams",
+    "ScheduleToolsResult",
+    "SessionForkResult",
+    "SessionPeerResponseTerminalParams",
+    "SessionTranscriptRewriteResult",
+    "WireProvisionApiKeyResult",
+    "WireSessionTranscriptRevision",
+]
+
+PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
+    "SessionExternalEventEnvelope",
+    "WireDeviceCompleteResult",
 ]
 
 MCP_LIVE_CONTRACT_TYPES = [
@@ -843,6 +908,17 @@ def _build_contract_schema_roots(
     """
     params_schema = _schema_root_with_nested_defs(copy.deepcopy(schemas.get("params", {})))
     wire_schema = _schema_root_with_nested_defs(copy.deepcopy(schemas.get("wire-types", {})))
+    runtime_host_schema = _schema_root_with_nested_defs(
+        copy.deepcopy(schemas.get("runtime-host", {}))
+    )
+    for name, schema in runtime_host_schema.items():
+        if name.startswith("__"):
+            continue
+        wire_schema.setdefault(name, schema)
+    wire_schema["$defs"] = {
+        **wire_schema.get("$defs", {}),
+        **runtime_host_schema.get("$defs", {}),
+    }
     roster = _sdk_contract_type_roster()
     params_report = _promote_inline_object_defs(params_schema, roster, roster)
     wire_report = _promote_inline_object_defs(wire_schema, roster, roster)
@@ -872,6 +948,8 @@ def _sdk_contract_type_roster() -> list[str]:
         WORKGRAPH_RPC_CONTRACT_ALIAS_TYPES,
         COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
         COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES,
+        PUBLIC_RPC_CATALOG_OBJECT_TYPES,
+        PUBLIC_RPC_CATALOG_ALIAS_TYPES,
     ):
         for name in group:
             if name not in roster:
@@ -1880,6 +1958,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "from typing import Any, Literal, NotRequired, Optional, Required, TypedDict\n\n"
     types_content += "from .errors import MeerkatError\n\n\n"
     types_content += f'CONTRACT_VERSION = "{contract_version}"\n\n\n'
+    types_content += "Value = Any\n\n\n"
 
     # WireUsage
     types_content += "@dataclass\nclass WireUsage:\n"
@@ -2170,6 +2249,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     # `config/set` accepts a bare config object or a wrapped
     # `{config, expected_generation}` envelope (untagged union).
     append_python_alias("ConfigSetParams", wire_schema, "Request payload for config/set.")
+    for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Wire payload for {name}.")
+    for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
+        append_python_contract_dataclass(name)
     append_python_dataclass("MobWireParams", params_schema, "Request payload for mob/wire.")
     append_python_dataclass("MobUnwireParams", params_schema, "Request payload for mob/unwire.")
     for name in MOB_RPC_CONTRACT_TYPES:
@@ -2525,6 +2608,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content = f"// Generated wire types for Meerkat SDK\n// Contract version: {contract_version}\n\n"
     types_content += 'import { MeerkatError } from "./errors.js";\n\n'
     types_content += f'export const CONTRACT_VERSION = "{contract_version}";\n\n'
+    types_content += "export type Value = unknown;\n\n"
     types_content += _TYPESCRIPT_WIRE_PARSE_PRELUDE + "\n"
 
     types_content += "export interface WireUsage {\n"
@@ -2721,6 +2805,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     for name in K20_CATALOG_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_alias("ConfigSetParams", wire_schema)
+    for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
+        append_typescript_contract_interface(name)
     append_typescript_interface("MobWireParams", params_schema)
     append_typescript_interface("MobUnwireParams", params_schema)
     for name in MOB_RPC_CONTRACT_TYPES:
@@ -2832,6 +2920,14 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("LiveRefreshResult", wire_schema)
     append_typescript_alias("LiveCloseStatus", wire_schema)
     append_typescript_interface("LiveCloseResult", wire_schema)
+    append_typescript_alias("LiveSendInputStatus", wire_schema)
+    append_typescript_interface("LiveSendInputResult", wire_schema)
+    append_typescript_alias("LiveCommitInputStatus", wire_schema)
+    append_typescript_interface("LiveCommitInputResult", wire_schema)
+    append_typescript_alias("LiveInterruptStatus", wire_schema)
+    append_typescript_interface("LiveInterruptResult", wire_schema)
+    append_typescript_alias("LiveTruncateStatus", wire_schema)
+    append_typescript_interface("LiveTruncateResult", wire_schema)
     append_typescript_alias("LiveInputChunkWire", wire_schema)
     # FIX-SDK-OBS: typed adapter observation discriminated unions. Aliases
     # because each is a serde-tagged enum. `RealtimeTranscriptEvent` is
@@ -4482,10 +4578,38 @@ def verify_contract_inventory_coverage(
 
     baseline_doc = json.loads(baseline_path.read_text())
     baseline = set(baseline_doc.get("grandfathered", []))
+    baseline_owner = baseline_doc.get("owner")
+    baseline_approved_by = baseline_doc.get("approved_by")
+    baseline_expires = baseline_doc.get("expires")
+    baseline_max = baseline_doc.get("max_grandfathered")
 
     new_gaps = sorted(missing - baseline)
     healed = sorted(baseline - missing)
     errors = []
+    if not baseline_owner or not isinstance(baseline_owner, str):
+        errors.append(f"{baseline_path.name} must declare a non-empty `owner`.")
+    if not baseline_approved_by or not isinstance(baseline_approved_by, str):
+        errors.append(f"{baseline_path.name} must declare a non-empty `approved_by`.")
+    if not isinstance(baseline_max, int) or baseline_max < 0:
+        errors.append(f"{baseline_path.name} must declare non-negative integer `max_grandfathered`.")
+    elif len(baseline) > baseline_max:
+        errors.append(
+            f"{baseline_path.name} contains {len(baseline)} grandfathered entries, "
+            f"exceeding max_grandfathered={baseline_max}."
+        )
+    if not isinstance(baseline_expires, str):
+        errors.append(f"{baseline_path.name} must declare an ISO date `expires`.")
+    else:
+        try:
+            expires = _dt.date.fromisoformat(baseline_expires)
+        except ValueError:
+            errors.append(f"{baseline_path.name} has invalid ISO date `expires`: {baseline_expires!r}.")
+        else:
+            if expires < _dt.date.today():
+                errors.append(
+                    f"{baseline_path.name} expired on {baseline_expires}; "
+                    "promote or remove the grandfathered SDK contract types."
+                )
     if new_gaps:
         errors.append(
             "catalog-named contract types are not exposed by generated SDK output "

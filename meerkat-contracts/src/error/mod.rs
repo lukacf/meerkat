@@ -239,6 +239,9 @@ impl From<meerkat_core::SessionError> for WireError {
             meerkat_core::SessionError::Agent(meerkat_core::AgentError::Cancelled) => {
                 ErrorCode::RequestCancelled
             }
+            meerkat_core::SessionError::Agent(
+                meerkat_core::AgentError::SkillResolutionFailed { .. },
+            ) => ErrorCode::SkillResolutionFailed,
             meerkat_core::SessionError::Agent(_) => ErrorCode::AgentError,
             meerkat_core::SessionError::PersistenceDisabled
             | meerkat_core::SessionError::CompactionDisabled
@@ -294,6 +297,25 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::RequestCancelled);
         assert_eq!(err.category, ErrorCategory::Request);
+    }
+
+    #[test]
+    fn session_skill_resolution_wire_error_uses_skill_resolution_code()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let skill_name = meerkat_core::skills::SkillName::parse("example")?;
+        let key = meerkat_core::skills::SkillKey::builtin(skill_name);
+        let err = WireError::from(meerkat_core::SessionError::Agent(
+            meerkat_core::AgentError::SkillResolutionFailed {
+                skill_key: Some(key.clone()),
+                reason: Box::new(
+                    meerkat_core::event::SkillResolutionFailureReason::NotFound { key },
+                ),
+            },
+        ));
+
+        assert_eq!(err.code, ErrorCode::SkillResolutionFailed);
+        assert_eq!(err.category, ErrorCategory::Skill);
+        Ok(())
     }
 
     #[test]

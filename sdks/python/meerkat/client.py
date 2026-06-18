@@ -91,6 +91,67 @@ from .generated.types import (
     ToolsRegisterParams,
     ToolsRegisterResult,
 )
+from .generated.types import (
+    ApprovalDecideParams as RpcApprovalDecideParams,
+    ApprovalGetParams as RpcApprovalGetParams,
+    ApprovalListParams as RpcApprovalListParams,
+    ApprovalListResult as RpcApprovalListResult,
+    ApprovalRecord as RpcApprovalRecord,
+    ApprovalRequestParams as RpcApprovalRequestParams,
+    ArchiveSessionParams as RpcArchiveSessionParams,
+    ArtifactDownloadParams as RpcArtifactDownloadParams,
+    ArtifactDownloadResult as RpcArtifactDownloadResult,
+    ArtifactIdParams as RpcArtifactIdParams,
+    ArtifactListParams as RpcArtifactListParams,
+    ArtifactListResult as RpcArtifactListResult,
+    ArtifactRecord as RpcArtifactRecord,
+    BindingIdParams as RpcBindingIdParams,
+    BlobGetParams as RpcBlobGetParams,
+    BlobPayload as RpcBlobPayload,
+    CreateProfileParams as RpcCreateProfileParams,
+    CreateScheduleRequest as RpcCreateScheduleRequest,
+    DeferredCreateResult as RpcDeferredCreateResult,
+    DeviceCompleteParams as RpcDeviceCompleteParams,
+    DeviceStartParams as RpcDeviceStartParams,
+    EventsLatestCursorParams as RpcEventsLatestCursorParams,
+    EventsLatestCursorResult as RpcEventsLatestCursorResult,
+    EventsListSinceParams as RpcEventsListSinceParams,
+    EventsListSinceResult as RpcEventsListSinceResult,
+    EventsSnapshotParams as RpcEventsSnapshotParams,
+    EventsSnapshotResult as RpcEventsSnapshotResult,
+    ForkSessionAtParams as RpcForkSessionAtParams,
+    ForkSessionReplaceParams as RpcForkSessionReplaceParams,
+    HelpRequest as RpcHelpRequest,
+    HelpResponse as RpcHelpResponse,
+    InjectSystemContextParams as RpcInjectSystemContextParams,
+    InjectSystemContextResult as RpcInjectSystemContextResult,
+    InterruptParams as RpcInterruptParams,
+    ListSessionsParams as RpcListSessionsParams,
+    ListSessionsResult as RpcListSessionsResult,
+    LoginCompleteParams as RpcLoginCompleteParams,
+    LoginStartParams as RpcLoginStartParams,
+    ProvisionApiKeyParams as RpcProvisionApiKeyParams,
+    ReadSessionHistoryParams as RpcReadSessionHistoryParams,
+    ReadSessionParams as RpcReadSessionParams,
+    ReadSessionTranscriptRevisionParams as RpcReadSessionTranscriptRevisionParams,
+    RealmIdParams as RpcRealmIdParams,
+    RestoreSessionTranscriptRevisionParams as RpcRestoreSessionTranscriptRevisionParams,
+    RewriteSessionTranscriptParams as RpcRewriteSessionTranscriptParams,
+    RuntimeHostCapabilities as RpcRuntimeHostCapabilities,
+    RuntimeHostHealth as RpcRuntimeHostHealth,
+    RuntimeHostInfo as RpcRuntimeHostInfo,
+    Schedule as RpcSchedule,
+    ScheduleToolCallParams as RpcScheduleToolCallParams,
+    ScheduleToolsResult as RpcScheduleToolsResult,
+    SessionExternalEventEnvelope as RpcSessionExternalEventEnvelope,
+    SessionForkResult as RpcSessionForkResult,
+    SessionPeerResponseTerminalParams as RpcSessionPeerResponseTerminalParams,
+    SessionTranscriptRewriteResult as RpcSessionTranscriptRewriteResult,
+    WireDeviceCompleteResult as RpcWireDeviceCompleteResult,
+    WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
+    WireRunResult as RpcWireRunResult,
+    WireSessionTranscriptRevision as RpcWireSessionTranscriptRevision,
+)
 from .mob import (
     Mob,
     MobHelperResult,
@@ -602,17 +663,20 @@ class MeerkatClient:
     async def get_realm(self, realm_id: str) -> dict[str, Any]:
         """Fetch one realm's full WireRealmConnectionSet. Delegates to
         `realm/get`."""
+        _rpc_signature: RpcRealmIdParams
         return await self._request("realm/get", {"realm_id": realm_id})
 
     async def list_auth_profiles(self, realm_id: str) -> dict[str, Any]:
         """List auth profiles / backend profiles / bindings for one
         realm. Delegates to `auth/profile/list`."""
+        _rpc_signature: RpcRealmIdParams
         return await self._request("auth/profile/list", {"realm_id": realm_id})
 
     async def get_auth_profile(
         self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
         """Fetch a binding-scoped auth profile via `auth/profile/get`."""
+        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
@@ -622,6 +686,7 @@ class MeerkatClient:
         self, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Create binding-scoped credentials via `auth/profile/create`."""
+        _rpc_signature: RpcCreateProfileParams
         return await self._request("auth/profile/create", params)
 
     async def delete_auth_profile(
@@ -629,6 +694,7 @@ class MeerkatClient:
     ) -> None:
         """Clear a profile's persisted credentials via
         `auth/profile/delete`."""
+        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
@@ -641,6 +707,7 @@ class MeerkatClient:
         `auth/login/start`. Returns `{authorize_url, state}`; client directs
         user to the URL then calls `auth_login_complete` once the redirect
         carries a code."""
+        _rpc_signature: RpcLoginStartParams
         return await self._request(
             "auth/login/start",
             {"provider": provider, "redirect_uri": redirect_uri},
@@ -660,6 +727,7 @@ class MeerkatClient:
         """Exchange an authorization code for tokens via
         `auth/login/complete`. Tokens land in the server-side credential
         source for the resolved binding."""
+        _rpc_signature: RpcLoginCompleteParams
         params: dict[str, Any] = {
             "provider": provider,
             "code": code,
@@ -676,6 +744,7 @@ class MeerkatClient:
         """Start an OAuth device-code flow via
         `auth/login/device_start`. Returns the user_code to display +
         verification_uri + interval."""
+        _rpc_signature: RpcDeviceStartParams
         return await self._request(
             "auth/login/device_start", {"provider": provider}
         )
@@ -692,6 +761,10 @@ class MeerkatClient:
         """Poll once for device-code completion via
         `auth/login/device_complete`. Returns `{state: "pending" |
         "slow_down" | "access_denied" | "expired" | "ready", ...}`."""
+        _rpc_signature: (
+            RpcDeviceCompleteParams
+            | RpcWireDeviceCompleteResult
+        )
         params: dict[str, Any] = {
             "provider": provider,
             "device_code": device_code,
@@ -715,6 +788,10 @@ class MeerkatClient:
         the Console-scope OAuth flow first; hands the resulting
         access_token here; the server POSTs to Anthropic's
         create_api_key endpoint and persists the returned key."""
+        _rpc_signature: (
+            RpcProvisionApiKeyParams
+            | RpcWireProvisionApiKeyResult
+        )
         params: dict[str, Any] = {
             "access_token": access_token,
             "realm_id": realm_id,
@@ -729,6 +806,7 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         """Report persisted-credential status for a binding via
         `auth/status/get`."""
+        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
@@ -739,6 +817,7 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         """Revoke + delete a binding's persisted credentials via
         `auth/logout`."""
+        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
@@ -788,6 +867,10 @@ class MeerkatClient:
             )
             print(session.text)
         """
+        _rpc_signature: (
+            RpcDeferredCreateResult
+            | RpcWireRunResult
+        )
         params = self._build_create_params(
             prompt, model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
@@ -858,6 +941,10 @@ class MeerkatClient:
                 session_id = stream.session_id
                 result = stream.result
         """
+        _rpc_signature: (
+            RpcDeferredCreateResult
+            | RpcWireRunResult
+        )
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
@@ -944,6 +1031,10 @@ class MeerkatClient:
             )
             result = await deferred.start_turn("Begin")
         """
+        _rpc_signature: (
+            RpcDeferredCreateResult
+            | RpcWireRunResult
+        )
         params = self._build_create_params(
             prompt, model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
@@ -985,6 +1076,10 @@ class MeerkatClient:
         max_tokens: int | None = None,
     ) -> RunResult:
         """Ask Meerkat usage help through the dedicated ``help/ask`` RPC."""
+        _rpc_signature: (
+            RpcHelpRequest
+            | RpcHelpResponse
+        )
         params: dict[str, Any] = {
             "question": question,
             "execution_mode": execution_mode,
@@ -1010,6 +1105,10 @@ class MeerkatClient:
         offset: int | None = None,
     ) -> list[SessionSummary]:
         """List active sessions."""
+        _rpc_signature: (
+            RpcListSessionsParams
+            | RpcListSessionsResult
+        )
         params: dict[str, Any] = {}
         if labels is not None:
             params["labels"] = labels
@@ -1025,6 +1124,7 @@ class MeerkatClient:
 
     async def read_session(self, session_id: str) -> SessionDetails:
         """Read detailed session state."""
+        _rpc_signature: RpcReadSessionParams
         result = await self._request("session/read", {"session_id": session_id})
         return self._parse_session_details(result)
 
@@ -1037,6 +1137,7 @@ class MeerkatClient:
         blocks: list[ContentBlock] | None = None,
     ) -> ExternalEventOutcome:
         """Append a durable external event input to a session runtime."""
+        _rpc_signature: RpcSessionExternalEventEnvelope
         params: dict[str, Any] = {
             "session_id": session_id,
             "kind": "generic_json",
@@ -1058,6 +1159,7 @@ class MeerkatClient:
         display_name: str | None = None,
     ) -> ExternalEventOutcome:
         """Admit a correlated terminal peer response through the typed ingress."""
+        _rpc_signature: RpcSessionPeerResponseTerminalParams
         params: dict[str, Any] = {
             "session_id": session_id,
             "peer_id": str(peer_id),
@@ -1079,6 +1181,10 @@ class MeerkatClient:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Inject system context into a session."""
+        _rpc_signature: (
+            RpcInjectSystemContextParams
+            | RpcInjectSystemContextResult
+        )
         params = {
             "session_id": session_id,
             "content": {"type": "text", "text": text},
@@ -1097,6 +1203,7 @@ class MeerkatClient:
         limit: int | None = None,
     ) -> SessionHistory:
         """Read paginated session transcript history."""
+        _rpc_signature: RpcReadSessionHistoryParams
         params: dict[str, Any] = {"session_id": session_id, "offset": offset}
         if limit is not None:
             params["limit"] = limit
@@ -1112,6 +1219,10 @@ class MeerkatClient:
         limit: int | None = None,
     ) -> SessionTranscriptRevision:
         """Read paginated transcript history for a retained revision."""
+        _rpc_signature: (
+            RpcReadSessionTranscriptRevisionParams
+            | RpcWireSessionTranscriptRevision
+        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "revision": revision,
@@ -1130,6 +1241,10 @@ class MeerkatClient:
         running_behavior: TranscriptEditRunningBehavior | None = None,
     ) -> SessionForkResult:
         """Fork an idle session at a transcript message index."""
+        _rpc_signature: (
+            RpcForkSessionAtParams
+            | RpcSessionForkResult
+        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "message_index": message_index,
@@ -1148,6 +1263,10 @@ class MeerkatClient:
         running_behavior: TranscriptEditRunningBehavior | None = None,
     ) -> SessionForkResult:
         """Fork an idle session and apply a typed transcript replacement."""
+        _rpc_signature: (
+            RpcForkSessionReplaceParams
+            | RpcSessionForkResult
+        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "message_index": message_index,
@@ -1170,6 +1289,10 @@ class MeerkatClient:
         running_behavior: TranscriptEditRunningBehavior | None = None,
     ) -> SessionTranscriptRewriteResult:
         """Commit a typed same-session transcript rewrite."""
+        _rpc_signature: (
+            RpcRewriteSessionTranscriptParams
+            | RpcSessionTranscriptRewriteResult
+        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "selection": selection,
@@ -1199,6 +1322,10 @@ class MeerkatClient:
         running_behavior: TranscriptEditRunningBehavior | None = None,
     ) -> SessionTranscriptRewriteResult:
         """Commit a typed rewrite that restores a retained transcript revision."""
+        _rpc_signature: (
+            RpcRestoreSessionTranscriptRevisionParams
+            | RpcSessionTranscriptRewriteResult
+        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "revision": revision,
@@ -1214,6 +1341,10 @@ class MeerkatClient:
         return self._parse_session_transcript_rewrite_result(raw)
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
+        _rpc_signature: (
+            RpcBlobGetParams
+            | RpcBlobPayload
+        )
         raw = await self._request("blob/get", {"blob_id": blob_id})
         return BlobPayload(
             blob_id=str(raw.get("blob_id", blob_id)),
@@ -1222,46 +1353,89 @@ class MeerkatClient:
         )
 
     async def get_runtime_host_info(self) -> dict[str, Any]:
+        _rpc_signature: RpcRuntimeHostInfo
         return await self._request("runtime/host_info", {})
 
     async def get_runtime_host_capabilities(self) -> dict[str, Any]:
+        _rpc_signature: RpcRuntimeHostCapabilities
         return await self._request("runtime/capabilities", {})
 
     async def get_runtime_host_health(self) -> dict[str, Any]:
+        _rpc_signature: RpcRuntimeHostHealth
         return await self._request("runtime/health", {})
 
     async def request_approval(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcApprovalRecord
+            | RpcApprovalRequestParams
+        )
         return await self._request("approval/request", params)
 
     async def list_approvals(
         self, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcApprovalListParams
+            | RpcApprovalListResult
+        )
         return await self._request("approval/list", params or {})
 
     async def get_approval(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcApprovalGetParams
+            | RpcApprovalRecord
+        )
         return await self._request("approval/get", params)
 
     async def decide_approval(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcApprovalDecideParams
+            | RpcApprovalRecord
+        )
         return await self._request("approval/decide", params)
 
     async def list_artifacts(
         self, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcArtifactListParams
+            | RpcArtifactListResult
+        )
         return await self._request("artifact/list", params or {})
 
     async def get_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcArtifactIdParams
+            | RpcArtifactRecord
+        )
         return await self._request("artifact/get", params)
 
     async def download_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcArtifactDownloadParams
+            | RpcArtifactDownloadResult
+        )
         return await self._request("artifact/download", params)
 
     async def latest_event_cursor(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcEventsLatestCursorParams
+            | RpcEventsLatestCursorResult
+        )
         return await self._request("events/latest_cursor", params)
 
     async def list_events_since(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcEventsListSinceParams
+            | RpcEventsListSinceResult
+        )
         return await self._request("events/list_since", params)
 
     async def event_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
+        _rpc_signature: (
+            RpcEventsSnapshotParams
+            | RpcEventsSnapshotResult
+        )
         return await self._request("events/snapshot", params)
 
     # -- Capabilities ------------------------------------------------------
@@ -1320,9 +1494,14 @@ class MeerkatClient:
         return self._parse_models_catalog(raw)
 
     async def create_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
+        _rpc_signature: (
+            RpcCreateScheduleRequest
+            | RpcSchedule
+        )
         return await self._request("schedule/create", request)
 
     async def get_schedule(self, schedule_id: str) -> ScheduleRecord:
+        _rpc_signature: RpcSchedule
         return await self._request("schedule/get", {"schedule_id": schedule_id})
 
     async def list_schedules(
@@ -1346,15 +1525,19 @@ class MeerkatClient:
         }
 
     async def update_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
+        _rpc_signature: RpcSchedule
         return await self._request("schedule/update", request)
 
     async def pause_schedule(self, schedule_id: str) -> ScheduleRecord:
+        _rpc_signature: RpcSchedule
         return await self._request("schedule/pause", {"schedule_id": schedule_id})
 
     async def resume_schedule(self, schedule_id: str) -> ScheduleRecord:
+        _rpc_signature: RpcSchedule
         return await self._request("schedule/resume", {"schedule_id": schedule_id})
 
     async def delete_schedule(self, schedule_id: str) -> ScheduleRecord:
+        _rpc_signature: RpcSchedule
         return await self._request("schedule/delete", {"schedule_id": schedule_id})
 
     async def list_schedule_occurrences(
@@ -1373,11 +1556,13 @@ class MeerkatClient:
         }
 
     async def list_schedule_tools(self) -> ScheduleToolsResult:
+        _rpc_signature: RpcScheduleToolsResult
         raw = await self._request("schedule/tools", {})
         tools = raw.get("tools", [])
         return {"tools": tools if isinstance(tools, list) else []}
 
     async def call_schedule_tool(self, request: ScheduleToolCall) -> dict[str, Any]:
+        _rpc_signature: RpcScheduleToolCallParams
         return await self._request("schedule/call", dict(request))
 
     async def get_workgraph_item(
@@ -2292,6 +2477,7 @@ class MeerkatClient:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
+        auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
@@ -2300,6 +2486,7 @@ class MeerkatClient:
             "prompt": prompt,
             "agent_identity": agent_identity,
             "role_name": role_name,
+            "auth_binding": _wire_value(auth_binding),
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
@@ -2329,6 +2516,7 @@ class MeerkatClient:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
+        auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
         fork_context: dict[str, Any] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
@@ -2339,6 +2527,7 @@ class MeerkatClient:
             "prompt": prompt,
             "agent_identity": agent_identity,
             "role_name": role_name,
+            "auth_binding": _wire_value(auth_binding),
             "fork_context": fork_context,
             "runtime_mode": runtime_mode,
             "backend": backend,
@@ -2833,9 +3022,11 @@ class MeerkatClient:
         )
 
     async def _interrupt(self, session_id: str) -> InterruptResult:
+        _rpc_signature: RpcInterruptParams
         return await self._request("turn/interrupt", {"session_id": session_id})
 
     async def _archive(self, session_id: str) -> None:
+        _rpc_signature: RpcArchiveSessionParams
         await self._request("session/archive", {"session_id": session_id})
 
     async def _send(self, session_id: str, **kwargs: Any) -> dict[str, Any]:

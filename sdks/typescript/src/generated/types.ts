@@ -5,6 +5,8 @@ import { MeerkatError } from "./errors.js";
 
 export const CONTRACT_VERSION = "0.7.9";
 
+export type Value = unknown;
+
 
 // K21 — shared fail-closed wire parsing helpers (generated; not exported).
 function wireParseError(context: string, message: string): MeerkatError {
@@ -392,6 +394,462 @@ export interface WorkItemsResult {
 
 export type ConfigSetParams = Record<string, unknown>;
 
+export interface SessionExternalEventEnvelopeGenericJson {
+  blocks?: WireContentBlock[];
+  event_type: string;
+  kind: "generic_json";
+  payload: unknown;
+}
+
+export interface SessionExternalEventEnvelopePeerResponseTerminal {
+  display_name?: PeerName;
+  kind: "peer_response_terminal";
+  peer_id: PeerId;
+  request_id: string;
+  result: unknown;
+  status: "completed" | "failed" | "cancelled";
+}
+
+export type SessionExternalEventEnvelope = SessionExternalEventEnvelopeGenericJson | SessionExternalEventEnvelopePeerResponseTerminal;
+
+export interface WireDeviceCompleteResultPending {
+  state: "pending";
+}
+
+export interface WireDeviceCompleteResultSlowDown {
+  state: "slow_down";
+}
+
+export interface WireDeviceCompleteResultAccessDenied {
+  state: "access_denied";
+}
+
+export interface WireDeviceCompleteResultExpired {
+  state: "expired";
+}
+
+export interface WireDeviceCompleteResultReady {
+  auth_binding: WireAuthBindingRef;
+  binding_id: string;
+  expires_at?: string;
+  has_refresh_token: boolean;
+  profile_id: string;
+  provider: string;
+  realm_id: string;
+  scopes: string[];
+  state: "ready";
+}
+
+export type WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady;
+
+export interface ApprovalDecideParams {
+  actor: string;
+  approval_id: string;
+  decision: "approve" | "deny";
+  provenance?: unknown;
+  reason?: string;
+}
+
+export interface ApprovalGetParams {
+  approval_id: string;
+}
+
+export interface ApprovalListParams {
+  filter?: Record<string, unknown>;
+}
+
+export interface ApprovalListResult {
+  approvals: Record<string, unknown>[];
+}
+
+export interface ApprovalRecord {
+  allowed_decisions: ("approve" | "deny")[];
+  approval_id: string;
+  created_at: string;
+  decision?: Record<string, unknown>;
+  expires_at?: string;
+  metadata: Record<string, unknown>;
+  owner: Record<string, unknown>;
+  proposed_action: Record<string, unknown>;
+  request_body?: unknown;
+  request_provenance?: unknown;
+  requester: string;
+  resource: Record<string, unknown>;
+  risk: "low" | "medium" | "high" | "critical";
+  status: "pending" | "approved" | "denied" | "expired" | "cancelled";
+  updated_at: string;
+}
+
+export interface ApprovalRequestParams {
+  allowed_decisions: ("approve" | "deny")[];
+  expires_at?: string;
+  metadata?: Record<string, unknown>;
+  owner: Record<string, unknown>;
+  proposed_action: Record<string, unknown>;
+  request_body?: unknown;
+  request_provenance?: unknown;
+  requester: string;
+  resource: Record<string, unknown>;
+  risk: "low" | "medium" | "high" | "critical";
+}
+
+export interface ArchiveSessionParams {
+  session_id: string;
+}
+
+export interface ArtifactDownloadParams {
+  artifact_id: string;
+  expected_media_type?: string;
+}
+
+export interface ArtifactDownloadResult {
+  payload: Record<string, unknown>;
+  record: Record<string, unknown>;
+}
+
+export interface ArtifactIdParams {
+  artifact_id: string;
+}
+
+export interface ArtifactListParams {
+  label_equals?: Record<string, string>;
+  session_id?: string;
+}
+
+export interface ArtifactListResult {
+  artifacts: Record<string, unknown>[];
+}
+
+export interface ArtifactRecord {
+  artifact_id: string;
+  artifact_type: "text" | "log" | "command_output" | "diff" | "patch" | "generated_file" | "test_report" | "screenshot" | "image" | "json" | "binary" | { other: string };
+  content_handle: Record<string, unknown>;
+  created_at: string;
+  handle: Record<string, unknown>;
+  hash?: string;
+  media_type: string;
+  metadata?: Record<string, unknown>;
+  owner?: Record<string, unknown>;
+  producer?: string;
+  provenance?: Record<string, string>;
+  size_bytes: number;
+  title: string;
+}
+
+export interface BindingIdParams {
+  binding_id: string;
+  profile_id?: string;
+  realm_id: string;
+}
+
+export interface BlobGetParams {
+  blob_id: string;
+}
+
+export interface BlobPayload {
+  blob_id: BlobId;
+  data: string;
+  media_type: string;
+}
+
+export interface CreateProfileParams {
+  auth_method: string;
+  binding_id: string;
+  profile_id?: string;
+  realm_id: string;
+  secret: string;
+}
+
+export interface CreateScheduleRequest {
+  description?: string;
+  labels?: Record<string, string>;
+  misfire_policy?: Record<string, unknown>;
+  missing_target_policy?: "skip" | "mark_misfired";
+  name?: string;
+  overlap_policy?: "allow_concurrent" | "skip_if_running";
+  planning_horizon_days?: number;
+  planning_horizon_occurrences?: number;
+  target: Record<string, unknown>;
+  trigger: Record<string, unknown>;
+}
+
+export interface DeferredCreateResult {
+  session_id: string;
+  session_ref?: string;
+}
+
+export interface DeviceCompleteParams {
+  binding_id: string;
+  device_code: string;
+  profile_id?: string;
+  provider: string;
+  realm_id: string;
+}
+
+export interface DeviceStartParams {
+  binding_id: string;
+  profile_id?: string;
+  provider: string;
+  realm_id: string;
+}
+
+export interface EventsLatestCursorParams {
+  scope: Record<string, unknown>;
+}
+
+export interface EventsLatestCursorResult {
+  contract_version: Record<string, unknown>;
+  cursor: Record<string, unknown>;
+}
+
+export interface EventsListSinceParams {
+  cursor?: Record<string, unknown>;
+  limit?: number;
+  scope: Record<string, unknown>;
+}
+
+export interface EventsListSinceResult {
+  contract_version: Record<string, unknown>;
+  events?: Record<string, unknown>[];
+  from_cursor: Record<string, unknown>;
+  has_more: boolean;
+  latest_cursor: Record<string, unknown>;
+  scope: Record<string, unknown>;
+}
+
+export interface EventsSnapshotParams {
+  scope: Record<string, unknown>;
+}
+
+export interface EventsSnapshotResult {
+  contract_version: Record<string, unknown>;
+  cursor: Record<string, unknown>;
+  scope: Record<string, unknown>;
+  snapshot: Record<string, unknown>;
+}
+
+export interface ForkSessionAtParams {
+  message_index: number;
+  running_behavior?: "reject";
+  session_id: string;
+}
+
+export interface ForkSessionReplaceParams {
+  message_index: number;
+  replacement: Record<string, unknown>;
+  running_behavior?: "reject";
+  session_id: string;
+}
+
+export interface HelpRequest {
+  execution_mode?: "explain_only" | "plan_execution";
+  max_tokens?: number;
+  model?: string;
+  prompt?: string;
+  provider?: string;
+  question: string;
+}
+
+export interface HelpResponse {
+  extraction_error?: Record<string, unknown>;
+  schema_warnings?: Record<string, unknown>[];
+  session_id: string;
+  session_ref?: string;
+  skill_diagnostics?: Record<string, unknown>;
+  structured_output?: unknown;
+  terminal_cause_kind?: "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
+  text: string;
+  tool_calls: number;
+  turns: number;
+  usage: Record<string, unknown>;
+}
+
+export interface InjectSystemContextParams {
+  content: Record<string, unknown>;
+  idempotency_key?: string;
+  session_id: string;
+  source?: string;
+}
+
+export interface InjectSystemContextResult {
+  status: "applied" | "staged" | "duplicate";
+}
+
+export interface InterruptParams {
+  session_id: string;
+}
+
+export interface ListSessionsParams {
+  labels?: Record<string, string>;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListSessionsResult {
+  sessions: Record<string, unknown>[];
+}
+
+export interface LoginCompleteParams {
+  binding_id: string;
+  code: string;
+  profile_id?: string;
+  provider: string;
+  realm_id: string;
+  redirect_uri: string;
+  state: string;
+}
+
+export interface LoginStartParams {
+  binding_id: string;
+  profile_id?: string;
+  provider: string;
+  realm_id: string;
+  redirect_uri: string;
+}
+
+export interface ProvisionApiKeyParams {
+  access_token: string;
+  binding_id?: string;
+  profile_id?: string;
+  realm_id?: string;
+}
+
+export interface ReadSessionHistoryParams {
+  limit?: number;
+  offset?: number;
+  session_id: string;
+}
+
+export interface ReadSessionParams {
+  session_id: string;
+}
+
+export interface ReadSessionTranscriptRevisionParams {
+  limit?: number;
+  offset?: number;
+  revision: string;
+  session_id: string;
+}
+
+export interface RealmIdParams {
+  realm_id: string;
+}
+
+export interface RestoreSessionTranscriptRevisionParams {
+  actor?: string;
+  expected_parent_revision?: string;
+  reason: Record<string, unknown>;
+  revision: string;
+  running_behavior?: "reject";
+  session_id: string;
+}
+
+export interface RewriteSessionTranscriptParams {
+  actor?: string;
+  expected_parent_revision?: string;
+  reason: Record<string, unknown>;
+  replacement: Record<string, unknown>[];
+  running_behavior?: "reject";
+  selection: Record<string, unknown>;
+  session_id: string;
+}
+
+export interface RuntimeHostCapabilities {
+  contract_version: Record<string, unknown>;
+  features: Record<string, unknown>;
+}
+
+export interface RuntimeHostHealth {
+  checks?: Record<string, "ok" | "degraded" | "unhealthy">;
+  contract_version: Record<string, unknown>;
+  status: "ok" | "degraded" | "unhealthy";
+}
+
+export interface RuntimeHostInfo {
+  capabilities: Record<string, unknown>;
+  contract_version: Record<string, unknown>;
+  endpoints: Record<string, unknown>;
+  health: Record<string, unknown>;
+  host_id: string;
+  host_id_scope: "process" | "realm_instance";
+  placement_labels?: Record<string, string>;
+  policy_profile_summary?: string;
+  process_name: string;
+  process_version: string;
+  realm: Record<string, unknown>;
+}
+
+export interface Schedule {
+  config: Record<string, unknown>;
+  misfire_policy: Record<string, unknown>;
+  missing_target_policy: "skip" | "mark_misfired";
+  next_occurrence_ordinal: number;
+  overlap_policy: "allow_concurrent" | "skip_if_running";
+  phase: "active" | "paused" | "deleted";
+  planning_cursor_utc?: string;
+  revision: number;
+  schedule_id: string;
+  superseded_ack_ids: string[];
+  target: Record<string, unknown>;
+  trigger: Record<string, unknown>;
+}
+
+export interface ScheduleToolCallParams {
+  arguments?: unknown;
+  name: string;
+}
+
+export interface ScheduleToolsResult {
+  tools: unknown[];
+}
+
+export interface SessionForkResult {
+  message_count: number;
+  session_id: string;
+  session_ref?: string;
+  source_session_id: string;
+}
+
+export interface SessionPeerResponseTerminalParams {
+  display_name?: PeerName;
+  peer_id: PeerId;
+  request_id: string;
+  result: unknown;
+  session_id: string;
+  status: "completed" | "failed" | "cancelled";
+}
+
+export interface SessionTranscriptRewriteResult {
+  commit: Record<string, unknown>;
+  message_count: number;
+  parent_revision: string;
+  revision: string;
+  session_id: string;
+}
+
+export interface WireProvisionApiKeyResult {
+  auth_binding: WireAuthBindingRef;
+  auth_mode: string;
+  binding_id: string;
+  has_api_key: boolean;
+  profile_id: string;
+  provider: string;
+  realm_id: string;
+  scopes: string[];
+}
+
+export interface WireSessionTranscriptRevision {
+  has_more: boolean;
+  head_revision: string;
+  limit?: number;
+  message_count: number;
+  messages: Record<string, unknown>[];
+  offset: number;
+  revision: string;
+  session_id: string;
+  session_ref?: string;
+}
+
 export interface MobWireParams {
   member: string;
   mob_id: string;
@@ -772,6 +1230,7 @@ export interface MobFlowCancelResult {
 
 export interface MobSpawnHelperParams {
   agent_identity?: string;
+  auth_binding?: WireAuthBindingRef;
   backend?: WireMobBackendKind;
   mob_id: string;
   prompt: string;
@@ -781,6 +1240,7 @@ export interface MobSpawnHelperParams {
 
 export interface MobForkHelperParams {
   agent_identity?: string;
+  auth_binding?: WireAuthBindingRef;
   backend?: WireMobBackendKind;
   fork_context?: unknown;
   mob_id: string;
@@ -2497,6 +2957,30 @@ export type LiveCloseStatus = "closed";
 
 export interface LiveCloseResult {
   status: "closed";
+}
+
+export type LiveSendInputStatus = "sent";
+
+export interface LiveSendInputResult {
+  status: "sent";
+}
+
+export type LiveCommitInputStatus = "committed";
+
+export interface LiveCommitInputResult {
+  status: "committed";
+}
+
+export type LiveInterruptStatus = "interrupted";
+
+export interface LiveInterruptResult {
+  status: "interrupted";
+}
+
+export type LiveTruncateStatus = "truncated";
+
+export interface LiveTruncateResult {
+  status: "truncated";
 }
 
 export interface LiveInputChunkWireAudio {

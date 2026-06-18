@@ -1357,6 +1357,8 @@ pub struct MobSpawnHelperParams {
     #[serde(default)]
     pub role_name: Option<String>,
     #[serde(default)]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
     pub backend: Option<MobBackendKind>,
@@ -1390,6 +1392,7 @@ pub async fn handle_spawn_helper(
     if let Some(role) = params.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
+    options.auth_binding = params.auth_binding;
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
     match state
@@ -1429,6 +1432,8 @@ pub struct MobForkHelperParams {
     #[serde(default)]
     pub role_name: Option<String>,
     #[serde(default)]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
+    #[serde(default)]
     pub fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
@@ -1467,6 +1472,7 @@ pub async fn handle_fork_helper(
     if let Some(role) = params.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
+    options.auth_binding = params.auth_binding;
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
     match state

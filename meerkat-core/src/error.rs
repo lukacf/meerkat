@@ -333,6 +333,11 @@ pub enum AgentError {
     ConfigError(String),
     #[error("Invalid tool in access policy: {tool}")]
     InvalidToolAccess { tool: String },
+    #[error("Skill resolution failed for {skill_key:?}: {reason}")]
+    SkillResolutionFailed {
+        skill_key: Option<crate::skills::SkillKey>,
+        reason: Box<crate::event::SkillResolutionFailureReason>,
+    },
     #[error("Internal error: {0}")]
     InternalError(String),
 

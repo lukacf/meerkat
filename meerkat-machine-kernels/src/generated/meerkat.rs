@@ -6876,6 +6876,8 @@ pub enum RunFailureSourceKind {
     ConfigError,
     #[serde(rename = "InvalidToolAccess")]
     InvalidToolAccess,
+    #[serde(rename = "SkillResolutionFailed")]
+    SkillResolutionFailed,
     #[serde(rename = "InternalError")]
     InternalError,
     #[serde(rename = "BuildError")]
@@ -6925,6 +6927,7 @@ impl RunFailureSourceKind {
             Self::ConcurrencyLimitExceeded => "ConcurrencyLimitExceeded",
             Self::ConfigError => "ConfigError",
             Self::InvalidToolAccess => "InvalidToolAccess",
+            Self::SkillResolutionFailed => "SkillResolutionFailed",
             Self::InternalError => "InternalError",
             Self::BuildError => "BuildError",
             Self::AuthReauthRequired => "AuthReauthRequired",
@@ -6964,6 +6967,7 @@ impl std::convert::TryFrom<&str> for RunFailureSourceKind {
             "ConcurrencyLimitExceeded" => Ok(Self::ConcurrencyLimitExceeded),
             "ConfigError" => Ok(Self::ConfigError),
             "InvalidToolAccess" => Ok(Self::InvalidToolAccess),
+            "SkillResolutionFailed" => Ok(Self::SkillResolutionFailed),
             "InternalError" => Ok(Self::InternalError),
             "BuildError" => Ok(Self::BuildError),
             "AuthReauthRequired" => Ok(Self::AuthReauthRequired),

@@ -235,13 +235,13 @@ fi
 run_governance_gate() {
   printf 'Cargo agent gate governance/spec paths:\n'
   printf '  %s\n' "${governance[@]}"
-  echo "Formal/governance artifacts changed; running machine-check-drift, runtime-authority-bypass, seam-inventory, and rmat-audit."
+  echo "Formal/governance artifacts changed; running machine-check-drift, machine-authority-docs-gate, runtime-authority-bypass, seam-inventory, and rmat-audit."
   if [[ "${dry_run}" -eq 1 ]]; then
-    echo "DRY-RUN make machine-check-drift runtime-authority-bypass seam-inventory rmat-audit"
-    echo "DRY-RUN generated-artifact summary: make machine-check-drift seam-inventory rmat-audit"
+    echo "DRY-RUN make machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit"
+    echo "DRY-RUN generated-artifact summary: make machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit"
     return 0
   fi
-  make machine-check-drift runtime-authority-bypass seam-inventory rmat-audit
+  make machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit
 }
 
 if [[ "${#governance[@]}" -gt 0 ]]; then

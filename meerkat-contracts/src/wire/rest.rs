@@ -276,6 +276,8 @@ pub struct RestMobHelperRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<AuthBindingRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<WireMobRuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<WireMobBackendKind>,
@@ -291,6 +293,8 @@ pub struct RestMobForkHelperRequest {
     pub agent_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<AuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_context: Option<WireForkContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -386,6 +390,45 @@ mod tests {
         let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
         assert_eq!(auth_binding.realm.as_str(), "dev");
         assert_eq!(auth_binding.binding.as_str(), "default_openai");
+        assert!(auth_binding.profile.is_none());
+    }
+
+    #[test]
+    fn mob_helper_requests_carry_structural_auth_binding() {
+        let parsed: RestMobHelperRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "help",
+            "agent_identity": "helper",
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "default_anthropic",
+                "profile": "console"
+            }
+        }))
+        .expect("spawn helper body parses");
+        let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
+        assert_eq!(
+            auth_binding
+                .profile
+                .as_ref()
+                .map(|profile| profile.as_str()),
+            Some("console")
+        );
+
+        let parsed: RestMobForkHelperRequest = serde_json::from_value(serde_json::json!({
+            "source_member_id": "source",
+            "prompt": "help",
+            "agent_identity": "helper",
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "default_anthropic"
+            }
+        }))
+        .expect("fork helper body parses");
+        let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
+        assert_eq!(auth_binding.realm.as_str(), "dev");
+        assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
         assert!(auth_binding.profile.is_none());
     }
 

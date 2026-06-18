@@ -359,7 +359,7 @@ case "${command}" in
   machine-authority-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//xtask:machine_verify_all_tlc_test //xtask:machines_contracts_test //xtask:protocol_codegen_drift_test //xtask:runtime_authority_bypass_test //meerkat-machine-codegen:render_contracts_test //meerkat-machine-codegen:runtime_alphabet_parity_test //meerkat-machine-codegen:runtime_schema_parity_test"
+    default_target="//xtask:machine_verify_all_tlc_test //xtask:machines_contracts_test //xtask:protocol_codegen_drift_test //xtask:runtime_authority_bypass_test //meerkat-machine-schema:docs_machine_authority_alignment_test //meerkat-machine-codegen:render_contracts_test //meerkat-machine-codegen:runtime_alphabet_parity_test //meerkat-machine-codegen:runtime_schema_parity_test"
     extra_args+=(
       --test_output=errors
       --test_summary=terse

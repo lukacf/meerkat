@@ -9,12 +9,15 @@ use crate::session_runtime::SessionRuntime;
 
 fn host_surface_options(
     runtime_available: bool,
+    live_enabled: bool,
+    live_webrtc_enabled: bool,
     event_replay: bool,
     approvals_available: bool,
     skills_enabled: bool,
 ) -> meerkat::surface::RuntimeHostSurfaceOptions {
     let catalog_options = meerkat_contracts::RpcMethodCatalogOptions {
         runtime_available,
+        live_enabled,
         mob_enabled: cfg!(feature = "mob"),
         mcp_enabled: cfg!(feature = "mcp"),
         comms_enabled: cfg!(feature = "comms"),
@@ -24,7 +27,7 @@ fn host_surface_options(
         schedule_enabled: cfg!(feature = "schedule"),
         workgraph_enabled: cfg!(feature = "workgraph"),
         skills_enabled,
-        live_webrtc_enabled: cfg!(feature = "live-webrtc"),
+        live_webrtc_enabled,
     };
     let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(
         "meerkat-rpc",
@@ -52,10 +55,14 @@ pub fn handle_info(
     runtime: &Arc<SessionRuntime>,
     config_store: &Arc<dyn ConfigStore>,
     runtime_available: bool,
+    live_enabled: bool,
+    live_webrtc_enabled: bool,
     skills_enabled: bool,
 ) -> RpcResponse {
     let options = host_surface_options(
         runtime_available,
+        live_enabled,
+        live_webrtc_enabled,
         runtime.supports_event_replay(),
         runtime.approval_service().is_persistent(),
         skills_enabled,
@@ -73,10 +80,14 @@ pub fn handle_capabilities(
     id: Option<RpcId>,
     runtime: &Arc<SessionRuntime>,
     runtime_available: bool,
+    live_enabled: bool,
+    live_webrtc_enabled: bool,
     skills_enabled: bool,
 ) -> RpcResponse {
     let options = host_surface_options(
         runtime_available,
+        live_enabled,
+        live_webrtc_enabled,
         runtime.supports_event_replay(),
         runtime.approval_service().is_persistent(),
         skills_enabled,

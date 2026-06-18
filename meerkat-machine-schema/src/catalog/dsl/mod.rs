@@ -1574,6 +1574,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ConcurrencyLimitExceeded",
                     "ConfigError",
                     "InvalidToolAccess",
+                    "SkillResolutionFailed",
                     "InternalError",
                     "BuildError",
                     "AuthReauthRequired",

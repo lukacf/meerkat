@@ -142,6 +142,7 @@ fn failure_source_variant(source: TurnFailureSourceKind) -> &'static str {
         TurnFailureSourceKind::ConcurrencyLimitExceeded => "ConcurrencyLimitExceeded",
         TurnFailureSourceKind::ConfigError => "ConfigError",
         TurnFailureSourceKind::InvalidToolAccess => "InvalidToolAccess",
+        TurnFailureSourceKind::SkillResolutionFailed => "SkillResolutionFailed",
         TurnFailureSourceKind::InternalError => "InternalError",
         TurnFailureSourceKind::BuildError => "BuildError",
         TurnFailureSourceKind::AuthReauthRequired => "AuthReauthRequired",

@@ -1175,8 +1175,26 @@ async fn process_queue(
             Err(_) => return true,
         };
 
-        // Dequeue and prepare under the driver lock
-        let dequeued = {
+        enum RuntimeLoopDequeueOutcome {
+            Ready {
+                input_ids: Vec<InputId>,
+                run_id: RunId,
+                primitive: Box<
+                    Result<
+                        RunPrimitive,
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
+                    >,
+                >,
+                batch: crate::meerkat_machine::driver::AuthorizedRuntimeLoopBatch,
+            },
+            ProjectionMismatch {
+                input_ids: Vec<InputId>,
+                reason: String,
+            },
+        }
+
+        // Dequeue and prepare under the driver lock.
+        let dequeued = 'dequeue: {
             let mut d = driver.lock().await;
 
             // Immediate attached steer can pre-bind the DSL run before waking
@@ -1217,11 +1235,16 @@ async fn process_queue(
             let staged_inputs = match d.dequeue_batch_exact(&batch) {
                 Ok(staged_inputs) => staged_inputs,
                 Err(error) => {
+                    let reason =
+                        format!("runtime loop batch projection conformance failed: {error}");
                     tracing::error!(
                         error = %error,
                         "runtime loop batch projection conformance failed"
                     );
-                    return true;
+                    break 'dequeue RuntimeLoopDequeueOutcome::ProjectionMismatch {
+                        input_ids: batch.input_ids().to_vec(),
+                        reason,
+                    };
                 }
             };
 
@@ -1274,11 +1297,21 @@ async fn process_queue(
                     },
                 ),
             };
-            Some((contributing_input_ids, run_id, primitive, batch))
+            RuntimeLoopDequeueOutcome::Ready {
+                input_ids: contributing_input_ids,
+                run_id,
+                primitive: Box::new(primitive),
+                batch,
+            }
         };
 
         match dequeued {
-            Some((input_ids, run_id, primitive, batch)) => {
+            RuntimeLoopDequeueOutcome::Ready {
+                input_ids,
+                run_id,
+                primitive,
+                batch,
+            } => {
                 if let Err(err) = crate::meerkat_machine::prepare_runtime_loop_batch_start(
                     driver,
                     run_id.clone(),
@@ -1297,7 +1330,7 @@ async fn process_queue(
                     }
                     return false;
                 }
-                let primitive = match primitive {
+                let primitive = match *primitive {
                     Ok(primitive) => primitive,
                     Err(conflict) => {
                         tracing::error!(
@@ -1600,7 +1633,19 @@ async fn process_queue(
                     }
                 }
             }
-            None => return false, // Queue empty
+            RuntimeLoopDequeueOutcome::ProjectionMismatch { input_ids, reason } => {
+                if let Some(completions) = completions.as_ref() {
+                    let mut completions = completions.lock().await;
+                    fail_completion_waiters(&mut completions, &input_ids, reason.clone());
+                }
+                return stop_runtime_loop_executor_from_dsl_effect(
+                    driver,
+                    completions,
+                    executor,
+                    reason,
+                )
+                .await;
+            }
         }
     }
 }

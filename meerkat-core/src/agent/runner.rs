@@ -19,8 +19,8 @@ use crate::tokio;
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceSnapshot, ToolFilter, ToolScopeRevision,
-    ToolScopeStageError,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceSnapshot, ToolFilter, ToolScopeApplyError,
+    ToolScopeRevision, ToolScopeStageError,
 };
 use crate::turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
@@ -138,6 +138,9 @@ pub enum SystemContextStateError {
     /// Serializing the system-context control state into session metadata failed.
     #[error("failed to serialize system-context state into session: {0}")]
     SystemContext(#[source] serde_json::Error),
+    /// Reading the generated-authority tool visibility projection failed.
+    #[error("failed to authorize tool visibility state for session export: {0}")]
+    ToolVisibilityAuthorization(#[source] ToolScopeApplyError),
     /// Serializing the authorized tool-visibility state into session metadata failed.
     #[error("failed to serialize tool visibility state into session: {0}")]
     ToolVisibility(#[source] serde_json::Error),
@@ -780,7 +783,11 @@ where
         session
             .set_system_context_state(state)
             .map_err(SystemContextStateError::SystemContext)?;
-        if let Ok(visibility_state) = self.tool_scope.authorized_visibility_state() {
+        if self.tool_scope.owns_durable_visibility_projection() {
+            let visibility_state = self
+                .tool_scope
+                .authorized_visibility_state()
+                .map_err(SystemContextStateError::ToolVisibilityAuthorization)?;
             session
                 .set_tool_visibility_state(visibility_state)
                 .map_err(SystemContextStateError::ToolVisibility)?;
@@ -1184,7 +1191,14 @@ where
         // Resolved activations travel as typed `SkillContext` blocks prepended
         // to the turn input, preserving activation provenance in the durable
         // transcript instead of folding skill bodies into operator text.
-        let skill_blocks = self.resolve_pending_skill_context(event_tx.as_ref()).await;
+        let skill_blocks = match self.resolve_pending_skill_context(event_tx.as_ref()).await {
+            Ok(blocks) => blocks,
+            Err(err) => {
+                self.handle_run_failure(&err, event_tx.as_ref()).await;
+                self.clear_runtime_execution_kind();
+                return Err(err);
+            }
+        };
         let user_input = if skill_blocks.is_empty() {
             user_input
         } else {
@@ -1417,10 +1431,10 @@ where
     async fn resolve_pending_skill_context(
         &mut self,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
-    ) -> Vec<crate::types::ContentBlock> {
+    ) -> Result<Vec<crate::types::ContentBlock>, AgentError> {
         let engine = match &self.skill_engine {
             Some(e) => e.clone(),
-            None => return Vec::new(),
+            None => return Ok(Vec::new()),
         };
 
         let mut skill_blocks: Vec<crate::types::ContentBlock> = Vec::new();
@@ -1476,14 +1490,21 @@ where
                     let _ = crate::event_tap::tap_emit(
                         &self.event_tap,
                         event_tx,
-                        AgentEvent::SkillResolutionFailed { skill_key, reason },
+                        AgentEvent::SkillResolutionFailed {
+                            skill_key: skill_key.clone(),
+                            reason: reason.clone(),
+                        },
                     )
                     .await;
+                    return Err(AgentError::SkillResolutionFailed {
+                        skill_key,
+                        reason: Box::new(reason),
+                    });
                 }
             }
         }
 
-        skill_blocks
+        Ok(skill_blocks)
     }
 }
 
@@ -1634,6 +1655,88 @@ mod skill_activation_effect_tests {
         async fn load(&self, _id: &str) -> Result<Option<crate::session::Session>, AgentError> {
             Ok(None)
         }
+    }
+
+    struct VisibilityReadFailingOwner;
+
+    impl crate::tool_scope::ToolVisibilityOwner for VisibilityReadFailingOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::session::SessionToolVisibilityState, ToolScopeApplyError> {
+            Err(ToolScopeApplyError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: crate::session::SessionToolVisibilityState,
+        ) -> Result<(), ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: ToolFilter,
+            _witnesses: std::collections::BTreeMap<
+                crate::ToolName,
+                crate::session::ToolVisibilityWitness,
+            >,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: std::collections::BTreeSet<crate::ToolName>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<crate::session::DeferredToolLoadAuthority>,
+        ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+            Err(ToolScopeStageError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::session::SessionToolVisibilityState, ToolScopeApplyError> {
+            Err(ToolScopeApplyError::Owner {
+                message: "visibility read fixture failed".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_visibility_export_read_failure_fails_closed() {
+        let owner: Arc<dyn crate::tool_scope::ToolVisibilityOwner> =
+            Arc::new(VisibilityReadFailingOwner);
+        let agent = AgentBuilder::new()
+            .with_tool_visibility_owner(
+                crate::tool_scope::generated_test_tool_visibility_owner_from(owner),
+            )
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let err = agent
+            .session_with_system_context_state()
+            .expect_err("generated owner read failures must not export partial visibility state");
+        assert!(matches!(
+            err,
+            SystemContextStateError::ToolVisibilityAuthorization(ToolScopeApplyError::Owner { .. })
+        ));
     }
 
     /// A `SkillEngine` whose `resolve_and_render` always fails with a typed
@@ -1831,11 +1934,25 @@ mod skill_activation_effect_tests {
         agent.pending_skill_references = Some(vec![key.clone()]);
 
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
-        let out = agent.resolve_pending_skill_context(Some(&tx)).await;
+        let err = agent
+            .resolve_pending_skill_context(Some(&tx))
+            .await
+            .expect_err("skill resolution failures must fail closed");
         drop(tx);
 
-        // Resolution failed, so no skill-context blocks are produced.
-        assert!(out.is_empty());
+        match err {
+            AgentError::SkillResolutionFailed {
+                skill_key: Some(failed_key),
+                reason,
+            } => match *reason {
+                crate::event::SkillResolutionFailureReason::NotFound { key: missing_key } => {
+                    assert_eq!(failed_key, key);
+                    assert_eq!(missing_key, key);
+                }
+                other => panic!("unexpected skill resolution reason: {other:?}"),
+            },
+            other => panic!("unexpected skill resolution error: {other:?}"),
+        }
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -1870,6 +1987,64 @@ mod skill_activation_effect_tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_fails_closed_when_per_turn_skill_resolution_fails() {
+        let mut agent = build_agent_with_engine(FailingSkillEngine).await;
+        let key = fixture_skill_key("email-extractor");
+        agent.pending_skill_references = Some(vec![key.clone()]);
+        let initial_message_count = agent.session().messages().len();
+
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
+        let err = agent
+            .run_with_events("hello".to_string().into(), tx)
+            .await
+            .expect_err("missing per-turn skill refs must fail the run");
+
+        match err {
+            AgentError::SkillResolutionFailed {
+                skill_key: Some(failed_key),
+                reason,
+            } => match *reason {
+                crate::event::SkillResolutionFailureReason::NotFound { key: missing_key } => {
+                    assert_eq!(failed_key, key);
+                    assert_eq!(missing_key, key);
+                }
+                other => panic!("unexpected skill resolution reason: {other:?}"),
+            },
+            other => panic!("unexpected skill resolution error: {other:?}"),
+        }
+        assert_eq!(
+            agent.session().messages().len(),
+            initial_message_count,
+            "failed per-turn skill resolution must not commit the user message"
+        );
+
+        let mut saw_skill_failure = false;
+        let mut saw_run_failed = false;
+        let mut saw_run_started = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentEvent::SkillResolutionFailed { .. } => saw_skill_failure = true,
+                AgentEvent::RunFailed { error_report, .. } => {
+                    saw_run_failed = true;
+                    assert_eq!(error_report.class, crate::event::AgentErrorClass::Skill);
+                }
+                AgentEvent::RunStarted { .. } => saw_run_started = true,
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_skill_failure,
+            "typed skill failure event should be emitted"
+        );
+        assert!(saw_run_failed, "run should terminalize with RunFailed");
+        assert!(
+            !saw_run_started,
+            "run must fail before publishing RunStarted"
+        );
+    }
+
     /// Row #84: a successful activation produces a typed activation record (the
     /// `SkillsResolved` event carrying the canonical `SkillKey`s), distinct
     /// from the operator text. The old behavior folded activation purely into
@@ -1882,7 +2057,10 @@ mod skill_activation_effect_tests {
         agent.pending_skill_references = Some(vec![key.clone()]);
 
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(8);
-        let out = agent.resolve_pending_skill_context(Some(&tx)).await;
+        let out = agent
+            .resolve_pending_skill_context(Some(&tx))
+            .await
+            .expect("successful skill resolution should produce skill context");
         drop(tx);
 
         // The activation yields a typed skill-context block carrying both the

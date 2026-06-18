@@ -321,9 +321,13 @@ rust_test(
     size = "small",
     data = [
         ":package_runfiles",
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
+        "//:workspace_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
+        "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",

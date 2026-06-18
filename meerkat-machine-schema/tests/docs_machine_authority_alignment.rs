@@ -12,6 +12,17 @@ use std::path::{Path, PathBuf};
 
 use meerkat_machine_schema::{canonical_composition_schemas, canonical_machine_schemas};
 
+fn workspace_root() -> PathBuf {
+    std::env::var_os("WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("workspace root")
+                .to_path_buf()
+        })
+}
+
 /// Extract the first backtick-quoted token on each markdown table row whose
 /// token ends in `Machine` — i.e. the first column of the Canonical Machines
 /// table (`| `MeerkatMachine` | ... |`). Owner/scope cells and other tables do
@@ -61,12 +72,9 @@ fn documented_composition_names(mdx: &str) -> std::collections::BTreeSet<String>
 
 #[test]
 fn machine_authority_doc_table_matches_canonical_registry() {
-    let mdx_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../docs/reference/machine-authority.mdx"
-    );
+    let mdx_path = workspace_root().join("docs/reference/machine-authority.mdx");
     let mdx =
-        std::fs::read_to_string(mdx_path).unwrap_or_else(|err| panic!("read {mdx_path}: {err}"));
+        std::fs::read_to_string(&mdx_path).unwrap_or_else(|err| panic!("read {mdx_path:?}: {err}"));
 
     let documented = documented_machine_names(&mdx);
     let canonical: std::collections::BTreeSet<String> = canonical_machine_schemas()
@@ -90,12 +98,9 @@ fn machine_authority_doc_table_matches_canonical_registry() {
 
 #[test]
 fn machine_authority_doc_composition_table_matches_canonical_registry() {
-    let mdx_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../docs/reference/machine-authority.mdx"
-    );
+    let mdx_path = workspace_root().join("docs/reference/machine-authority.mdx");
     let mdx =
-        std::fs::read_to_string(mdx_path).unwrap_or_else(|err| panic!("read {mdx_path}: {err}"));
+        std::fs::read_to_string(&mdx_path).unwrap_or_else(|err| panic!("read {mdx_path:?}: {err}"));
 
     let documented = documented_composition_names(&mdx);
     let canonical: std::collections::BTreeSet<String> = canonical_composition_schemas()
@@ -205,9 +210,7 @@ fn count_claim_mismatches(
 /// count (`canonical_machine_schemas()` / `canonical_composition_schemas()`).
 #[test]
 fn doctrine_count_claims_match_canonical_registry() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root");
+    let repo_root = workspace_root();
     let machine_count = canonical_machine_schemas().len();
     let composition_count = canonical_composition_schemas().len();
 

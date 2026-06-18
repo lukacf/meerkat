@@ -38,7 +38,7 @@ async fn inner_test_rest_resume_metadata() {
     std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
 
     let mut config = Config::default();
-    config.agent.max_tokens_per_turn = 128;
+    config.agent.max_tokens_per_turn = Some(128);
     let config_store = MemoryConfigStore::new(config.clone(), meerkat_models::canonical());
 
     let store_path = temp_dir.path().join("sessions");
@@ -82,7 +82,7 @@ async fn inner_test_rest_resume_metadata() {
 
     let state_run = AppState {
         store_path: store_path.clone(),
-        max_tokens: config.agent.max_tokens_per_turn,
+        max_tokens: config.agent.resolved_max_tokens_per_turn(),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: true,
@@ -142,7 +142,7 @@ async fn inner_test_rest_resume_metadata() {
     let run_payload = json!({
         "prompt": "Say the word 'ok' and nothing else.",
         "model": meerkat::resolve_create_session_default_model(&config),
-        "max_tokens": config.agent.max_tokens_per_turn
+        "max_tokens": config.agent.resolved_max_tokens_per_turn()
     });
     let request = Request::builder()
         .method("POST")

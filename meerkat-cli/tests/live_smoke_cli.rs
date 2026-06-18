@@ -148,7 +148,7 @@ async fn write_smoke_config(
     tokio::fs::create_dir_all(&rkat_dir).await?;
 
     let mut config = Config::default();
-    config.agent.max_tokens_per_turn = 256;
+    config.agent.max_tokens_per_turn = Some(256);
     config.agent.model = smoke_model();
     let config_toml = toml::to_string_pretty(&config)?;
     tokio::fs::write(rkat_dir.join("config.toml"), config_toml).await?;
@@ -453,7 +453,7 @@ async fn inner_e2e_cli_generate_image_openai_default() -> Result<(), Box<dyn std
     let rkat_dir = project_dir.join(".rkat");
     tokio::fs::create_dir_all(&rkat_dir).await?;
     let mut config = Config::default();
-    config.agent.max_tokens_per_turn = 4096;
+    config.agent.max_tokens_per_turn = Some(4096);
     config.agent.model = smoke_model();
     let config_toml = toml::to_string_pretty(&config)?;
     tokio::fs::write(rkat_dir.join("config.toml"), config_toml).await?;

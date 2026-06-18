@@ -186,7 +186,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
             serde_json::to_vec(&json!({
                 "prompt": "say ok",
                 "model": meerkat::resolve_create_session_default_model(&config),
-                "max_tokens": config.agent.max_tokens_per_turn
+                "max_tokens": config.agent.resolved_max_tokens_per_turn()
             }))
             .expect("serialize payload"),
         ))

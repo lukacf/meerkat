@@ -157,7 +157,7 @@ fn build_app_inner(
 
     let state = AppState {
         store_path: store_path.clone(),
-        max_tokens: config.agent.max_tokens_per_turn,
+        max_tokens: config.agent.resolved_max_tokens_per_turn(),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: false,

@@ -44,7 +44,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
     std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
 
     let mut config = Config::default();
-    config.agent.max_tokens_per_turn = 256;
+    config.agent.max_tokens_per_turn = Some(256);
     config.agent.model = smoke_model();
     let config_store = MemoryConfigStore::new(config.clone(), meerkat_models::canonical());
 
@@ -86,7 +86,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
 
     let state = AppState {
         store_path: store_path.clone(),
-        max_tokens: config.agent.max_tokens_per_turn,
+        max_tokens: config.agent.resolved_max_tokens_per_turn(),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
         enable_builtins: false,

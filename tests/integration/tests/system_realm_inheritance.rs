@@ -287,4 +287,13 @@ async fn realm_config_inheritance_real_fs_chain() {
         GLOBAL_REALM_SLUG,
         "the implicit global tail is always part of the chain"
     );
+
+    // MF-13: an operator default model set only in `global` ([agent].model) is
+    // inherited by a realm that does not override it, so the composed config the
+    // create-session default-model ladder reads carries the inherited default
+    // (not the catalog substitute). `solo` never sets a model.
+    assert_eq!(
+        solo_effective.agent.model, "claude-sonnet-4-5",
+        "solo inherits global's operator default model"
+    );
 }

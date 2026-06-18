@@ -552,6 +552,10 @@ pub struct MeerkatMcpState {
     instance_id: Option<String>,
     expose_paths: bool,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    /// Realm config source for composing the effective config on model-resolution
+    /// read paths (create default-model), so an inherited (ancestor-realm) default
+    /// model / self-hosted alias resolves like the agent build path.
+    realm_config_source: Arc<dyn meerkat_core::RealmConfigSource>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
@@ -834,6 +838,7 @@ impl MeerkatMcpState {
             instance_id: bootstrap.realm.instance_id,
             expose_paths,
             config_runtime,
+            realm_config_source,
             skill_runtime,
             #[cfg(feature = "mob")]
             mob_state,
@@ -975,6 +980,7 @@ impl MeerkatMcpState {
             instance_id: bootstrap.realm.instance_id,
             expose_paths: false,
             config_runtime,
+            realm_config_source,
             skill_runtime: None,
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
@@ -3292,13 +3298,21 @@ async fn handle_meerkat_run(
         ));
     }
     // A ConfigError is a TRUE fault and must not be laundered into a default config
-    // that silently picks a phantom default model.
-    let config = state
+    // that silently picks a phantom default model. Compose the realm chain so an
+    // inherited (ancestor-realm) default model / self-hosted alias resolves like
+    // the agent build path.
+    let head_config = state
         .config_runtime
         .get()
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to read config: {e}")))?
         .config;
+    let config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm_id, head_config)
+        .await
+        .map_err(|e| {
+            ToolCallError::internal(format!("Failed to compose realm config chain: {e}"))
+        })?;
     let model = input
         .model
         .as_ref()

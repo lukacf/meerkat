@@ -3320,7 +3320,13 @@ impl SessionRuntime {
             .clone()
     }
 
-    async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RpcError> {
+    /// Compose the active realm chain over the durable head config — the
+    /// effective config every model-resolution read path (registry, create
+    /// default-model) must use so an inherited (ancestor-realm) self-hosted alias
+    /// or default model resolves like the agent build + hot-swap paths. The
+    /// `config get/set` path keeps reading the RAW head store (read/write split).
+    /// Fail-closed: a compose error propagates.
+    pub async fn effective_config(&self) -> Result<meerkat_core::Config, RpcError> {
         let head_config = if let Some(runtime) = self.config_runtime() {
             runtime
                 .get()
@@ -3335,31 +3341,28 @@ impl SessionRuntime {
             meerkat_core::Config::default()
         };
 
-        // Compose the active realm chain so an inherited self-hosted/custom model
-        // alias (e.g. defined only in `global`) is visible to provider resolution
-        // on session create / turn model-override — matching the agent build and
-        // hot-swap registries. Fail-closed: a compose error propagates.
         let inheritance = self
             .builder_realm_inheritance
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let config = if let Some(inheritance) = inheritance {
+        if let Some(inheritance) = inheritance {
             inheritance
                 .compose_over(head_config)
                 .await
                 .map_err(|e| RpcError {
                     code: error::INTERNAL_ERROR,
-                    message: format!(
-                        "Failed to compose realm config chain for model registry: {e}"
-                    ),
+                    message: format!("Failed to compose realm config chain: {e}"),
                     data: None,
-                })?
+                })
         } else {
-            head_config
-        };
+            Ok(head_config)
+        }
+    }
 
-        config
+    async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RpcError> {
+        self.effective_config()
+            .await?
             .model_registry(meerkat_models::canonical())
             .map_err(|e| RpcError {
                 code: error::INTERNAL_ERROR,

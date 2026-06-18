@@ -200,8 +200,29 @@ struct RestRuntimeExecutorContext {
     instance_id: Option<String>,
     backend: String,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
+    /// Realm config source for composing the effective config on turn-path model
+    /// capability validation (inherited self-hosted model capabilities).
+    realm_config_source: Arc<dyn meerkat_core::RealmConfigSource>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     runtime_pre_admissions: RestRuntimePreAdmissions,
+}
+
+impl RestRuntimeExecutorContext {
+    /// Compose the active realm chain over the durable head config — the
+    /// effective config turn-path model-capability validation must read so an
+    /// inherited self-hosted model's capabilities are visible (matches the build
+    /// + create paths). Fail-closed.
+    async fn effective_config(&self) -> Result<Config, meerkat_core::ConfigError> {
+        let head = self
+            .config_runtime
+            .get()
+            .await
+            .map_err(|err| meerkat_core::ConfigError::Validation(err.to_string()))?
+            .config;
+        meerkat_core::EffectiveConfigReader::new(Arc::clone(&self.realm_config_source))
+            .effective_config_over_head(&self.realm, head)
+            .await
+    }
 }
 
 struct RestSessionRuntimeExecutor {
@@ -629,6 +650,7 @@ impl AppState {
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
             config_runtime: self.config_runtime.clone(),
+            realm_config_source: Arc::clone(&self.realm_config_source),
             runtime_adapter: self.runtime_adapter.clone(),
             runtime_pre_admissions: self.runtime_pre_admissions.clone(),
         }
@@ -1036,15 +1058,15 @@ fn pending_system_context_appends(
         .collect()
 }
 
-async fn resolve_validation_identity(
-    config_runtime: &meerkat_core::ConfigRuntime,
+/// `config` MUST be the composed effective config (see
+/// [`effective_config_for_state`]) so an inherited self-hosted/custom model alias
+/// resolves the same way the agent build path sees it.
+fn resolve_validation_identity(
+    config: &Config,
     model: &str,
     provider: Option<meerkat_core::Provider>,
 ) -> Result<SessionLlmIdentity, String> {
-    let snapshot = config_runtime.get().await.ok().map(|state| state.config);
-    let registry = snapshot
-        .as_ref()
-        .and_then(|config| config.model_registry(meerkat_models::canonical()).ok());
+    let registry = config.model_registry(meerkat_models::canonical()).ok();
     let entry = registry.as_ref().and_then(|registry| registry.entry(model));
     if let (Some(registry), Some(provider)) = (registry.as_ref(), provider)
         && let Some(reason) = registry.provider_override_mismatch_reason(provider, model)
@@ -1090,14 +1112,13 @@ async fn resolve_validation_identity(
 /// config the built agent actually uses. A config read failure is propagated
 /// as a typed fault, never laundered into a fallback default.
 async fn resolve_default_model(state: &AppState) -> Result<String, ApiError> {
-    let snapshot = state
-        .config_runtime
-        .get()
-        .await
-        .map_err(config_runtime_err_to_api)?;
-    Ok(meerkat::resolve_create_session_default_model(
-        &snapshot.config,
-    ))
+    // Compose the realm chain so an operator default model inherited from an
+    // ancestor realm (e.g. `[agent].model` / `[models].*` in `global`) is honored
+    // instead of silently substituting the catalog default.
+    let config = effective_config_for_state(state).await.map_err(|err| {
+        ApiError::Internal(format!("failed to compose realm config chain: {err}"))
+    })?;
+    Ok(meerkat::resolve_create_session_default_model(&config))
 }
 
 #[derive(Debug, Clone)]
@@ -1135,22 +1156,21 @@ fn inline_video_registry_unavailable_evidence(
     )
 }
 
-async fn require_inline_video_support(
-    config_runtime: &meerkat_core::ConfigRuntime,
+fn require_inline_video_support(
+    config: &Config,
     identity: &SessionLlmIdentity,
 ) -> Result<(), meerkat_core::UnsupportedModelCapabilityEvidence> {
-    let Ok(snapshot) = config_runtime.get().await else {
-        return Err(inline_video_registry_unavailable_evidence(identity));
-    };
-    let Ok(registry) = snapshot.config.model_registry(meerkat_models::canonical()) else {
+    let Ok(registry) = config.model_registry(meerkat_models::canonical()) else {
         return Err(inline_video_registry_unavailable_evidence(identity));
     };
 
     registry.require_inline_video_for_provider(identity.provider, &identity.model)
 }
 
-async fn validate_prompt_video_input(
-    config_runtime: &meerkat_core::ConfigRuntime,
+/// `config` MUST be the composed effective config so an inherited self-hosted
+/// model's inline-video capability is visible.
+fn validate_prompt_video_input(
+    config: &Config,
     prompt: &ContentInput,
     identity: &SessionLlmIdentity,
 ) -> Result<(), PromptVideoInputValidationError> {
@@ -1163,12 +1183,41 @@ async fn validate_prompt_video_input(
         .map_err(PromptVideoInputValidationError::InvalidBlock)?;
 
     if meerkat_core::has_video(blocks) {
-        require_inline_video_support(config_runtime, identity)
-            .await
+        require_inline_video_support(config, identity)
             .map_err(PromptVideoInputValidationError::UnsupportedCapability)?;
     }
 
     Ok(())
+}
+
+/// Production wrapper: compose the active realm chain, then resolve the
+/// validation identity against the EFFECTIVE config so an inherited
+/// (ancestor-realm) self-hosted/custom model alias resolves like the agent build
+/// path. A compose failure is surfaced as a typed validation error (fail-closed).
+async fn resolve_validation_identity_for_state(
+    state: &AppState,
+    model: &str,
+    provider: Option<meerkat_core::Provider>,
+) -> Result<SessionLlmIdentity, String> {
+    let config = effective_config_for_state(state)
+        .await
+        .map_err(|err| err.to_string())?;
+    resolve_validation_identity(&config, model, provider)
+}
+
+/// Production wrapper: compose the active realm chain, then validate prompt video
+/// input against the EFFECTIVE config (inherited self-hosted model capabilities).
+async fn validate_prompt_video_input_for_state(
+    state: &AppState,
+    prompt: &ContentInput,
+    identity: &SessionLlmIdentity,
+) -> Result<(), PromptVideoInputValidationError> {
+    let config = effective_config_for_state(state).await.map_err(|err| {
+        PromptVideoInputValidationError::InvalidBlock(format!(
+            "failed to compose realm config chain: {err}"
+        ))
+    })?;
+    validate_prompt_video_input(&config, prompt, identity)
 }
 
 fn prompt_video_input_error_to_api(error: PromptVideoInputValidationError) -> ApiError {
@@ -1456,13 +1505,15 @@ async fn apply_runtime_turn(
                 .session_metadata()
                 .map(|metadata| metadata.llm_identity())
         });
-    if let Some(identity) = session_identity
-        && let Err(error) =
-            validate_prompt_video_input(&context.config_runtime, &prompt, &identity).await
-    {
-        return Err(SessionError::Agent(meerkat_core::AgentError::ConfigError(
-            error.to_string(),
-        )));
+    if let Some(identity) = session_identity {
+        let effective = context.effective_config().await.map_err(|err| {
+            SessionError::Agent(meerkat_core::AgentError::ConfigError(err.to_string()))
+        })?;
+        if let Err(error) = validate_prompt_video_input(&effective, &prompt, &identity) {
+            return Err(SessionError::Agent(meerkat_core::AgentError::ConfigError(
+                error.to_string(),
+            )));
+        }
     }
 
     let boundary = match primitive {
@@ -3420,6 +3471,24 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
     }
 }
 
+/// Compose the active realm chain over the durable head config — the effective
+/// config every model-resolution / validation read path must use so an inherited
+/// (ancestor-realm) self-hosted alias, default model, or capability is visible,
+/// matching the agent build path (`FactoryAgentBuilder::resolve_config`). The
+/// `config get/set` path keeps reading the RAW head store (read/write split).
+/// Fail-closed: a compose error is a typed fault, never the raw head.
+async fn effective_config_for_state(state: &AppState) -> Result<Config, meerkat_core::ConfigError> {
+    let head = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(|err| meerkat_core::ConfigError::Validation(err.to_string()))?
+        .config;
+    meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source))
+        .effective_config_over_head(&state.realm, head)
+        .await
+}
+
 fn validate_config_for_commit_with_roots(
     config: &Config,
     _context_root: Option<&std::path::Path>,
@@ -4296,7 +4365,7 @@ async fn create_session_inner(
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let initial_identity =
-        match resolve_validation_identity(&state.config_runtime, &model, req.provider).await {
+        match resolve_validation_identity_for_state(state, &model, req.provider).await {
             Ok(identity) => identity,
             Err(err) => {
                 if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
@@ -4388,9 +4457,7 @@ async fn create_session_inner(
     };
 
     let validation_identity =
-        match resolve_validation_identity(&state.config_runtime, &svc_req.model, create_provider)
-            .await
-        {
+        match resolve_validation_identity_for_state(state, &svc_req.model, create_provider).await {
             Ok(identity) => identity,
             Err(err) => {
                 if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
@@ -4406,8 +4473,7 @@ async fn create_session_inner(
             }
         };
     if let Err(err) =
-        validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
-            .await
+        validate_prompt_video_input_for_state(state, &svc_req.prompt, &validation_identity).await
     {
         if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
             drop(caller_event_tx);
@@ -5471,32 +5537,26 @@ async fn continue_session_inner(
             labels: None,
         };
         let create_provider = create_req.build.as_ref().and_then(|build| build.provider);
-        let validation_identity = match resolve_validation_identity(
-            &state.config_runtime,
-            &create_req.model,
-            create_provider,
-        )
-        .await
-        {
-            Ok(identity) => identity,
-            Err(err) => {
-                unregister_rest_runtime_if_new_idle_locked(
-                    state,
-                    &session_id,
-                    runtime_was_registered,
-                )
-                .await;
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
-            }
-        };
-        if let Err(err) = validate_prompt_video_input(
-            &state.config_runtime,
-            &create_req.prompt,
-            &validation_identity,
-        )
-        .await
+        let validation_identity =
+            match resolve_validation_identity_for_state(state, &create_req.model, create_provider)
+                .await
+            {
+                Ok(identity) => identity,
+                Err(err) => {
+                    unregister_rest_runtime_if_new_idle_locked(
+                        state,
+                        &session_id,
+                        runtime_was_registered,
+                    )
+                    .await;
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+                }
+            };
+        if let Err(err) =
+            validate_prompt_video_input_for_state(state, &create_req.prompt, &validation_identity)
+                .await
         {
             unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
                 .await;
@@ -5800,8 +5860,7 @@ async fn continue_session_inner(
 
         let current_identity = stored_metadata.llm_identity();
         if let Err(err) =
-            validate_prompt_video_input(&state.config_runtime, &turn_prompt, &current_identity)
-                .await
+            validate_prompt_video_input_for_state(state, &turn_prompt, &current_identity).await
         {
             unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
                 .await;
@@ -9175,37 +9234,22 @@ mod tests {
 
     #[tokio::test]
     async fn validate_prompt_video_input_accepts_self_hosted_alias_from_runtime_registry() {
-        let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
-            self_hosted_test_config(true),
-            meerkat_models::canonical(),
-        ));
-        let config_runtime =
-            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let config = self_hosted_test_config(true);
 
-        let identity = resolve_validation_identity(&config_runtime, "gemma-4-e2b", None)
-            .await
+        let identity = resolve_validation_identity(&config, "gemma-4-e2b", None)
             .expect("self-hosted alias should resolve");
         assert_eq!(identity.provider, Provider::SelfHosted);
 
-        validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
-            .await
+        validate_prompt_video_input(&config, &inline_video_prompt(), &identity)
             .expect("self-hosted aliases should validate inline video against the active registry");
     }
 
     #[tokio::test]
     async fn validate_prompt_video_input_rejects_inline_video_for_wrong_provider_known_model() {
-        let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
-        let config_runtime =
-            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let config = Config::default();
         let identity = validation_identity(Provider::Anthropic, "gemini-3.5-flash");
 
-        let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
-            .await
+        let err = validate_prompt_video_input(&config, &inline_video_prompt(), &identity)
             .expect_err("wrong typed provider must not inherit Gemini inline-video support");
 
         let evidence = err
@@ -9225,17 +9269,10 @@ mod tests {
 
     #[tokio::test]
     async fn validate_prompt_video_input_rejects_inline_video_for_unknown_provider_model_pair() {
-        let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
-        let config_runtime =
-            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let config = Config::default();
         let identity = validation_identity(Provider::Other, "uncatalogued-video-model");
 
-        let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
-            .await
+        let err = validate_prompt_video_input(&config, &inline_video_prompt(), &identity)
             .expect_err("unknown provider/model pair must fail closed without defaults");
 
         let evidence = err
@@ -9251,17 +9288,10 @@ mod tests {
 
     #[tokio::test]
     async fn validate_prompt_video_input_rejects_inline_video_without_typed_provider_authority() {
-        let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
-        let config_runtime =
-            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let config = Config::default();
         let identity = validation_identity(Provider::Other, "gemini-3.5-flash");
 
-        let err = validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
-            .await
+        let err = validate_prompt_video_input(&config, &inline_video_prompt(), &identity)
             .expect_err(
                 "known model/display strings must not select capability without typed provider",
             );
@@ -9279,18 +9309,10 @@ mod tests {
 
     #[tokio::test]
     async fn validation_identity_rejects_explicit_provider_that_contradicts_catalog_owner() {
-        let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
-        let config_runtime =
-            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let config = Config::default();
 
-        let err =
-            resolve_validation_identity(&config_runtime, "gpt-5.4", Some(Provider::Anthropic))
-                .await
-                .expect_err("validation identity should fail closed for wrong-provider overrides");
+        let err = resolve_validation_identity(&config, "gpt-5.4", Some(Provider::Anthropic))
+            .expect_err("validation identity should fail closed for wrong-provider overrides");
 
         assert!(
             err.contains("registered for provider 'openai'")
@@ -9302,16 +9324,9 @@ mod tests {
 
     #[tokio::test]
     async fn validation_identity_rejects_uncatalogued_model_without_provider_authority() {
-        let temp = TempDir::new().unwrap();
-        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
-        let config_runtime =
-            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+        let config = Config::default();
 
-        let err = resolve_validation_identity(&config_runtime, "unknown-model", None)
-            .await
+        let err = resolve_validation_identity(&config, "unknown-model", None)
             .expect_err("validation identity should fail closed without a typed provider owner");
 
         assert!(

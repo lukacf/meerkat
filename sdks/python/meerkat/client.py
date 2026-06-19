@@ -4167,6 +4167,10 @@ class MeerkatClient:
             if content_value is not None
             else None,
             stop_reason=data.get("stop_reason"),
+            interaction_id=str(data["interaction_id"])
+            if data.get("interaction_id") is not None
+            else None,
+            run_id=str(data["run_id"]) if data.get("run_id") is not None else None,
             blocks=[
                 MeerkatClient._parse_session_assistant_block(block)
                 for block in MeerkatClient._require_list_field(data, "blocks", context)

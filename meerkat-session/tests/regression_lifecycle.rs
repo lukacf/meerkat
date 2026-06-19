@@ -471,19 +471,15 @@ impl SessionAgent for RecordingTurnAgent {
 
     async fn run_turn_with_events(
         &mut self,
-        _prompt: meerkat_core::types::ContentInput,
-        handling_mode: HandlingMode,
-        render_metadata: Option<RenderMetadata>,
-        _typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
-        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        input: meerkat_session::ephemeral::SessionAgentTurnInput,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.recorded
             .lock()
             .expect("recorded-turn lock poisoned")
             .push(RecordedTurnMetadata {
-                handling_mode,
-                render_metadata,
+                handling_mode: input.handling_mode,
+                render_metadata: input.render_metadata,
             });
         Ok(RunResult {
             text: "recorded".to_string(),

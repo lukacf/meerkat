@@ -6,14 +6,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-python3 tools/sdk-codegen/generate.py
+PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+
+"$PYTHON" tools/sdk-codegen/generate.py
 
 if ! git diff --quiet -- \
     sdks/python/meerkat/generated \
     sdks/typescript/src/generated \
     sdks/web/src/generated; then
     echo "SDK codegen freshness check FAILED"
-    echo "Run: python3 tools/sdk-codegen/generate.py"
+    echo "Run: $PYTHON tools/sdk-codegen/generate.py"
     echo "Then commit the updated generated SDK artifacts."
     git diff --stat -- \
         sdks/python/meerkat/generated \

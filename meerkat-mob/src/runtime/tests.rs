@@ -6239,24 +6239,21 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
     async fn run_turn_with_events(
         &mut self,
-        prompt: meerkat_core::types::ContentInput,
-        handling_mode: HandlingMode,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        _typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
-        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        input: meerkat_session::ephemeral::SessionAgentTurnInput,
         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        if handling_mode != HandlingMode::Queue {
+        if input.handling_mode != HandlingMode::Queue {
             return Err(meerkat_core::error::AgentError::ConfigError(format!(
-                "unexpected overlay-probe handling mode: {handling_mode:?}"
+                "unexpected overlay-probe handling mode: {:?}",
+                input.handling_mode,
             )));
         }
-        if render_metadata.is_some() {
+        if input.render_metadata.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "overlay probe does not consume render metadata".to_string(),
             ));
         }
-        self.run_with_events(prompt, event_tx).await
+        self.run_with_events(input.prompt, event_tx).await
     }
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}

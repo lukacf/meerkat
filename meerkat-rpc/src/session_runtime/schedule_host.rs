@@ -393,6 +393,7 @@ impl SessionRuntime {
                 execution_kind: None,
                 peer_response_terminal_apply_intent: None,
                 auth_binding: None,
+                transcript_identity: Default::default(),
             },
         );
         let mut prompt_input =

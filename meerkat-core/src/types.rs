@@ -22,6 +22,33 @@ pub fn message_timestamp_now() -> MessageTimestamp {
     chrono::Utc::now()
 }
 
+/// Stable runtime identity for a transcript message.
+///
+/// These fields are optional so older persisted sessions deserialize without a
+/// migration, while new runtime-backed turns can expose the same identity that
+/// live event streams carry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct TranscriptMessageIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<crate::interaction::InteractionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<crate::lifecycle::RunId>,
+}
+
+impl TranscriptMessageIdentity {
+    pub fn is_empty(&self) -> bool {
+        self.interaction_id.is_none() && self.run_id.is_none()
+    }
+
+    pub fn with_run_id(&self, run_id: crate::lifecycle::RunId) -> Self {
+        Self {
+            interaction_id: self.interaction_id,
+            run_id: Some(run_id),
+        }
+    }
+}
+
 // ===========================================================================
 // Multimodal content blocks
 // ===========================================================================
@@ -2135,6 +2162,8 @@ pub struct UserMessage {
     pub content: Vec<ContentBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
+    #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
+    pub identity: TranscriptMessageIdentity,
     /// Typed transcript role. Defaults to [`TranscriptUserRole::Conversational`];
     /// runtime compaction marks the summary boundary message as
     /// [`TranscriptUserRole::CompactionSummary`].
@@ -2158,6 +2187,7 @@ impl UserMessage {
         Self {
             content: ContentBlock::text_vec(content.into()),
             render_metadata,
+            identity: TranscriptMessageIdentity::default(),
             transcript_role: TranscriptUserRole::Conversational,
             created_at: message_timestamp_now(),
         }
@@ -2172,6 +2202,7 @@ impl UserMessage {
         Self {
             content: ContentBlock::text_vec(content.into()),
             render_metadata: None,
+            identity: TranscriptMessageIdentity::default(),
             transcript_role: TranscriptUserRole::CompactionSummary,
             created_at: message_timestamp_now(),
         }
@@ -2190,6 +2221,7 @@ impl UserMessage {
         Self {
             content,
             render_metadata,
+            identity: TranscriptMessageIdentity::default(),
             transcript_role: TranscriptUserRole::Conversational,
             created_at: message_timestamp_now(),
         }
@@ -2226,6 +2258,8 @@ pub struct BlockAssistantMessage {
     pub blocks: Vec<AssistantBlock>,
     /// How the turn ended
     pub stop_reason: StopReason,
+    #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
+    pub identity: TranscriptMessageIdentity,
     /// When this assistant message was committed to the transcript.
     #[serde(default = "message_timestamp_now")]
     pub created_at: MessageTimestamp,
@@ -2240,6 +2274,7 @@ impl BlockAssistantMessage {
         Self {
             blocks,
             stop_reason,
+            identity: TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         }
     }

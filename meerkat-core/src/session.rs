@@ -4380,6 +4380,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4420,6 +4421,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4456,6 +4458,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4470,6 +4473,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4484,6 +4488,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4521,6 +4526,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4544,6 +4550,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4560,6 +4567,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::ToolUse,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4583,6 +4591,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -4627,6 +4636,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("keep suffix".to_string())));
@@ -4641,6 +4651,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4689,6 +4700,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4702,6 +4714,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4717,6 +4730,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let bridge_parent = session
@@ -4740,6 +4754,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4791,6 +4806,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent = base.transcript_revision().expect("parent revision");
@@ -4805,6 +4821,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4827,6 +4844,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4877,6 +4895,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4890,6 +4909,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -4933,6 +4953,7 @@ mod tests {
                             meta: None,
                         }],
                         stop_reason: StopReason::EndTurn,
+                        identity: crate::types::TranscriptMessageIdentity::default(),
                         created_at: crate::types::message_timestamp_now(),
                     }),
                 ],
@@ -4968,6 +4989,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -4981,6 +5003,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -5026,6 +5049,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let original_messages = session.messages().to_vec();
@@ -5039,6 +5063,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
                 TranscriptRewriteReason::new("compaction"),
@@ -6139,6 +6164,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -6637,6 +6663,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         session.record_usage(Usage {

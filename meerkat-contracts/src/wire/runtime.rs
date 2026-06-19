@@ -1410,6 +1410,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             peer_response_terminal_apply_intent: value
                 .peer_response_terminal_apply_intent
                 .map(Into::into),
+            transcript_identity: Default::default(),
         }
     }
 }

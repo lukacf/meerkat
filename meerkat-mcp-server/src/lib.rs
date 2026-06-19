@@ -7335,6 +7335,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
@@ -7348,6 +7349,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));

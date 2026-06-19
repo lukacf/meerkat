@@ -6,12 +6,14 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
+use meerkat_core::interaction::InteractionId;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyFailureCause, CoreApplyTerminal, CoreExecutorError,
 };
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive, StagedRunInput};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::turn_execution_authority::ContentShape as TurnContentShape;
+use meerkat_core::types::TranscriptMessageIdentity;
 
 use crate::input::Input;
 #[cfg(test)]
@@ -61,6 +63,12 @@ pub(crate) fn for_input(
     }
     metadata.execution_kind = Some(semantics.execution_kind);
     metadata.peer_response_terminal_apply_intent = semantics.peer_response_terminal_apply_intent;
+    if let Some(correlation_id) = input.header().correlation_id.as_ref() {
+        metadata.transcript_identity = TranscriptMessageIdentity {
+            interaction_id: Some(InteractionId(correlation_id.0)),
+            run_id: None,
+        };
+    }
     metadata
 }
 
@@ -2619,6 +2627,56 @@ mod tests {
             payload: None,
             handling_mode: None,
         })
+    }
+
+    #[test]
+    fn turn_metadata_stamps_transcript_identity_from_input_correlation() {
+        let interaction_uuid = uuid::Uuid::from_u128(7);
+        let mut input = make_peer_message("peer-1", "hello");
+        if let Input::Peer(peer) = &mut input {
+            peer.header.correlation_id = Some(crate::CorrelationId::from_uuid(interaction_uuid));
+        }
+        let semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+                .unwrap();
+
+        let metadata = for_input(&input, semantics);
+
+        assert_eq!(
+            metadata.transcript_identity.interaction_id,
+            Some(InteractionId(interaction_uuid))
+        );
+        assert_eq!(metadata.transcript_identity.run_id, None);
+    }
+
+    #[test]
+    fn merged_turn_metadata_clears_distinct_transcript_identities() {
+        let mut first = make_peer_message("peer-1", "hello");
+        let mut second = make_peer_message("peer-2", "again");
+        if let Input::Peer(peer) = &mut first {
+            peer.header.correlation_id =
+                Some(crate::CorrelationId::from_uuid(uuid::Uuid::from_u128(1)));
+        }
+        if let Input::Peer(peer) = &mut second {
+            peer.header.correlation_id =
+                Some(crate::CorrelationId::from_uuid(uuid::Uuid::from_u128(2)));
+        }
+        let first_semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&first, true)
+                .unwrap();
+        let second_semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                &second, true,
+            )
+            .unwrap();
+        let inputs = vec![(InputId::new(), first), (InputId::new(), second)];
+        let semantics = vec![first_semantics, second_semantics];
+
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .unwrap()
+            .expect("metadata should still carry execution kind");
+
+        assert!(metadata.transcript_identity.is_empty());
     }
 
     fn make_terminal_peer_response(peer_id: &str, request_id: &str) -> Input {

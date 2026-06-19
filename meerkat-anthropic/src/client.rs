@@ -315,6 +315,7 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
             Message::User(user) => Some(Message::User(meerkat_core::UserMessage {
                 content: project_anthropic_content_blocks(&user.content),
                 render_metadata: user.render_metadata.clone(),
+                identity: user.identity.clone(),
                 transcript_role: user.transcript_role,
                 created_at: user.created_at,
             })),
@@ -326,6 +327,7 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
                     Some(Message::BlockAssistant(BlockAssistantMessage {
                         blocks,
                         stop_reason: assistant.stop_reason,
+                        identity: assistant.identity.clone(),
                         created_at: assistant.created_at,
                     }))
                 }
@@ -1959,6 +1961,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
 
@@ -2073,6 +2076,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
 
@@ -2116,6 +2120,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
 
@@ -2830,6 +2835,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
 
@@ -2874,6 +2880,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
 

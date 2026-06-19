@@ -4085,6 +4085,8 @@ export class MeerkatClient {
       content:
         contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
+      interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
+      runId: data.run_id != null ? String(data.run_id) : undefined,
       blocks: rawBlocks.map((block) => MeerkatClient.parseSessionAssistantBlock(block)),
       results: rawResults.map((result): SessionToolResult => {
         if (typeof result !== "object" || result === null) {

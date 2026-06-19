@@ -71,6 +71,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         peer_response_terminal_apply_intent: Some(
             PeerResponseTerminalApplyIntent::AppendContextAndRun,
         ),
+        transcript_identity: Default::default(),
     }
 }
 

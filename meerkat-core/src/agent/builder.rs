@@ -660,6 +660,7 @@ impl AgentBuilder {
             mob_authority_handle: None,
             runtime_execution_kind_required: self.runtime_execution_kind_required,
             runtime_execution_kind: self.runtime_execution_kind,
+            active_transcript_identity: None,
             turn_state_handle: self.turn_state_handle,
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,

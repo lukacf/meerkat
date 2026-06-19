@@ -31,7 +31,7 @@ use meerkat_core::{
     Message, ProviderId, SessionEffect, StopReason, ToolCallView, ToolDef, ToolResult, UserMessage,
 };
 use meerkat_runtime::{MeerkatMachine, SessionServiceRuntimeExt};
-use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder};
+use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionAgentTurnInput};
 use meerkat_store::MemoryBlobStore;
 use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore};
 use serde_json::value::RawValue;
@@ -551,11 +551,14 @@ mod image_generation_substrate {
         let (run_tx, _run_rx) = mpsc::channel(32);
         let result = SessionAgent::run_turn_with_events(
             &mut agent,
-            "make an image".to_string().into(),
-            meerkat_core::types::HandlingMode::Queue,
-            None,
-            Vec::new(),
-            Some(RuntimeExecutionKind::ContentTurn),
+            SessionAgentTurnInput {
+                prompt: "make an image".to_string().into(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+                typed_turn_appends: Vec::new(),
+                transcript_identity: None,
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+            },
             run_tx,
         )
         .await

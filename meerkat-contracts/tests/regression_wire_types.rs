@@ -271,6 +271,8 @@ fn wire_session_history_required_fields() {
             },
             WireSessionMessage::User {
                 content: meerkat_contracts::WireContentInput::Text("user".to_string()),
+                interaction_id: None,
+                run_id: None,
                 created_at: "2026-04-27T00:00:01Z".to_string(),
             },
         ],
@@ -304,6 +306,8 @@ fn wire_session_history_roundtrip() {
             WireSessionMessage::BlockAssistant {
                 blocks: vec![],
                 stop_reason: meerkat_contracts::WireStopReason::EndTurn,
+                interaction_id: None,
+                run_id: None,
                 created_at: "2026-04-27T00:00:02Z".to_string(),
             },
             WireSessionMessage::ToolResults {

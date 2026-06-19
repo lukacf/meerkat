@@ -20454,15 +20454,12 @@ fn revival_error_means_session_already_live(
     error: &MobError,
     bridge_session_id: &SessionId,
 ) -> bool {
-    let expected = format!("Session identity already active: {bridge_session_id}");
-    match error {
+    matches!(
+        error,
         MobError::SessionError(meerkat_core::service::SessionError::Agent(
-            meerkat_core::error::AgentError::InternalError(message)
-            | meerkat_core::error::AgentError::BuildError(message),
-        ))
-        | MobError::Internal(message) => message.contains(&expected),
-        _ => false,
-    }
+            meerkat_core::error::AgentError::SessionIdentityInUse(session_id),
+        )) if session_id == bridge_session_id
+    )
 }
 
 #[cfg(test)]

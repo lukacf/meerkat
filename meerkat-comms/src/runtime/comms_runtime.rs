@@ -28,7 +28,7 @@ use meerkat_core::config::PlainEventSource;
 use meerkat_core::handles::{SessionClaim, SessionClaimError, SessionClaimHandle};
 use meerkat_core::hydrate_content_blocks;
 use meerkat_core::time_compat::Instant;
-use meerkat_core::{BlobStore, MissingBlobBehavior};
+use meerkat_core::{BlobStore, MissingBlobBehavior, SessionId};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -1400,7 +1400,7 @@ pub enum CommsRuntimeError {
     #[error("Identity error: {0}")]
     IdentityError(String),
     #[error("Session identity already active: {0}")]
-    SessionIdentityInUse(String),
+    SessionIdentityInUse(SessionId),
     #[error("Trust load error: {0}")]
     TrustLoadError(String),
     #[error("Listener error: {0}")]
@@ -1471,9 +1471,7 @@ fn observe_inproc_registration(
 impl From<SessionClaimError> for CommsRuntimeError {
     fn from(err: SessionClaimError) -> Self {
         match err {
-            SessionClaimError::SessionIdentityInUse(sid) => {
-                Self::SessionIdentityInUse(sid.to_string())
-            }
+            SessionClaimError::SessionIdentityInUse(sid) => Self::SessionIdentityInUse(sid),
         }
     }
 }

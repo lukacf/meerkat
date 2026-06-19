@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::{cmp, collections::HashSet};
 
+#[cfg(feature = "comms")]
+use crate::BuildAgentError;
 use crate::{AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig};
 #[cfg(feature = "comms")]
 use crate::{CommsRuntime, CoreCommsConfig};
@@ -546,6 +548,50 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
     silent_intents: std::sync::Arc<std::collections::HashSet<String>>,
     session_claim_handle: std::sync::Arc<dyn meerkat_core::handles::SessionClaimHandle>,
 ) -> Result<CommsRuntime, String> {
+    build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents_typed(
+        config,
+        base_dir,
+        user_config_root,
+        comms_name,
+        peer_meta,
+        inproc_namespace,
+        session_id,
+        silent_intents,
+        session_claim_handle,
+    )
+    .await
+    .map_err(|error| match error {
+        BuildAgentError::Comms(message) => message,
+        other => other.to_string(),
+    })
+}
+
+#[cfg(feature = "comms")]
+fn session_scoped_comms_error(
+    context: &'static str,
+    error: meerkat_comms::CommsRuntimeError,
+) -> BuildAgentError {
+    match error {
+        meerkat_comms::CommsRuntimeError::SessionIdentityInUse(session_id) => {
+            BuildAgentError::SessionIdentityInUse(session_id)
+        }
+        other => BuildAgentError::Comms(format!("{context}: {other}")),
+    }
+}
+
+#[cfg(feature = "comms")]
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
+pub(crate) async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents_typed(
+    config: &Config,
+    base_dir: impl AsRef<Path>,
+    user_config_root: Option<&Path>,
+    comms_name: &str,
+    peer_meta: Option<meerkat_core::PeerMeta>,
+    inproc_namespace: Option<String>,
+    session_id: &meerkat_core::SessionId,
+    silent_intents: std::sync::Arc<std::collections::HashSet<String>>,
+    session_claim_handle: std::sync::Arc<dyn meerkat_core::handles::SessionClaimHandle>,
+) -> Result<CommsRuntime, BuildAgentError> {
     let event_listen_tcp = config
         .comms
         .event_address
@@ -554,28 +600,32 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
             addr.parse()
                 .map_err(|e| format!("Invalid event_address '{addr}': {e}"))
         })
-        .transpose()?;
+        .transpose()
+        .map_err(BuildAgentError::Config)?;
 
     let runtime = match config.comms.mode {
         CommsRuntimeMode::Inproc => CommsRuntime::inproc_only_session_scoped_with_silent_intents(
             comms_name,
             inproc_namespace.clone(),
-            canonical_session_comms_identity_root(user_config_root)?,
+            canonical_session_comms_identity_root(user_config_root)
+                .map_err(BuildAgentError::Config)?,
             session_id,
             silent_intents.clone(),
             session_claim_handle,
         )
         .await
-        .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?,
+        .map_err(|error| {
+            session_scoped_comms_error("Failed to create inproc comms runtime", error)
+        })?,
         CommsRuntimeMode::Tcp => {
-            let address = config
-                .comms
-                .address
-                .as_ref()
-                .ok_or_else(|| "comms.address is required when comms.mode = tcp".to_string())?;
-            let listen_tcp = address
-                .parse()
-                .map_err(|e| format!("Invalid comms TCP address '{address}': {e}"))?;
+            let address = config.comms.address.as_ref().ok_or_else(|| {
+                BuildAgentError::Config(
+                    "comms.address is required when comms.mode = tcp".to_string(),
+                )
+            })?;
+            let listen_tcp = address.parse().map_err(|e| {
+                BuildAgentError::Config(format!("Invalid comms TCP address '{address}': {e}"))
+            })?;
             let comms = CoreCommsConfig {
                 enabled: true,
                 name: comms_name.to_string(),
@@ -593,18 +643,18 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
                 silent_intents.clone(),
             )
             .await
-            .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
-            rt.start_listeners()
-                .await
-                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+            .map_err(|error| session_scoped_comms_error("Failed to create comms runtime", error))?;
+            rt.start_listeners().await.map_err(|error| {
+                session_scoped_comms_error("Failed to start comms listeners", error)
+            })?;
             rt
         }
         CommsRuntimeMode::Uds => {
-            let address = config
-                .comms
-                .address
-                .as_ref()
-                .ok_or_else(|| "comms.address is required when comms.mode = uds".to_string())?;
+            let address = config.comms.address.as_ref().ok_or_else(|| {
+                BuildAgentError::Config(
+                    "comms.address is required when comms.mode = uds".to_string(),
+                )
+            })?;
             let comms = CoreCommsConfig {
                 enabled: true,
                 name: comms_name.to_string(),
@@ -621,10 +671,10 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
                 silent_intents.clone(),
             )
             .await
-            .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
-            rt.start_listeners()
-                .await
-                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+            .map_err(|error| session_scoped_comms_error("Failed to create comms runtime", error))?;
+            rt.start_listeners().await.map_err(|error| {
+                session_scoped_comms_error("Failed to start comms listeners", error)
+            })?;
             rt
         }
     };

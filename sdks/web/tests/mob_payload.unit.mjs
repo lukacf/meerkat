@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { Mob } from '../dist/mob.js';
@@ -6,10 +7,15 @@ import { MeerkatRuntime } from '../dist/runtime.js';
 import { Session, serializePromptContentInput } from '../dist/session.js';
 import { isKnownEvent } from '../dist/types.js';
 
+const WEB_PACKAGE_JSON_URL = new URL('../package.json', import.meta.url);
+const { version: CURRENT_WASM_VERSION } = JSON.parse(
+  await readFile(WEB_PACKAGE_JSON_URL, 'utf8'),
+);
+
 function makeSubscriptionRuntime(overrides = {}) {
   return {
     default: async () => undefined,
-    runtime_version: () => '0.7.0-alpha.0',
+    runtime_version: () => CURRENT_WASM_VERSION,
     init_runtime_from_config: () => JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] }),
     destroy_runtime: () => undefined,
     async mob_create(definitionJson) {
@@ -88,7 +94,7 @@ async function runtimeWithMobList(payload) {
     {
       async default() {},
       runtime_version() {
-        return '0.7.0-alpha.0';
+        return CURRENT_WASM_VERSION;
       },
       init_runtime_from_config() {
         return JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] });
@@ -1232,6 +1238,37 @@ test('Session.destroy re-throws non-already-gone typed errors', () => {
     async () => '{}',
   );
   assert.throws(() => session.destroy(), /SESSION_BUSY/);
+});
+
+test('Mob.listMembers rejects legacy profile aliases without canonical role', async () => {
+  const mob = new Mob('mob-web-unit', {
+    async mob_list_members() {
+      return JSON.stringify([
+        {
+          agent_identity: 'worker-1',
+          member_ref: 'ref-worker-1',
+          profile_name: 'worker',
+        },
+      ]);
+    },
+  });
+
+  await assert.rejects(() => mob.listMembers(), /missing role/);
+});
+
+test('Mob.listMembers rejects missing canonical agent_identity', async () => {
+  const mob = new Mob('mob-web-unit', {
+    async mob_list_members() {
+      return JSON.stringify([
+        {
+          member_ref: 'ref-worker-1',
+          role: 'worker',
+        },
+      ]);
+    },
+  });
+
+  await assert.rejects(() => mob.listMembers(), /missing agent_identity/);
 });
 
 // Regression: the WASM helper deserializers (MobSpawnHelperOptions /

@@ -444,7 +444,7 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::InvalidToolAccess { .. } => Self::Tool,
             AgentError::SkillResolutionFailed { .. } => Self::Skill,
             AgentError::InternalError(_) => Self::Internal,
-            AgentError::BuildError(_) => Self::Build,
+            AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
             AgentError::CallbackPending { .. } => Self::CallbackPending,
             AgentError::StructuredOutputValidationFailed { .. } => Self::StructuredOutput,

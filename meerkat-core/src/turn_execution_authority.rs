@@ -213,7 +213,7 @@ impl TurnFailureSourceKind {
             AgentError::InvalidToolAccess { .. } => Self::InvalidToolAccess,
             AgentError::SkillResolutionFailed { .. } => Self::SkillResolutionFailed,
             AgentError::InternalError(_) => Self::InternalError,
-            AgentError::BuildError(_) => Self::BuildError,
+            AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::BuildError,
             AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
             AgentError::CallbackPending { .. } => Self::CallbackPending,
             AgentError::StructuredOutputValidationFailed { .. } => {

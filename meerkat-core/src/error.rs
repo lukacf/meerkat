@@ -345,6 +345,10 @@ pub enum AgentError {
     #[error("Build error: {0}")]
     BuildError(String),
 
+    /// Agent construction attempted to claim a session identity that is already live.
+    #[error("Session identity already active: {0}")]
+    SessionIdentityInUse(SessionId),
+
     /// MeerkatMachine DSL observed an auth lease in `reauth_required`
     /// state at a CallingLlm boundary; the lease cannot proceed
     /// until the user re-authenticates (`rkat auth login`). This is a

@@ -1249,14 +1249,11 @@ fn session_error_means_session_identity_already_active(
     error: &SessionError,
     bridge_session_id: &SessionId,
 ) -> bool {
-    let expected = format!("Session identity already active: {bridge_session_id}");
     matches!(
         error,
         SessionError::Agent(
-            meerkat_core::error::AgentError::InternalError(message)
-                | meerkat_core::error::AgentError::BuildError(message)
-        )
-            if message.contains(&expected)
+            meerkat_core::error::AgentError::SessionIdentityInUse(session_id)
+        ) if session_id == bridge_session_id
     )
 }
 

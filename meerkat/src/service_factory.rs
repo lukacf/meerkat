@@ -27,7 +27,7 @@ use tokio_with_wasm::alias::sync::mpsc;
 
 #[cfg(feature = "session-store")]
 use crate::PersistenceBundle;
-use crate::{AgentBuildConfig, AgentFactory, DynAgent};
+use crate::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent};
 use meerkat_client::LlmClient;
 
 /// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
@@ -38,6 +38,16 @@ pub struct FactoryAgent {
     /// to fire `AdvanceSessionContext` on every canonical session-truth
     /// mutation (W2-E / issue #264). `None` on `StandaloneEphemeral` builds.
     session_context: Option<Arc<dyn meerkat_core::handles::SessionContextHandle>>,
+}
+
+fn build_agent_error_to_agent_error(error: BuildAgentError) -> meerkat_core::error::AgentError {
+    match error {
+        #[cfg(feature = "comms")]
+        BuildAgentError::SessionIdentityInUse(session_id) => {
+            meerkat_core::error::AgentError::SessionIdentityInUse(session_id)
+        }
+        other => meerkat_core::error::AgentError::BuildError(other.to_string()),
+    }
 }
 
 impl FactoryAgent {
@@ -890,9 +900,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .factory
             .build_agent(build_config, &config)
             .await
-            .map_err(|e| {
-                SessionError::Agent(meerkat_core::error::AgentError::BuildError(e.to_string()))
-            })?;
+            .map_err(|e| SessionError::Agent(build_agent_error_to_agent_error(e)))?;
 
         Ok(FactoryAgent {
             agent,

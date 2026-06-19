@@ -540,7 +540,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         {
           agent_identity: "worker-1",
           member_ref: "ref-worker-1",
-          profile: "worker",
+          role: "worker",
         },
       ]);
     },
@@ -746,7 +746,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
           {
             prompt: "Summarize the thread.",
             agent_identity: "helper-1",
-            profile_name: "worker",
+            role_name: "worker",
           },
         ],
         [
@@ -756,7 +756,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
             source_member_id: "worker-1",
             prompt: "Review the draft.",
             agent_identity: "fork-1",
-            profile_name: "worker",
+            role_name: "worker",
             fork_context: { mode: "full_history" },
           },
         ],

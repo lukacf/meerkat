@@ -1535,10 +1535,9 @@ impl MockSessionService {
     }
 
     /// Inject the production-faithful revival failure: create_session fails with
-    /// the wrapped "Session identity already active" error and does NOT register
-    /// a live session, so `has_live_session` returns false at the actor's
-    /// recovery re-check (the leaked-claim-without-live-session terminal path the
-    /// user hit).
+    /// the typed `SessionIdentityInUse` cause and does NOT register a live
+    /// session, so `has_live_session` returns false at the actor's recovery
+    /// re-check (the leaked-claim-without-live-session terminal path the user hit).
     async fn set_create_session_identity_already_active_without_live_session(
         &self,
         session_id: &SessionId,
@@ -1843,9 +1842,10 @@ impl SessionService for MockSessionService {
         }
         // Production-faithful "already active" failure: the inproc comms-claim
         // acquire fails INSIDE build_agent, before any live session handle is
-        // registered, so this returns the wrapped BuildError WITHOUT inserting
-        // into self.sessions — leaving has_live_session false at the actor's
-        // recovery re-check (the leaked-claim-without-live-session terminal path).
+        // registered, so this returns the typed build-time cause WITHOUT
+        // inserting into self.sessions — leaving has_live_session false at the
+        // actor's recovery re-check (the leaked-claim-without-live-session
+        // terminal path).
         if self
             .create_identity_already_active_no_live_sessions
             .read()
@@ -1855,10 +1855,7 @@ impl SessionService for MockSessionService {
             self.create_session_in_flight
                 .fetch_sub(1, Ordering::Relaxed);
             return Err(SessionError::Agent(
-                meerkat_core::error::AgentError::BuildError(format!(
-                    "Comms runtime failed: Failed to create inproc comms runtime: \
-                     Session identity already active: {session_id}"
-                )),
+                meerkat_core::error::AgentError::SessionIdentityInUse(session_id),
             ));
         }
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
@@ -2043,9 +2040,7 @@ impl SessionService for MockSessionService {
             self.create_session_in_flight
                 .fetch_sub(1, Ordering::Relaxed);
             return Err(SessionError::Agent(
-                meerkat_core::error::AgentError::BuildError(format!(
-                    "Session identity already active: {session_id}"
-                )),
+                meerkat_core::error::AgentError::SessionIdentityInUse(session_id),
             ));
         }
 

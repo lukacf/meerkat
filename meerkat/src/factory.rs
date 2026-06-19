@@ -933,6 +933,11 @@ pub enum BuildAgentError {
     #[cfg(feature = "comms")]
     Comms(String),
 
+    /// Comms construction failed because the canonical session identity claim is live.
+    #[error("Session identity already active: {0}")]
+    #[cfg(feature = "comms")]
+    SessionIdentityInUse(meerkat_core::SessionId),
+
     /// Configuration error.
     #[error("Config error: {0}")]
     Config(String),
@@ -957,6 +962,18 @@ pub enum BuildAgentError {
     #[error("keep_alive requires comms_name to be set")]
     #[cfg(feature = "comms")]
     KeepAliveRequiresCommsName,
+}
+
+#[cfg(feature = "comms")]
+impl From<meerkat_comms::CommsRuntimeError> for BuildAgentError {
+    fn from(error: meerkat_comms::CommsRuntimeError) -> Self {
+        match error {
+            meerkat_comms::CommsRuntimeError::SessionIdentityInUse(session_id) => {
+                Self::SessionIdentityInUse(session_id)
+            }
+            other => Self::Comms(other.to_string()),
+        }
+    }
 }
 
 /// Resolver that delegates to [`ModelRegistry`] to look up model-specific
@@ -4461,7 +4478,7 @@ impl AgentFactory {
                     }
                 };
             let mut runtime =
-                crate::build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents(
+                crate::sdk::build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents_typed(
                     config,
                     _realm_scope_root.as_path(),
                     self.user_config_root.as_deref(),
@@ -4478,7 +4495,7 @@ impl AgentFactory {
                     session_claim_handle,
                 )
                 .await
-                .map_err(BuildAgentError::Comms)?;
+                ?;
             if let Some(blob_store) = build_config.blob_store_override.clone() {
                 runtime.set_blob_store(blob_store);
             }
@@ -4511,7 +4528,7 @@ impl AgentFactory {
                     .map(|realm| realm.as_str().to_string()),
                 silent_intents,
             )
-            .map_err(|e| BuildAgentError::Comms(e.to_string()))?;
+            .map_err(BuildAgentError::from)?;
             runtime.require_peer_comms_machine_authority();
             if let Some(ref meta) = build_config.peer_meta {
                 runtime.set_peer_meta(meta.clone());

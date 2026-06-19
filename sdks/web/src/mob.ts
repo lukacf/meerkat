@@ -1000,16 +1000,11 @@ export class Mob {
       if (!memberRef) {
         throw new Error('Invalid mob list_members entry: missing member_ref');
       }
-      const profile =
-        typeof member.role === 'string' && member.role.length > 0
-          ? member.role
-          : typeof member.profile === 'string' && member.profile.length > 0
-            ? member.profile
-            : typeof member.profile_name === 'string' && member.profile_name.length > 0
-              ? member.profile_name
-              : undefined;
+      const profile = typeof member.role === 'string' && member.role.length > 0
+        ? member.role
+        : undefined;
       if (!profile) {
-        throw new Error('Invalid mob list_members entry: missing profile');
+        throw new Error('Invalid mob list_members entry: missing role');
       }
       return {
         agent_identity: agentIdentity,

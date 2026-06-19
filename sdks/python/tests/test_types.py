@@ -3137,7 +3137,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                     {
                         "agent_identity": "agent-a",
                         "member_ref": _make_member_ref("mob-1", "agent-a"),
-                        "profile": "planner",
+                        "role": "planner",
                     }
                 ]
             }
@@ -4384,6 +4384,84 @@ async def test_list_mob_members_rejects_non_list_members() -> None:
 
     with pytest.raises(MeerkatError) as excinfo:
         await client.list_mob_members("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_mob_members_requires_canonical_identity_and_role() -> None:
+    client = MeerkatClient()
+
+    async def missing_identity(_method, _params):
+        return {
+            "members": [
+                {
+                    "member_ref": _make_member_ref("mob-1", "worker-1"),
+                    "role": "worker",
+                }
+            ]
+        }
+
+    client._request = missing_identity  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing agent_identity") as excinfo:
+        await client.list_mob_members("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    async def legacy_profile_alias(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "worker-1",
+                    "member_ref": _make_member_ref("mob-1", "worker-1"),
+                    "profile_name": "worker",
+                }
+            ]
+        }
+
+    client._request = legacy_profile_alias  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing role") as excinfo:
+        await client.list_mob_members("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_mob_helper_results_require_canonical_agent_identity() -> None:
+    client = MeerkatClient()
+
+    async def missing_spawn_identity(method, _params):
+        if method == "mob/spawn_helper":
+            return {
+                "tokens_used": 1,
+                "member_ref": _make_member_ref("mob-1", "helper-a"),
+            }
+        raise AssertionError(f"unexpected method {method}")
+
+    client._request = missing_spawn_identity  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing agent_identity") as excinfo:
+        await client.spawn_mob_helper(
+            "mob-1",
+            "help",
+            agent_identity="helper-a",
+            role_name="worker",
+        )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    async def missing_fork_identity(method, _params):
+        if method == "mob/fork_helper":
+            return {
+                "tokens_used": 1,
+                "member_ref": _make_member_ref("mob-1", "fork-a"),
+            }
+        raise AssertionError(f"unexpected method {method}")
+
+    client._request = missing_fork_identity  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing agent_identity") as excinfo:
+        await client.fork_mob_helper(
+            "mob-1",
+            "agent-a",
+            "help",
+            agent_identity="fork-a",
+            role_name="worker",
+        )
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 

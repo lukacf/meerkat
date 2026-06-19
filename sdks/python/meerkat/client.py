@@ -1857,20 +1857,23 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/members response: entry missing member_ref",
                 )
+            agent_identity = entry.get("agent_identity")
+            if not isinstance(agent_identity, str) or not agent_identity:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/members response: entry missing agent_identity",
+                )
+            role = entry.get("role")
+            if not isinstance(role, str) or not role:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/members response: entry missing role",
+                )
             normalized.append(
                 {
-                    "agent_identity": (
-                        str(entry.get("agent_identity", ""))
-                        if entry.get("agent_identity") is not None
-                        else ""
-                    ),
+                    "agent_identity": agent_identity,
                     "member_ref": member_ref,
-                    "profile": str(
-                        entry.get("profile_name")
-                        or entry.get("profile")
-                        or entry.get("role")
-                        or ""
-                    ),
+                    "profile": role,
                     **(
                         {"peer_id": str(entry["peer_id"])}
                         if entry.get("peer_id") is not None
@@ -2496,15 +2499,16 @@ class MeerkatClient:
                 "INVALID_RESPONSE",
                 "Invalid mob/spawn_helper response: missing member_ref",
             )
+        resolved_identity = result.get("agent_identity")
+        if not isinstance(resolved_identity, str) or not resolved_identity:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/spawn_helper response: missing agent_identity",
+            )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
             "tokens_used": int(result.get("tokens_used", 0)),
-            "agent_identity": (
-                result["agent_identity"]
-                if isinstance(result.get("agent_identity"), str)
-                and result["agent_identity"]
-                else (agent_identity or "")
-            ),
+            "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }
 
@@ -2538,15 +2542,16 @@ class MeerkatClient:
                 "INVALID_RESPONSE",
                 "Invalid mob/fork_helper response: missing member_ref",
             )
+        resolved_identity = result.get("agent_identity")
+        if not isinstance(resolved_identity, str) or not resolved_identity:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/fork_helper response: missing agent_identity",
+            )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
             "tokens_used": int(result.get("tokens_used", 0)),
-            "agent_identity": (
-                result["agent_identity"]
-                if isinstance(result.get("agent_identity"), str)
-                and result["agent_identity"]
-                else (agent_identity or "")
-            ),
+            "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }
 

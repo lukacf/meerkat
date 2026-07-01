@@ -4728,6 +4728,7 @@ mod tests {
         persisted_sessions: RwLock<HashMap<SessionId, Session>>,
         archive_failures: RwLock<HashMap<SessionId, String>>,
         keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
+        last_start_turn: RwLock<Option<(SessionId, String)>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
         start_turn_calls: AtomicU64,
@@ -4741,6 +4742,7 @@ mod tests {
                 persisted_sessions: RwLock::new(HashMap::new()),
                 archive_failures: RwLock::new(HashMap::new()),
                 keep_alive_notifiers: RwLock::new(HashMap::new()),
+                last_start_turn: RwLock::new(None),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
                 start_turn_calls: AtomicU64::new(0),
@@ -4754,6 +4756,10 @@ mod tests {
 
         fn start_turn_call_count(&self) -> u64 {
             self.start_turn_calls.load(Ordering::Relaxed)
+        }
+
+        async fn last_start_turn(&self) -> Option<(SessionId, String)> {
+            self.last_start_turn.read().await.clone()
         }
 
         async fn insert_persisted_session(&self, session: Session) {
@@ -4865,12 +4871,13 @@ mod tests {
         async fn start_turn(
             &self,
             id: &SessionId,
-            _req: StartTurnRequest,
+            req: StartTurnRequest,
         ) -> Result<RunResult, SessionError> {
             if !self.sessions.read().await.contains_key(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
+            *self.last_start_turn.write().await = Some((id.clone(), req.prompt.text_content()));
             let delay_ms = self.start_turn_delay_ms.load(Ordering::Relaxed);
             if delay_ms > 0 {
                 sleep(Duration::from_millis(delay_ms)).await;
@@ -6944,6 +6951,209 @@ mod tests {
         let mobs = restored.mob_list().await.expect("restore mob list");
         assert_eq!(mobs.len(), 1);
         assert_eq!(mobs[0].0, mob_id);
+    }
+
+    #[tokio::test]
+    async fn current_session_schedule_survives_member_respawn_and_runtime_restart() {
+        use meerkat::surface::SurfaceScheduleMobHost as _;
+
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime_root = root.path().join("runtime");
+        let schedule_path = root.path().join("schedules.db");
+        let identity = AgentIdentity::from("worker-1");
+        let mut definition = explicit_definition("scheduled-identity-e2e");
+        if let Some(meerkat_mob::ProfileBinding::Inline(profile)) =
+            definition.profiles.get_mut(&ProfileName::from("worker"))
+        {
+            profile.external_addressable = true;
+        }
+
+        let state = Arc::new(
+            MobMcpState::new(svc.clone()).with_persistent_storage_root(Some(runtime_root.clone())),
+        );
+        let mob_id = state
+            .mob_create_definition(definition)
+            .await
+            .expect("create persistent mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                identity.clone(),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn original worker");
+        let original_bridge_session = state
+            .mob_resolve_bridge_session_id(&mob_id, &identity)
+            .await
+            .expect("resolve original bridge session")
+            .expect("original bridge session exists");
+
+        let schedule_store = Arc::new(
+            meerkat_store::SqliteScheduleStore::open(&schedule_path).expect("open schedule store"),
+        );
+        let schedule_service = meerkat_schedule::ScheduleService::new(schedule_store.clone());
+        let dispatcher = meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
+            Arc::new(meerkat_schedule::ScheduleToolDispatcher::new(
+                schedule_service.clone(),
+            )),
+            original_bridge_session.clone(),
+            Arc::new(
+                meerkat::surface::MobMemberCurrentSessionScheduleResolver::new(
+                    meerkat_core::MobMemberBinding {
+                        mob_id: mob_id.to_string(),
+                        role: "worker".to_string(),
+                        member: identity.to_string(),
+                    },
+                ),
+            ),
+        );
+        let schedule_args = json!({
+            "name": "durable identity schedule",
+            "description": "created by an identity-backed member through current_session",
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": chrono::Utc::now(),
+                "every_seconds": 60
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "current_session",
+                "action": {
+                    "type": "prompt",
+                    "prompt": "scheduled identity survives restart"
+                }
+            },
+            "misfire_policy": { "type": "skip" },
+            "overlap_policy": "skip_if_running",
+            "missing_target_policy": "mark_misfired",
+            "planning_horizon_occurrences": 1
+        });
+        let raw_schedule_args =
+            serde_json::value::RawValue::from_string(schedule_args.to_string()).expect("raw args");
+        let created = dispatcher
+            .dispatch(ToolCallView {
+                id: "schedule-1",
+                name: "meerkat_schedule_create",
+                args: raw_schedule_args.as_ref(),
+            })
+            .await
+            .expect("schedule create through current_session wrapper");
+        let created: serde_json::Value =
+            serde_json::from_str(&created.result.text_content()).expect("created schedule json");
+        let schedule_id = meerkat_schedule::ScheduleId::parse(
+            created["schedule_id"]
+                .as_str()
+                .expect("created schedule id"),
+        )
+        .expect("valid schedule id");
+        let persisted = schedule_service
+            .get(&schedule_id)
+            .await
+            .expect("load created schedule");
+        let meerkat::TargetBinding::Identity(binding) = &persisted.target else {
+            panic!("current_session from mob member must persist as identity target");
+        };
+        assert!(
+            !binding
+                .identity()
+                .contains(&original_bridge_session.to_string()),
+            "durable identity must not include the transient bridge session"
+        );
+        assert!(
+            !binding.identity().contains("worker\""),
+            "durable identity must not include the old profile/role"
+        );
+
+        state
+            .mob_respawn(&mob_id, identity.clone(), None)
+            .await
+            .expect("respawn worker");
+        let respawned_bridge_session = state
+            .mob_resolve_bridge_session_id(&mob_id, &identity)
+            .await
+            .expect("resolve respawned bridge session")
+            .expect("respawned bridge session exists");
+        assert_ne!(
+            respawned_bridge_session, original_bridge_session,
+            "respawn should regenerate the bridge session"
+        );
+
+        drop(state);
+        let restored_state = Arc::new(
+            MobMcpState::new(svc.clone()).with_persistent_storage_root(Some(runtime_root)),
+        );
+        let restored_bridge_session = restored_state
+            .mob_resolve_bridge_session_id(&mob_id, &identity)
+            .await
+            .expect("resolve restored bridge session")
+            .expect("restored bridge session exists");
+        assert_eq!(
+            restored_bridge_session, respawned_bridge_session,
+            "runtime restart should restore the current materialized member binding"
+        );
+
+        let restored_schedule_store = Arc::new(
+            meerkat_store::SqliteScheduleStore::open(&schedule_path)
+                .expect("reopen schedule store"),
+        );
+        let restored_schedule_service =
+            meerkat_schedule::ScheduleService::new(restored_schedule_store);
+        let restored_schedule = restored_schedule_service
+            .get(&schedule_id)
+            .await
+            .expect("load schedule after restart");
+        let occurrence = meerkat_schedule::Occurrence::planned_from_schedule(
+            &restored_schedule,
+            meerkat_schedule::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("plan restored occurrence");
+        let meerkat::TargetBinding::Identity(restored_binding) = &restored_schedule.target else {
+            panic!("restored schedule must keep identity target");
+        };
+        let host = MobMcpScheduleHost::new(restored_state);
+        let probe = host
+            .probe_identity_target(restored_binding)
+            .await
+            .expect("probe restored identity target")
+            .expect("mob identity should be handled by mob host");
+        assert!(matches!(probe, meerkat::TargetProbeOutcome::Ready));
+
+        let before_turns = svc.start_turn_call_count();
+        let dispatch = host
+            .deliver_identity_target(&occurrence, restored_binding)
+            .await
+            .expect("deliver restored identity target")
+            .expect("mob identity should deliver through restored mob host");
+        let terminal = dispatch.completion.await.expect("delivery completion");
+        assert_eq!(
+            terminal.phase,
+            meerkat::OccurrencePhase::Completed,
+            "scheduled identity delivery failed: {terminal:?}"
+        );
+        assert_eq!(dispatch.correlation_id.as_deref(), Some("worker-1"));
+        assert_eq!(
+            svc.start_turn_call_count(),
+            before_turns + 1,
+            "scheduled prompt should reach the restored current member session"
+        );
+        let (delivered_session, delivered_prompt) = svc
+            .last_start_turn()
+            .await
+            .expect("scheduled delivery should start a turn");
+        assert_eq!(
+            delivered_session, restored_bridge_session,
+            "scheduled prompt must target the restored current materialized session"
+        );
+        assert_ne!(
+            delivered_session, original_bridge_session,
+            "scheduled prompt must not target the original transient bridge session"
+        );
+        assert_eq!(delivered_prompt, "scheduled identity survives restart");
     }
 
     #[tokio::test]

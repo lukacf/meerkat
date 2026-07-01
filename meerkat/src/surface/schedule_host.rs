@@ -126,6 +126,36 @@ pub fn mob_member_schedule_identity(binding: &meerkat_core::MobMemberBinding) ->
     format!("mob_member:{json}")
 }
 
+#[derive(Debug, Clone)]
+pub struct MobMemberCurrentSessionScheduleResolver {
+    binding: meerkat_core::MobMemberBinding,
+}
+
+impl MobMemberCurrentSessionScheduleResolver {
+    pub fn new(binding: meerkat_core::MobMemberBinding) -> Self {
+        Self { binding }
+    }
+
+    pub fn binding(&self) -> &meerkat_core::MobMemberBinding {
+        &self.binding
+    }
+}
+
+impl meerkat_schedule::CurrentSessionScheduleTargetResolver
+    for MobMemberCurrentSessionScheduleResolver
+{
+    fn resolve_current_session_target(
+        &self,
+        _current_session_id: &SessionId,
+        action: ScheduledSessionAction,
+    ) -> TargetBinding {
+        TargetBinding::identity(IdentityTargetBinding::resumable(
+            mob_member_schedule_identity(&self.binding),
+            action,
+        ))
+    }
+}
+
 #[allow(dead_code)]
 pub fn parse_mob_member_schedule_identity(identity: &str) -> Option<MobMemberScheduleIdentity> {
     let json = identity.strip_prefix("mob_member:")?;

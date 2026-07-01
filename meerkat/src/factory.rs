@@ -89,28 +89,6 @@ use tokio_with_wasm::alias::sync::mpsc;
 
 use crate::model_fallback::{ModelFallbackCandidate, ModelFallbackClient};
 
-#[derive(Debug, Clone)]
-struct MobMemberCurrentSessionScheduleResolver {
-    binding: meerkat_core::MobMemberBinding,
-}
-
-impl meerkat_schedule::CurrentSessionScheduleTargetResolver
-    for MobMemberCurrentSessionScheduleResolver
-{
-    fn resolve_current_session_target(
-        &self,
-        _current_session_id: &meerkat_core::SessionId,
-        action: meerkat_schedule::ScheduledSessionAction,
-    ) -> meerkat_schedule::TargetBinding {
-        meerkat_schedule::TargetBinding::identity(
-            meerkat_schedule::IdentityTargetBinding::resumable(
-                crate::surface::mob_member_schedule_identity(&self.binding),
-                action,
-            ),
-        )
-    }
-}
-
 #[cfg(feature = "comms")]
 use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
@@ -4751,7 +4729,9 @@ impl AgentFactory {
                     meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
                         schedule_dispatcher,
                         session.id().clone(),
-                        Arc::new(MobMemberCurrentSessionScheduleResolver { binding }),
+                        Arc::new(
+                            crate::surface::MobMemberCurrentSessionScheduleResolver::new(binding),
+                        ),
                     ),
                 ) as Arc<dyn AgentToolDispatcher>,
                 None => Arc::new(meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
@@ -5708,13 +5688,13 @@ mod tests {
 
     #[test]
     fn mob_member_current_session_schedule_resolver_persists_role_free_identity_target() {
-        let resolver = MobMemberCurrentSessionScheduleResolver {
-            binding: meerkat_core::MobMemberBinding {
-                mob_id: "ops".to_string(),
-                role: "old-profile".to_string(),
-                member: "deploy-monitor".to_string(),
-            },
+        let mob_binding = meerkat_core::MobMemberBinding {
+            mob_id: "ops".to_string(),
+            role: "old-profile".to_string(),
+            member: "deploy-monitor".to_string(),
         };
+        let resolver =
+            crate::surface::MobMemberCurrentSessionScheduleResolver::new(mob_binding.clone());
         let target =
             meerkat_schedule::CurrentSessionScheduleTargetResolver::resolve_current_session_target(
                 &resolver,
@@ -5733,7 +5713,7 @@ mod tests {
         };
         assert_eq!(
             binding.identity(),
-            crate::surface::mob_member_schedule_identity(&resolver.binding)
+            crate::surface::mob_member_schedule_identity(&mob_binding)
         );
         assert!(
             !binding.identity().contains("old-profile"),

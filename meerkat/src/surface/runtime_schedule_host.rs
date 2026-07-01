@@ -8,8 +8,8 @@ use super::{
     AcceptedScheduledInput, NoopScheduleMobHost, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
     build_dispatch_from_accepted, default_persistent_executor, immediate_delivery_failure,
-    materialize_session, schedule_attempt_idempotency_key, schedule_host_supported,
-    spawn_schedule_host,
+    materialize_session, recover_mob_member_identity_from_session_target,
+    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, PersistentSessionService, ScheduleDomainError, ScheduleService,
@@ -19,7 +19,7 @@ use crate::{
 use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::MeerkatMachine;
-use meerkat_schedule::DeliveryFailureReason;
+use meerkat_schedule::{DeliveryFailureReason, IdentityTargetBinding};
 
 pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
     service: Arc<PersistentSessionService<B>>,
@@ -253,50 +253,39 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
         self.update_peer_ingress_context(session_id).await
     }
 
+    #[cfg(feature = "comms")]
     async fn detach_schedule_peer_ingress(
         &self,
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
-        #[cfg(feature = "comms")]
-        {
-            self.runtime_adapter
-                .update_peer_ingress_context(session_id, false, None)
-                .await
-                .map_err(schedule_internal)?;
-        }
-        #[cfg(not(feature = "comms"))]
-        let _ = session_id;
+        self.runtime_adapter
+            .update_peer_ingress_context(session_id, false, None)
+            .await
+            .map_err(schedule_internal)?;
         Ok(())
     }
 
+    #[cfg(feature = "comms")]
     async fn session_keep_alive(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, ScheduleDomainError> {
-        #[cfg(feature = "comms")]
-        {
-            let session = self
-                .service
-                .load_authoritative_session(session_id)
-                .await
-                .map_err(schedule_internal)?
-                .ok_or_else(|| {
-                    ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}"))
-                })?;
-            session
-                .session_metadata()
-                .map(|metadata| metadata.keep_alive)
-                .ok_or_else(|| {
-                    ScheduleDomainError::Internal(format!(
-                        "session {session_id} is missing session metadata"
-                    ))
-                })
-        }
-        #[cfg(not(feature = "comms"))]
-        {
-            let _ = session_id;
-            Ok(false)
-        }
+        let session = self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(schedule_internal)?
+            .ok_or_else(|| {
+                ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}"))
+            })?;
+        session
+            .session_metadata()
+            .map(|metadata| metadata.keep_alive)
+            .ok_or_else(|| {
+                ScheduleDomainError::Internal(format!(
+                    "session {session_id} is missing session metadata"
+                ))
+            })
     }
 
     async fn update_peer_ingress_context(
@@ -343,6 +332,21 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
                 "failed to read session target {session_id}: {error}"
             ))),
         }
+    }
+
+    async fn session_target_owner_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, ScheduleDomainError> {
+        let Some(session) = self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(schedule_internal)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(session))
     }
 
     fn build_materialized_request(
@@ -404,6 +408,20 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
                 "failed to read session target {session_id}: {error}"
             ))),
         }
+    }
+
+    async fn recover_session_target_identity(
+        &self,
+        binding: &SessionTargetBinding,
+    ) -> Result<Option<IdentityTargetBinding>, ScheduleDomainError> {
+        let SessionTargetBinding::ResumableSession { session_id, .. } = binding else {
+            return Ok(None);
+        };
+        let session = self.session_target_owner_identity(session_id).await?;
+        Ok(recover_mob_member_identity_from_session_target(
+            binding,
+            session.as_ref(),
+        ))
     }
 
     async fn materialize_session(

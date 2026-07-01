@@ -48,7 +48,9 @@ pub use schedule_host::{
     ScheduleHostHandle, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
     SurfaceScheduleMobHost, SurfaceScheduleSessionHost, async_completion_dispatch,
     build_dispatch_from_accepted, immediate_completed_dispatch, immediate_delivery_failure,
-    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
+    mob_member_schedule_identity, parse_mob_member_schedule_identity,
+    recover_mob_member_identity_from_session_target, schedule_attempt_idempotency_key,
+    schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};

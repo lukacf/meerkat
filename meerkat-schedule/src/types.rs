@@ -1146,12 +1146,17 @@ pub enum MissingTargetPolicy {
 #[serde(tag = "target_kind", rename_all = "snake_case")]
 pub enum TargetBinding {
     Session(Box<SessionTargetBinding>),
+    Identity(Box<IdentityTargetBinding>),
     Mob(Box<MobTargetBinding>),
 }
 
 impl TargetBinding {
     pub fn session(binding: SessionTargetBinding) -> Self {
         Self::Session(Box::new(binding))
+    }
+
+    pub fn identity(binding: IdentityTargetBinding) -> Self {
+        Self::Identity(Box::new(binding))
     }
 
     pub fn stable_key(&self) -> Result<String, String> {
@@ -1161,6 +1166,7 @@ impl TargetBinding {
     pub fn bind_materialized_session(&mut self, session_id: &SessionId) -> bool {
         match self {
             Self::Session(binding) => binding.bind_materialized_session(session_id),
+            Self::Identity(_) => false,
             Self::Mob(_) => false,
         }
     }
@@ -1168,6 +1174,7 @@ impl TargetBinding {
     pub fn validate_public_api(&self) -> Result<(), String> {
         match self {
             Self::Session(_) => Ok(()),
+            Self::Identity(_) => Ok(()),
             Self::Mob(binding) => binding.validate_public_api(),
         }
     }
@@ -1241,6 +1248,41 @@ impl SessionTargetBinding {
                 }
             },
             Self::ExactSession { .. } | Self::ResumableSession { .. } => false,
+        }
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IdentityTargetBinding {
+    ResumableIdentity {
+        identity: String,
+        action: ScheduledSessionAction,
+    },
+}
+
+impl IdentityTargetBinding {
+    pub fn resumable(identity: impl Into<String>, action: ScheduledSessionAction) -> Self {
+        Self::ResumableIdentity {
+            identity: identity.into(),
+            action,
+        }
+    }
+
+    pub fn stable_key(&self) -> Result<String, String> {
+        semantic_json_key("identity_target", self)
+    }
+
+    pub fn identity(&self) -> &str {
+        match self {
+            Self::ResumableIdentity { identity, .. } => identity,
+        }
+    }
+
+    pub fn action(&self) -> &ScheduledSessionAction {
+        match self {
+            Self::ResumableIdentity { action, .. } => action,
         }
     }
 }
@@ -2971,6 +3013,30 @@ mod tests {
         let value = serde_json::to_value(&binding).map_err(|error| error.to_string())?;
         assert_eq!(value["target_kind"], "session");
         assert_eq!(value["type"], "exact_session");
+
+        let round_trip: TargetBinding =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        assert_eq!(round_trip, binding);
+        Ok(())
+    }
+
+    #[test]
+    fn identity_target_binding_round_trips_as_first_class_target() -> Result<(), String> {
+        let binding = TargetBinding::identity(IdentityTargetBinding::resumable(
+            "domain:security",
+            ScheduledSessionAction::Prompt {
+                prompt: ContentInput::from("scheduled hello"),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        ));
+
+        let value = serde_json::to_value(&binding).map_err(|error| error.to_string())?;
+        assert_eq!(value["target_kind"], "identity");
+        assert_eq!(value["type"], "resumable_identity");
+        assert_eq!(value["identity"], "domain:security");
 
         let round_trip: TargetBinding =
             serde_json::from_value(value).map_err(|error| error.to_string())?;

@@ -5,10 +5,11 @@ use async_trait::async_trait;
 use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::{
     ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, schedule_host_supported, spawn_schedule_host,
+    SurfaceScheduleSessionHost, recover_mob_member_identity_from_session_target,
+    schedule_host_supported, spawn_schedule_host,
 };
 use meerkat::{
-    AgentBuildConfig, DeliveryDispatch, Occurrence, ScheduleDomainError,
+    AgentBuildConfig, DeliveryDispatch, IdentityTargetBinding, Occurrence, ScheduleDomainError,
     SessionMaterializationSpec, SessionService, SessionTargetBinding, TargetProbeOutcome,
 };
 use meerkat_contracts::SkillsParams;
@@ -257,6 +258,26 @@ impl SurfaceScheduleSessionHost for RestScheduleTargetAdapter {
         binding: &SessionTargetBinding,
     ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
         self.context.session_target_probe(binding).await
+    }
+
+    async fn recover_session_target_identity(
+        &self,
+        binding: &SessionTargetBinding,
+    ) -> Result<Option<IdentityTargetBinding>, ScheduleDomainError> {
+        let Some(session_id) = binding.resolved_session_id() else {
+            return Ok(None);
+        };
+        let session = self
+            .context
+            .runtime
+            .session_service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        Ok(recover_mob_member_identity_from_session_target(
+            binding,
+            session.as_ref(),
+        ))
     }
 
     async fn materialize_session(

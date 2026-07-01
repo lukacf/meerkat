@@ -42,21 +42,23 @@ pub use surface::wire_schedule_tools;
 pub use tool_surface::ScheduleToolSurface;
 pub use tools::{
     CAPABILITY_UNAVAILABLE as SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE,
-    CurrentSessionScheduleToolDispatcher, INVALID_ARGUMENTS as SCHEDULE_TOOL_INVALID_ARGUMENTS,
-    NOT_FOUND as SCHEDULE_TOOL_NOT_FOUND, ScheduleToolDispatcher, ScheduleToolError,
-    handle_schedule_tools_call, schedule_tools_list,
+    CurrentSessionScheduleTargetResolver, CurrentSessionScheduleToolDispatcher,
+    DefaultCurrentSessionScheduleTargetResolver,
+    INVALID_ARGUMENTS as SCHEDULE_TOOL_INVALID_ARGUMENTS, NOT_FOUND as SCHEDULE_TOOL_NOT_FOUND,
+    ScheduleToolDispatcher, ScheduleToolError, handle_schedule_tools_call, schedule_tools_list,
 };
 pub use trigger::{CronAuthoringSpec, next_due_after, occurrences_for_horizon};
 pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryCompletionFailureReason,
     DeliveryFailureReason, DeliveryReceipt, DeliveryReceiptStage, ForkContextSpec,
-    HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy, MissingTargetPolicy, MobTargetBinding,
-    Occurrence, OccurrenceFailureClass, OccurrenceId, OccurrenceOrdinal, OccurrencePhase,
-    OccurrenceTargetProbeOutcome, OverlapPolicy, ResolvedSpawnSnapshot, RuntimeCompletionOutcome,
-    RuntimeDeliveryOutcome, Schedule, ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision,
-    ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
-    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
-    TriggerSpec, UpdateScheduleRequest,
+    HelperOptionsSpec, IdentityTargetBinding, IntervalTriggerSpec, MisfirePolicy,
+    MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
+    OccurrenceOrdinal, OccurrencePhase, OccurrenceTargetProbeOutcome, OverlapPolicy,
+    ResolvedSpawnSnapshot, RuntimeCompletionOutcome, RuntimeDeliveryOutcome, Schedule,
+    ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
+    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
+    UpdateScheduleRequest,
 };
 
 pub const SCHEDULE_CAPABILITY_DISABLED_DESCRIPTION: &str = "config.tools.schedule_enabled is false";

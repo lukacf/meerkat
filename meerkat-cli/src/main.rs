@@ -22,8 +22,8 @@ use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::{
     AcceptedScheduledInput, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
     SurfaceScheduleMobHost, SurfaceScheduleSessionHost, build_dispatch_from_accepted,
-    immediate_delivery_failure, schedule_attempt_idempotency_key, schedule_host_supported,
-    spawn_schedule_host,
+    immediate_delivery_failure, recover_mob_member_identity_from_session_target,
+    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 use meerkat::{
     AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
@@ -10546,6 +10546,41 @@ impl SurfaceScheduleMobHost for CliScheduleMobHost {
             .deliver_mob_target(occurrence, binding)
             .await
     }
+
+    async fn probe_identity_target(
+        &self,
+        binding: &meerkat::IdentityTargetBinding,
+    ) -> Result<Option<meerkat::TargetProbeOutcome>, meerkat::ScheduleDomainError> {
+        let state = get_or_hydrate_cli_mob_state(
+            &self.scope,
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            Arc::clone(&self.mob_state_cache),
+        )
+        .await
+        .map_err(|error| meerkat::ScheduleDomainError::ProbeFailed(error.to_string()))?;
+        meerkat_mob_mcp::MobMcpScheduleHost::new(state)
+            .probe_identity_target(binding)
+            .await
+    }
+
+    async fn deliver_identity_target(
+        &self,
+        occurrence: &meerkat::Occurrence,
+        binding: &meerkat::IdentityTargetBinding,
+    ) -> Result<Option<meerkat::DeliveryDispatch>, meerkat::ScheduleDomainError> {
+        let state = get_or_hydrate_cli_mob_state(
+            &self.scope,
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            Arc::clone(&self.mob_state_cache),
+        )
+        .await
+        .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        meerkat_mob_mcp::MobMcpScheduleHost::new(state)
+            .deliver_identity_target(occurrence, binding)
+            .await
+    }
 }
 
 #[cfg(all(not(feature = "mob"), feature = "session-store"))]
@@ -10711,6 +10746,24 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         Ok(meerkat::TargetProbeOutcome::Missing {
             detail: Some(format!("session not found: {session_id}")),
         })
+    }
+
+    async fn recover_session_target_identity(
+        &self,
+        binding: &meerkat::SessionTargetBinding,
+    ) -> Result<Option<meerkat::IdentityTargetBinding>, meerkat::ScheduleDomainError> {
+        let Some(session_id) = binding.resolved_session_id() else {
+            return Ok(None);
+        };
+        let session = self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        Ok(recover_mob_member_identity_from_session_target(
+            binding,
+            session.as_ref(),
+        ))
     }
 
     async fn materialize_session(
@@ -21004,6 +21057,73 @@ capabilities = ["rpc"]
                 && !detail.contains("require the mob feature"),
             "CLI mob-enabled schedule host should not use the no-op fallback: {detail}"
         );
+    }
+
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[tokio::test]
+    async fn test_cli_schedule_mob_host_delegates_mob_identity_targets() {
+        let host = cli_schedule_mob_host_from_state(meerkat_mob_mcp::MobMcpState::new_in_memory());
+        let identity =
+            meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
+                mob_id: "ops".to_string(),
+                role: "old-profile".to_string(),
+                member: "deploy-monitor".to_string(),
+            });
+        let binding = meerkat::IdentityTargetBinding::resumable(
+            identity,
+            meerkat::ScheduledSessionAction::Prompt {
+                prompt: "Check deploy state.".to_string().into(),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        );
+
+        let probe = host
+            .probe_identity_target(&binding)
+            .await
+            .expect("identity probe should delegate to mob adapter")
+            .expect("mob identity should be handled by mob adapter");
+        let meerkat::TargetProbeOutcome::Missing { detail } = probe else {
+            panic!("empty in-memory mob state should report missing member, got {probe:?}");
+        };
+        let detail = detail.expect("missing detail");
+        assert!(
+            !detail.contains("scheduled identity targets are not supported"),
+            "CLI mob-enabled schedule host should not use session fallback for identity targets: {detail}"
+        );
+
+        let schedule = meerkat::Schedule::new(meerkat::CreateScheduleRequest {
+            name: Some("cli-mob-identity-test".to_string()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: meerkat::TargetBinding::Identity(Box::new(binding.clone())),
+            misfire_policy: meerkat::MisfirePolicy::Skip,
+            overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+            missing_target_policy: meerkat::MissingTargetPolicy::Skip,
+            labels: Default::default(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("identity target should create a schedule");
+        let occurrence = meerkat::Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("identity target occurrence should plan");
+        let dispatch = host
+            .deliver_identity_target(&occurrence, &binding)
+            .await
+            .expect("identity delivery should delegate to mob adapter")
+            .expect("mob identity should be handled by mob adapter");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+        assert_eq!(terminal.phase, meerkat::OccurrencePhase::DeliveryFailed);
     }
 
     #[tokio::test]

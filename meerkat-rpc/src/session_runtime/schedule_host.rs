@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use meerkat::surface::{
     AcceptedScheduledInput, NoopScheduleMobHost, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
-    build_dispatch_from_accepted, immediate_delivery_failure, schedule_attempt_idempotency_key,
+    build_dispatch_from_accepted, immediate_delivery_failure,
+    recover_mob_member_identity_from_session_target, schedule_attempt_idempotency_key,
     schedule_host_supported, spawn_schedule_host,
 };
 use meerkat::{
-    AgentBuildConfig, DeliveryDispatch, DeliveryFailureReason, Occurrence, ScheduleDomainError,
-    SessionMaterializationSpec, SessionTargetBinding, TargetProbeOutcome,
+    AgentBuildConfig, DeliveryDispatch, DeliveryFailureReason, IdentityTargetBinding, Occurrence,
+    ScheduleDomainError, SessionMaterializationSpec, SessionTargetBinding, TargetProbeOutcome,
 };
 use meerkat_core::SessionId;
 #[cfg(feature = "mob")]
@@ -192,6 +193,24 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
                 detail: Some(format!("session not found: {session_id}")),
             }),
         }
+    }
+
+    async fn recover_session_target_identity(
+        &self,
+        binding: &SessionTargetBinding,
+    ) -> Result<Option<IdentityTargetBinding>, ScheduleDomainError> {
+        let runtime = self.upgrade_runtime()?;
+        let Some(session_id) = binding.resolved_session_id() else {
+            return Ok(None);
+        };
+        let session = runtime
+            .load_persisted_session(session_id)
+            .await
+            .map_err(rpc_to_schedule)?;
+        Ok(recover_mob_member_identity_from_session_target(
+            binding,
+            session.as_ref(),
+        ))
     }
 
     async fn materialize_session(

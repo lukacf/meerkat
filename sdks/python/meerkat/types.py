@@ -637,6 +637,8 @@ class SessionMessage:
     body: str | None = None
     content: ContentInput | None = None
     stop_reason: str | None = None
+    interaction_id: str | None = None
+    run_id: str | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)
     results: list[SessionToolResult] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)

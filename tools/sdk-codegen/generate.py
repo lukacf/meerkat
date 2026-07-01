@@ -2002,6 +2002,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    body: Optional[str] = None\n"
     types_content += "    content: Optional[WireContentInput] = None\n"
     types_content += "    stop_reason: Optional[WireStopReason] = None\n"
+    types_content += "    interaction_id: Optional[str] = None\n"
+    types_content += "    run_id: Optional[str] = None\n"
     types_content += "    blocks: Optional[list[WireAssistantBlock]] = None\n"
     types_content += "    results: Optional[list[WireToolResult]] = None\n\n\n"
 
@@ -2650,6 +2652,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  body?: string;\n"
     types_content += "  content?: WireContentInput;\n"
     types_content += "  stop_reason?: WireStopReason;\n"
+    types_content += "  interaction_id?: string;\n"
+    types_content += "  run_id?: string;\n"
     types_content += "  blocks?: WireAssistantBlock[];\n"
     types_content += "  results?: WireToolResult[];\n"
     types_content += "}\n\n"

@@ -66,6 +66,8 @@ class WireSessionMessage:
     body: Optional[str] = None
     content: Optional[WireContentInput] = None
     stop_reason: Optional[WireStopReason] = None
+    interaction_id: Optional[str] = None
+    run_id: Optional[str] = None
     blocks: Optional[list[WireAssistantBlock]] = None
     results: Optional[list[WireToolResult]] = None
 

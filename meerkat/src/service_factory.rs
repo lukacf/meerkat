@@ -12,11 +12,12 @@ use meerkat_core::comms::{CommsCommand, PeerDirectoryEntry, SendError, SendRecei
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay};
 use meerkat_core::types::{
-    AssistantBlock, HandlingMode, Message, RenderMetadata, RunResult, SessionId, StopReason, Usage,
+    AssistantBlock, HandlingMode, Message, RunResult, SessionId, StopReason, Usage,
 };
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{
-    ObservedSessionTailKind, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+    ObservedSessionTailKind, SessionAgent, SessionAgentBuilder, SessionAgentTurnInput,
+    SessionSnapshot,
 };
 use std::sync::Arc;
 
@@ -97,11 +98,7 @@ impl SessionAgent for FactoryAgent {
 
     async fn run_turn_with_events(
         &mut self,
-        prompt: meerkat_core::types::ContentInput,
-        handling_mode: HandlingMode,
-        render_metadata: Option<RenderMetadata>,
-        typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
-        execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        input: SessionAgentTurnInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         // handling_mode and render_metadata are runtime-owned semantics.
@@ -109,32 +106,41 @@ impl SessionAgent for FactoryAgent {
         // the time this method runs the routing decision is already made.
         // Reject if a non-runtime caller attempts to use these — they cannot
         // be honored on the direct path and silent flattening violates §5.
-        if handling_mode != HandlingMode::Queue {
+        if input.handling_mode != HandlingMode::Queue {
             return Err(meerkat_core::error::AgentError::ConfigError(format!(
-                "handling_mode {handling_mode:?} requires a runtime-backed surface; direct session-service path supports Queue only",
+                "handling_mode {:?} requires a runtime-backed surface; direct session-service path supports Queue only",
+                input.handling_mode,
             )));
         }
-        if render_metadata.is_some() {
+        if input.render_metadata.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "render_metadata requires a runtime-backed surface; direct session-service path does not support it".to_string(),
             ));
         }
-        self.agent.set_runtime_execution_kind(execution_kind);
-        if typed_turn_appends.is_empty() {
-            self.agent.run_with_events(prompt, event_tx).await
+        self.agent.set_runtime_execution_kind(input.execution_kind);
+        if input.typed_turn_appends.is_empty() && input.transcript_identity.is_none() {
+            self.agent.run_with_events(input.prompt, event_tx).await
         } else {
             self.agent
-                .run_with_events_and_typed_turn_appends(prompt, typed_turn_appends, event_tx)
+                .run_with_events_and_typed_turn_appends(
+                    input.prompt,
+                    input.typed_turn_appends,
+                    input.transcript_identity,
+                    event_tx,
+                )
                 .await
         }
     }
 
     async fn run_pending_with_events(
         &mut self,
+        transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.set_runtime_execution_kind(execution_kind);
+        self.agent
+            .set_active_transcript_identity(transcript_identity);
         self.agent.run_pending_with_events(event_tx).await
     }
 
@@ -1648,11 +1654,14 @@ mod tests {
         let (run_tx, _run_rx) = mpsc::channel(8);
         SessionAgent::run_turn_with_events(
             &mut agent,
-            "inspect".to_string().into(),
-            HandlingMode::Queue,
-            None,
-            Vec::new(),
-            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            SessionAgentTurnInput {
+                prompt: "inspect".to_string().into(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+                typed_turn_appends: Vec::new(),
+                transcript_identity: None,
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            },
             run_tx,
         )
         .await
@@ -1715,11 +1724,14 @@ mod tests {
         let (run_tx, _run_rx) = mpsc::channel(8);
         SessionAgent::run_turn_with_events(
             &mut agent,
-            "inspect".to_string().into(),
-            HandlingMode::Queue,
-            None,
-            Vec::new(),
-            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            SessionAgentTurnInput {
+                prompt: "inspect".to_string().into(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+                typed_turn_appends: Vec::new(),
+                transcript_identity: None,
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            },
             run_tx,
         )
         .await

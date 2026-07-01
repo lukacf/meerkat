@@ -1579,6 +1579,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -1593,6 +1594,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = parent.transcript_revision()?;
@@ -1774,6 +1776,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         });
         incoming.commit_transcript_rewrite(
@@ -1900,6 +1903,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let mut incoming = previous.clone();
@@ -1981,6 +1985,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
@@ -2028,6 +2033,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
@@ -2085,6 +2091,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -2132,6 +2139,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
@@ -2181,6 +2189,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
@@ -2234,6 +2243,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let incoming_revision = incoming.transcript_revision()?;
@@ -2285,6 +2295,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -2304,6 +2315,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = incoming.transcript_revision()?;
@@ -2338,6 +2350,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -2357,6 +2370,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let parent_revision = incoming.transcript_revision()?;
@@ -2394,6 +2408,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -2453,6 +2468,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let previous_revision = previous.transcript_revision()?;
@@ -2564,6 +2580,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
 
@@ -2576,6 +2593,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
             })],
             crate::TranscriptRewriteReason::new("compaction"),
@@ -2590,6 +2608,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let bridge = session.transcript_revision()?;
@@ -2603,6 +2622,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
             })],
             crate::TranscriptRewriteReason::new("compaction"),
@@ -2637,6 +2657,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
         let base_revision = base.transcript_revision()?;
@@ -2650,6 +2671,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
             })],
             crate::TranscriptRewriteReason::new("compaction"),
@@ -2667,6 +2689,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
             })],
             crate::TranscriptRewriteReason::new("compaction"),

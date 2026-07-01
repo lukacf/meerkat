@@ -257,6 +257,8 @@ export interface SessionMessage {
   readonly body?: string;
   readonly content?: ContentInput;
   readonly stopReason?: string;
+  readonly interactionId?: string;
+  readonly runId?: string;
   readonly blocks: readonly SessionAssistantBlock[];
   readonly results: readonly SessionToolResult[];
   readonly raw?: Record<string, unknown>;

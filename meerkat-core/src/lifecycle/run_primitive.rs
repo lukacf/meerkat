@@ -11,7 +11,9 @@ use crate::connection::AuthBindingRef;
 use crate::provider::Provider;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
-use crate::types::{HandlingMode, RenderMetadata, SystemNoticeBlock, SystemNoticeKind};
+use crate::types::{
+    HandlingMode, RenderMetadata, SystemNoticeBlock, SystemNoticeKind, TranscriptMessageIdentity,
+};
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -1085,6 +1087,11 @@ pub struct RuntimeTurnMetadata {
     /// machine at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+    /// Stable transcript identity derived at runtime admission. Persisting this
+    /// on transcript messages lets history readers join persisted frames with
+    /// live frames without falling back to message text.
+    #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
+    pub transcript_identity: TranscriptMessageIdentity,
 }
 
 impl RuntimeTurnMetadata {
@@ -1103,6 +1110,11 @@ impl RuntimeTurnMetadata {
             && self.render_metadata.is_none()
             && self.execution_kind.is_none()
             && self.peer_response_terminal_apply_intent.is_none()
+            && self.transcript_identity.is_empty()
+    }
+
+    pub fn transcript_message_identity(&self) -> Option<TranscriptMessageIdentity> {
+        (!self.transcript_identity.is_empty()).then(|| self.transcript_identity.clone())
     }
 
     /// Merge another metadata carrier into this one. Scalar conflicts (two
@@ -1145,6 +1157,7 @@ impl RuntimeTurnMetadata {
             other.peer_response_terminal_apply_intent,
             "peer_response_terminal_apply_intent",
         )?;
+        merge_transcript_identity(&mut self.transcript_identity, other.transcript_identity);
 
         // Collections: accumulate.
         if let Some(extra) = other.skill_references {
@@ -1158,6 +1171,19 @@ impl RuntimeTurnMetadata {
                 .extend(extra);
         }
         Ok(())
+    }
+}
+
+fn merge_transcript_identity(lhs: &mut TranscriptMessageIdentity, rhs: TranscriptMessageIdentity) {
+    if rhs.is_empty() {
+        return;
+    }
+    if lhs.is_empty() {
+        *lhs = rhs;
+        return;
+    }
+    if *lhs != rhs {
+        *lhs = TranscriptMessageIdentity::default();
     }
 }
 

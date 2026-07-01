@@ -10893,6 +10893,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     execution_kind: None,
                     peer_response_terminal_apply_intent: None,
                     auth_binding: None,
+                    transcript_identity: Default::default(),
                 },
             ),
         );

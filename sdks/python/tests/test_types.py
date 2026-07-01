@@ -773,6 +773,8 @@ def test_parse_session_history():
             {"role": "system", "content": "rules", "created_at": "2026-05-26T10:00:00Z"},
             {
                 "role": "block_assistant",
+                "interaction_id": "019405c8-1234-7000-8000-000000000001",
+                "run_id": "019405c8-1234-7000-8000-000000000002",
                 "blocks": [
                     {
                         "block_type": "tool_use",
@@ -784,6 +786,8 @@ def test_parse_session_history():
             },
             {
                 "role": "tool_results",
+                "interaction_id": None,
+                "run_id": None,
                 "results": [{"tool_use_id": "tc_1", "content": "done", "is_error": False}],
                 "created_at": "2026-05-26T10:00:02Z",
             },
@@ -793,7 +797,11 @@ def test_parse_session_history():
     assert history.session_id == "s1"
     assert history.limit == 2
     assert history.has_more is True
+    assert history.messages[1].interaction_id == "019405c8-1234-7000-8000-000000000001"
+    assert history.messages[1].run_id == "019405c8-1234-7000-8000-000000000002"
     assert history.messages[1].blocks[0].name == "search"
+    assert history.messages[2].interaction_id is None
+    assert history.messages[2].run_id is None
     assert history.messages[2].results[0].tool_use_id == "tc_1"
 
 

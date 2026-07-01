@@ -292,6 +292,7 @@ mod session_persistence {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("How are you?".to_string())));
@@ -330,6 +331,7 @@ mod session_persistence {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let id = session.id().clone();
@@ -366,6 +368,7 @@ mod session_persistence {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("Call a tool".to_string())));
@@ -1011,6 +1014,7 @@ mod combined {
                 meta: None,
             }],
             stop_reason: StopReason::ToolUse,
+            identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.record_usage(first_usage);
@@ -1033,6 +1037,7 @@ mod combined {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.record_usage(second_usage);

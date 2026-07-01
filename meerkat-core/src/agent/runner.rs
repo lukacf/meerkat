@@ -25,7 +25,10 @@ use crate::tool_scope::{
 use crate::turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
-use crate::types::{ContentInput, Message, RunInput, RunResult, ToolCallView, ToolNameSet};
+use crate::types::{
+    BlockAssistantMessage, ContentInput, Message, RunInput, RunResult, ToolCallView, ToolNameSet,
+    TranscriptMessageIdentity, UserMessage,
+};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
 use std::collections::HashSet;
@@ -330,8 +333,16 @@ where
         self.runtime_execution_kind = execution_kind;
     }
 
+    pub fn set_active_transcript_identity(
+        &mut self,
+        transcript_identity: Option<TranscriptMessageIdentity>,
+    ) {
+        self.active_transcript_identity = transcript_identity;
+    }
+
     fn clear_runtime_execution_kind(&mut self) {
         self.runtime_execution_kind = None;
+        self.active_transcript_identity = None;
     }
 
     fn require_runtime_execution_kind(&self) -> Result<(), AgentError> {
@@ -359,6 +370,7 @@ where
     pub(crate) fn apply_session_effects(
         &mut self,
         effects: &[crate::ops::SessionEffect],
+        run_id: Option<&crate::lifecycle::RunId>,
     ) -> Result<(), crate::error::AgentError> {
         use crate::error::AgentError;
 
@@ -396,12 +408,23 @@ where
                     visibility_changed = true;
                 }
                 crate::ops::SessionEffect::AppendAssistantBlocks { blocks } => {
-                    self.session.push(crate::types::Message::BlockAssistant(
-                        crate::types::BlockAssistantMessage::new(
-                            blocks.clone(),
-                            crate::types::StopReason::EndTurn,
-                        ),
-                    ));
+                    let message = crate::types::BlockAssistantMessage::new(
+                        blocks.clone(),
+                        crate::types::StopReason::EndTurn,
+                    );
+                    let message = if let Some(run_id) = run_id {
+                        let mut message = message;
+                        message.identity = self
+                            .active_transcript_identity
+                            .clone()
+                            .unwrap_or_default()
+                            .with_run_id(run_id.clone());
+                        message
+                    } else {
+                        message
+                    };
+                    self.session
+                        .push(crate::types::Message::BlockAssistant(message));
                 }
             }
         }
@@ -630,7 +653,7 @@ where
                     outcome.result.tool_use_id = call.id;
                 }
                 if !outcome.session_effects.is_empty() {
-                    self.apply_session_effects(&outcome.session_effects)?;
+                    self.apply_session_effects(&outcome.session_effects, None)?;
                 }
                 Ok(outcome)
             }
@@ -1055,7 +1078,7 @@ where
 
     /// Run the agent with a user message.
     pub async fn run(&mut self, user_input: ContentInput) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), None).await
+        self.run_inner(user_input, Vec::new(), None, None).await
     }
 
     /// Run the agent with events streamed to the provided channel.
@@ -1064,7 +1087,8 @@ where
         user_input: ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), Some(event_tx)).await
+        self.run_inner(user_input, Vec::new(), None, Some(event_tx))
+            .await
     }
 
     /// Run the agent with provider-facing prompt content derived from typed
@@ -1073,10 +1097,36 @@ where
         &mut self,
         user_input: ContentInput,
         typed_turn_appends: Vec<ConversationAppend>,
+        transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, typed_turn_appends, Some(event_tx))
-            .await
+        self.run_inner(
+            user_input,
+            typed_turn_appends,
+            transcript_identity,
+            Some(event_tx),
+        )
+        .await
+    }
+
+    fn stamp_user_message_identity(&self, mut message: UserMessage) -> UserMessage {
+        if let Some(identity) = self.active_transcript_identity.as_ref() {
+            message.identity = identity.clone();
+        }
+        message
+    }
+
+    pub(super) fn stamp_assistant_message_identity(
+        &self,
+        mut message: BlockAssistantMessage,
+        run_id: &crate::lifecycle::RunId,
+    ) -> BlockAssistantMessage {
+        message.identity = self
+            .active_transcript_identity
+            .clone()
+            .unwrap_or_default()
+            .with_run_id(run_id.clone());
+        message
     }
 
     /// Run the agent using the pending continuation boundary already in the session.
@@ -1105,7 +1155,9 @@ where
     fn push_transcript_append(&mut self, append: ConversationAppend) -> Result<(), AgentError> {
         match append.role {
             ConversationAppendRole::User => {
-                let message = user_message_from_operator_renderable(append.content)?;
+                let message = self.stamp_user_message_identity(
+                    user_message_from_operator_renderable(append.content)?,
+                );
                 self.session.push(Message::User(message));
             }
             ConversationAppendRole::SystemNotice => {
@@ -1175,11 +1227,16 @@ where
         &mut self,
         user_input: ContentInput,
         typed_turn_appends: Vec<ConversationAppend>,
+        transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
+        self.set_active_transcript_identity(transcript_identity);
 
-        self.require_runtime_execution_kind()?;
+        if let Err(err) = self.require_runtime_execution_kind() {
+            self.clear_runtime_execution_kind();
+            return Err(err);
+        }
 
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
@@ -1236,10 +1293,14 @@ where
             } else {
                 crate::types::UserMessage::text(user_input.text_content())
             };
+            let user_message = self.stamp_user_message_identity(user_message);
             self.session.push(Message::User(user_message));
         } else {
             for append in typed_turn_appends {
-                self.push_transcript_append(append)?;
+                if let Err(err) = self.push_transcript_append(append) {
+                    self.clear_runtime_execution_kind();
+                    return Err(err);
+                }
             }
         }
 
@@ -1297,12 +1358,15 @@ where
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
         let session_tail = observe_session_tail(self.session.messages());
-        let pending_resolution =
-            resolve_pending_continuation(session_tail, 0).map_err(|error| {
-                AgentError::InternalError(format!(
+        let pending_resolution = match resolve_pending_continuation(session_tail, 0) {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                self.clear_runtime_execution_kind();
+                return Err(AgentError::InternalError(format!(
                     "generated pending-continuation authority rejected run_pending: {error}"
-                ))
-            })?;
+                )));
+            }
+        };
         let prompt = match pending_resolution.disposition {
             PendingContinuationDisposition::RunPending => {
                 if let Some(terminal) = pending_resolution.public_terminal {
@@ -1333,7 +1397,10 @@ where
             }
         };
 
-        self.require_runtime_execution_kind()?;
+        if let Err(err) = self.require_runtime_execution_kind() {
+            self.clear_runtime_execution_kind();
+            return Err(err);
+        }
 
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
@@ -1913,7 +1980,7 @@ mod skill_activation_effect_tests {
         engine: E,
     ) -> Agent<StaticLlmClient, NoTools, NoopStore> {
         let skill_runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
-        AgentBuilder::new()
+        with_test_turn_state_handle(AgentBuilder::new())
             .with_skill_engine(skill_runtime)
             .build_standalone(
                 Arc::new(StaticLlmClient),
@@ -1921,6 +1988,21 @@ mod skill_activation_effect_tests {
                 Arc::new(NoopStore),
             )
             .await
+    }
+
+    fn with_test_turn_state_handle(builder: AgentBuilder) -> AgentBuilder {
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
+        builder
+            .resume_session(session)
+            .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
     }
 
     /// Row #65: a failing `skill_references` resolution emits the typed
@@ -2043,6 +2125,99 @@ mod skill_activation_effect_tests {
             !saw_run_started,
             "run must fail before publishing RunStarted"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_transcript_identity_is_persisted_on_user_and_assistant_messages() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_beef));
+        let transcript_identity = crate::types::TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            run_id: None,
+        };
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "Still here.".to_string().into(),
+                Vec::new(),
+                Some(transcript_identity),
+                tx,
+            )
+            .await
+            .expect("mock turn should complete");
+
+        let user = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::User(message) => Some(message),
+                _ => None,
+            })
+            .expect("turn should persist a user transcript message");
+        assert_eq!(
+            user.identity.interaction_id,
+            Some(interaction_id),
+            "runtime-stamped interaction id must survive into persisted user history"
+        );
+        assert_eq!(user.identity.run_id, None);
+
+        let assistant = agent
+            .session()
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::BlockAssistant(message) => Some(message),
+                _ => None,
+            })
+            .expect("turn should persist a block assistant transcript message");
+        assert_eq!(
+            assistant.identity.interaction_id,
+            Some(interaction_id),
+            "persisted assistant history must carry the same id as live InteractionComplete"
+        );
+        assert!(
+            assistant.identity.run_id.is_some(),
+            "assistant transcript identity must include the concrete run id for exact run-scoped joins"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_assistant_blocks_effect_stamps_active_transcript_identity_and_run_id() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_cafe));
+        let run_id = crate::lifecycle::RunId::new();
+        agent.set_active_transcript_identity(Some(crate::types::TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            run_id: None,
+        }));
+
+        agent
+            .apply_session_effects(
+                &[crate::ops::SessionEffect::AppendAssistantBlocks {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "effect assistant".to_string(),
+                        meta: None,
+                    }],
+                }],
+                Some(&run_id),
+            )
+            .expect("assistant append effect should apply");
+
+        let assistant = agent
+            .session()
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::BlockAssistant(message) => Some(message),
+                _ => None,
+            })
+            .expect("effect should persist a block assistant message");
+        assert_eq!(assistant.identity.interaction_id, Some(interaction_id));
+        assert_eq!(assistant.identity.run_id, Some(run_id));
     }
 
     /// Row #84: a successful activation produces a typed activation record (the

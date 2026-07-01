@@ -2333,7 +2333,10 @@ where
                     }
 
                     let (blocks, stop_reason, usage) = result.into_parts();
-                    let assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
+                    let assistant_msg = self.stamp_assistant_message_identity(
+                        BlockAssistantMessage::new(blocks, stop_reason),
+                        &run_id,
+                    );
                     let assistant_text = assistant_msg.to_string();
 
                     // #128: the shell computes the pure pre-classifier (this
@@ -2783,7 +2786,7 @@ where
                                 )
                             });
                         if !pre_tool_effects.is_empty() {
-                            self.apply_session_effects(&pre_tool_effects)?;
+                            self.apply_session_effects(&pre_tool_effects, Some(&run_id))?;
                         }
                         let tool_batch_produced_output =
                             tool_results.iter().any(|result| !result.is_error)
@@ -2801,7 +2804,7 @@ where
                         let assistant_image_events =
                             assistant_image_events_from_effects(&post_tool_effects);
                         if !post_tool_effects.is_empty() {
-                            self.apply_session_effects(&post_tool_effects)?;
+                            self.apply_session_effects(&post_tool_effects, Some(&run_id))?;
                         }
                         if tool_batch_produced_output {
                             run_has_visible_or_actionable_output = true;

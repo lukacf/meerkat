@@ -937,6 +937,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             session
@@ -1112,6 +1113,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let current_snapshot = serde_json::to_vec(&current).unwrap();
@@ -1254,6 +1256,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
 
@@ -1271,6 +1274,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let parent_revision = incoming.transcript_revision().unwrap();
@@ -1357,6 +1361,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                             meta: None,
                         }],
                         stop_reason: StopReason::EndTurn,
+                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],
                     TranscriptRewriteReason::new("compaction"),
@@ -1385,6 +1390,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                             meta: None,
                         }],
                         stop_reason: StopReason::EndTurn,
+                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],
                     TranscriptRewriteReason::new("compaction"),

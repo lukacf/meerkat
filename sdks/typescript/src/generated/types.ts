@@ -124,6 +124,8 @@ export interface WireSessionMessage {
   body?: string;
   content?: WireContentInput;
   stop_reason?: WireStopReason;
+  interaction_id?: string;
+  run_id?: string;
   blocks?: WireAssistantBlock[];
   results?: WireToolResult[];
 }

@@ -105,6 +105,7 @@ fn peer_input_from_ingress_fact(
     response_terminality: Option<meerkat_core::interaction::TerminalityClass>,
 ) -> Result<Input, PeerIngressProjectionError> {
     let convention = map_ingress_convention(interaction.id, ingress, response_terminality)?;
+    let transcript_correlation_id = transcript_correlation_id(interaction, &convention);
     let durability = map_durability(&convention);
     let handling_mode = match &convention {
         PeerConvention::ResponseProgress { .. } => None,
@@ -137,7 +138,7 @@ fn peer_input_from_ingress_fact(
             },
             idempotency_key: None,
             supersession_key: None,
-            correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
+            correlation_id: Some(CorrelationId::from_uuid(transcript_correlation_id.0)),
         },
         convention: Some(convention),
         content: match peer_blocks(interaction) {
@@ -147,6 +148,19 @@ fn peer_input_from_ingress_fact(
         payload: peer_payload(interaction),
         handling_mode,
     }))
+}
+
+fn transcript_correlation_id(
+    interaction: &InboxInteraction,
+    convention: &PeerConvention,
+) -> meerkat_core::InteractionId {
+    match (convention, &interaction.content) {
+        (
+            PeerConvention::ResponseProgress { .. } | PeerConvention::ResponseTerminal { .. },
+            InteractionContent::Response { in_reply_to, .. },
+        ) => *in_reply_to,
+        _ => interaction.id,
+    }
 }
 
 fn map_ingress_convention(
@@ -373,6 +387,11 @@ mod tests {
         if let Input::Peer(p) = &input {
             assert!(matches!(p.convention, Some(PeerConvention::Message)));
             assert_eq!(p.content.text_content(), "hello");
+            assert_eq!(
+                p.header.correlation_id,
+                Some(CorrelationId::from_uuid(interaction.id.0)),
+                "plain peer messages must use the inbound interaction id as the live/history dedup key",
+            );
             assert_eq!(p.header.durability, InputDurability::Durable);
             assert_eq!(
                 p.handling_mode,
@@ -952,6 +971,11 @@ mod tests {
                     ..
                 })
             ));
+            assert_eq!(
+                p.header.correlation_id,
+                Some(CorrelationId::from_uuid(in_reply_to.0)),
+                "terminal peer responses must use the request interaction id that InteractionComplete reports",
+            );
             assert_eq!(p.header.durability, InputDurability::Durable);
             assert_eq!(
                 p.payload,
@@ -1188,6 +1212,11 @@ mod tests {
                     ..
                 })
             ));
+            assert_eq!(
+                p.header.correlation_id,
+                Some(CorrelationId::from_uuid(in_reply_to.0)),
+                "progress peer responses must share the same request correlation as terminal response completion",
+            );
             assert_eq!(p.header.durability, InputDurability::Ephemeral);
             assert!(
                 p.handling_mode.is_none(),

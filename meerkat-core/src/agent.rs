@@ -1321,6 +1321,8 @@ where
     /// Typed execution intent for the current run, when this turn is owned by
     /// the runtime control plane rather than a direct surface call.
     pub(crate) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
+    /// Stable transcript identity for the active runtime-owned turn.
+    pub(crate) active_transcript_identity: Option<crate::types::TranscriptMessageIdentity>,
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,

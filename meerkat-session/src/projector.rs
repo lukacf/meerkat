@@ -572,6 +572,7 @@ mod tests {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
         let parent_revision = session.transcript_revision().unwrap();

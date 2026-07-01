@@ -136,6 +136,7 @@ pub use meerkat_core::{
     // Canonical typed tool identity (K8a fold)
     ToolName,
     ToolResult,
+    TranscriptMessageIdentity,
     Usage,
     UserMessage,
     // Operations

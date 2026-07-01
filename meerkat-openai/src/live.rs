@@ -4720,6 +4720,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: meerkat_core::StopReason::EndTurn,
+                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
@@ -5095,6 +5096,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
@@ -5159,6 +5161,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
@@ -5257,6 +5260,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
@@ -5265,6 +5269,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::ToolResults {
@@ -5368,6 +5373,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::User(meerkat_core::UserMessage::text(
@@ -5379,6 +5385,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::ToolResults {
@@ -5447,6 +5454,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
@@ -5461,6 +5469,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: meerkat_core::StopReason::EndTurn,
+                    identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ));
@@ -8212,6 +8221,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: types::message_timestamp_now(),
             }),
         ];
@@ -8372,6 +8382,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: types::message_timestamp_now(),
             }),
         ];

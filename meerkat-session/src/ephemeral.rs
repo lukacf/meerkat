@@ -487,6 +487,15 @@ pub trait SessionAgentBuilder: Send + Sync {
 }
 
 /// Trait abstracting over the agent's run/cancel interface.
+pub struct SessionAgentTurnInput {
+    pub prompt: meerkat_core::types::ContentInput,
+    pub handling_mode: meerkat_core::types::HandlingMode,
+    pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    pub typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
+    pub transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
+    pub execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionAgent: Send {
@@ -510,29 +519,31 @@ pub trait SessionAgent: Send {
     /// to prevent silent flattening on paths that can't honor them (§5).
     async fn run_turn_with_events(
         &mut self,
-        prompt: meerkat_core::types::ContentInput,
-        handling_mode: meerkat_core::types::HandlingMode,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
-        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        input: SessionAgentTurnInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        if handling_mode != meerkat_core::types::HandlingMode::Queue {
+        if input.handling_mode != meerkat_core::types::HandlingMode::Queue {
             return Err(meerkat_core::error::AgentError::ConfigError(format!(
-                "handling_mode {handling_mode:?} requires a runtime-backed surface",
+                "handling_mode {:?} requires a runtime-backed surface",
+                input.handling_mode,
             )));
         }
-        if render_metadata.is_some() {
+        if input.render_metadata.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "render_metadata requires a runtime-backed surface".to_string(),
             ));
         }
-        if !typed_turn_appends.is_empty() {
+        if !input.typed_turn_appends.is_empty() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "typed turn appends require a runtime-backed surface".to_string(),
             ));
         }
-        self.run_with_events(prompt, event_tx).await
+        if input.transcript_identity.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "transcript identity requires a runtime-backed surface".to_string(),
+            ));
+        }
+        self.run_with_events(input.prompt, event_tx).await
     }
 
     /// Continue from the existing session transcript without pushing a new user
@@ -540,9 +551,15 @@ pub trait SessionAgent: Send {
     /// tool-result continuations.
     async fn run_pending_with_events(
         &mut self,
+        transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if transcript_identity.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "transcript identity requires a runtime-backed surface".to_string(),
+            ));
+        }
         Err(meerkat_core::error::AgentError::ConfigError(
             "run_pending_with_events is not supported by this session agent".to_string(),
         ))
@@ -3913,6 +3930,9 @@ async fn session_task<A: SessionAgent>(
                 let execution_kind = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
+                let transcript_identity = metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.transcript_message_identity());
                 // `active_admission` is held for the whole turn. On any
                 // pre-run failure path below it simply drops at the end of
                 // this arm: the final lease release settles staged-restore
@@ -4220,17 +4240,24 @@ async fn session_task<A: SessionAgent>(
                     let run_fut: RunFut<'_> = match disposition {
                         StartTurnDisposition::RunContentTurn => {
                             Box::pin(agent.run_turn_with_events(
-                                prompt,
-                                handling_mode,
-                                render_metadata,
-                                typed_turn_appends,
+                                SessionAgentTurnInput {
+                                    prompt,
+                                    handling_mode,
+                                    render_metadata,
+                                    typed_turn_appends,
+                                    transcript_identity,
+                                    execution_kind,
+                                },
+                                agent_event_tx.clone(),
+                            ))
+                        }
+                        StartTurnDisposition::RunPending => {
+                            Box::pin(agent.run_pending_with_events(
+                                transcript_identity,
                                 execution_kind,
                                 agent_event_tx.clone(),
                             ))
                         }
-                        StartTurnDisposition::RunPending => Box::pin(
-                            agent.run_pending_with_events(execution_kind, agent_event_tx.clone()),
-                        ),
                         StartTurnDisposition::NoPendingBoundary => {
                             // Already handled above — unreachable here.
                             unreachable!("NoPendingBoundary handled before Running state")

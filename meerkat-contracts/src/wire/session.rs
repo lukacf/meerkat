@@ -32,6 +32,7 @@ use meerkat_core::{
     SystemNoticeMessage, ToolResult, TranscriptEditRunningBehavior, TranscriptReplacement,
     TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource, UserMessage, VideoData,
 };
+use meerkat_core::{InteractionId, RunId};
 use std::convert::TryFrom;
 
 /// Request payload for `session/stream_open`.
@@ -1111,6 +1112,7 @@ impl TranscriptRewriteMessage {
                 Ok(Message::User(UserMessage {
                     content,
                     render_metadata: None,
+                    identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     transcript_role: meerkat_core::types::TranscriptUserRole::default(),
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
@@ -1127,6 +1129,7 @@ impl TranscriptRewriteMessage {
                 Ok(Message::BlockAssistant(BlockAssistantMessage {
                     blocks,
                     stop_reason: stop_reason.into(),
+                    identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
             }
@@ -1285,12 +1288,20 @@ pub enum WireSessionMessage {
     },
     User {
         content: WireContentInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interaction_id: Option<InteractionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<RunId>,
         created_at: String,
     },
     #[serde(rename = "block_assistant")]
     BlockAssistant {
         blocks: Vec<WireAssistantBlock>,
         stop_reason: WireStopReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interaction_id: Option<InteractionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<RunId>,
         created_at: String,
     },
     #[serde(rename = "tool_results")]
@@ -1324,12 +1335,16 @@ impl From<Message> for WireSessionMessage {
                 };
                 Self::User {
                     content,
+                    interaction_id: message.identity.interaction_id,
+                    run_id: message.identity.run_id,
                     created_at,
                 }
             }
             Message::BlockAssistant(message) => Self::BlockAssistant {
                 blocks: message.blocks.into_iter().map(Into::into).collect(),
                 stop_reason: message.stop_reason.into(),
+                interaction_id: message.identity.interaction_id,
+                run_id: message.identity.run_id,
                 created_at: message.created_at.to_rfc3339(),
             },
             Message::ToolResults {
@@ -1845,6 +1860,8 @@ mod tests {
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),
+                    interaction_id: None,
+                    run_id: None,
                     created_at: "2026-04-27T00:00:01Z".to_string(),
                 },
                 WireSessionMessage::BlockAssistant {
@@ -1875,6 +1892,8 @@ mod tests {
                         },
                     ],
                     stop_reason: WireStopReason::EndTurn,
+                    interaction_id: None,
+                    run_id: None,
                     created_at: "2026-04-27T00:00:03Z".to_string(),
                 },
                 WireSessionMessage::ToolResults {
@@ -1944,6 +1963,58 @@ mod tests {
             wire.messages[2],
             WireSessionMessage::BlockAssistant { .. }
         ));
+    }
+
+    #[test]
+    fn test_wire_session_history_exposes_transcript_identity() {
+        let interaction_id = InteractionId(uuid::Uuid::from_u128(7));
+        let run_id = RunId::from_uuid(uuid::Uuid::from_u128(8));
+        let mut user = UserMessage::text("hello");
+        user.identity = meerkat_core::types::TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            run_id: None,
+        };
+        let mut assistant = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "Still here.".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        );
+        assistant.identity = meerkat_core::types::TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            run_id: Some(run_id.clone()),
+        };
+        let page = SessionHistoryPage {
+            session_id: SessionId::new(),
+            message_count: 2,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![Message::User(user), Message::BlockAssistant(assistant)],
+        };
+
+        let wire: WireSessionHistory = page.into();
+
+        match &wire.messages[0] {
+            WireSessionMessage::User {
+                interaction_id: Some(actual),
+                run_id: None,
+                ..
+            } => assert_eq!(*actual, interaction_id),
+            other => panic!("expected user identity, got {other:?}"),
+        }
+        match &wire.messages[1] {
+            WireSessionMessage::BlockAssistant {
+                interaction_id: Some(actual_interaction),
+                run_id: Some(actual_run),
+                ..
+            } => {
+                assert_eq!(*actual_interaction, interaction_id);
+                assert_eq!(actual_run, &run_id);
+            }
+            other => panic!("expected assistant identity, got {other:?}"),
+        }
     }
 
     #[test]

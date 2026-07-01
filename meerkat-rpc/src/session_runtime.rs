@@ -1570,6 +1570,7 @@ impl SessionRuntime {
             auth_binding,
             execution_kind: None,
             peer_response_terminal_apply_intent: None,
+            transcript_identity: Default::default(),
         };
         (!metadata.is_empty()).then_some(metadata)
     }

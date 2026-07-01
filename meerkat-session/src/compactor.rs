@@ -96,6 +96,7 @@ fn project_messages_for_summarization(messages: &[Message]) -> Vec<Message> {
                     Some(Message::BlockAssistant(BlockAssistantMessage {
                         blocks,
                         stop_reason: assistant.stop_reason,
+                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: assistant.created_at,
                     }))
                 }

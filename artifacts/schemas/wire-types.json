@@ -50111,6 +50111,10 @@
         ],
         "type": "object"
       },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -50256,6 +50260,10 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
       "SkillKey": {
@@ -51463,9 +51471,29 @@
               "created_at": {
                 "type": "string"
               },
+              "interaction_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InteractionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "role": {
                 "const": "user",
                 "type": "string"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -51486,9 +51514,29 @@
               "created_at": {
                 "type": "string"
               },
+              "interaction_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InteractionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "role": {
                 "const": "block_assistant",
                 "type": "string"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "stop_reason": {
                 "$ref": "#/$defs/WireStopReason"
@@ -52046,6 +52094,10 @@
         ],
         "type": "object"
       },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -52191,6 +52243,10 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
       "SkillKey": {
@@ -53479,9 +53535,29 @@
           "created_at": {
             "type": "string"
           },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InteractionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "role": {
             "const": "user",
             "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -53502,9 +53578,29 @@
           "created_at": {
             "type": "string"
           },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InteractionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "role": {
             "const": "block_assistant",
             "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "stop_reason": {
             "$ref": "#/$defs/WireStopReason"
@@ -54446,6 +54542,10 @@
         ],
         "type": "object"
       },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -54591,6 +54691,10 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
       "SkillKey": {
@@ -55798,9 +55902,29 @@
               "created_at": {
                 "type": "string"
               },
+              "interaction_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InteractionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "role": {
                 "const": "user",
                 "type": "string"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -55821,9 +55945,29 @@
               "created_at": {
                 "type": "string"
               },
+              "interaction_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InteractionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "role": {
                 "const": "block_assistant",
                 "type": "string"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "stop_reason": {
                 "$ref": "#/$defs/WireStopReason"

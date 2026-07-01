@@ -6071,6 +6071,51 @@ mod tests {
     }
 
     #[test]
+    fn peer_turn_metadata_matches_live_interaction_complete_identity() {
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let input = crate::input::Input::Peer(crate::input::PeerInput {
+            header: crate::input::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::Peer {
+                    peer_id: PEER_ID_RECEIVER.to_string(),
+                    display_identity: Some("keepalive-peer".to_string()),
+                    runtime_id: None,
+                },
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: Some(crate::CorrelationId::from_uuid(interaction_id.0)),
+            },
+            convention: Some(crate::input::PeerConvention::Message),
+            content: "poke".to_string().into(),
+            payload: None,
+            handling_mode: None,
+        });
+        let semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+                .expect("peer message should admit as a runtime turn");
+        let metadata = crate::runtime_loop::for_input(&input, semantics);
+
+        let event =
+            interaction_terminal_event(interaction_id, CompletionOutcome::CompletedWithoutResult);
+        let AgentEvent::InteractionComplete {
+            interaction_id: live_interaction_id,
+            ..
+        } = event
+        else {
+            panic!("expected InteractionComplete");
+        };
+
+        assert_eq!(
+            metadata.transcript_identity.interaction_id,
+            Some(live_interaction_id),
+            "runtime transcript identity must use the same peer interaction id as the live terminal event"
+        );
+    }
+
+    #[test]
     fn callback_pending_maps_to_interaction_callback_pending_terminal_event() {
         let interaction_id = InteractionId(Uuid::new_v4());
         let event = interaction_terminal_event(

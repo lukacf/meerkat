@@ -94,8 +94,12 @@ describe("Transcript Rewrite Serialization", () => {
       role: "user",
       content: "old",
       created_at: "2026-05-26T10:00:00Z",
+      interaction_id: "019405c8-1234-7000-8000-000000000001",
+      run_id: "019405c8-1234-7000-8000-000000000002",
       provider_trace_id: "trace-1",
     });
+    assert.equal(parsed.interactionId, "019405c8-1234-7000-8000-000000000001");
+    assert.equal(parsed.runId, "019405c8-1234-7000-8000-000000000002");
 
     const serialized = MeerkatClient.serializeTranscriptRewriteMessage({
       ...parsed,
@@ -106,6 +110,8 @@ describe("Transcript Rewrite Serialization", () => {
       role: "user",
       content: "new",
       created_at: "2026-05-26T10:00:00Z",
+      interaction_id: "019405c8-1234-7000-8000-000000000001",
+      run_id: "019405c8-1234-7000-8000-000000000002",
       provider_trace_id: "trace-1",
     });
   });

@@ -5952,6 +5952,10 @@
         ],
         "type": "string"
       },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
       "RuntimeDeliveryOutcome": {
         "oneOf": [
           {
@@ -10367,9 +10371,29 @@
               "created_at": {
                 "type": "string"
               },
+              "interaction_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InteractionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "role": {
                 "const": "user",
                 "type": "string"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -10390,9 +10414,29 @@
               "created_at": {
                 "type": "string"
               },
+              "interaction_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InteractionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "role": {
                 "const": "block_assistant",
                 "type": "string"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "stop_reason": {
                 "$ref": "#/components/schemas/WireStopReason"

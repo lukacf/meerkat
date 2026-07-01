@@ -76,6 +76,7 @@ fn test_message_json_schema() {
             meta: None,
         }],
         stop_reason: StopReason::EndTurn,
+        identity: crate::types::TranscriptMessageIdentity::default(),
         created_at: message_timestamp_now(),
     });
     let json = serde_json::to_value(&assistant).unwrap();
@@ -118,6 +119,38 @@ fn test_user_message_render_metadata_serialization() {
     assert_eq!(json["role"], "user");
     assert_eq!(json["render_metadata"]["class"], "tool_scope_notice");
     assert_eq!(json["render_metadata"]["salience"], "normal");
+}
+
+#[test]
+fn test_transcript_message_identity_serialization_is_optional() {
+    let plain = serde_json::to_value(Message::User(UserMessage::text("hello"))).unwrap();
+    assert!(plain.get("identity").is_none());
+
+    let interaction_id = crate::InteractionId(uuid::Uuid::nil());
+    let run_id = crate::lifecycle::RunId::from_uuid(uuid::Uuid::from_u128(42));
+    let mut user = UserMessage::text("hello");
+    user.identity = TranscriptMessageIdentity {
+        interaction_id: Some(interaction_id),
+        run_id: Some(run_id.clone()),
+    };
+
+    let json = serde_json::to_value(Message::User(user)).unwrap();
+    assert_eq!(
+        json["identity"]["interaction_id"],
+        interaction_id.to_string()
+    );
+    assert_eq!(json["identity"]["run_id"], run_id.to_string());
+
+    let legacy: Message = serde_json::from_value(json!({
+        "role": "block_assistant",
+        "blocks": [{"block_type": "text", "data": {"text": "ok"}}],
+        "stop_reason": "end_turn"
+    }))
+    .unwrap();
+    match legacy {
+        Message::BlockAssistant(message) => assert!(message.identity.is_empty()),
+        other => panic!("expected block assistant, got {other:?}"),
+    }
 }
 
 #[test]
@@ -613,6 +646,7 @@ fn test_session_checkpoint_complex() {
                     },
                 ],
                 stop_reason: StopReason::ToolUse,
+                identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
             }));
 
@@ -628,6 +662,7 @@ fn test_session_checkpoint_complex() {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
             }));
         } else {
@@ -638,6 +673,7 @@ fn test_session_checkpoint_complex() {
                     meta: None,
                 }],
                 stop_reason: StopReason::EndTurn,
+                identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
             }));
         }
@@ -1408,6 +1444,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
 
@@ -1427,6 +1464,7 @@ mod ordered_transcript_types {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
 
@@ -1446,6 +1484,7 @@ mod ordered_transcript_types {
                 meta: None,
             }],
             stop_reason: StopReason::ToolUse,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
         assert!(msg_with_tools.has_tool_calls());
@@ -1456,6 +1495,7 @@ mod ordered_transcript_types {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
         assert!(!msg_without_tools.has_tool_calls());
@@ -1482,6 +1522,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
 
@@ -1524,6 +1565,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
 
@@ -1536,6 +1578,7 @@ mod ordered_transcript_types {
         let msg = BlockAssistantMessage {
             blocks: vec![],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
 
@@ -1573,6 +1616,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
 

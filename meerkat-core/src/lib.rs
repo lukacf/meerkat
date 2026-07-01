@@ -331,7 +331,7 @@ pub use types::{
     SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, SystemPromptMutationKind, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptSource, TranscriptUserRole, Usage, UserMessage, VideoData,
+    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, validate_inline_video_blocks,
 };

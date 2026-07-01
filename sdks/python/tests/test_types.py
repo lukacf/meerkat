@@ -1324,6 +1324,7 @@ def test_member_send_never_falls_back_to_requested_handling_mode():
         # Runtime echoes identity/member_ref but OMITS handling_mode entirely.
         # The client requested "steer" — it must not be substituted.
         return {
+            "mob_id": params["mob_id"],
             "agent_identity": params["agent_identity"],
             "member_ref": "m1",
         }
@@ -1352,6 +1353,7 @@ def test_member_send_returns_runtime_handling_mode():
 
     async def fake_request(method, params):
         return {
+            "mob_id": params["mob_id"],
             "agent_identity": params["agent_identity"],
             "member_ref": "m1",
             # Runtime resolved to "queue" though client asked for "steer".
@@ -3394,6 +3396,26 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
 
 
 @pytest.mark.asyncio
+async def test_spawn_mob_member_rejects_missing_runtime_mob_id() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        return {
+            "agent_identity": "agent-a",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing mob_id"):
+        await client.spawn_mob_member(
+            "mob-1",
+            profile="worker",
+            agent_identity="agent-a",
+        )
+
+
+@pytest.mark.asyncio
 async def test_mob_status_rejects_missing_status():
     client = MeerkatClient()
 
@@ -3495,6 +3517,7 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
     async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
         calls.append((method, params))
         return {
+            "mob_id": "mob-1",
             "agent_identity": "agent-a",
             "member_ref": _make_member_ref("mob-1", "agent-a"),
             "handling_mode": "steer",
@@ -3511,6 +3534,7 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
     )
 
     assert receipt == {
+        "mob_id": "mob-1",
         "agent_identity": "agent-a",
         "member_ref": _make_member_ref("mob-1", "agent-a"),
         "handling_mode": "steer",
@@ -3539,6 +3563,58 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError, match="missing member_ref"):
+        await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")
+
+
+@pytest.mark.asyncio
+async def test_send_mob_member_content_rejects_missing_runtime_identity() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        return {
+            "mob_id": "mob-1",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "handling_mode": "queue",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing agent_identity"):
+        await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")
+
+
+@pytest.mark.asyncio
+async def test_send_mob_member_content_rejects_missing_runtime_mob_id() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        return {
+            "agent_identity": "agent-a",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "handling_mode": "queue",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing mob_id"):
+        await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")
+
+
+@pytest.mark.asyncio
+async def test_send_mob_member_content_rejects_mismatched_runtime_mob_id() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        return {
+            "mob_id": "mob-2",
+            "agent_identity": "agent-a",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "handling_mode": "queue",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="mob_id mismatch"):
         await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")
 
 

@@ -13,21 +13,13 @@ Each composition directory contains:
 - optional witness or liveness configs when the composition has additional
   proof lanes
 
-Canonical composition set:
-
-- `meerkat_mob_seam`
-- perimeter compositions retained after audit:
-  - `auth_lease_bundle`
-  - `schedule_bundle`
-  - `schedule_runtime_bundle`
-  - `schedule_mob_bundle`
-  - `workgraph_attention_bundle`
-
 Status:
 
-- internal routes inside `MeerkatMachine` and `MobMachine` are no longer
-  modeled as inter-machine compositions
-- `meerkat_mob_seam` is the sole inter-kernel composition
+- `specs/compositions/` is the canonical executable composition-spec home
+- the schema catalog and generated authority artifacts define the canonical
+  composition roster
+- internal routes inside `MeerkatMachine` and `MobMachine` are not modeled as
+  inter-machine compositions
 - the retained perimeter/workgraph compositions were audited during the two-kernel
   collapse:
   - `auth_lease_bundle` remains because it publishes auth lease lifecycle

@@ -169,7 +169,9 @@ sh_test(
     args = ["sdk-suites"],
     data = [
         "//:workspace_runfiles",
-    ] + RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
+        "@wasm_pack_darwin_arm64//:wasm-pack",
+        "@wasm_pack_linux_x86_64//:wasm-pack",
+    ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
     exec_properties = CARGO_EQUIVALENT_EXEC_PROPERTIES,
     size = "enormous",
     timeout = "eternal",

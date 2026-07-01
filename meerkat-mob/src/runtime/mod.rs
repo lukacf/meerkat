@@ -50,6 +50,7 @@ pub(crate) type RuntimeAdapterOption = Option<Arc<meerkat_runtime::MeerkatMachin
 #[cfg(not(feature = "runtime-adapter"))]
 pub(crate) type RuntimeAdapterOption = Option<()>;
 
+pub(crate) const FLOW_MEMBER_ID_PREFIX: &str = "__flow_";
 pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
 
 pub(crate) fn flow_system_member_id() -> AgentIdentity {

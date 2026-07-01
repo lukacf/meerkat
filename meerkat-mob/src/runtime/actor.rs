@@ -8836,6 +8836,7 @@ impl MobActor {
             let _ = reply_tx.send(Err(error));
             return;
         }
+        let allow_reserved_flow_identity = spawn_source.allows_reserved_flow_identity();
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,
             identity,
@@ -8874,7 +8875,7 @@ impl MobActor {
             _ => None,
         };
         let prepare_result = async {
-            if agent_identity.is_system_reserved() {
+            if agent_identity.is_system_reserved() && !allow_reserved_flow_identity {
                 return Err(MobError::WiringError(format!(
                     "meerkat id '{agent_identity}' uses reserved system identifier namespace"
                 )));
@@ -10244,7 +10245,7 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending resolving supervisor comms"
         );
-        let supervisor_private_trust_install = if agent_identity.as_str().starts_with("__flow_") {
+        let supervisor_private_trust_install = if agent_identity.is_flow_member_namespace() {
             tracing::debug!(
                 agent_identity = %agent_identity,
                 "MobActor::finalize_spawn_from_pending skipped supervisor private trust for run-scoped flow member"
@@ -10582,7 +10583,7 @@ impl MobActor {
         // compensating rollback in `rollback_failed_spawn` expects both
         // `wired_spawn_targets` and `planned_wiring_targets` populated so
         // partial-wire failures can unwind.
-        let mut planned_wiring_targets = if agent_identity.as_str().starts_with("__flow_") {
+        let mut planned_wiring_targets = if agent_identity.is_flow_member_namespace() {
             Vec::new()
         } else {
             Box::pin(self.spawn_wiring_targets(profile_name, agent_identity)).await
@@ -10704,7 +10705,7 @@ impl MobActor {
         }
 
         if runtime_mode == crate::MobRuntimeMode::TurnDriven
-            && !agent_identity.as_str().starts_with("__flow_")
+            && !agent_identity.is_flow_member_namespace()
         {
             // Turn-driven mob members still need a persistent comms drain:
             // async peer requests/responses arrive between user turns (think

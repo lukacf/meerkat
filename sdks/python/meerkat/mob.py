@@ -55,6 +55,7 @@ RenderMetadata = TypedDict(
 MemberDeliveryReceipt = TypedDict(
     "MemberDeliveryReceipt",
     {
+        "mob_id": str,
         "agent_identity": str,
         "member_ref": MobMemberRef,
         "handling_mode": Literal["queue", "steer"],

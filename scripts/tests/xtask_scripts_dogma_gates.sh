@@ -69,6 +69,11 @@ if scripts/machine-authority-changed -- xtask/src/rmat_policy.rs >/dev/null; the
 else
   bad "machine-authority-changed did not flag xtask/src/rmat_policy.rs"
 fi
+if scripts/machine-authority-changed -- meerkat-mob/src/runtime/actor.rs >/dev/null; then
+  ok "machine-authority-changed exits 0 (changed) for mob runtime authority"
+else
+  bad "machine-authority-changed did not flag mob runtime authority"
+fi
 if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/dev/null; then
   ok "machine-authority-changed exits 0 (changed) for machine-authority docs"
 else
@@ -157,6 +162,13 @@ if printf '%s' "$generated_machine_gate_out" | grep -Fq 'machine-check-drift mac
 else
   bad "cargo-agent-gate dry-run did not route generated machine catalog changes"
 fi
+mob_identity_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-mob/src/ids.rs 2>&1 || true)
+if printf '%s' "$mob_identity_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
+  && ! printf '%s' "$mob_identity_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
+  ok "cargo-agent-gate dry-run routes mob identity authority changes to governance gate"
+else
+  bad "cargo-agent-gate dry-run did not route mob identity authority changes"
+fi
 generated_buildbuddy_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- meerkat-core/src/generated/protocol_runtime.rs 2>&1 || true)
 if printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
   && ! printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
@@ -190,6 +202,20 @@ if printf '%s' "$surface_gate_out" | grep -Fq 'verify-schema-freshness verify-sd
   ok "cargo-agent-gate dry-run routes public surface docs/router/mob-mcp changes to generated contract ratchets"
 else
   bad "cargo-agent-gate dry-run did not route public surface docs/router/mob-mcp changes"
+fi
+web_gate_out=$(scripts/cargo-agent-gate --dry-run -- sdks/web/src/runtime.ts 2>&1 || true)
+if printf '%s' "$web_gate_out" | grep -Fq 'test-sdk-web' \
+  && ! printf '%s' "$web_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
+  ok "cargo-agent-gate dry-run routes Web SDK changes to Web SDK tests"
+else
+  bad "cargo-agent-gate dry-run did not route Web SDK changes"
+fi
+wasm_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-web-runtime/src/lib.rs 2>&1 || true)
+if printf '%s' "$wasm_gate_out" | grep -Fq 'wasm-check' \
+  && ! printf '%s' "$wasm_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
+  ok "cargo-agent-gate dry-run routes web runtime changes to wasm-check"
+else
+  bad "cargo-agent-gate dry-run did not route web runtime changes"
 fi
 rest_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- meerkat-rest/src/lib.rs meerkat-rpc/src/session_runtime.rs 2>&1 || true)
 if printf '%s' "$rest_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \

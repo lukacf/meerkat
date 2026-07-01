@@ -27243,9 +27243,9 @@ async fn test_plain_text_step_output_can_skip_json_parsing() {
 }
 
 #[tokio::test]
-async fn test_spawn_rejects_reserved_flow_system_member_prefix() {
+async fn test_spawn_rejects_reserved_flow_member_prefix() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
-    let reserved_member_identity = format!("{}test", crate::runtime::FLOW_SYSTEM_MEMBER_ID_PREFIX);
+    let reserved_member_identity = format!("{}worker_demo", crate::runtime::FLOW_MEMBER_ID_PREFIX);
     let err = handle
         .spawn(
             ProfileName::from("lead"),

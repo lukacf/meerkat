@@ -5582,6 +5582,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
         client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
     ) -> Result<(), SessionError> {
+        if self.runtime_store.is_some() {
+            return Err(SessionError::Unsupported(
+                "set_session_client is disabled for runtime-backed sessions; use runtime turn metadata reconfiguration".to_string(),
+            ));
+        }
+
         self.inner.set_session_client(id, client).await
     }
 

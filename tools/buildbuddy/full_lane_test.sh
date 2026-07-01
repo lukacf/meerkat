@@ -298,18 +298,35 @@ case "${lane}" in
     wait_parallel_jobs
     ;;
   sdk-suites)
-    configure_rust "${host_rust_toolchain}"
+    configure_rust_with_wasm_target
     configure_node
     configure_python
+    configure_wasm_pack
     "${CARGO}" build -p meerkat-rpc
-    (cd sdks/python &&
+    parallel_jobs_file="${TEST_TMPDIR}/sdk-suites-jobs.tsv"
+    : >"${parallel_jobs_file}"
+    run_parallel_job python-sdk bash -lc '
+      export PIP_CACHE_DIR="${TEST_TMPDIR}/pip-cache-python-sdk"
+      cd sdks/python &&
       "${PYTHON}" -m pip install --upgrade pip &&
       "${PYTHON}" -m pip install -e ".[dev]" &&
-      "${PYTHON}" -m pytest -q tests)
-    (cd sdks/typescript &&
+      "${PYTHON}" -m pytest -q tests
+    '
+    run_parallel_job typescript-sdk bash -lc '
+      export NPM_CONFIG_CACHE="${TEST_TMPDIR}/npm-cache-typescript-sdk"
+      cd sdks/typescript &&
       npm install --ignore-scripts &&
       npm run build &&
-      npm test)
+      npm test
+    '
+    run_parallel_job web-sdk bash -lc '
+      export NPM_CONFIG_CACHE="${TEST_TMPDIR}/npm-cache-web-sdk"
+      cd sdks/web &&
+      npm install --ignore-scripts &&
+      npm run build &&
+      npm test
+    '
+    wait_parallel_jobs
     make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
     ;;
   wasm-check)

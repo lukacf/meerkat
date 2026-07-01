@@ -186,7 +186,7 @@ string_newtype!(
 
 impl AgentIdentity {
     /// Returns `true` when this identity falls inside the reserved
-    /// flow-system namespace.
+    /// flow-owned member namespace.
     ///
     /// This is the single canonical predicate for "is this a system-owned
     /// identity the public spawn/wire surfaces must reject"; all admission and
@@ -194,7 +194,14 @@ impl AgentIdentity {
     /// from the underlying string prefix.
     pub(crate) fn is_system_reserved(&self) -> bool {
         self.as_str()
-            .starts_with(crate::runtime::FLOW_SYSTEM_MEMBER_ID_PREFIX)
+            .starts_with(crate::runtime::FLOW_MEMBER_ID_PREFIX)
+    }
+
+    /// Returns `true` when this identity falls inside the flow-owned member
+    /// namespace. Only MobMachine-owned flow provisioning may mint these
+    /// identities; public spawn surfaces must reject them.
+    pub(crate) fn is_flow_member_namespace(&self) -> bool {
+        self.is_system_reserved()
     }
 
     /// Constructs the reserved provenance identity used to attribute

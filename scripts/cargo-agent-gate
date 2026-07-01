@@ -209,6 +209,8 @@ done < <(collect_changed_paths | awk 'NF' | sort -u)
 relevant=()
 governance=()
 generated_contract=()
+web_sdk=()
+wasm_runtime=()
 global=0
 if [[ "${#changed[@]}" -gt 0 ]]; then
   for path in "${changed[@]}"; do
@@ -224,10 +226,18 @@ if [[ "${#changed[@]}" -gt 0 ]]; then
     if scripts/generated-contract-ratchet-changed -- "${path}" >/dev/null 2>&1; then
       generated_contract+=("${path}")
     fi
+    case "${path}" in
+      sdks/web/*)
+        web_sdk+=("${path}")
+        ;;
+      meerkat-web-runtime/*)
+        wasm_runtime+=("${path}")
+        ;;
+    esac
   done
 fi
 
-if [[ "${#relevant[@]}" -eq 0 && "${#governance[@]}" -eq 0 && "${#generated_contract[@]}" -eq 0 ]]; then
+if [[ "${#relevant[@]}" -eq 0 && "${#governance[@]}" -eq 0 && "${#generated_contract[@]}" -eq 0 && "${#web_sdk[@]}" -eq 0 && "${#wasm_runtime[@]}" -eq 0 ]]; then
   echo "Cargo agent gate: no Rust build-relevant changes detected."
   exit 0
 fi
@@ -256,6 +266,28 @@ if [[ "${#generated_contract[@]}" -gt 0 ]]; then
     echo "DRY-RUN make verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment"
   else
     make verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment
+  fi
+fi
+
+if [[ "${#web_sdk[@]}" -gt 0 ]]; then
+  printf 'Cargo agent gate Web SDK paths:\n'
+  printf '  %s\n' "${web_sdk[@]}"
+  echo "Web SDK changed; running test-sdk-web."
+  if [[ "${dry_run}" -eq 1 ]]; then
+    echo "DRY-RUN make test-sdk-web"
+  else
+    make test-sdk-web
+  fi
+fi
+
+if [[ "${#wasm_runtime[@]}" -gt 0 ]]; then
+  printf 'Cargo agent gate WASM runtime paths:\n'
+  printf '  %s\n' "${wasm_runtime[@]}"
+  echo "WASM runtime changed; running wasm-check."
+  if [[ "${dry_run}" -eq 1 ]]; then
+    echo "DRY-RUN make wasm-check"
+  else
+    make wasm-check
   fi
 fi
 

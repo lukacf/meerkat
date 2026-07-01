@@ -2636,6 +2636,24 @@ describe("Parity wrappers", () => {
     assert.equal(calls[4].params.limit, 5);
   });
 
+  it("rejects mob spawn receipts missing server-owned identity fields", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      member_ref: makeMemberRef("mob-1", "worker-1"),
+    });
+
+    await assert.rejects(
+      () => client.spawnMobMember("mob-1", {
+        profile: "worker",
+        agentIdentity: "worker-1",
+      }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("missing mob_id"),
+    );
+  });
+
   it("passes mob_turn_start tri-state overrides through unchanged", async () => {
     const client = new MeerkatClient();
     const calls = [];
@@ -2863,6 +2881,30 @@ describe("Parity wrappers", () => {
     assert.equal(spawnByRole.fenceToken, undefined);
     assert.equal(forkByRole.agentRuntimeId, undefined);
     assert.equal(forkByRole.fenceToken, undefined);
+  });
+
+  it("rejects helper receipts missing runtime-owned agent identity", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      output: "ok",
+      tokens_used: 1,
+      member_ref: makeMemberRef("mob-1", "caller-requested"),
+    });
+
+    await assert.rejects(
+      () => client.spawnMobHelper("mob-1", "help", { agentIdentity: "caller-requested" }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("missing agent_identity"),
+    );
+    await assert.rejects(
+      () => client.forkMobHelper("mob-1", "source", "help", { agentIdentity: "caller-requested" }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("missing agent_identity"),
+    );
   });
 });
 
@@ -3529,6 +3571,7 @@ describe("Mob member host ingress", () => {
     client.request = async (method, params) => {
       calls.push({ method, params });
       return {
+        mob_id: "mob-1",
         agent_identity: "reviewer-1",
         member_ref: expectedRef,
         handling_mode: "steer",
@@ -3547,6 +3590,7 @@ describe("Mob member host ingress", () => {
     );
 
     assert.deepEqual(receipt, {
+      mobId: "mob-1",
       agentIdentity: "reviewer-1",
       memberRef: expectedRef,
       handlingMode: "steer",
@@ -3577,6 +3621,58 @@ describe("Mob member host ingress", () => {
       /missing member_ref/,
     );
   });
+
+  it("rejects member-send receipts missing runtime-owned agent identity", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      mob_id: "mob-1",
+      member_ref: makeMemberRef("mob-1", "reviewer-1"),
+      handling_mode: "queue",
+    });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hello reviewer"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("missing agent_identity"),
+    );
+  });
+
+  it("rejects member-send receipts missing runtime-owned mob id", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      agent_identity: "reviewer-1",
+      member_ref: makeMemberRef("mob-1", "reviewer-1"),
+      handling_mode: "queue",
+    });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hello reviewer"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("missing mob_id"),
+    );
+  });
+
+  it("rejects member-send receipts with mismatched runtime-owned mob id", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      mob_id: "mob-2",
+      agent_identity: "reviewer-1",
+      member_ref: makeMemberRef("mob-1", "reviewer-1"),
+      handling_mode: "queue",
+    });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hello reviewer"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("mob_id mismatch"),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3588,6 +3684,7 @@ describe("Member-send handling-mode parse boundary (row 357)", () => {
     const client = new MeerkatClient();
     const expectedRef = makeMemberRef("mob-1", "reviewer-1");
     client.request = async () => ({
+      mob_id: "mob-1",
       agent_identity: "reviewer-1",
       member_ref: expectedRef,
       handling_mode: "queue",
@@ -3604,6 +3701,7 @@ describe("Member-send handling-mode parse boundary (row 357)", () => {
     const client = new MeerkatClient();
     const expectedRef = makeMemberRef("mob-1", "reviewer-1");
     client.request = async () => ({
+      mob_id: "mob-1",
       agent_identity: "reviewer-1",
       member_ref: expectedRef,
       // handling_mode intentionally absent
@@ -3622,6 +3720,7 @@ describe("Member-send handling-mode parse boundary (row 357)", () => {
     const client = new MeerkatClient();
     const expectedRef = makeMemberRef("mob-1", "reviewer-1");
     client.request = async () => ({
+      mob_id: "mob-1",
       agent_identity: "reviewer-1",
       member_ref: expectedRef,
       handling_mode: "interrupt",

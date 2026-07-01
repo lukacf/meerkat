@@ -17,7 +17,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage check-rust-release-config check-rust-release-packaging check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit audit-generated-headers
+.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage check-rust-release-config check-rust-release-packaging check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -119,8 +119,23 @@ test-sdk-typescript:
 		npm run build && \
 		npm test)
 
+# Web SDK test suite
+test-sdk-web:
+	@echo "$(GREEN)Running Web SDK tests...$(NC)"
+	@(cd sdks/web && \
+		npm install --ignore-scripts && \
+		npm run build && \
+		npm test)
+
+# WASM runtime compile and lint gate
+wasm-check:
+	@echo "$(GREEN)Running WASM runtime check...$(NC)"
+	@rustup target add wasm32-unknown-unknown
+	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) check -p meerkat-web-runtime --target wasm32-unknown-unknown
+	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings
+
 # Combined SDK test suites
-test-sdk-suites: test-sdk-python test-sdk-typescript
+test-sdk-suites: test-sdk-python test-sdk-typescript test-sdk-web
 
 # Minimal builds without optional features
 test-minimal:

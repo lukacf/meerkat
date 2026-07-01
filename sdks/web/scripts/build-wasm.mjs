@@ -19,6 +19,8 @@ const WORKSPACE_DIR = path.resolve(SDK_DIR, "../..");
 const CACHE_MANIFEST = path.join(OUT_DIR, ".meerkat-wasm-build.json");
 const WASM_PACK_BIN =
   process.env.RKAT_WASM_PACK_BIN || process.env.WASM_PACK || "wasm-pack";
+const CARGO_BIN = process.env.CARGO || "cargo";
+const CARGO_BIN_DIR = path.isAbsolute(CARGO_BIN) ? path.dirname(CARGO_BIN) : "";
 const REQUIRED_OUTPUTS = [
   "meerkat_web_runtime.js",
   "meerkat_web_runtime_bg.wasm",
@@ -72,6 +74,18 @@ function pidIsAlive(pid) {
   } catch (error) {
     return error?.code === "EPERM";
   }
+}
+
+function wasmPackEnv(extraEnv = {}) {
+  const env = {
+    ...process.env,
+    ...extraEnv,
+  };
+  if (CARGO_BIN_DIR) {
+    env.CARGO = CARGO_BIN;
+    env.PATH = `${CARGO_BIN_DIR}${path.delimiter}${env.PATH || ""}`;
+  }
+  return env;
 }
 
 async function readLockOwner() {
@@ -243,7 +257,7 @@ async function collectPackageInputs(packageRoot) {
 }
 
 async function localCargoGraphInputs() {
-  const metadataText = await runCapture("cargo", ["metadata", "--format-version", "1"], {
+  const metadataText = await runCapture(CARGO_BIN, ["metadata", "--format-version", "1"], {
     cwd: WORKSPACE_DIR,
   });
   const metadata = JSON.parse(metadataText);
@@ -352,8 +366,7 @@ async function run() {
           cwd: SDK_DIR,
           stdio: "inherit",
           env: {
-            ...process.env,
-            ...RELEASE_CARGO_PROFILE_ENV,
+            ...wasmPackEnv(RELEASE_CARGO_PROFILE_ENV),
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: WASM_RUSTFLAGS,
           },
         },

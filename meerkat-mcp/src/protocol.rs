@@ -23,7 +23,7 @@ impl McpProtocol {
         Self { service }
     }
 
-    pub fn server_info(&self) -> Option<&rmcp::model::ServerInfo> {
+    pub fn server_info(&self) -> Option<Arc<rmcp::model::ServerInfo>> {
         self.service.peer_info()
     }
 
@@ -66,21 +66,21 @@ impl McpProtocol {
     /// not model are preserved verbatim as [`ContentBlock::Structured`] rather
     /// than silently dropped.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let arguments = args.as_object().cloned();
+        let request = match args.as_object().cloned() {
+            Some(arguments) => {
+                CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
+            }
+            None => CallToolRequestParams::new(name.to_string()),
+        };
 
-        let result = self
-            .service
-            .call_tool(CallToolRequestParams {
-                name: name.to_string().into(),
-                arguments,
-                meta: None,
-                task: None,
-            })
-            .await
-            .map_err(|e| McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: e.to_string(),
-            })?;
+        let result =
+            self.service
+                .call_tool(request)
+                .await
+                .map_err(|e| McpError::ToolCallFailed {
+                    tool: name.to_string(),
+                    reason: e.to_string(),
+                })?;
 
         if result.is_error.unwrap_or(false) {
             return Err(McpError::ToolCallFailed {
@@ -94,21 +94,21 @@ impl McpProtocol {
 
     /// Call a tool, returning only text content (errors on non-text content).
     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
-        let arguments = args.as_object().cloned();
+        let request = match args.as_object().cloned() {
+            Some(arguments) => {
+                CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
+            }
+            None => CallToolRequestParams::new(name.to_string()),
+        };
 
-        let result = self
-            .service
-            .call_tool(CallToolRequestParams {
-                name: name.to_string().into(),
-                arguments,
-                meta: None,
-                task: None,
-            })
-            .await
-            .map_err(|e| McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: e.to_string(),
-            })?;
+        let result =
+            self.service
+                .call_tool(request)
+                .await
+                .map_err(|e| McpError::ToolCallFailed {
+                    tool: name.to_string(),
+                    reason: e.to_string(),
+                })?;
 
         if result.is_error.unwrap_or(false) {
             return Err(McpError::ToolCallFailed {

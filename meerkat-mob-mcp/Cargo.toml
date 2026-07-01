@@ -45,6 +45,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true }
 tempfile = { workspace = true }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
+meerkat-schedule = { workspace = true }
+meerkat-store = { workspace = true, features = ["sqlite"] }
 
 [package.metadata.cargo-machete]
 ignored = ["chrono", "meerkat-client", "thiserror", "tempfile"]  # proc macros / transitive

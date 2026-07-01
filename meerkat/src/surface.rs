@@ -44,13 +44,13 @@ pub use runtime_schedule_host::{
     spawn_runtime_backed_schedule_host, spawn_runtime_backed_schedule_host_with_mobs,
 };
 pub use schedule_host::{
-    AcceptedScheduledInput, AcceptedScheduledInputCompletion, NoopScheduleMobHost,
-    ScheduleHostHandle, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, async_completion_dispatch,
-    build_dispatch_from_accepted, immediate_completed_dispatch, immediate_delivery_failure,
-    mob_member_schedule_identity, parse_mob_member_schedule_identity,
-    recover_mob_member_identity_from_session_target, schedule_attempt_idempotency_key,
-    schedule_host_supported, spawn_schedule_host,
+    AcceptedScheduledInput, AcceptedScheduledInputCompletion,
+    MobMemberCurrentSessionScheduleResolver, NoopScheduleMobHost, ScheduleHostHandle,
+    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
+    SurfaceScheduleSessionHost, async_completion_dispatch, build_dispatch_from_accepted,
+    immediate_completed_dispatch, immediate_delivery_failure, mob_member_schedule_identity,
+    parse_mob_member_schedule_identity, recover_mob_member_identity_from_session_target,
+    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};

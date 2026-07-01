@@ -309,7 +309,7 @@ impl McpConnection {
     }
 
     /// Get server info
-    pub fn server_info(&self) -> Option<&rmcp::model::ServerInfo> {
+    pub fn server_info(&self) -> Option<Arc<rmcp::model::ServerInfo>> {
         self.service.peer_info()
     }
 
@@ -355,21 +355,21 @@ impl McpConnection {
     /// are preserved verbatim as [`ContentBlock::Structured`] rather than
     /// silently dropped.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let arguments = args.as_object().cloned();
+        let request = match args.as_object().cloned() {
+            Some(arguments) => {
+                CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
+            }
+            None => CallToolRequestParams::new(name.to_string()),
+        };
 
-        let result = self
-            .service
-            .call_tool(CallToolRequestParams {
-                name: name.to_string().into(),
-                arguments,
-                meta: None,
-                task: None,
-            })
-            .await
-            .map_err(|e| McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: format!("{e}"),
-            })?;
+        let result =
+            self.service
+                .call_tool(request)
+                .await
+                .map_err(|e| McpError::ToolCallFailed {
+                    tool: name.to_string(),
+                    reason: format!("{e}"),
+                })?;
 
         // Check for tool error. The MCP server carries the error detail in
         // `content`; carry it through as the typed reason rather than dropping

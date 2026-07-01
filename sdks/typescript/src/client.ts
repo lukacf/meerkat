@@ -1609,11 +1609,22 @@ export class MeerkatClient {
         "Invalid mob/member_send response: missing member_ref",
       );
     }
+    const resolvedMobId = MeerkatClient.parseRequiredString(
+      result.mob_id,
+      "Invalid mob/member_send response: missing mob_id",
+    );
+    if (resolvedMobId !== mobId) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/member_send response: mob_id mismatch",
+      );
+    }
     return {
-      agentIdentity:
-        typeof result.agent_identity === "string" && result.agent_identity.length > 0
-          ? result.agent_identity
-          : agentIdentity,
+      mobId: resolvedMobId,
+      agentIdentity: MeerkatClient.parseRequiredString(
+        result.agent_identity,
+        "Invalid mob/member_send response: missing agent_identity",
+      ),
       memberRef,
       handlingMode: MeerkatClient.parseWireHandlingMode(
         result.handling_mode,
@@ -1638,11 +1649,14 @@ export class MeerkatClient {
       );
     }
     return {
-      mobId: String(result.mob_id ?? mobId),
-      agentIdentity:
-        typeof result.agent_identity === "string" && result.agent_identity.length > 0
-          ? result.agent_identity
-          : options.agentIdentity,
+      mobId: MeerkatClient.parseRequiredString(
+        result.mob_id,
+        "Invalid mob/spawn response: missing mob_id",
+      ),
+      agentIdentity: MeerkatClient.parseRequiredString(
+        result.agent_identity,
+        "Invalid mob/spawn response: missing agent_identity",
+      ),
       memberRef,
     };
   }
@@ -2208,16 +2222,10 @@ export class MeerkatClient {
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
     });
-    const resultIdentity =
-      typeof result.agent_identity === "string" && result.agent_identity.length > 0
-        ? result.agent_identity
-        : options?.agentIdentity;
-    if (!resultIdentity) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/spawn_helper response: missing agent identity",
-      );
-    }
+    const resultIdentity = MeerkatClient.parseRequiredString(
+      result.agent_identity,
+      "Invalid mob/spawn_helper response: missing agent_identity",
+    );
     const memberRef =
       typeof result.member_ref === "string" && result.member_ref.length > 0
         ? result.member_ref
@@ -2267,16 +2275,10 @@ export class MeerkatClient {
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
     });
-    const resultIdentity =
-      typeof result.agent_identity === "string" && result.agent_identity.length > 0
-        ? result.agent_identity
-        : options?.agentIdentity;
-    if (!resultIdentity) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/fork_helper response: missing agent identity",
-      );
-    }
+    const resultIdentity = MeerkatClient.parseRequiredString(
+      result.agent_identity,
+      "Invalid mob/fork_helper response: missing agent_identity",
+    );
     const memberRef =
       typeof result.member_ref === "string" && result.member_ref.length > 0
         ? result.member_ref
@@ -2564,6 +2566,13 @@ export class MeerkatClient {
 
   private static parseOptionalString(raw: unknown): string | undefined {
     return typeof raw === "string" ? raw : undefined;
+  }
+
+  private static parseRequiredString(raw: unknown, context: string): string {
+    if (typeof raw === "string" && raw.length > 0) {
+      return raw;
+    }
+    throw new MeerkatError("INVALID_RESPONSE", context);
   }
 
   private static parseOptionalNumber(raw: unknown): number | undefined {

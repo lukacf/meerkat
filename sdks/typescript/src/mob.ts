@@ -45,6 +45,7 @@ export interface MemberSendOptions {
 }
 
 export interface MemberDeliveryReceipt {
+  mobId: string;
   agentIdentity: string;
   memberRef: MobMemberRef;
   handlingMode: MobHandlingMode;

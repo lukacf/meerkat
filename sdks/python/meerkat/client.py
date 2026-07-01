@@ -1958,6 +1958,17 @@ class MeerkatClient:
                 "Invalid mob/member_send response: missing member_ref",
             )
         receipt_handling_mode = result.get("handling_mode")
+        resolved_mob_id = result.get("mob_id")
+        if not isinstance(resolved_mob_id, str) or not resolved_mob_id:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/member_send response: missing mob_id",
+            )
+        if resolved_mob_id != mob_id:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/member_send response: mob_id mismatch",
+            )
         resolved_identity = result.get("agent_identity")
         if not isinstance(resolved_identity, str) or not resolved_identity:
             raise MeerkatError(
@@ -1965,6 +1976,7 @@ class MeerkatClient:
                 "Invalid mob/member_send response: missing agent_identity",
             )
         return {
+            "mob_id": resolved_mob_id,
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
             "handling_mode": self._parse_wire_handling_mode(
@@ -2032,8 +2044,14 @@ class MeerkatClient:
                 "INVALID_RESPONSE",
                 "Invalid mob/spawn response: missing member_ref",
             )
+        resolved_mob_id = result.get("mob_id")
+        if not isinstance(resolved_mob_id, str) or not resolved_mob_id:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/spawn response: missing mob_id",
+            )
         return {
-            "mob_id": str(result.get("mob_id", mob_id)),
+            "mob_id": resolved_mob_id,
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }

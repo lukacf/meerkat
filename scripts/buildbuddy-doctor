@@ -381,6 +381,7 @@ else
 fi
 
 if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
   grep -Fq 'buildbuddy-gcp-executors' .github/workflows/buildbuddy.yml &&
   grep -Fq 'queue: max' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN' .github/workflows/buildbuddy.yml &&
@@ -422,6 +423,8 @@ if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'name: Governance submitter' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-changes 'name: WASM, SDK, and feature change detection' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'name: SDK suites submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'timeout-minutes: 45' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit "MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: \${{ vars.MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS || '2400' }}" &&
   job_has_line .github/workflows/buildbuddy.yml wasm-check-submit 'name: WASM check submitter' &&
   job_has_line .github/workflows/buildbuddy.yml minimal-feature-submit 'name: Minimal feature submitter' &&
   job_has_line .github/workflows/buildbuddy.yml feature-submit 'name: Feature matrix submitter' &&
@@ -476,6 +479,7 @@ if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   ! job_has_line .github/workflows/buildbuddy.yml feature-submit 'rmat-audit' &&
   ! job_has_line .github/workflows/buildbuddy.yml feature-submit 'machine-authority' &&
   grep -Fq 'MEERKAT_BUILDBUDDY_BATCH_JOBS' .github/workflows/buildbuddy.yml &&
+  grep -Fq "MAX_SECONDS: \${{ needs.wasm-feature-changes.outputs.sdk_changed == 'true' && (vars.MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS || '2400') || (vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '1500') }}" .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY_BATCH_JOBS: ${{ inputs.batch_jobs || env.MEERKAT_BUILDBUDDY_BATCH_JOBS }}' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
   grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
   grep -Fq 'Active BuildBuddy lane heartbeat' scripts/buildbuddy-ci-lane-batch &&

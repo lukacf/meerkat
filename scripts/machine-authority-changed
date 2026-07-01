@@ -87,7 +87,7 @@ machine_authority_path() {
     meerkat-machine-codegen/*|meerkat-machine-derive/*|meerkat-machine-dsl/*|meerkat-machine-dsl-core/*|meerkat-machine-kernels/*|meerkat-machine-schema/*)
       return 0
       ;;
-    meerkat-runtime/src/meerkat_machine/*|meerkat-runtime/src/auth_machine/*|meerkat-mob/src/machines/*|meerkat-schedule/src/machines/*)
+    meerkat-runtime/src/meerkat_machine/*|meerkat-runtime/src/auth_machine/*|meerkat-mob/src/ids.rs|meerkat-mob/src/machines/*|meerkat-mob/src/runtime/*|meerkat-schedule/src/machines/*)
       return 0
       ;;
     meerkat-machine-kernels/src/generated/*|meerkat-core/src/generated/*|meerkat-mob/src/generated/*|meerkat-runtime/src/generated/*|meerkat-schedule/src/generated/*|*/src/generated/protocol_*.rs)

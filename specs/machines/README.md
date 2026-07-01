@@ -13,28 +13,11 @@ Each machine directory contains:
 - optional focused liveness or audit configs when the machine has additional
   proof lanes
 
-Canonical machine set:
-
-- `meerkat_machine`
-- `mob_machine`
-- `auth`
-- `occurrence_lifecycle`
-- `schedule_lifecycle`
-- `work_graph_lifecycle`
-- `work_attention_lifecycle`
-
 Status:
 
 - `specs/machines/` is the canonical executable spec home
-- the machine authority specs live at:
-  - `specs/machines/meerkat_machine/`
-  - `specs/machines/mob_machine/`
-  - `specs/machines/auth/`
-  - `specs/machines/occurrence_lifecycle/`
-  - `specs/machines/schedule_lifecycle/`
-  - `specs/machines/work_graph_lifecycle/`
-  - `specs/machines/work_attention_lifecycle/`
-- the schema catalog and generated authority artifacts must match these specs
+- the schema catalog and generated authority artifacts define the canonical
+  machine roster
 - where implementation or catalog coverage diverges, `mapping.md` calls that
   out explicitly
 - the checked-in `ci.cfg` files are the bounded CI TLC profiles

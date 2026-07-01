@@ -1754,6 +1754,7 @@ pub enum SpawnSource {
     AgentSpawnMember,
     HelperSpawn,
     BatchItem,
+    FlowProvisioning,
     PolicySpawn,
     Respawn,
     Resume,
@@ -1768,6 +1769,7 @@ impl SpawnSource {
             Self::AgentSpawnMember => "agent_spawn_member",
             Self::HelperSpawn => "helper_spawn",
             Self::BatchItem => "batch_item",
+            Self::FlowProvisioning => "flow_provisioning",
             Self::PolicySpawn => "policy_spawn",
             Self::Respawn => "respawn",
             Self::Resume => "resume",
@@ -1782,6 +1784,11 @@ impl SpawnSource {
             crate::launch::MemberLaunchMode::Fork { .. } => Self::Fork,
             crate::launch::MemberLaunchMode::Fresh => base,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn allows_reserved_flow_identity(self) -> bool {
+        matches!(self, Self::FlowProvisioning)
     }
 }
 
@@ -3861,9 +3868,10 @@ impl MobHandle {
             if self.get_member(&identity).await?.is_some() {
                 continue;
             }
-            self.spawn_spec(
+            self.spawn_spec_internal_with_source(
                 SpawnMemberSpec::new(role, identity)
                     .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+                SpawnSource::FlowProvisioning,
             )
             .await?;
         }

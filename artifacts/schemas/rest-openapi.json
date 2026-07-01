@@ -3370,6 +3370,30 @@
         ],
         "type": "object"
       },
+      "IdentityTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/components/schemas/ScheduledSessionAction"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "type": {
+                "const": "resumable_identity",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "identity",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InputSource": {
         "description": "Source for an input event posted to an agent.",
         "enum": [
@@ -7724,6 +7748,19 @@
             "properties": {
               "target_kind": {
                 "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/IdentityTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "identity",
                 "type": "string"
               }
             },

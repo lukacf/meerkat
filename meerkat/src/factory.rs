@@ -89,6 +89,28 @@ use tokio_with_wasm::alias::sync::mpsc;
 
 use crate::model_fallback::{ModelFallbackCandidate, ModelFallbackClient};
 
+#[derive(Debug, Clone)]
+struct MobMemberCurrentSessionScheduleResolver {
+    binding: meerkat_core::MobMemberBinding,
+}
+
+impl meerkat_schedule::CurrentSessionScheduleTargetResolver
+    for MobMemberCurrentSessionScheduleResolver
+{
+    fn resolve_current_session_target(
+        &self,
+        _current_session_id: &meerkat_core::SessionId,
+        action: meerkat_schedule::ScheduledSessionAction,
+    ) -> meerkat_schedule::TargetBinding {
+        meerkat_schedule::TargetBinding::identity(
+            meerkat_schedule::IdentityTargetBinding::resumable(
+                crate::surface::mob_member_schedule_identity(&self.binding),
+                action,
+            ),
+        )
+    }
+}
+
 #[cfg(feature = "comms")]
 use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
@@ -4724,11 +4746,19 @@ impl AgentFactory {
         let effective_schedule = build_config.override_schedule.resolve(self.enable_schedule);
         if effective_schedule && let Some(schedule_dispatcher) = build_config.schedule_tools.take()
         {
-            let schedule_dispatcher =
-                Arc::new(meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
+            let schedule_dispatcher = match build_config.mob_member_binding.clone() {
+                Some(binding) => Arc::new(
+                    meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
+                        schedule_dispatcher,
+                        session.id().clone(),
+                        Arc::new(MobMemberCurrentSessionScheduleResolver { binding }),
+                    ),
+                ) as Arc<dyn AgentToolDispatcher>,
+                None => Arc::new(meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
                     schedule_dispatcher,
                     session.id().clone(),
-                )) as Arc<dyn AgentToolDispatcher>;
+                )) as Arc<dyn AgentToolDispatcher>,
+            };
             let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
@@ -5675,6 +5705,41 @@ mod tests {
     };
     use std::collections::HashMap;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn mob_member_current_session_schedule_resolver_persists_role_free_identity_target() {
+        let resolver = MobMemberCurrentSessionScheduleResolver {
+            binding: meerkat_core::MobMemberBinding {
+                mob_id: "ops".to_string(),
+                role: "old-profile".to_string(),
+                member: "deploy-monitor".to_string(),
+            },
+        };
+        let target =
+            meerkat_schedule::CurrentSessionScheduleTargetResolver::resolve_current_session_target(
+                &resolver,
+                &SessionId::new(),
+                meerkat_schedule::ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("check".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            );
+
+        let meerkat_schedule::TargetBinding::Identity(binding) = target else {
+            panic!("mob-member-backed current_session should persist an identity target");
+        };
+        assert_eq!(
+            binding.identity(),
+            crate::surface::mob_member_schedule_identity(&resolver.binding)
+        );
+        assert!(
+            !binding.identity().contains("old-profile"),
+            "role/profile must not be part of the durable schedule identity"
+        );
+    }
 
     /// A faulted default TokenStore must surface its typed open fault at the
     /// resolution seam — never collapse to "no store attached" (which would

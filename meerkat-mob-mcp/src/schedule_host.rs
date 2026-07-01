@@ -4,12 +4,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat::surface::{
     SurfaceScheduleMobHost, async_completion_dispatch, immediate_completed_dispatch,
-    immediate_delivery_failure,
+    immediate_delivery_failure, parse_mob_member_schedule_identity,
 };
 use meerkat::{
     DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryTerminal, ForkContextSpec,
-    HelperOptionsSpec, MobTargetBinding, Occurrence, ScheduleDomainError, ScheduleSpawnTooling,
-    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, TargetProbeOutcome,
+    HelperOptionsSpec, IdentityTargetBinding, MobTargetBinding, Occurrence, ScheduleDomainError,
+    ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
+    ScheduledSessionAction, TargetProbeOutcome,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata};
 use meerkat_mob::{
@@ -371,6 +372,74 @@ impl SurfaceScheduleMobHost for MobMcpScheduleHost {
             }
         }
     }
+
+    async fn probe_identity_target(
+        &self,
+        binding: &IdentityTargetBinding,
+    ) -> Result<Option<TargetProbeOutcome>, ScheduleDomainError> {
+        let Some(identity) = parse_mob_member_schedule_identity(binding.identity()) else {
+            return Ok(None);
+        };
+        let mob_id = MobId::from(identity.mob_id.as_str());
+        let member = AgentIdentity::from(identity.member.as_str());
+        match self.runtime.member_exists(&mob_id, &member).await {
+            Ok(true) => Ok(Some(TargetProbeOutcome::Ready)),
+            Ok(false) => Ok(Some(TargetProbeOutcome::Missing {
+                detail: Some(format!("mob member not found: {}", identity.member)),
+            })),
+            Err(error) => mob_probe_error_outcome(error).map(Some),
+        }
+    }
+
+    async fn deliver_identity_target(
+        &self,
+        occurrence: &Occurrence,
+        binding: &IdentityTargetBinding,
+    ) -> Result<Option<DeliveryDispatch>, ScheduleDomainError> {
+        let Some(identity) = parse_mob_member_schedule_identity(binding.identity()) else {
+            return Ok(None);
+        };
+        let mob_id = MobId::from(identity.mob_id.as_str());
+        let member = AgentIdentity::from(identity.member.as_str());
+        let ScheduledSessionAction::Prompt {
+            prompt,
+            system_prompt,
+            render_metadata,
+            skill_refs,
+            additional_instructions,
+        } = binding.action()
+        else {
+            return Ok(Some(immediate_delivery_failure(
+                occurrence,
+                "scheduled mob-member identity targets only support prompt actions".to_string(),
+                DeliveryFailureReason::RuntimeRejected,
+                None,
+                None,
+            )));
+        };
+        if system_prompt.is_some() || !skill_refs.is_empty() || !additional_instructions.is_empty()
+        {
+            return Ok(Some(immediate_delivery_failure(
+                occurrence,
+                "scheduled mob-member identity targets do not support session-only prompt overrides"
+                    .to_string(),
+                DeliveryFailureReason::RuntimeRejected,
+                None,
+                None,
+            )));
+        }
+        match self
+            .runtime
+            .member_send(&mob_id, member, prompt.clone(), render_metadata.clone())
+            .await
+        {
+            Ok(correlation_id) => Ok(Some(immediate_completed_dispatch(
+                occurrence,
+                Some(correlation_id),
+            ))),
+            Err(error) => Ok(Some(mob_delivery_failed_dispatch(occurrence, error))),
+        }
+    }
 }
 
 fn mob_binding_mob_id(binding: &MobTargetBinding) -> &str {
@@ -699,7 +768,7 @@ mod tests {
         RawValue::from_string(value.to_string()).expect("valid raw json")
     }
 
-    fn sample_occurrence(binding: MobTargetBinding) -> Occurrence {
+    fn sample_occurrence_for_target(target: TargetBinding) -> Occurrence {
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("mob-schedule-host-test".to_string()),
             description: None,
@@ -708,7 +777,7 @@ mod tests {
                 every_seconds: 60,
                 end_at_utc: None,
             }),
-            target: TargetBinding::Mob(Box::new(binding)),
+            target,
             misfire_policy: MisfirePolicy::Skip,
             overlap_policy: OverlapPolicy::SkipIfRunning,
             missing_target_policy: MissingTargetPolicy::Skip,
@@ -722,6 +791,10 @@ mod tests {
                 .expect("sample occurrence planning should pass generated authority");
         occurrence.attempt_count = 1;
         occurrence
+    }
+
+    fn sample_occurrence(binding: MobTargetBinding) -> Occurrence {
+        sample_occurrence_for_target(TargetBinding::Mob(Box::new(binding)))
     }
 
     #[tokio::test]
@@ -743,6 +816,58 @@ mod tests {
             .deliver_mob_target(&occurrence, &binding)
             .await
             .expect("delivery dispatch");
+
+        assert_eq!(dispatch.correlation_id.as_deref(), Some("deploy-monitor"));
+        assert_eq!(
+            runtime.sent_members.lock().expect("sent lock").as_slice(),
+            &[(
+                "ops".to_string(),
+                "deploy-monitor".to_string(),
+                "Check deploy state.".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn mob_member_identity_target_delivers_to_member_authority() {
+        let runtime = Arc::new(RecordingMobRuntime::default());
+        runtime.with_member("deploy-monitor");
+        let host = MobMcpScheduleHost::from_runtime(runtime.clone());
+        let identity =
+            meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
+                mob_id: "ops".to_string(),
+                role: "old-profile".to_string(),
+                member: "deploy-monitor".to_string(),
+            });
+        assert!(
+            !identity.contains("old-profile"),
+            "schedule identity must not include profile/role material"
+        );
+        let binding = IdentityTargetBinding::resumable(
+            identity,
+            ScheduledSessionAction::Prompt {
+                prompt: ContentInput::Text("Check deploy state.".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        );
+        let occurrence =
+            sample_occurrence_for_target(TargetBinding::Identity(Box::new(binding.clone())));
+
+        let probe = host
+            .probe_identity_target(&binding)
+            .await
+            .expect("identity probe")
+            .expect("mob identity should be handled by mob host");
+        assert!(matches!(probe, TargetProbeOutcome::Ready));
+
+        let dispatch = host
+            .deliver_identity_target(&occurrence, &binding)
+            .await
+            .expect("identity delivery")
+            .expect("mob identity should be delivered by mob host");
 
         assert_eq!(dispatch.correlation_id.as_deref(), Some("deploy-monitor"));
         assert_eq!(

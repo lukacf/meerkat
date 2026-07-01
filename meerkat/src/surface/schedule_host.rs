@@ -3,18 +3,21 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
-use meerkat_core::{ContentInput, SessionId, skills::SkillRef, types::RenderMetadata};
+use meerkat_core::{ContentInput, Session, SessionId, skills::SkillRef, types::RenderMetadata};
 use meerkat_runtime::{
     CompletionHandle,
     completion::{CompletionOutcome, CompletionWaitError},
 };
 use meerkat_schedule::{
     DeliveryCompletion, DeliveryCompletionFailureReason, DeliveryDispatch, DeliveryFailureReason,
-    DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal, MobTargetBinding, Occurrence,
-    OccurrencePhase, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig, ScheduleService,
-    ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
+    DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal, IdentityTargetBinding,
+    MobTargetBinding, Occurrence, OccurrencePhase, ScheduleDomainError, ScheduleDriver,
+    ScheduleDriverConfig, ScheduleFilter, ScheduleService, ScheduleStoreKind,
+    ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
+    UpdateScheduleRequest,
 };
+use serde::{Deserialize, Serialize};
 
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::oneshot;
@@ -86,12 +89,108 @@ pub struct ScheduledPromptDispatch {
     pub materialized_session_id: Option<SessionId>,
 }
 
+#[derive(Serialize)]
+struct MobMemberScheduleIdentityKey<'a> {
+    schema: &'static str,
+    mob_id: &'a str,
+    member: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct MobMemberScheduleIdentity {
+    pub mob_id: String,
+    pub member: String,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct OwnedMobMemberScheduleIdentityKey {
+    schema: String,
+    mob_id: String,
+    member: String,
+}
+
+pub fn mob_member_schedule_identity(binding: &meerkat_core::MobMemberBinding) -> String {
+    let key = MobMemberScheduleIdentityKey {
+        schema: "meerkat.schedule.mob_member_identity.v2",
+        mob_id: &binding.mob_id,
+        member: &binding.member,
+    };
+    let json = serde_json::to_string(&key).unwrap_or_else(|_| {
+        format!(
+            "{{\"schema\":\"meerkat.schedule.mob_member_identity.v2\",\"mob_id\":\"{}\",\"member\":\"{}\"}}",
+            binding.mob_id, binding.member
+        )
+    });
+    format!("mob_member:{json}")
+}
+
+#[allow(dead_code)]
+pub fn parse_mob_member_schedule_identity(identity: &str) -> Option<MobMemberScheduleIdentity> {
+    let json = identity.strip_prefix("mob_member:")?;
+    let key: OwnedMobMemberScheduleIdentityKey = serde_json::from_str(json).ok()?;
+    match key.schema.as_str() {
+        "meerkat.schedule.mob_member_identity.v1" | "meerkat.schedule.mob_member_identity.v2" => {
+            Some(MobMemberScheduleIdentity {
+                mob_id: key.mob_id,
+                member: key.member,
+            })
+        }
+        _ => None,
+    }
+}
+
+pub fn recover_mob_member_identity_from_session_target(
+    binding: &SessionTargetBinding,
+    session: Option<&Session>,
+) -> Option<IdentityTargetBinding> {
+    let SessionTargetBinding::ResumableSession { action, .. } = binding else {
+        return None;
+    };
+    let owner = session
+        .and_then(Session::session_metadata)
+        .and_then(|metadata| metadata.mob_member_binding)?;
+    Some(IdentityTargetBinding::resumable(
+        mob_member_schedule_identity(&owner),
+        action.clone(),
+    ))
+}
+
 #[async_trait]
 pub trait SurfaceScheduleSessionHost: Send + Sync {
     async fn probe_session_target(
         &self,
         binding: &SessionTargetBinding,
     ) -> Result<TargetProbeOutcome, ScheduleDomainError>;
+
+    async fn probe_identity_target(
+        &self,
+        binding: &IdentityTargetBinding,
+    ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+        let _ = binding;
+        Ok(TargetProbeOutcome::Missing {
+            detail: Some(
+                "scheduled identity targets are not supported by this session host".to_string(),
+            ),
+        })
+    }
+
+    async fn resolve_identity_target(
+        &self,
+        binding: &IdentityTargetBinding,
+    ) -> Result<Option<SessionId>, ScheduleDomainError> {
+        let _ = binding;
+        Ok(None)
+    }
+
+    async fn recover_session_target_identity(
+        &self,
+        binding: &SessionTargetBinding,
+    ) -> Result<Option<IdentityTargetBinding>, ScheduleDomainError> {
+        let _ = binding;
+        Ok(None)
+    }
 
     /// Materialize the on-demand session for `occurrence`.
     ///
@@ -138,6 +237,23 @@ pub trait SurfaceScheduleMobHost: Send + Sync {
         occurrence: &Occurrence,
         binding: &MobTargetBinding,
     ) -> Result<DeliveryDispatch, ScheduleDomainError>;
+
+    async fn probe_identity_target(
+        &self,
+        binding: &IdentityTargetBinding,
+    ) -> Result<Option<TargetProbeOutcome>, ScheduleDomainError> {
+        let _ = binding;
+        Ok(None)
+    }
+
+    async fn deliver_identity_target(
+        &self,
+        occurrence: &Occurrence,
+        binding: &IdentityTargetBinding,
+    ) -> Result<Option<DeliveryDispatch>, ScheduleDomainError> {
+        let _ = (occurrence, binding);
+        Ok(None)
+    }
 }
 
 pub struct NoopScheduleMobHost {
@@ -176,6 +292,21 @@ impl SurfaceScheduleMobHost for NoopScheduleMobHost {
             None,
         ))
     }
+
+    async fn probe_identity_target(
+        &self,
+        _binding: &IdentityTargetBinding,
+    ) -> Result<Option<TargetProbeOutcome>, ScheduleDomainError> {
+        Ok(None)
+    }
+
+    async fn deliver_identity_target(
+        &self,
+        _occurrence: &Occurrence,
+        _binding: &IdentityTargetBinding,
+    ) -> Result<Option<DeliveryDispatch>, ScheduleDomainError> {
+        Ok(None)
+    }
 }
 
 pub struct SharedScheduleTargetAdapter {
@@ -205,6 +336,42 @@ impl SharedScheduleTargetAdapter {
         match binding {
             SessionTargetBinding::ExactSession { session_id, .. }
             | SessionTargetBinding::ResumableSession { session_id, .. } => {
+                if let Ok(TargetProbeOutcome::Missing { .. }) =
+                    self.session_host.probe_session_target(binding).await
+                {
+                    let recovered = self
+                        .session_host
+                        .recover_session_target_identity(binding)
+                        .await
+                        .map_err(|error| {
+                            immediate_delivery_failure(
+                                occurrence,
+                                error.to_string(),
+                                DeliveryFailureReason::TargetMaterializationFailed,
+                                None,
+                                None,
+                            )
+                        })?;
+                    if let Some(identity) = recovered {
+                        if let Some(dispatch) = self
+                            .mob_host
+                            .deliver_identity_target(occurrence, &identity)
+                            .await
+                            .map_err(|error| {
+                                immediate_delivery_failure(
+                                    occurrence,
+                                    error.to_string(),
+                                    DeliveryFailureReason::TargetMaterializationFailed,
+                                    None,
+                                    None,
+                                )
+                            })?
+                        {
+                            return Err(dispatch);
+                        }
+                        return self.resolve_identity(occurrence, &identity).await;
+                    }
+                }
                 Ok(ResolvedScheduledSession {
                     session_id: session_id.clone(),
                     materialized_session_id: None,
@@ -313,6 +480,132 @@ impl SharedScheduleTargetAdapter {
 
         None
     }
+
+    async fn resolve_identity(
+        &self,
+        occurrence: &Occurrence,
+        binding: &IdentityTargetBinding,
+    ) -> Result<ResolvedScheduledSession, DeliveryDispatch> {
+        match self.session_host.resolve_identity_target(binding).await {
+            Ok(Some(session_id)) => Ok(ResolvedScheduledSession {
+                session_id,
+                materialized_session_id: None,
+                allow_system_prompt_override: false,
+            }),
+            Ok(None) => Err(immediate_delivery_failure(
+                occurrence,
+                format!(
+                    "scheduled identity target not found: {}",
+                    binding.identity()
+                ),
+                DeliveryFailureReason::TargetMaterializationFailed,
+                None,
+                None,
+            )),
+            Err(error) => Err(immediate_delivery_failure(
+                occurrence,
+                error.to_string(),
+                DeliveryFailureReason::TargetMaterializationFailed,
+                None,
+                None,
+            )),
+        }
+    }
+
+    pub async fn migrate_recoverable_session_targets(&self) -> Result<usize, ScheduleDomainError> {
+        let schedules = self
+            .schedule_service
+            .store()
+            .list_schedules(ScheduleFilter {
+                include_deleted: false,
+                ..ScheduleFilter::default()
+            })
+            .await?;
+        let mut migrated = 0usize;
+
+        for schedule in schedules {
+            let TargetBinding::Session(binding) = &schedule.target else {
+                continue;
+            };
+            let Some(identity) = self
+                .session_host
+                .recover_session_target_identity(binding)
+                .await?
+            else {
+                continue;
+            };
+            self.schedule_service
+                .update(
+                    &schedule.schedule_id,
+                    UpdateScheduleRequest {
+                        expected_revision: Some(schedule.revision),
+                        target: Some(TargetBinding::identity(identity)),
+                        ..UpdateScheduleRequest::default()
+                    },
+                )
+                .await?;
+            migrated += 1;
+        }
+
+        Ok(migrated)
+    }
+
+    async fn deliver_session_action(
+        &self,
+        occurrence: &Occurrence,
+        resolved: ResolvedScheduledSession,
+        action: &ScheduledSessionAction,
+    ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+        match action {
+            ScheduledSessionAction::Prompt {
+                prompt,
+                system_prompt,
+                render_metadata,
+                skill_refs,
+                additional_instructions,
+            } => {
+                if system_prompt.is_some() && !resolved.allow_system_prompt_override {
+                    return Ok(immediate_delivery_failure(
+                        occurrence,
+                        "scheduled system_prompt override is only supported when materializing a new session"
+                            .to_string(),
+                        DeliveryFailureReason::RuntimeRejected,
+                        None,
+                        resolved.materialized_session_id,
+                    ));
+                }
+                self.session_host
+                    .deliver_prompt(
+                        &resolved.session_id,
+                        occurrence,
+                        ScheduledPromptDispatch {
+                            prompt: prompt.clone(),
+                            render_metadata: render_metadata.clone(),
+                            skill_refs: skill_refs.clone(),
+                            additional_instructions: additional_instructions.clone(),
+                            materialized_session_id: resolved.materialized_session_id,
+                        },
+                    )
+                    .await
+            }
+            ScheduledSessionAction::Event {
+                event_type,
+                payload,
+                render_metadata,
+            } => {
+                self.session_host
+                    .deliver_event(
+                        &resolved.session_id,
+                        occurrence,
+                        event_type.clone(),
+                        payload.clone(),
+                        render_metadata.clone(),
+                        resolved.materialized_session_id,
+                    )
+                    .await
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -323,7 +616,25 @@ impl ScheduleTargetProbe for SharedScheduleTargetAdapter {
     ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
         match &occurrence.target_snapshot {
             TargetBinding::Session(binding) => {
-                self.session_host.probe_session_target(binding).await
+                let probe = self.session_host.probe_session_target(binding).await?;
+                if matches!(probe, TargetProbeOutcome::Missing { .. })
+                    && let Some(identity) = self
+                        .session_host
+                        .recover_session_target_identity(binding)
+                        .await?
+                {
+                    if let Some(probe) = self.mob_host.probe_identity_target(&identity).await? {
+                        return Ok(probe);
+                    }
+                    return self.session_host.probe_identity_target(&identity).await;
+                }
+                Ok(probe)
+            }
+            TargetBinding::Identity(binding) => {
+                if let Some(probe) = self.mob_host.probe_identity_target(binding).await? {
+                    return Ok(probe);
+                }
+                self.session_host.probe_identity_target(binding).await
             }
             TargetBinding::Mob(binding) => self.mob_host.probe_mob_target(binding).await,
         }
@@ -343,55 +654,23 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
                     Err(dispatch) => return Ok(dispatch),
                 };
 
-                match binding.action() {
-                    ScheduledSessionAction::Prompt {
-                        prompt,
-                        system_prompt,
-                        render_metadata,
-                        skill_refs,
-                        additional_instructions,
-                    } => {
-                        if system_prompt.is_some() && !resolved.allow_system_prompt_override {
-                            return Ok(immediate_delivery_failure(
-                                occurrence,
-                                "scheduled system_prompt override is only supported when materializing a new session"
-                                    .to_string(),
-                                DeliveryFailureReason::RuntimeRejected,
-                                None,
-                                resolved.materialized_session_id,
-                            ));
-                        }
-                        self.session_host
-                            .deliver_prompt(
-                                &resolved.session_id,
-                                occurrence,
-                                ScheduledPromptDispatch {
-                                    prompt: prompt.clone(),
-                                    render_metadata: render_metadata.clone(),
-                                    skill_refs: skill_refs.clone(),
-                                    additional_instructions: additional_instructions.clone(),
-                                    materialized_session_id: resolved.materialized_session_id,
-                                },
-                            )
-                            .await
-                    }
-                    ScheduledSessionAction::Event {
-                        event_type,
-                        payload,
-                        render_metadata,
-                    } => {
-                        self.session_host
-                            .deliver_event(
-                                &resolved.session_id,
-                                occurrence,
-                                event_type.clone(),
-                                payload.clone(),
-                                render_metadata.clone(),
-                                resolved.materialized_session_id,
-                            )
-                            .await
-                    }
+                self.deliver_session_action(occurrence, resolved, binding.action())
+                    .await
+            }
+            TargetBinding::Identity(binding) => {
+                if let Some(dispatch) = self
+                    .mob_host
+                    .deliver_identity_target(occurrence, binding)
+                    .await?
+                {
+                    return Ok(dispatch);
                 }
+                let resolved = match self.resolve_identity(occurrence, binding).await {
+                    Ok(resolved) => resolved,
+                    Err(dispatch) => return Ok(dispatch),
+                };
+                self.deliver_session_action(occurrence, resolved, binding.action())
+                    .await
             }
             TargetBinding::Mob(binding) => {
                 self.mob_host.deliver_mob_target(occurrence, binding).await
@@ -409,6 +688,7 @@ pub fn spawn_schedule_host(
     adapter: Arc<SharedScheduleTargetAdapter>,
     owner_id: impl Into<String>,
 ) -> ScheduleHostHandle {
+    let migration_adapter = Arc::clone(&adapter);
     let driver = Arc::new(ScheduleDriver::new(
         schedule_service.clone(),
         schedule_service.store(),
@@ -428,6 +708,12 @@ pub fn spawn_schedule_host(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     #[cfg(not(target_arch = "wasm32"))]
     let join = tokio::spawn(async move {
+        if let Err(error) = migration_adapter
+            .migrate_recoverable_session_targets()
+            .await
+        {
+            tracing::warn!(%error, "failed to migrate recoverable schedule session targets");
+        }
         let mut interval = tokio::time::interval(poll_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -441,6 +727,12 @@ pub fn spawn_schedule_host(
     });
     #[cfg(target_arch = "wasm32")]
     let join = tokio_with_wasm::alias::task::spawn(async move {
+        if let Err(error) = migration_adapter
+            .migrate_recoverable_session_targets()
+            .await
+        {
+            tracing::warn!(%error, "failed to migrate recoverable schedule session targets");
+        }
         let mut interval = tokio_with_wasm::alias::time::interval(poll_interval);
         loop {
             tokio_with_wasm::alias::select! {
@@ -692,6 +984,7 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_schedule::ScheduleStore;
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
 
     fn sample_occurrence() -> Occurrence {
         let schedule = meerkat_schedule::Schedule::new(meerkat_schedule::CreateScheduleRequest {
@@ -840,6 +1133,12 @@ mod tests {
         materialize_calls: Arc<AtomicUsize>,
     }
 
+    struct IdentityResolvingHost {
+        current_session_id: Arc<Mutex<SessionId>>,
+        delivered_session_id: Arc<Mutex<Option<SessionId>>>,
+        legacy_session_id: Option<SessionId>,
+    }
+
     #[async_trait]
     impl SurfaceScheduleSessionHost for PanicOnMaterializeHost {
         async fn probe_session_target(
@@ -867,6 +1166,88 @@ mod tests {
             occurrence: &Occurrence,
             _dispatch: ScheduledPromptDispatch,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            Ok(immediate_completed_dispatch(occurrence, None))
+        }
+
+        async fn deliver_event(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            _event_type: String,
+            _payload: serde_json::Value,
+            _render_metadata: Option<RenderMetadata>,
+            _materialized_session_id: Option<SessionId>,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            Ok(immediate_completed_dispatch(occurrence, None))
+        }
+    }
+
+    #[async_trait]
+    impl SurfaceScheduleSessionHost for IdentityResolvingHost {
+        async fn probe_session_target(
+            &self,
+            _binding: &SessionTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            Ok(TargetProbeOutcome::Ready)
+        }
+
+        async fn probe_identity_target(
+            &self,
+            binding: &IdentityTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            assert_eq!(binding.identity(), "domain:security");
+            Ok(TargetProbeOutcome::Ready)
+        }
+
+        async fn resolve_identity_target(
+            &self,
+            binding: &IdentityTargetBinding,
+        ) -> Result<Option<SessionId>, ScheduleDomainError> {
+            assert_eq!(binding.identity(), "domain:security");
+            Ok(Some(
+                self.current_session_id
+                    .lock()
+                    .expect("current session lock")
+                    .clone(),
+            ))
+        }
+
+        async fn recover_session_target_identity(
+            &self,
+            binding: &SessionTargetBinding,
+        ) -> Result<Option<IdentityTargetBinding>, ScheduleDomainError> {
+            let Some(legacy_session_id) = &self.legacy_session_id else {
+                return Ok(None);
+            };
+            if binding.resolved_session_id() != Some(legacy_session_id) {
+                return Ok(None);
+            }
+            Ok(Some(IdentityTargetBinding::resumable(
+                "domain:security",
+                binding.action().clone(),
+            )))
+        }
+
+        async fn materialize_session(
+            &self,
+            _occurrence: &Occurrence,
+            _create: &SessionMaterializationSpec,
+            _prompt_system_prompt: Option<&str>,
+        ) -> Result<SessionId, ScheduleDomainError> {
+            panic!("identity targets must resolve existing materialized sessions")
+        }
+
+        async fn deliver_prompt(
+            &self,
+            session_id: &SessionId,
+            occurrence: &Occurrence,
+            dispatch: ScheduledPromptDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            assert_eq!(dispatch.materialized_session_id, None);
+            *self
+                .delivered_session_id
+                .lock()
+                .expect("delivered session lock") = Some(session_id.clone());
             Ok(immediate_completed_dispatch(occurrence, None))
         }
 
@@ -995,5 +1376,123 @@ mod tests {
             0,
             "Layer B guard must reuse the bound id, never call materialize_session"
         );
+    }
+
+    #[tokio::test]
+    async fn identity_target_resolves_current_session_at_delivery_time() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let current_session_id = Arc::new(Mutex::new(SessionId::new()));
+        let delivered_session_id = Arc::new(Mutex::new(None));
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(IdentityResolvingHost {
+            current_session_id: Arc::clone(&current_session_id),
+            delivered_session_id: Arc::clone(&delivered_session_id),
+            legacy_session_id: None,
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = SharedScheduleTargetAdapter::new(service, session_host, mob_host);
+
+        let mut occurrence = sample_occurrence();
+        occurrence.target_snapshot = TargetBinding::identity(IdentityTargetBinding::resumable(
+            "domain:security",
+            ScheduledSessionAction::Prompt {
+                prompt: ContentInput::Text("identity check".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        ));
+
+        let session_after_restart = SessionId::new();
+        *current_session_id.lock().expect("current session lock") = session_after_restart.clone();
+
+        let probe = adapter
+            .probe_target(&occurrence)
+            .await
+            .expect("identity probe should resolve through host");
+        assert!(matches!(probe, TargetProbeOutcome::Ready));
+
+        let dispatch = adapter
+            .deliver_occurrence(&occurrence)
+            .await
+            .expect("identity delivery should dispatch");
+        let terminal = dispatch.completion.await.expect("delivery completion");
+        assert_eq!(terminal.phase, OccurrencePhase::Completed);
+        assert_eq!(
+            delivered_session_id
+                .lock()
+                .expect("delivered session lock")
+                .as_ref(),
+            Some(&session_after_restart)
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_recoverable_session_target_persists_identity_target() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let legacy_session_id = SessionId::new();
+        let schedule = service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some("legacy-owned-session".to_string()),
+                description: None,
+                trigger: meerkat_schedule::TriggerSpec::Interval(
+                    meerkat_schedule::IntervalTriggerSpec {
+                        start_at_utc: chrono::Utc::now(),
+                        every_seconds: 60,
+                        end_at_utc: None,
+                    },
+                ),
+                target: TargetBinding::session(SessionTargetBinding::ResumableSession {
+                    session_id: legacy_session_id.clone(),
+                    action: ScheduledSessionAction::Prompt {
+                        prompt: ContentInput::Text("legacy identity check".to_string()),
+                        system_prompt: None,
+                        render_metadata: None,
+                        skill_refs: Vec::new(),
+                        additional_instructions: Vec::new(),
+                    },
+                }),
+                misfire_policy: meerkat_schedule::MisfirePolicy::Skip,
+                overlap_policy: meerkat_schedule::OverlapPolicy::SkipIfRunning,
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("schedule create should succeed");
+        let current_session_id = Arc::new(Mutex::new(SessionId::new()));
+        let delivered_session_id = Arc::new(Mutex::new(None));
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(IdentityResolvingHost {
+            current_session_id,
+            delivered_session_id,
+            legacy_session_id: Some(legacy_session_id),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = SharedScheduleTargetAdapter::new(service.clone(), session_host, mob_host);
+
+        let migrated = adapter
+            .migrate_recoverable_session_targets()
+            .await
+            .expect("migration should succeed");
+        assert_eq!(migrated, 1);
+
+        let updated = store
+            .get_schedule(&schedule.schedule_id)
+            .await
+            .expect("store read")
+            .expect("schedule still exists");
+        let TargetBinding::Identity(binding) = updated.target else {
+            panic!("legacy session target should migrate to identity target");
+        };
+        assert_eq!(binding.identity(), "domain:security");
     }
 }

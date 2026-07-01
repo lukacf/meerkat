@@ -1,6 +1,7 @@
 use crate::{
     CreateScheduleRequest, Occurrence, ScheduleDomainError, ScheduleId, ScheduleService,
-    ScheduleStoreError, UpdateScheduleRequest,
+    ScheduleStoreError, ScheduledSessionAction, SessionTargetBinding, TargetBinding,
+    UpdateScheduleRequest,
 };
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
@@ -160,20 +161,59 @@ impl AgentToolDispatcher for ScheduleToolDispatcher {
     }
 }
 
+/// Resolves the agent-facing `current_session` shortcut into a persisted target.
+pub trait CurrentSessionScheduleTargetResolver: Send + Sync {
+    fn resolve_current_session_target(
+        &self,
+        current_session_id: &SessionId,
+        action: ScheduledSessionAction,
+    ) -> TargetBinding;
+}
+
+#[derive(Debug, Default)]
+pub struct DefaultCurrentSessionScheduleTargetResolver;
+
+impl CurrentSessionScheduleTargetResolver for DefaultCurrentSessionScheduleTargetResolver {
+    fn resolve_current_session_target(
+        &self,
+        current_session_id: &SessionId,
+        action: ScheduledSessionAction,
+    ) -> TargetBinding {
+        TargetBinding::session(SessionTargetBinding::ResumableSession {
+            session_id: current_session_id.clone(),
+            action,
+        })
+    }
+}
+
 /// Session-scoped adapter for agent-facing schedule tools.
 ///
-/// The durable schedule model intentionally stores concrete targets. This
-/// adapter is only an authoring convenience: it lets an agent say
-/// `current_session`, then rewrites that target to the known session id before
-/// forwarding to the underlying schedule dispatcher.
+/// The durable schedule model intentionally stores concrete durable targets.
+/// This adapter is only an authoring convenience: it lets an agent say
+/// `current_session`, then asks the host resolver which target should be
+/// persisted. The default resolver preserves the historical
+/// `resumable_session(session_id)` behavior.
 pub struct CurrentSessionScheduleToolDispatcher {
     inner: Arc<dyn AgentToolDispatcher>,
     current_session_id: SessionId,
+    target_resolver: Arc<dyn CurrentSessionScheduleTargetResolver>,
     tool_defs: Arc<[Arc<ToolDef>]>,
 }
 
 impl CurrentSessionScheduleToolDispatcher {
     pub fn new(inner: Arc<dyn AgentToolDispatcher>, current_session_id: SessionId) -> Self {
+        Self::new_with_resolver(
+            inner,
+            current_session_id,
+            Arc::new(DefaultCurrentSessionScheduleTargetResolver),
+        )
+    }
+
+    pub fn new_with_resolver(
+        inner: Arc<dyn AgentToolDispatcher>,
+        current_session_id: SessionId,
+        target_resolver: Arc<dyn CurrentSessionScheduleTargetResolver>,
+    ) -> Self {
         let tool_defs = inner
             .tools()
             .iter()
@@ -183,6 +223,7 @@ impl CurrentSessionScheduleToolDispatcher {
         Self {
             inner,
             current_session_id,
+            target_resolver,
             tool_defs,
         }
     }
@@ -210,7 +251,12 @@ impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
                 format!("invalid schedule tool-call arguments JSON: {error}"),
             )
         })?;
-        let rewritten = rewrite_current_session_target(args, &self.current_session_id);
+        let rewritten = rewrite_current_session_target(
+            args,
+            &self.current_session_id,
+            self.target_resolver.as_ref(),
+        )
+        .map_err(|error| ToolError::invalid_arguments(call.name, error))?;
         let rewritten_raw = serde_json::value::RawValue::from_string(rewritten.to_string())
             .map_err(|error| {
                 ToolError::invalid_arguments(
@@ -385,8 +431,8 @@ fn current_session_tool_def(tool: &ToolDef) -> ToolDef {
     if rewritten.name == "meerkat_schedule_create" || rewritten.name == "meerkat_schedule_update" {
         rewritten.description.push_str(
             "\n\nAgent-facing shortcut: session targets may also use type=\"current_session\". \
-             The tool host resolves it to this running session and persists the schedule as a \
-             concrete resumable_session target.",
+             The tool host resolves it to a durable target before persistence. Hosts with stable \
+             agent identities may persist identity targets instead of raw session ids.",
         );
         add_current_session_to_schema(&mut rewritten.input_schema);
     }
@@ -425,17 +471,21 @@ fn add_current_session_to_schema(schema: &mut Value) {
     }
 }
 
-fn rewrite_current_session_target(mut args: Value, current_session_id: &SessionId) -> Value {
+fn rewrite_current_session_target(
+    mut args: Value,
+    current_session_id: &SessionId,
+    resolver: &dyn CurrentSessionScheduleTargetResolver,
+) -> Result<Value, String> {
     let Some(target) = args
         .as_object_mut()
         .and_then(|object| object.get_mut("target"))
         .and_then(Value::as_object_mut)
     else {
-        return args;
+        return Ok(args);
     };
 
-    rewrite_current_session_target_object(target, current_session_id);
-    args
+    rewrite_current_session_target_object(target, current_session_id, resolver)?;
+    Ok(args)
 }
 
 /// Tool-host-only target kinds. The `current_session` pseudo-variant is a
@@ -460,24 +510,41 @@ enum HostSessionTargetProbe {
     Other,
 }
 
+#[derive(Deserialize)]
+struct HostCurrentSessionTarget {
+    action: ScheduledSessionAction,
+}
+
 impl HostTargetProbe {
     fn is_current_session(&self) -> bool {
         matches!(self, Self::Session(HostSessionTargetProbe::CurrentSession))
     }
 }
 
-fn rewrite_current_session_target_object(target: &mut Map<String, Value>, session_id: &SessionId) {
+fn rewrite_current_session_target_object(
+    target: &mut Map<String, Value>,
+    session_id: &SessionId,
+    resolver: &dyn CurrentSessionScheduleTargetResolver,
+) -> Result<(), String> {
     let is_current_session =
         serde_json::from_value::<HostTargetProbe>(Value::Object(target.clone()))
             .map(|probe| probe.is_current_session())
             .unwrap_or(false);
 
     if !is_current_session {
-        return;
+        return Ok(());
     }
 
-    target.insert("type".into(), Value::String("resumable_session".into()));
-    target.insert("session_id".into(), Value::String(session_id.to_string()));
+    let current = serde_json::from_value::<HostCurrentSessionTarget>(Value::Object(target.clone()))
+        .map_err(|error| format!("invalid current_session target: {error}"))?;
+    let resolved = resolver.resolve_current_session_target(session_id, current.action);
+    let resolved_value = serde_json::to_value(resolved)
+        .map_err(|error| format!("failed to encode resolved current_session target: {error}"))?;
+    let resolved_object = resolved_value
+        .as_object()
+        .ok_or_else(|| "resolved current_session target was not an object".to_string())?;
+    *target = resolved_object.clone();
+    Ok(())
 }
 
 fn empty_schema() -> Value {
@@ -650,7 +717,7 @@ fn calendar_field_schema(description: &'static str) -> Value {
 
 fn target_binding_schema() -> Value {
     json!({
-        "description": "Where the schedule delivers. Uses target_kind to select session or mob. Session targets: exact_session (deliver to a known session_id; fails if session is gone), resumable_session (deliver to a session_id that may be idle; runtime resumes it -- best for long-lived TUX sessions), materialize_on_demand_session (create a new session on first fire using a \"create\" spec, then reuse it -- use when no session exists yet). Mob targets: member, flow, spawn_helper, fork_helper (deliver to a mob member or flow). Examples: {\"target_kind\":\"session\",\"type\":\"resumable_session\",\"session_id\":\"<UUID>\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | {\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run report\"},\"create\":{\"model\":\"claude-sonnet-4-6\"}}.",
+        "description": "Where the schedule delivers. Uses target_kind to select session, identity, or mob. Session targets: exact_session (deliver to a known session_id; fails if session is gone), resumable_session (deliver to a session_id that may be idle; runtime resumes it -- best for stable long-lived sessions), materialize_on_demand_session (create a new session on first fire using a \"create\" spec, then reuse it -- use when no session exists yet). Identity targets: resumable_identity (deliver to the current materialized session for a stable agent identity; host resolves at fire time). Mob targets: member, flow, spawn_helper, fork_helper (deliver to a mob member or flow). Examples: {\"target_kind\":\"identity\",\"type\":\"resumable_identity\",\"identity\":\"domain:security\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | {\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run report\"},\"create\":{\"model\":\"claude-sonnet-4-6\"}}.",
         "oneOf": [
             {
                 "type": "object",
@@ -685,6 +752,20 @@ fn target_binding_schema() -> Value {
                         "then": { "required": ["session_id"] }
                     }
                 ],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "target_kind": { "const": "identity" },
+                    "type": { "const": "resumable_identity" },
+                    "identity": {
+                        "type": "string",
+                        "description": "Stable agent identity resolved by the schedule host at occurrence delivery time."
+                    },
+                    "action": scheduled_session_action_schema()
+                },
+                "required": ["target_kind", "type", "identity", "action"],
                 "additionalProperties": false
             },
             {
@@ -942,8 +1023,9 @@ fn missing_target_policy_schema() -> Value {
 mod tests {
     use super::*;
     use crate::{
-        IntervalTriggerSpec, MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy,
-        OverlapPolicy, ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
+        IdentityTargetBinding, IntervalTriggerSpec, MemoryScheduleStore, MisfirePolicy,
+        MissingTargetPolicy, OverlapPolicy, ScheduledSessionAction, SessionTargetBinding,
+        TargetBinding, TriggerSpec,
     };
     use chrono::{Duration, Utc};
     use meerkat_core::{AgentToolDispatcher, ToolError};
@@ -951,6 +1033,18 @@ mod tests {
     use serde_json::value::RawValue;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+
+    struct IdentityCurrentSessionResolver;
+
+    impl CurrentSessionScheduleTargetResolver for IdentityCurrentSessionResolver {
+        fn resolve_current_session_target(
+            &self,
+            _current_session_id: &SessionId,
+            action: ScheduledSessionAction,
+        ) -> TargetBinding {
+            TargetBinding::identity(IdentityTargetBinding::resumable("domain:security", action))
+        }
+    }
 
     fn schedule_request() -> CreateScheduleRequest {
         CreateScheduleRequest {
@@ -1229,6 +1323,68 @@ mod tests {
         assert_eq!(
             updated["target"]["session_id"].as_str(),
             Some(current_session_id.to_string().as_str())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_session_schedule_dispatcher_uses_host_resolver_target() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let current_session_id = SessionId::new();
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new_with_resolver(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            current_session_id,
+            Arc::new(IdentityCurrentSessionResolver),
+        );
+
+        let request = json!({
+            "name": "identity-followup",
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": (Utc::now() + Duration::minutes(1)).to_rfc3339(),
+                "every_seconds": 60
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "current_session",
+                "action": {
+                    "type": "prompt",
+                    "prompt": "check this identity"
+                }
+            },
+            "misfire_policy": { "type": "skip" },
+            "overlap_policy": "skip_if_running",
+            "missing_target_policy": "mark_misfired",
+            "planning_horizon_occurrences": 1
+        });
+        let raw = RawValue::from_string(request.to_string()).map_err(|error| error.to_string())?;
+        let outcome = dispatcher
+            .dispatch(tool_call(
+                "sched-current-identity-create",
+                "meerkat_schedule_create",
+                raw.as_ref(),
+            ))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+
+        let created: Value = serde_json::from_str(&outcome.result.text_content())
+            .map_err(|error| error.to_string())?;
+        assert_eq!(created["target"]["target_kind"].as_str(), Some("identity"));
+        assert_eq!(
+            created["target"]["type"].as_str(),
+            Some("resumable_identity")
+        );
+        assert_eq!(
+            created["target"]["identity"].as_str(),
+            Some("domain:security")
+        );
+
+        let listed = handle_schedule_tools_call(&service, "meerkat_schedule_list", &json!({}))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            listed["schedules"][0]["target"]["target_kind"].as_str(),
+            Some("identity")
         );
         Ok(())
     }

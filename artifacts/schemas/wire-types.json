@@ -30488,6 +30488,30 @@
         },
         "type": "object"
       },
+      "IdentityTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "type": {
+                "const": "resumable_identity",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "identity",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "IntervalTriggerSpec": {
         "properties": {
           "end_at_utc": {
@@ -31781,6 +31805,19 @@
             "type": "object"
           },
           {
+            "$ref": "#/$defs/IdentityTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "identity",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
             "$ref": "#/$defs/MobTargetBinding",
             "properties": {
               "target_kind": {
@@ -32534,6 +32571,30 @@
           }
         },
         "type": "object"
+      },
+      "IdentityTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "type": {
+                "const": "resumable_identity",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "identity",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "IntervalTriggerSpec": {
         "properties": {
@@ -33894,6 +33955,19 @@
             "type": "object"
           },
           {
+            "$ref": "#/$defs/IdentityTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "identity",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
             "$ref": "#/$defs/MobTargetBinding",
             "properties": {
               "target_kind": {
@@ -34683,6 +34757,30 @@
           }
         },
         "type": "object"
+      },
+      "IdentityTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "type": {
+                "const": "resumable_identity",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "identity",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "IntervalTriggerSpec": {
         "properties": {
@@ -36154,6 +36252,19 @@
             "properties": {
               "target_kind": {
                 "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/IdentityTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "identity",
                 "type": "string"
               }
             },

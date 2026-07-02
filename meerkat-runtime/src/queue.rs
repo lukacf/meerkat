@@ -113,6 +113,7 @@ mod tests {
 
     fn make_prompt(id: InputId) -> Input {
         Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: InputHeader {
                 id,
                 timestamp: Utc::now(),

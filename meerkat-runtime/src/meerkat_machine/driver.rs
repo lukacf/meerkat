@@ -2723,6 +2723,7 @@ mod tests {
             crate::input::ContinuationInput::detached_background_op_completed(),
         );
         let prompt_input = Input::Prompt(crate::input::PromptInput {
+            injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),

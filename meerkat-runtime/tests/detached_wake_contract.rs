@@ -287,6 +287,7 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
     // inject the continuation on the feed-backed path.
     use meerkat_runtime::{Input, InputDurability, InputHeader, PromptInput};
     let trigger_input = Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -395,6 +396,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
     // Trigger the runtime loop with a prompt so the idle-wake path fires
     use meerkat_runtime::{Input, InputHeader, PromptInput};
     let trigger_input = Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -529,6 +531,7 @@ async fn choke_004_completion_during_running_defers_wake() {
     // Start a turn (session becomes Running)
     use meerkat_runtime::{Input, InputHeader, PromptInput};
     let trigger = Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -676,6 +679,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
     // Trigger a prompt to flush any queued continuations
     use meerkat_runtime::{Input, InputHeader, PromptInput};
     let trigger = Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),

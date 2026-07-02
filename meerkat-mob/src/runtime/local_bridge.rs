@@ -100,6 +100,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
         input_id: &str,
         content: ContentInput,
         handling_mode: HandlingMode,
+        injected_context: Vec<ContentInput>,
     ) -> Result<BridgeDeliveryResponse, MobError> {
         use meerkat_runtime::input::{
             Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
@@ -139,6 +140,9 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
             // In-process bridge deliveries carry no comms envelope, so no
             // sender taint declaration exists.
             sender_taint: None,
+            // Lowers as InjectedContext-role appends immediately before this
+            // input's peer append.
+            injected_context,
         });
 
         match self

@@ -34,6 +34,7 @@ fn memory_blob_store() -> Arc<dyn BlobStore> {
 
 fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -1329,6 +1330,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
 
     fn make_progress_input(label: &str) -> Input {
         Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),

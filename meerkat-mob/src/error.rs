@@ -220,6 +220,19 @@ pub enum MobError {
         context: &'static str,
     },
 
+    /// Injected context cannot be delivered on this work-dispatch path.
+    ///
+    /// The autonomous inbox path flows through comms plain events (no
+    /// user-channel transcript boundary), and steer dispatch realizes as
+    /// live system-context appends; neither can materialize typed
+    /// injected-context messages before the work content. Fail closed
+    /// rather than silently dropping host-provided context.
+    #[error("injected context undeliverable to member {member_id}: {reason}")]
+    InjectedContextUndeliverable {
+        member_id: AgentIdentity,
+        reason: &'static str,
+    },
+
     /// Operation blocked by reset barrier.
     #[error("reset barrier active")]
     ResetBarrier,

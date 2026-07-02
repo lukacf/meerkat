@@ -183,21 +183,6 @@ pub async fn start_turn_with_params(
         Err(resp) => return resp,
     };
 
-    // turn/start routes through the runtime prompt-input path, which does
-    // not carry the injected-context slot yet. Fail closed rather than
-    // silently dropping host-provided context.
-    if params
-        .injected_context
-        .as_ref()
-        .is_some_and(|entries| !entries.is_empty())
-    {
-        return RpcResponse::error(
-            id,
-            crate::error::INVALID_PARAMS,
-            "injected_context is not supported on the JSON-RPC surface yet",
-        );
-    }
-
     if let Some(context) = request_context.as_ref() {
         let runtime_adapter = Arc::clone(runtime_adapter);
         let session_id = session_id.clone();
@@ -260,6 +245,7 @@ pub async fn start_turn_with_params(
         .start_turn_via_runtime(
             &session_id,
             params.prompt,
+            params.injected_context.unwrap_or_default(),
             mcp_event_tx,
             skill_refs,
             params.flow_tool_overlay,

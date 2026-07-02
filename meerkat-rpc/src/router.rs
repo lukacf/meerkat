@@ -5808,6 +5808,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-forward-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
@@ -5857,6 +5858,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-steer-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),

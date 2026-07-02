@@ -1967,6 +1967,12 @@ pub struct MobTurnStartParams {
         Option<WireTurnMetadataOverride<crate::wire::runtime::WireProviderParamsOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
+    /// Host-attached injected context for this turn. Each entry materializes
+    /// as a separate typed injected-context transcript message immediately
+    /// before the turn's user message, in order. `mob/turn_start` already
+    /// rejects autonomous members, so this always rides a turn-driven turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected_context: Option<Vec<WireContentInput>>,
 }
 
 /// One currently wired peer that is known to be unreachable.
@@ -2336,6 +2342,13 @@ pub struct MobSubmitWorkParams {
     pub content: WireContentInput,
     #[serde(default)]
     pub origin: WireWorkOrigin,
+    /// Host-attached injected context delivered alongside the work content.
+    /// Each entry materializes on the member as a separate typed
+    /// injected-context transcript message immediately before the work
+    /// content, in order. Deliverable to queue-mode turn-driven members;
+    /// autonomous inbox delivery rejects it with a typed error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected_context: Option<Vec<WireContentInput>>,
 }
 
 /// Response payload for `mob/submit_work`.

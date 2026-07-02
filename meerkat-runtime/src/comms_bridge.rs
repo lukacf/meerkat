@@ -123,6 +123,7 @@ fn peer_input_from_ingress_fact(
         .or_else(|| ingress.display_label());
 
     Ok(Input::Peer(PeerInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),

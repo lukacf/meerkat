@@ -4554,6 +4554,7 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
         prompt: ContentInput,
+        injected_context: Vec<ContentInput>,
         mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
@@ -4639,7 +4640,13 @@ impl SessionRuntime {
             Some(effective_identity.provider.as_str()),
         );
 
-        let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
+        // Injected context lowers through the prompt input's typed slot so
+        // the runtime batch places the InjectedContext-role appends
+        // immediately before the user append.
+        let input = Input::Prompt(
+            PromptInput::from_content_input(prompt, turn_metadata)
+                .with_injected_context(injected_context),
+        );
         let input_id = input.id().clone();
 
         self.ensure_runtime_executor(session_id).await?;
@@ -5427,16 +5434,27 @@ impl SessionRuntime {
                 build_config,
                 labels,
                 deferred_prompt,
+                deferred_injected_context,
                 generated_machine_archived_resume_admission,
                 ..
             } = slot;
             let mut build_config = *build_config;
             let mut runtime_prompt: ContentInput = prompt.clone();
             let mut typed_turn_appends = primitive.typed_turn_appends();
-            if let Some(deferred) = deferred_prompt {
-                runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
+            let mut promotion_injected_context = Vec::new();
+            if deferred_prompt.is_some() || !deferred_injected_context.is_empty() {
+                if let Some(deferred) = deferred_prompt {
+                    runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
+                }
                 // The merged deferred prompt must be the transcript boundary;
                 // current-turn primitive appends would otherwise replace it.
+                // Direct lowering takes over, so injected context moves onto
+                // the StartTurnRequest carrier: the deferred-create entries
+                // first, then the promoting turn's own entries (extracted
+                // from the appends being cleared) — both still land before
+                // the single merged user message.
+                promotion_injected_context = deferred_injected_context;
+                promotion_injected_context.extend(primitive.injected_context_content_inputs());
                 typed_turn_appends.clear();
             }
 
@@ -5561,7 +5579,11 @@ impl SessionRuntime {
                 create_req,
                 run_id,
                 StartTurnRequest {
-                    injected_context: Vec::new(),
+                    // Empty on the runtime-appends path (typed_turn_appends
+                    // carry the injected context); populated only when the
+                    // deferred merge cleared the appends and direct lowering
+                    // owns the turn.
+                    injected_context: promotion_injected_context,
                     prompt: runtime_prompt,
                     system_prompt: None,
                     event_tx: Some(event_tx),
@@ -5668,12 +5690,23 @@ impl SessionRuntime {
         mut build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
+        deferred_injected_context: Vec<ContentInput>,
     ) -> Result<SessionId, RpcError> {
         let effective_llm_identity = self.llm_identity_from_pending_build(&build_config).await?;
         build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
         if let Some(prompt) = deferred_prompt.as_ref() {
             self.validate_prompt_video_input(prompt, &effective_llm_identity)
                 .await?;
+        }
+        // Injected context is a first-turn submit-work fact: it persists in
+        // the staged slot only alongside a deferred first-turn prompt.
+        if deferred_prompt.is_none() && !deferred_injected_context.is_empty() {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "injected_context on a deferred create requires a deferred prompt"
+                    .to_string(),
+                data: None,
+            });
         }
 
         // Pre-create a session to claim a stable SessionId.
@@ -5748,6 +5781,7 @@ impl SessionRuntime {
                     effective_llm_identity,
                     labels,
                     deferred_prompt,
+                    deferred_injected_context,
                     now,
                     now,
                     false,
@@ -6253,6 +6287,7 @@ impl SessionRuntime {
                         effective_llm_identity,
                         labels,
                         None,
+                        Vec::new(),
                         now,
                         now,
                         false,
@@ -9029,7 +9064,7 @@ mod tests {
         let build_config = AgentBuildConfig::new("totally-unregistered-model-xyz");
 
         let err = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .expect_err("deferred create must reject before reserving a pending session");
 
@@ -9952,7 +9987,7 @@ mod tests {
     ) {
         let (build_config, calls, release) = blocking_build_config();
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .expect("create blocking session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10040,7 +10075,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
@@ -10106,7 +10141,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
@@ -10162,7 +10197,7 @@ mod tests {
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed context-only apply should release pre-admission");
     }
@@ -10175,7 +10210,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
@@ -10281,7 +10316,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
@@ -10348,7 +10383,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create candidate session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10423,6 +10458,7 @@ mod tests {
                 mock_build_config(),
                 None,
                 Some(ContentInput::Text("deferred prompt".to_string())),
+                Vec::new(),
             )
             .await
             .expect("create staged session");
@@ -10468,7 +10504,7 @@ mod tests {
         );
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -10483,7 +10519,7 @@ mod tests {
             .await
             .expect("archive staged session");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("archive should release restored staged admission");
     }
@@ -10501,7 +10537,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create candidate session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10593,7 +10629,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create candidate session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10668,7 +10704,7 @@ mod tests {
             Some("synthetic post-prepare create failure".to_string());
 
         let failed = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             failed
@@ -10691,7 +10727,7 @@ mod tests {
             "failed create must unregister prepared runtime bindings"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("failed create should release admission capacity");
     }
@@ -10703,7 +10739,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10791,7 +10827,7 @@ mod tests {
         ]);
 
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10857,7 +10893,7 @@ mod tests {
         ]);
 
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10943,7 +10979,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("realtime-open-config-peer-response".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -10951,6 +10987,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -10969,6 +11006,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
@@ -11070,7 +11108,7 @@ mod tests {
         let runtime = Arc::new(base_runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -11078,6 +11116,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -11096,6 +11135,7 @@ mod tests {
             .accept_input(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
@@ -11251,7 +11291,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -11259,6 +11299,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -11277,6 +11318,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
@@ -11373,7 +11415,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("runtime-owned-terminal-peer-response-events".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -11381,6 +11423,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -11405,6 +11448,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
@@ -11499,7 +11543,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some(operator_name.to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -11507,6 +11551,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "Hello".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -11660,7 +11705,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("realtime-open-config-runtime-append".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -11745,7 +11790,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("realtime-open-config-durable-authority".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -11832,7 +11877,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("mob-owned-stale-live-runtime-turn".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -11840,6 +11885,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "first runtime turn".into(),
+                Vec::new(),
                 event_tx.clone(),
                 None,
                 None,
@@ -11884,6 +11930,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "second runtime turn after durable authority wins".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -11934,7 +11981,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("realtime-open-config-durable-context".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -12028,7 +12075,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("realtime-transcript-context-sync".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -12142,7 +12189,7 @@ mod tests {
         build.keep_alive = true;
         build.comms_name = Some("realtime-open-config-runtime-backed-context".to_string());
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -12223,7 +12270,7 @@ mod tests {
         ]);
 
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -13161,6 +13208,7 @@ mod tests {
                 },
                 None,
                 Some(inline_video_prompt()),
+                Vec::new(),
             )
             .await
             .expect("self-hosted inline-video alias should validate against runtime registry");
@@ -13191,6 +13239,7 @@ mod tests {
                 },
                 None,
                 None,
+                Vec::new(),
             )
             .await
             .expect("pending self-hosted session should stage");
@@ -13468,7 +13517,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -13483,7 +13532,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -13543,7 +13592,7 @@ mod tests {
         ));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -13615,7 +13664,7 @@ mod tests {
         let (build_config, calls, release) = blocking_build_config();
 
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .unwrap();
 
@@ -13689,6 +13738,7 @@ mod tests {
                 Some(ContentInput::Text(
                     "Remember the codeword ORBIT-7 for later.".to_string(),
                 )),
+                Vec::new(),
             )
             .await
             .expect("create deferred session");
@@ -13713,6 +13763,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "What is the codeword? Include any markers you were told about.".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -13739,6 +13790,139 @@ mod tests {
         );
     }
 
+    /// Project a persisted session's user-channel messages as
+    /// `(is_injected_context, text)` pairs, in transcript order.
+    fn user_channel_messages(session: &Session) -> Vec<(bool, String)> {
+        session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some((
+                    user.transcript_role.is_injected_context(),
+                    user.text_content(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Runtime-routed `turn/start` delivery property: each injected-context
+    /// entry lands in the transcript as a separate typed injected-context
+    /// user-channel message immediately BEFORE the turn's user message, in
+    /// order.
+    #[tokio::test]
+    async fn turn_start_injected_context_lands_before_user_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "What changed?".into(),
+                vec![
+                    ContentInput::Text("ambient alpha".to_string()),
+                    ContentInput::Text("ambient beta".to_string()),
+                ],
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("runtime-routed turn with injected context");
+
+        let session = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("session persisted");
+        let users = user_channel_messages(&session);
+        assert_eq!(
+            users,
+            vec![
+                (true, "ambient alpha".to_string()),
+                (true, "ambient beta".to_string()),
+                (false, "What changed?".to_string()),
+            ],
+            "injected context must land as typed injected-context messages \
+             immediately before the turn's user message, in order"
+        );
+    }
+
+    /// Staged-promotion regression (design 6c): injected context supplied
+    /// with a deferred `session/create` persists in the promoting slot and
+    /// materializes at promotion — together with the promoting turn's own
+    /// injected context — before the single merged user message.
+    #[tokio::test]
+    async fn staged_promotion_materializes_deferred_injected_context_before_user_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let session_id = runtime
+            .create_session(
+                mock_build_config(),
+                None,
+                Some(ContentInput::Text("Deferred prompt.".to_string())),
+                vec![ContentInput::Text("staged ambient".to_string())],
+            )
+            .await
+            .expect("create deferred session with injected context");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "Turn prompt.".into(),
+                vec![ContentInput::Text("turn ambient".to_string())],
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("promoting turn with injected context");
+
+        let session = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("session persisted");
+        let users = user_channel_messages(&session);
+        assert_eq!(
+            users,
+            vec![
+                (true, "staged ambient".to_string()),
+                (true, "turn ambient".to_string()),
+                (false, "Deferred prompt.\n\nTurn prompt.".to_string()),
+            ],
+            "deferred-create injected context must materialize at promotion, \
+             followed by the promoting turn's injected context, before the \
+             merged user message"
+        );
+    }
+
+    /// Injected context on a deferred create requires a deferred prompt to
+    /// attach to — there is no other durable slot for it to persist in.
+    #[tokio::test]
+    async fn deferred_create_injected_context_without_prompt_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let err = runtime
+            .create_session(
+                mock_build_config(),
+                None,
+                None,
+                vec![ContentInput::Text("orphan ambient".to_string())],
+            )
+            .await
+            .expect_err("injected context without a deferred prompt must fail closed");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+    }
+
     #[tokio::test]
     async fn promotion_restore_preserves_system_context_appends() {
         let temp = tempfile::tempdir().unwrap();
@@ -13762,6 +13946,7 @@ mod tests {
                     effective_llm_identity,
                     None,
                     None,
+                    Vec::new(),
                     now,
                     now,
                     false,
@@ -13839,7 +14024,7 @@ mod tests {
 
         // Use a slow mock to give us time to observe Running state
         let session_id = runtime
-            .create_session(slow_build_config(100), None, None)
+            .create_session(slow_build_config(100), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -13907,7 +14092,7 @@ mod tests {
         let (build_config, calls, release) = blocking_build_config();
 
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .unwrap();
 
@@ -13979,7 +14164,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(100);
@@ -14023,7 +14208,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -14141,7 +14326,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -14181,7 +14366,7 @@ mod tests {
 
         // Create a session — the agent should have mob tools.
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -14209,17 +14394,17 @@ mod tests {
 
         // Create two sessions (the max)
         let _s1 = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let _s2 = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
         // Third should fail
         let result = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(result.is_err(), "Third session should fail");
         let err = result.unwrap_err();
@@ -14274,7 +14459,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("rejected archived-projection resume should not leak admission");
     }
@@ -14291,7 +14476,7 @@ mod tests {
         );
         let service = runtime.session_service();
         let _active = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("fill active admission capacity");
 
@@ -14330,7 +14515,7 @@ mod tests {
         );
         let service = runtime.session_service();
         let _active = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("fill active admission capacity");
 
@@ -14370,7 +14555,7 @@ mod tests {
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
         );
         let _active = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("fill active admission capacity");
 
@@ -14413,7 +14598,7 @@ mod tests {
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
         );
         let _active = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("fill active admission capacity");
 
@@ -14467,6 +14652,7 @@ mod tests {
             .start_turn_via_runtime(
                 &archived_id,
                 "archived runtime-routed session".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -14525,7 +14711,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         assert!(
@@ -14609,7 +14795,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -14662,7 +14848,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -14699,6 +14885,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "must not enter runtime queue".into(),
+                Vec::new(),
                 event_tx,
                 None,
                 None,
@@ -14732,7 +14919,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .expect("create staged blocking session");
         let first_turn = start_runtime_prompt_without_registration_lock(
@@ -14804,7 +14991,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -14831,6 +15018,7 @@ mod tests {
                 .start_turn_via_runtime(
                     &turn_session_id,
                     "wait for registration lock before reserving".into(),
+                    Vec::new(),
                     event_tx,
                     None,
                     None,
@@ -14874,7 +15062,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -14952,6 +15140,7 @@ mod tests {
             .expect("save store-only session");
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
@@ -14994,7 +15183,7 @@ mod tests {
             .await;
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("accept validation failure should release active capacity");
     }
@@ -15050,7 +15239,7 @@ mod tests {
             .await;
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("terminal no-handle accept should leave active capacity available");
     }
@@ -15068,7 +15257,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -15107,6 +15296,7 @@ mod tests {
                 .start_turn_via_runtime(
                     &active_session_id,
                     "active input survives stale cleanup".into(),
+                    Vec::new(),
                     event_tx,
                     None,
                     None,
@@ -15242,7 +15432,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("failed runtime input cleanup should release active admission");
     }
@@ -15277,7 +15467,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("staged session should reserve active capacity");
         let admission = runtime
@@ -15295,7 +15485,7 @@ mod tests {
             "dropping staged-origin pre-admission registration must restore staged capacity"
         );
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -15419,7 +15609,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
         let _rpc_staged = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("rpc staged session should reserve capacity");
 
@@ -15454,7 +15644,7 @@ mod tests {
             .await
             .expect("mob/direct deferred create should reserve capacity");
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -15469,7 +15659,7 @@ mod tests {
             .await
             .expect("archiving direct staged session should release capacity");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("rpc create should succeed after direct staged archive");
     }
@@ -15605,7 +15795,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if runtime
-                    .create_session(mock_build_config(), None, None)
+                    .create_session(mock_build_config(), None, None, Vec::new())
                     .await
                     .is_ok()
                 {
@@ -15624,7 +15814,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("rpc staged session should reserve capacity");
         let service = runtime.session_service();
@@ -15641,7 +15831,7 @@ mod tests {
         );
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -15655,7 +15845,7 @@ mod tests {
             .await
             .expect("RPC archive should still own RPC-staged cleanup");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("RPC archive should release staged capacity");
     }
@@ -15736,7 +15926,7 @@ mod tests {
             "runtime retirement should hide compatibility projection state"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("converged archive should release admission");
     }
@@ -15753,7 +15943,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -15855,7 +16045,7 @@ mod tests {
             .await
             .expect("direct deferred create should reserve capacity");
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -15870,7 +16060,7 @@ mod tests {
             .await
             .expect("runtime discard should remove direct deferred live session");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("discarding direct deferred live session should release RPC admission");
     }
@@ -15894,7 +16084,7 @@ mod tests {
             .await
             .expect("direct deferred create should reserve capacity");
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -15925,7 +16115,7 @@ mod tests {
             "compatibility archive projection must not retire a runtime-backed direct session: {completed:?}"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed direct turn should release RPC admission");
     }
@@ -15977,7 +16167,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed runtime start_turn should release direct deferred admission");
     }
@@ -16030,7 +16220,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed runtime apply should release direct deferred admission");
     }
@@ -16054,7 +16244,7 @@ mod tests {
             .await
             .expect("direct deferred create should reserve capacity");
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16080,7 +16270,7 @@ mod tests {
             "compatibility archive projection must not hide a runtime-backed live session: {live:?}"
         );
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16128,7 +16318,7 @@ mod tests {
             "timestamp-only durable projection must not evict live runtime mechanics"
         );
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16144,7 +16334,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let hook = Arc::new(PendingPromotionPreTurnHook::default());
@@ -16168,7 +16358,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
         loop {
             match runtime
-                .create_session(mock_build_config(), None, None)
+                .create_session(mock_build_config(), None, None, Vec::new())
                 .await
             {
                 Ok(_) => break,
@@ -16222,7 +16412,7 @@ mod tests {
         );
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16237,7 +16427,7 @@ mod tests {
             .await
             .expect("restored direct staged session should be archivable");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("archiving restored direct staged session should release capacity");
     }
@@ -16276,7 +16466,7 @@ mod tests {
         );
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16291,7 +16481,7 @@ mod tests {
             .await
             .expect("restored direct staged session should remain archivable");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("archiving restored direct staged session should release capacity");
     }
@@ -16305,7 +16495,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -16348,7 +16538,7 @@ mod tests {
             .expect("mob runtime executor should use existing pre-admission");
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed mob runtime executor apply should release active admission");
     }
@@ -16364,7 +16554,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -16480,7 +16670,7 @@ mod tests {
             "successful first-turn materialization must not restore staged capacity"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed materialized first turn should release active admission");
     }
@@ -16531,7 +16721,7 @@ mod tests {
         );
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16546,7 +16736,7 @@ mod tests {
             .await
             .expect("restored direct staged session should remain archivable");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("archiving restored direct staged session should release capacity");
     }
@@ -16558,7 +16748,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
         let (build_config, calls, release) = blocking_build_config();
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .expect("create session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -16623,7 +16813,7 @@ mod tests {
         }
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16647,7 +16837,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
         let (build_config, calls, release) = blocking_build_config();
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .expect("create pending RPC session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -16688,7 +16878,7 @@ mod tests {
         );
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16704,7 +16894,7 @@ mod tests {
             .expect("pending first turn task")
             .expect("pending first turn should finish");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("capacity should release after pending first turn stops");
     }
@@ -16734,7 +16924,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("rejected eager create must not consume active capacity");
     }
@@ -16746,7 +16936,7 @@ mod tests {
 
         for index in 0..4 {
             let session_id = runtime
-                .create_session(mock_build_config(), None, None)
+                .create_session(mock_build_config(), None, None, Vec::new())
                 .await
                 .unwrap_or_else(|err| {
                     panic!("create_session {index} should ignore completed history: {err:?}")
@@ -16785,11 +16975,11 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 2));
 
         let first = runtime
-            .create_session(slow_build_config(250), None, None)
+            .create_session(slow_build_config(250), None, None, Vec::new())
             .await
             .expect("create first session");
         let second = runtime
-            .create_session(slow_build_config(250), None, None)
+            .create_session(slow_build_config(250), None, None, Vec::new())
             .await
             .expect("create second session");
 
@@ -16852,7 +17042,7 @@ mod tests {
         }
 
         let result = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(result.is_err(), "third session should fail while two run");
         let err = result.unwrap_err();
@@ -16878,7 +17068,7 @@ mod tests {
             let runtime = Arc::clone(&runtime);
             async move {
                 runtime
-                    .create_session(mock_build_config(), None, None)
+                    .create_session(mock_build_config(), None, None, Vec::new())
                     .await
             }
         }))
@@ -16907,11 +17097,11 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let staged = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked.is_err(),
@@ -16923,7 +17113,7 @@ mod tests {
             .await
             .expect("archive staged session");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("new session should be admitted after staged archive");
     }
@@ -16934,7 +17124,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(slow_build_config(250), None, None)
+            .create_session(slow_build_config(250), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -16981,7 +17171,7 @@ mod tests {
             "archive during promotion should be rejected as busy: {archive:?}"
         );
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -16996,7 +17186,7 @@ mod tests {
             .unwrap()
             .expect("promoting turn should finish");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("capacity should release after promotion completes");
     }
@@ -17007,7 +17197,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
         let (build_config, calls, _release) = blocking_build_config();
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -17053,7 +17243,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("interrupted first turn should release admission");
     }
@@ -17069,7 +17259,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -17112,7 +17302,7 @@ mod tests {
             .expect("busy pre-run interrupt must not cancel or corrupt the first turn");
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed first turn should release active admission");
     }
@@ -17128,7 +17318,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -17185,7 +17375,7 @@ mod tests {
             .expect("busy handler interrupt must not cancel or corrupt the first turn");
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed first turn should release active admission");
     }
@@ -17201,7 +17391,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -17212,6 +17402,7 @@ mod tests {
                 .start_turn_via_runtime(
                     &session_for_turn,
                     "interrupt accepted runtime-routed first turn".into(),
+                    Vec::new(),
                     event_tx,
                     None,
                     None,
@@ -17272,7 +17463,7 @@ mod tests {
             .expect("busy pre-promotion interrupt must not cancel or corrupt the first turn");
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed runtime-routed first turn should release active admission");
     }
@@ -17288,7 +17479,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -17299,6 +17490,7 @@ mod tests {
                 .start_turn_via_runtime(
                     &session_for_turn,
                     "yielding interrupt runtime-routed first turn".into(),
+                    Vec::new(),
                     event_tx,
                     None,
                     None,
@@ -17337,7 +17529,7 @@ mod tests {
             .expect("busy yielding interrupt must not cancel or corrupt the first turn");
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed runtime-routed first turn should release active admission");
     }
@@ -17353,7 +17545,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hook));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let primitive = runtime_content_turn_primitive();
@@ -17396,7 +17588,7 @@ mod tests {
             .expect("busy pre-run interrupt must not cancel or corrupt runtime apply");
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed runtime apply should release active admission");
     }
@@ -17407,7 +17599,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -17433,7 +17625,7 @@ mod tests {
             .await
             .expect("failed pending promotion should be restored and archivable");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("archive after failed promotion should release active admission");
     }
@@ -17444,7 +17636,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -17466,7 +17658,7 @@ mod tests {
         assert_eq!(err.code, error::INVALID_PARAMS);
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -17497,7 +17689,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let primitive = runtime_content_turn_primitive();
@@ -17540,7 +17732,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let primitive = runtime_resume_pending_primitive();
@@ -17592,7 +17784,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect(
                 "pre-run no-pending terminal should release staged admission after machine archive",
@@ -17605,7 +17797,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let primitive = runtime_resume_pending_primitive();
@@ -17645,7 +17837,7 @@ mod tests {
             "machine-archived no-pending session should be gone, got {retry:?}"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("machine-archived no-pending session should release admission");
     }
@@ -17710,7 +17902,7 @@ mod tests {
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let no_pending = drive_pending_start_resume_pending(&runtime, &session_id)
@@ -17731,7 +17923,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("machine-archived no-pending start should release staged admission");
     }
@@ -17742,7 +17934,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let slot = runtime
@@ -17809,7 +18001,7 @@ mod tests {
             .await
             .expect("archive should release live capacity before replenishment");
         let _competitor = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("competing create should consume the released live capacity");
         let replenish = promotion_cleanup
@@ -17843,7 +18035,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let slot = runtime
@@ -17879,7 +18071,7 @@ mod tests {
 
         drop(service_admission);
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("aborted drop restore should release capacity after service admission drops");
     }
@@ -17895,7 +18087,7 @@ mod tests {
         );
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let mut archived = Session::with_id(session_id.clone());
@@ -17929,7 +18121,7 @@ mod tests {
             "archived store projection must not unregister runtime bindings"
         );
         let next = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             next.is_ok(),
@@ -17944,7 +18136,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create recoverable session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18032,7 +18224,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create recoverable session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18097,7 +18289,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create recoverable session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18158,7 +18350,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create recoverable session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18227,7 +18419,7 @@ mod tests {
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         assert!(
@@ -18253,7 +18445,7 @@ mod tests {
             "staged archive must unregister prepared runtime bindings"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("staged archive should release active admission capacity");
     }
@@ -18264,7 +18456,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18294,7 +18486,7 @@ mod tests {
             "materialized archive must unregister runtime bindings"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("materialized archive should release active admission capacity");
     }
@@ -18315,7 +18507,7 @@ mod tests {
         );
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         store.fail_after_successful_saves(1);
@@ -18338,7 +18530,7 @@ mod tests {
             "failed cleanup archive must not retire the runtime (document commit realizes first)"
         );
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -18380,7 +18572,7 @@ mod tests {
             "machine-retired no-pending start should unregister prepared runtime bindings"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("machine-retired no-pending start should release staged admission");
     }
@@ -18396,7 +18588,7 @@ mod tests {
         );
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         store.set_fail_save(true);
@@ -18420,7 +18612,7 @@ mod tests {
             "create persist failure should be surfaced for pending start: {failed:?}"
         );
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -18453,7 +18645,7 @@ mod tests {
             .await
             .expect("staged session should retry after durable store recovers");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed retry should release active admission");
     }
@@ -18474,7 +18666,7 @@ mod tests {
         );
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create staged session");
         store.fail_after_successful_saves(1);
@@ -18549,7 +18741,7 @@ mod tests {
             "machine-retired no-pending apply should unregister prepared runtime bindings"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("machine-retired no-pending apply should release staged admission");
     }
@@ -18560,7 +18752,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
-            .create_session(fail_after_first_build_config(), None, None)
+            .create_session(fail_after_first_build_config(), None, None, Vec::new())
             .await
             .expect("create session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18592,7 +18784,7 @@ mod tests {
         assert!(failed.is_err(), "second turn should fail");
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("failed turn should release admission capacity");
     }
@@ -18604,7 +18796,7 @@ mod tests {
         let (build_config, calls, release) = block_after_first_build_config();
 
         let session_id = runtime
-            .create_session(build_config, None, None)
+            .create_session(build_config, None, None, Vec::new())
             .await
             .expect("create session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18647,7 +18839,7 @@ mod tests {
         );
 
         let blocked = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             blocked
@@ -18661,7 +18853,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
         loop {
             match runtime
-                .create_session(mock_build_config(), None, None)
+                .create_session(mock_build_config(), None, None, Vec::new())
                 .await
             {
                 Ok(_) => break,
@@ -18685,7 +18877,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create materialized candidate");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18805,7 +18997,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let recoverable = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create recoverable session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18832,7 +19024,7 @@ mod tests {
             .await;
 
         let blocker = runtime
-            .create_session(slow_build_config(250), None, None)
+            .create_session(slow_build_config(250), None, None, Vec::new())
             .await
             .expect("create blocker");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18919,7 +19111,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create recoverable session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -18990,7 +19182,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create target session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -19016,7 +19208,7 @@ mod tests {
         }
 
         let _capacity_filler = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create capacity filler");
 
@@ -19058,7 +19250,7 @@ mod tests {
         let runtime = Arc::new(runtime);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create recoverable session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -19116,7 +19308,7 @@ mod tests {
         );
 
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("recovered pre-run terminal should release active admission");
     }
@@ -19128,7 +19320,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create session to archive");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -19170,7 +19362,7 @@ mod tests {
             "runtime apply must reject archived persisted recovery: {recovered:?}"
         );
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("rejected archived recovery must not leak active admission");
     }
@@ -19238,7 +19430,7 @@ mod tests {
 
         store.clear_failures();
         let admitted = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("discarded recovered create failure should release admission");
         runtime
@@ -19261,7 +19453,7 @@ mod tests {
             .await
             .expect("recovered session should retry after durable store recovers");
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed recovery retry should release active admission");
     }
@@ -19283,11 +19475,11 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let s1 = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let s2 = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19312,7 +19504,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19379,7 +19571,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19443,7 +19635,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19576,7 +19768,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19723,7 +19915,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19906,7 +20098,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19922,7 +20114,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -19949,7 +20141,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let mut stream = runtime
@@ -20015,7 +20207,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20081,7 +20273,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20134,7 +20326,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20167,7 +20359,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20201,7 +20393,10 @@ mod tests {
         let mut build = AgentBuildConfig::new("gpt-realtime-2");
         build.provider = Some(meerkat_core::Provider::OpenAI);
         build.llm_client_override = Some(Arc::new(MockLlmClient));
-        let session_id = runtime.create_session(build, None, None).await.unwrap();
+        let session_id = runtime
+            .create_session(build, None, None, Vec::new())
+            .await
+            .unwrap();
 
         let info = runtime
             .read_session_rich(&session_id)
@@ -20246,7 +20441,7 @@ mod tests {
         build.provider = Some(meerkat_core::Provider::OpenAI);
         build.llm_client_override = Some(Arc::new(MockLlmClient));
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session for deferred OpenAI realtime build");
 
@@ -20282,7 +20477,7 @@ mod tests {
         // typed variant guards against a regression where the staged read
         // silently swallows the gate error.
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create_session for deferred non-realtime build");
 
@@ -20329,7 +20524,7 @@ mod tests {
         build.provider = Some(meerkat_core::Provider::OpenAI);
         build.llm_client_override = Some(Arc::new(MockLlmClient));
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session for realtime build");
 
@@ -20402,7 +20597,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20440,7 +20635,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20724,7 +20919,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20759,7 +20954,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20808,7 +21003,7 @@ mod tests {
         let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -20968,7 +21163,7 @@ mod tests {
 
         // Create session with an Anthropic model (supports image_tool_results).
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21055,7 +21250,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21142,7 +21337,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21218,7 +21413,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21329,7 +21524,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21378,7 +21573,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21462,7 +21657,7 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21583,7 +21778,7 @@ mod tests {
             ..Default::default()
         });
         let session_id = runtime
-            .create_session(build, None, None)
+            .create_session(build, None, None, Vec::new())
             .await
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -21678,7 +21873,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -21717,6 +21912,7 @@ mod tests {
                 .start_turn_via_runtime(
                     &session_id,
                     "test".into(),
+                    Vec::new(),
                     tx,
                     None,
                     None,
@@ -21749,7 +21945,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -21758,6 +21954,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "promote pending without keep_alive override".into(),
+                Vec::new(),
                 tx,
                 None,
                 None,
@@ -21783,7 +21980,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
 
@@ -21792,6 +21989,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "test".into(),
+                Vec::new(),
                 tx,
                 None,
                 None,
@@ -21838,7 +22036,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("create session");
         let (tx, _rx) = mpsc::channel(100);
@@ -21873,6 +22071,7 @@ mod tests {
             .start_turn_via_runtime(
                 &session_id,
                 "invalid keep_alive on persisted-only".into(),
+                Vec::new(),
                 tx,
                 None,
                 None,
@@ -21893,7 +22092,7 @@ mod tests {
         wait_for_runtime_unregistered(&runtime, &session_id, "persisted-only keep_alive rejection")
             .await;
         runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("invalid keep_alive override should release active capacity");
     }
@@ -21946,7 +22145,7 @@ mod tests {
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
-            .create_session(mock_build_config(), None, None)
+            .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .unwrap();
         runtime
@@ -22279,7 +22478,12 @@ mod tests {
         // service map and would surface NotFound, causing the swap branch
         // to be skipped entirely (the verifier's CC2 finding).
         let session_id = runtime
-            .create_session(realtime_build_config("gpt-realtime-2"), None, None)
+            .create_session(
+                realtime_build_config("gpt-realtime-2"),
+                None,
+                None,
+                Vec::new(),
+            )
             .await
             .expect("create_session for live channel");
         let (event_tx, _rx) = mpsc::channel(100);
@@ -22437,7 +22641,12 @@ mod tests {
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
-            .create_session(realtime_build_config("gpt-realtime-2"), None, None)
+            .create_session(
+                realtime_build_config("gpt-realtime-2"),
+                None,
+                None,
+                Vec::new(),
+            )
             .await
             .expect("create_session for live channel");
 

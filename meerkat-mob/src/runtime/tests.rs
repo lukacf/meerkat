@@ -1246,6 +1246,11 @@ struct MockSessionService {
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     start_turn_prompts: RwLock<Vec<(SessionId, String)>>,
+    /// Per turn request: the user-channel shape the runner would materialize
+    /// — `(is_injected_context, text)` pairs in transcript order, derived
+    /// from the request's active lowering carrier (typed appends in runtime
+    /// mode, the `injected_context` field + prompt in direct mode).
+    start_turn_user_channel: RwLock<Vec<(SessionId, Vec<(bool, String)>)>>,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     cancel_after_boundary_supported: AtomicBool,
@@ -1312,6 +1317,7 @@ impl MockSessionService {
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             start_turn_prompts: RwLock::new(Vec::new()),
+            start_turn_user_channel: RwLock::new(Vec::new()),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             cancel_after_boundary_supported: AtomicBool::new(true),
@@ -1423,6 +1429,10 @@ impl MockSessionService {
 
     async fn recorded_start_turn_prompts(&self) -> Vec<(SessionId, String)> {
         self.start_turn_prompts.read().await.clone()
+    }
+
+    async fn recorded_start_turn_user_channel(&self) -> Vec<(SessionId, Vec<(bool, String)>)> {
+        self.start_turn_user_channel.read().await.clone()
     }
 
     async fn recorded_external_tools_flags(&self) -> Vec<bool> {
@@ -2064,6 +2074,30 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), req.prompt.text_content()));
+        let user_channel: Vec<(bool, String)> = if req.runtime.typed_turn_appends.is_empty() {
+            req.injected_context
+                .iter()
+                .map(|entry| (true, entry.text_content()))
+                .chain(std::iter::once((false, req.prompt.text_content())))
+                .collect()
+        } else {
+            use meerkat_core::lifecycle::run_primitive::ConversationAppendRole;
+            req.runtime
+                .typed_turn_appends
+                .iter()
+                .filter_map(|append| match append.role {
+                    ConversationAppendRole::InjectedContext => {
+                        Some((true, append.content.render_text()))
+                    }
+                    ConversationAppendRole::User => Some((false, append.content.render_text())),
+                    _ => None,
+                })
+                .collect()
+        };
+        self.start_turn_user_channel
+            .write()
+            .await
+            .push((id.clone(), user_channel));
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
@@ -8169,6 +8203,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         .expect("old supervisor bridge should explicitly trust peer for stale-epoch probe");
     let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
         super::bridge_protocol::BridgeDeliveryPayload {
+            injected_context: Vec::new(),
             supervisor: old_bridge
                 .supervisor_spec()
                 .await
@@ -32607,6 +32642,156 @@ async fn test_internal_queued_submit_work_drains_after_running_turn() {
     );
 }
 
+/// Ask 1 (design item 7), turn-driven work lane: injected context on a
+/// `WorkSpec` reaches the member's turn request as the user-channel shape
+/// `[injected..., work content]`, in delivery order.
+#[tokio::test]
+async fn test_turn_driven_submit_work_delivers_injected_context_before_work_content() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-injected-context");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("summarize the findings".to_string(), WorkOrigin::Internal)
+                .with_injected_context(vec![
+                    meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+                    meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+                ]),
+        )
+        .await
+        .expect("submit work with injected context");
+
+    wait_for_start_turn_call_count(
+        &service,
+        1,
+        "turn-driven work with injected context should start a turn",
+    )
+    .await;
+
+    let records = service.recorded_start_turn_user_channel().await;
+    let (_, user_channel) = records.last().expect("one turn request recorded");
+    assert_eq!(
+        user_channel,
+        &vec![
+            (true, "ambient alpha".to_string()),
+            (true, "ambient beta".to_string()),
+            (false, "summarize the findings".to_string()),
+        ],
+        "injected context must reach the member turn request as typed \
+         injected-context entries before the work content, in order"
+    );
+}
+
+/// Ask 1 (design item 7), autonomous decision: the autonomous inbox path
+/// flows through comms plain events (no user-channel work boundary), so
+/// non-empty injected context is rejected fail-closed with a typed error —
+/// never silently dropped.
+#[tokio::test]
+async fn test_autonomous_submit_work_with_injected_context_rejected() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("lead-injected-context");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let baseline_injects = service.inject_call_count();
+    let err = handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("do the thing".to_string(), WorkOrigin::External).with_injected_context(
+                vec![meerkat_core::types::ContentInput::Text(
+                    "ambient".to_string(),
+                )],
+            ),
+        )
+        .await
+        .expect_err("autonomous inbox delivery cannot carry injected context");
+    assert!(
+        matches!(err, MobError::InjectedContextUndeliverable { .. }),
+        "expected typed InjectedContextUndeliverable, got {err:?}"
+    );
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects,
+        "rejected work must not be partially injected"
+    );
+}
+
+/// Ask 1 (design item 7), steer decision: steer dispatch realizes as live
+/// system-context appends (no transcript boundary), so injected context on a
+/// steer-mode work submission is rejected fail-closed with a typed error.
+#[tokio::test]
+async fn test_steer_submit_work_with_injected_context_rejected() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-steer-injected");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let err = handle
+        .submit_work_with_mode(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("urgent update".to_string(), WorkOrigin::Internal).with_injected_context(
+                vec![meerkat_core::types::ContentInput::Text(
+                    "ambient".to_string(),
+                )],
+            ),
+            HandlingMode::Steer,
+        )
+        .await
+        .expect_err("steer dispatch cannot carry injected context");
+    assert!(
+        matches!(err, MobError::InjectedContextUndeliverable { .. }),
+        "expected typed InjectedContextUndeliverable, got {err:?}"
+    );
+}
+
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
@@ -41179,6 +41364,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::StaleEventCursor { .. } => "stale_event_cursor".to_string(),
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
         MobError::WorkCancellationUnsupported(_) => "work_cancellation_unsupported".to_string(),
+        MobError::InjectedContextUndeliverable { .. } => {
+            "injected_context_undeliverable".to_string()
+        }
         MobError::ActorCommandChannelClosed => "actor_command_channel_closed".to_string(),
         MobError::ActorReplyChannelClosed => "actor_reply_channel_closed".to_string(),
         MobError::BridgeSessionNotInLiveAuthority { .. } => {

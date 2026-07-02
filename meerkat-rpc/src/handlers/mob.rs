@@ -1744,7 +1744,17 @@ pub async fn handle_submit_work(
         Ok(c) => c,
         Err(err) => return invalid_params(id, format!("invalid content: {err}")),
     };
-    let spec = meerkat_mob::WorkSpec::new(content, origin);
+    let injected_context = match params
+        .injected_context
+        .unwrap_or_default()
+        .into_iter()
+        .map(ContentInput::try_from)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(entries) => entries,
+        Err(err) => return invalid_params(id, format!("invalid injected_context: {err}")),
+    };
+    let spec = meerkat_mob::WorkSpec::new(content, origin).with_injected_context(injected_context);
     match state
         .mob_submit_work(&mob_id, runtime_id.clone(), fence_token, work_ref, spec)
         .await
@@ -2169,6 +2179,19 @@ pub async fn handle_mob_turn_start(
         Ok(prompt) => prompt,
         Err(err) => return invalid_params(id, format!("invalid prompt: {err}")),
     };
+    let injected_context = match mob_params
+        .injected_context
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(ContentInput::try_from)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+    {
+        Ok(entries) => entries,
+        Err(err) => return invalid_params(id, format!("invalid injected_context: {err}")),
+    };
     let turn_params = super::turn::StartTurnParams {
         session_id: session_id.to_string(),
         prompt,
@@ -2188,7 +2211,7 @@ pub async fn handle_mob_turn_start(
         structured_output_retries: mob_params.structured_output_retries,
         provider_params: lower_turn_metadata_override(mob_params.provider_params),
         auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
-        injected_context: None,
+        injected_context,
     };
 
     super::turn::start_turn_with_params(

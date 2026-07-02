@@ -305,6 +305,11 @@ pub struct StagedSlot {
     /// Prompt supplied at `session/create` time when the initial turn is
     /// deferred. Prepended to the first `turn/start` prompt on promotion.
     pub deferred_prompt: Option<ContentInput>,
+    /// Host-attached injected context supplied at `session/create` time when
+    /// the initial turn is deferred. Persists alongside `deferred_prompt`
+    /// and materializes at promotion as typed injected-context messages
+    /// immediately before the first turn's user message.
+    pub deferred_injected_context: Vec<ContentInput>,
     pub created_at_secs: u64,
     pub updated_at_secs: u64,
 }
@@ -317,6 +322,7 @@ impl StagedSlot {
         effective_llm_identity: SessionLlmIdentity,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
+        deferred_injected_context: Vec<ContentInput>,
         created_at_secs: u64,
         updated_at_secs: u64,
         machine_archived_resume_authorized: bool,
@@ -336,6 +342,7 @@ impl StagedSlot {
             },
             labels,
             deferred_prompt,
+            deferred_injected_context,
             created_at_secs,
             updated_at_secs,
         })
@@ -360,6 +367,9 @@ pub struct PromotingSlot {
     pub effective_llm_identity: SessionLlmIdentity,
     pub labels: Option<BTreeMap<String, String>>,
     pub deferred_prompt: Option<ContentInput>,
+    /// Deferred-create injected context; materializes at promotion before
+    /// the merged first-turn user message.
+    pub deferred_injected_context: Vec<ContentInput>,
     pub created_at_secs: u64,
     pub updated_at_secs: u64,
     pub generated_machine_archived_resume_admission: GeneratedMachineArchivedResumeAdmission,
@@ -674,6 +684,7 @@ impl StagedSessionRegistry {
             effective_llm_identity,
             labels: slot.labels.clone(),
             deferred_prompt: slot.deferred_prompt.clone(),
+            deferred_injected_context: slot.deferred_injected_context.clone(),
             created_at_secs: slot.created_at_secs,
             updated_at_secs: slot.updated_at_secs,
             generated_machine_archived_resume_admission:
@@ -742,6 +753,7 @@ impl StagedSessionRegistry {
         build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
+        deferred_injected_context: Vec<ContentInput>,
         created_at_secs: u64,
         updated_at_secs: u64,
     ) -> bool {
@@ -761,6 +773,7 @@ impl StagedSessionRegistry {
         };
         slot.labels = labels;
         slot.deferred_prompt = deferred_prompt;
+        slot.deferred_injected_context = deferred_injected_context;
         slot.created_at_secs = created_at_secs;
         slot.updated_at_secs = updated_at_secs;
         true
@@ -1011,6 +1024,7 @@ mod tests {
             identity("test-model"),
             None,
             None,
+            Vec::new(),
             100,
             100,
             false,
@@ -1083,6 +1097,7 @@ mod tests {
             identity("test-model"),
             None,
             None,
+            Vec::new(),
             100,
             100,
             false,
@@ -1119,6 +1134,7 @@ mod tests {
             *promoted.build_config,
             promoted.labels,
             promoted.deferred_prompt,
+            promoted.deferred_injected_context,
             promoted.created_at_secs,
             promoted.updated_at_secs,
         )
@@ -1153,6 +1169,7 @@ mod tests {
                 *promoted.build_config,
                 promoted.labels,
                 promoted.deferred_prompt,
+                promoted.deferred_injected_context,
                 promoted.created_at_secs,
                 promoted.updated_at_secs,
             )
@@ -1189,6 +1206,7 @@ mod tests {
                 *promoted.build_config,
                 promoted.labels,
                 promoted.deferred_prompt,
+                promoted.deferred_injected_context,
                 promoted.created_at_secs,
                 promoted.updated_at_secs,
             )

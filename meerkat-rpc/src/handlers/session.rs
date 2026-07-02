@@ -237,21 +237,6 @@ pub async fn create_session_with_params(
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
-    // session/create routes the first turn through the runtime prompt-input
-    // path, which does not carry the injected-context slot yet. Fail closed
-    // rather than silently dropping host-provided context.
-    if params
-        .injected_context
-        .as_ref()
-        .is_some_and(|entries| !entries.is_empty())
-    {
-        return RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            "injected_context is not supported on the JSON-RPC surface yet",
-        );
-    }
-
     let model_was_explicit = params.model.is_some();
     // When the caller does not pin a model, the runtime's configured default is
     // resolved through the catalog-owned `resolve_create_session_default_model`
@@ -391,14 +376,22 @@ pub async fn create_session_with_params(
         }
     };
 
-    // Create the session. When deferred, stash the prompt for the first turn.
-    let deferred_prompt = if params.initial_turn == Some(InitialTurn::Deferred) {
-        Some(params.prompt.clone())
-    } else {
-        None
-    };
+    // Create the session. When deferred, stash the prompt (and any injected
+    // context) for the first turn; both materialize at promotion.
+    let injected_context = params.injected_context.unwrap_or_default();
+    let (deferred_prompt, deferred_injected_context, injected_context) =
+        if params.initial_turn == Some(InitialTurn::Deferred) {
+            (Some(params.prompt.clone()), injected_context, Vec::new())
+        } else {
+            (None, Vec::new(), injected_context)
+        };
     let session_id = match runtime
-        .create_session(build_config, params.labels, deferred_prompt)
+        .create_session(
+            build_config,
+            params.labels,
+            deferred_prompt,
+            deferred_injected_context,
+        )
         .await
     {
         Ok(sid) => sid,
@@ -516,12 +509,14 @@ pub async fn create_session_with_params(
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
         let prompt_for_turn = params.prompt.clone();
+        let injected_context_for_turn = injected_context.clone();
         let skill_refs_for_turn = skill_refs.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
                 .start_turn_via_runtime(
                     &sid_for_turn,
                     prompt_for_turn,
+                    injected_context_for_turn,
                     event_tx_for_turn,
                     skill_refs_for_turn,
                     None,
@@ -563,6 +558,7 @@ pub async fn create_session_with_params(
             .start_turn_via_runtime(
                 &session_id,
                 params.prompt,
+                injected_context,
                 mcp_event_tx,
                 skill_refs,
                 None,

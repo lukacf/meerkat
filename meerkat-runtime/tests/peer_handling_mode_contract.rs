@@ -27,6 +27,7 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver) {
 
 fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
     Input::Peer(PeerInput {
+        injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
             id: InputId::new(),

@@ -4217,18 +4217,6 @@ async fn create_session_inner(
     {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
-    // REST create routes the first turn through the runtime prompt-input
-    // path, which does not carry the injected-context slot yet. Fail closed
-    // rather than silently dropping host-provided context.
-    if req
-        .injected_context
-        .as_ref()
-        .is_some_and(|entries| !entries.is_empty())
-    {
-        return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(
-            "injected_context is not supported on the REST surface yet".to_string(),
-        )));
-    }
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -4567,19 +4555,24 @@ async fn create_session_inner(
         }
     }
 
-    // Create input and route through runtime
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
-        req.prompt,
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
-                skill_references,
-                flow_tool_overlay: None,
-                additional_instructions: None,
-                ..Default::default()
-            },
-        ),
-    ));
+    // Create input and route through runtime. Injected context lowers
+    // through the prompt input's typed slot so the runtime batch places the
+    // InjectedContext-role appends immediately before the user append.
+    let input = meerkat_runtime::Input::Prompt(
+        meerkat_runtime::PromptInput::from_content_input(
+            req.prompt,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
+                    skill_references,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                    ..Default::default()
+                },
+            ),
+        )
+        .with_injected_context(req.injected_context.unwrap_or_default()),
+    );
 
     // Final cancel recheck before submitting input — interrupt() is a no-op
     // when no turn is running, so cancel between the last recheck and here
@@ -5201,18 +5194,6 @@ async fn continue_session_inner(
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
-    // REST continue routes the turn through the runtime prompt-input path,
-    // which does not carry the injected-context slot yet. Fail closed rather
-    // than silently dropping host-provided context.
-    if req
-        .injected_context
-        .as_ref()
-        .is_some_and(|entries| !entries.is_empty())
-    {
-        return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(
-            "injected_context is not supported on the REST surface yet".to_string(),
-        )));
-    }
     let path_session_id = match resolve_session_id_for_state(id, state) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -5697,8 +5678,8 @@ async fn continue_session_inner(
                 runtime_executor_attach_error_to_api(error),
             ));
         }
-        let input =
-            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
+        let input = meerkat_runtime::Input::Prompt(
+            meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -5714,7 +5695,9 @@ async fn continue_session_inner(
                         ..Default::default()
                     },
                 ),
-            ));
+            )
+            .with_injected_context(req.injected_context.clone().unwrap_or_default()),
+        );
         // Final cancel recheck before submitting input.
         if let Some(ctx) = req_ctx.as_ref()
             && ctx.cancel_already_requested()
@@ -5993,8 +5976,8 @@ async fn continue_session_inner(
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestTerminal::RespondWithoutPublish(Err(e));
         }
-        let input =
-            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
+        let input = meerkat_runtime::Input::Prompt(
+            meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -6010,7 +5993,9 @@ async fn continue_session_inner(
                         ..Default::default()
                     },
                 ),
-            ));
+            )
+            .with_injected_context(req.injected_context.clone().unwrap_or_default()),
+        );
         let input_id = input.id().clone();
         let mut pre_admission_registration = None;
         if let Some(admission) = pending_pre_admission.take() {
@@ -10844,6 +10829,98 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(payload["session_id"].is_string());
         assert_eq!(payload["text"], "ok");
+    }
+
+    /// REST end-to-end acceptance for Ask 1: `injected_context` on session
+    /// create materializes as typed injected-context transcript messages
+    /// immediately before the first turn's user message, in order — visible
+    /// through the history projection's typed `transcript_role`.
+    #[tokio::test]
+    async fn test_create_session_injected_context_lands_before_user_message() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let app = router(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "What changed?",
+                            "injected_context": ["ambient alpha", "ambient beta"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("create with injected context timed out")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = payload["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let history_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{session_id}/history"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history_response.status(), StatusCode::OK);
+        let history_body = history_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let history: serde_json::Value = serde_json::from_slice(&history_body).unwrap();
+        let user_channel: Vec<(String, String)> = history["messages"]
+            .as_array()
+            .expect("history messages")
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .map(|message| {
+                (
+                    message
+                        .get("transcript_role")
+                        .and_then(|role| role.as_str())
+                        .unwrap_or("conversational")
+                        .to_string(),
+                    message["content"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            user_channel,
+            vec![
+                ("injected_context".to_string(), "ambient alpha".to_string()),
+                ("injected_context".to_string(), "ambient beta".to_string()),
+                ("conversational".to_string(), "What changed?".to_string()),
+            ],
+            "injected context must land as typed injected-context messages \
+             immediately before the first turn's user message: {history}"
+        );
     }
 
     #[test]

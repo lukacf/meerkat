@@ -500,13 +500,17 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     boundary: RunApplyBoundary,
     semantics: &[crate::ingress_types::RuntimeInputSemantics],
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
+    // Injected-context appends chain BEFORE the input's own append: the
+    // delivery invariant is that host-attached injected context lands in the
+    // transcript immediately before the turn's user/peer message, in order.
     let appends = projections
         .iter()
         .flat_map(|projection| {
             projection
-                .append
+                .injected_context_appends
                 .clone()
                 .into_iter()
+                .chain(projection.append.clone())
                 .chain(projection.additional_appends.clone())
         })
         .collect::<Vec<_>>();
@@ -1974,6 +1978,7 @@ mod tests {
 
     fn make_prompt(text: &str) -> Input {
         Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -1999,6 +2004,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2025,6 +2031,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer_message_uses_body_when_projection_text_is_empty() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2052,6 +2059,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer_request_is_runtime_owned_and_ignores_bogus_body() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2090,6 +2098,7 @@ mod tests {
     #[test]
     fn machine_batch_projection_peer_response_terminal_is_runtime_owned_from_typed_payload() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2142,6 +2151,7 @@ mod tests {
         // convention + the Result JSON verbatim; any per-fixture semantics
         // belong to the peer application, not the runtime.
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2300,6 +2310,7 @@ mod tests {
     fn peer_response_terminal_forced_immediate_boundary_is_invalid_apply_intent()
     -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2377,6 +2388,7 @@ mod tests {
         // override and the runtime-loop batch path already stages it as
         // RunStart.
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2432,6 +2444,7 @@ mod tests {
         // runtime), which later surfaced as
         // "wire requires comms runtime for '<peer>'" during respawn.
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2481,6 +2494,7 @@ mod tests {
     #[test]
     fn queued_peer_response_terminal_starts_requester_reaction_turn() -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2545,6 +2559,7 @@ mod tests {
     fn peer_response_terminal_apply_intent_is_policy_runtime_and_executor_consistent()
     -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2619,6 +2634,7 @@ mod tests {
 
     fn make_peer_message(peer_id: &str, body: &str) -> Input {
         Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2693,6 +2709,7 @@ mod tests {
 
     fn make_terminal_peer_response(peer_id: &str, request_id: &str) -> Input {
         Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2819,6 +2836,7 @@ mod tests {
         ];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963001";
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2879,6 +2897,7 @@ mod tests {
         ];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963002";
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2933,6 +2952,7 @@ mod tests {
         }];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963003";
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -2986,6 +3006,7 @@ mod tests {
         }];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963004";
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -3697,6 +3718,56 @@ mod tests {
         );
     }
 
+    /// Delivery-order invariant: injected-context appends land in the staged
+    /// primitive immediately BEFORE the turn's user append, in order.
+    #[test]
+    fn primitive_places_injected_context_appends_before_user_append() {
+        let mut input = make_prompt("the prompt");
+        let Input::Prompt(prompt) = &mut input else {
+            panic!("make_prompt must build a prompt input");
+        };
+        prompt.injected_context = vec![
+            meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+            meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+        ];
+
+        let primitive = input_to_primitive(&input, input.id().clone())
+            .expect("single prompt input metadata cannot conflict");
+        let RunPrimitive::StagedInput(staged) = &primitive else {
+            panic!("expected staged input");
+        };
+        use meerkat_core::lifecycle::run_primitive::ConversationAppendRole as Role;
+        let shapes = staged
+            .appends
+            .iter()
+            .map(|append| (append.role, append.content.render_text()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shapes,
+            vec![
+                (Role::InjectedContext, "ambient alpha".to_string()),
+                (Role::InjectedContext, "ambient beta".to_string()),
+                (Role::User, "the prompt".to_string()),
+            ],
+        );
+        // The extracted boundary prompt must not fold the injected context in
+        // — it is delivered ALONGSIDE the user message, never inside it.
+        assert_eq!(
+            primitive.extract_content_input().text_content(),
+            "the prompt"
+        );
+        // The promotion path's re-lowering projection recovers the entries in
+        // delivery order.
+        assert_eq!(
+            primitive
+                .injected_context_content_inputs()
+                .iter()
+                .map(meerkat_core::types::ContentInput::text_content)
+                .collect::<Vec<_>>(),
+            vec!["ambient alpha".to_string(), "ambient beta".to_string()],
+        );
+    }
+
     #[test]
     fn primitive_from_idle_peer_steer_normalizes_execution_handling_mode() {
         let mut input = make_peer_message("peer-steer", "urgent helper update");
@@ -3762,6 +3833,7 @@ mod tests {
     #[test]
     fn primitive_from_peer_terminal_has_content_turn() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
@@ -3803,6 +3875,7 @@ mod tests {
         // helper batch that mixes kinds must fail instead of inventing a local
         // ContentTurn default.
         let peer = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),

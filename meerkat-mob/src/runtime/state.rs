@@ -252,6 +252,10 @@ pub(super) struct SubmitWorkPayload {
     pub work_ref: WorkRef,
     pub content: ContentInput,
     pub origin: WorkOrigin,
+    /// Host-attached injected context riding with the work content. Shell
+    /// dispatch carrier only — the MobMachine DSL admits identity facts
+    /// (runtime id, fence, work id, origin), never content payloads.
+    pub injected_context: Vec<ContentInput>,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
     pub ack_mode: crate::mob_machine::SubmitWorkAckMode,

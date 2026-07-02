@@ -336,6 +336,7 @@ impl RuntimeStore for FailPersistInputStore {
 
 fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -354,6 +355,7 @@ fn make_prompt(text: &str) -> Input {
 
 fn make_multimodal_prompt(text: &str, label: &str) -> Input {
     Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),

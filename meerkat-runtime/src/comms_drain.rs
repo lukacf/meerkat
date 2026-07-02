@@ -815,6 +815,10 @@ fn peer_input_from_delivery_payload(
         // Bridge delivery payloads are supervisor-authored work deliveries,
         // not peer comms envelopes: no sender taint declaration exists.
         sender_taint: None,
+        // Supervisor-attached injected context rides the delivery payload
+        // and lowers as InjectedContext-role transcript appends immediately
+        // before this input's peer append.
+        injected_context: payload.injected_context,
     })
 }
 
@@ -6084,6 +6088,7 @@ mod tests {
     fn peer_turn_metadata_matches_live_interaction_complete_identity() {
         let interaction_id = InteractionId(Uuid::new_v4());
         let input = crate::input::Input::Peer(crate::input::PeerInput {
+            injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -6343,6 +6348,7 @@ mod tests {
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             InteractionId(Uuid::new_v4()),
             BridgeDeliveryPayload {
+                injected_context: Vec::new(),
                 supervisor: supervisor_bridge_spec(),
                 epoch: 1,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -6359,6 +6365,65 @@ mod tests {
             peer.handling_mode,
             Some(HandlingMode::Queue),
             "bridge delivery explicit queue must survive into MeerkatMachine admission"
+        );
+    }
+
+    /// Remote-member receiver lowering: injected context on a bridge
+    /// delivery payload reaches the peer-work input's typed slot, and the
+    /// peer projection places the InjectedContext-role appends before the
+    /// peer work append.
+    #[test]
+    fn bridge_delivery_payload_injected_context_projects_before_peer_append() {
+        let input = peer_input_from_delivery_payload(
+            &SessionId::new(),
+            PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
+            InteractionId(Uuid::new_v4()),
+            BridgeDeliveryPayload {
+                injected_context: vec![
+                    meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+                    meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+                ],
+                supervisor: supervisor_bridge_spec(),
+                epoch: 1,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                input_id: "bridge-delivery-injected-context-test".to_string(),
+                content: meerkat_core::types::ContentInput::Text("work content".to_string()),
+                handling_mode: HandlingMode::Queue,
+            },
+        );
+
+        let Input::Peer(peer) = &input else {
+            panic!("bridge delivery must project to peer input");
+        };
+        assert_eq!(
+            peer.injected_context,
+            vec![
+                meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+                meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+            ],
+        );
+
+        let projection = crate::input::runtime_input_projection_for_machine_batch(&input);
+        assert_eq!(
+            projection
+                .injected_context_appends
+                .iter()
+                .map(|append| (append.role, append.content.render_text()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    meerkat_core::lifecycle::run_primitive::ConversationAppendRole::InjectedContext,
+                    "ambient alpha".to_string()
+                ),
+                (
+                    meerkat_core::lifecycle::run_primitive::ConversationAppendRole::InjectedContext,
+                    "ambient beta".to_string()
+                ),
+            ],
+        );
+        assert!(
+            projection.append.is_some(),
+            "peer work append must survive alongside injected context"
         );
     }
 

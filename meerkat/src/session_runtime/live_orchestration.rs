@@ -557,8 +557,23 @@ mod orchestrator {
                 build_config,
                 labels,
                 deferred_prompt,
+                deferred_injected_context,
                 ..
             } = slot;
+            // Realtime-open promotion stages the deferred prompt as a pending
+            // continuation, and the pending-continuation turn lane rejects
+            // injected context (there is no StartTurnRequest to carry it).
+            // Fail closed rather than silently dropping the deferred
+            // injected context; `promotion_cleanup` restores the staged slot
+            // on this early return, so a later `turn/start` promotion still
+            // delivers it.
+            if !deferred_injected_context.is_empty() {
+                return Err(SessionError::Unsupported(
+                    "a deferred session created with injected_context cannot be promoted by \
+                     realtime open; promote it with turn/start"
+                        .to_string(),
+                ));
+            }
             let mut build_config = *build_config;
 
             if build_config.llm_client_override.is_none()

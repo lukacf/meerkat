@@ -125,6 +125,10 @@ impl SubmitWorkDispatchCompletion {
 
 struct SubmitWorkDispatchRequest {
     content: ContentInput,
+    /// Host-attached injected context riding with the work content.
+    /// Deliverable on queue-mode turn-driven dispatch (local and remote);
+    /// autonomous inbox delivery and steer dispatch reject it fail-closed.
+    injected_context: Vec<ContentInput>,
     handling_mode: meerkat_core::types::HandlingMode,
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
@@ -6815,6 +6819,7 @@ impl MobActor {
             use meerkat_runtime::{Input, InputHeader, PromptInput};
 
             let input = Input::Prompt(PromptInput {
+                injected_context: Vec::new(),
                 header: InputHeader {
                     id: meerkat_core::lifecycle::InputId::new(),
                     timestamp: chrono::Utc::now(),
@@ -17869,6 +17874,7 @@ impl MobActor {
             work_ref,
             content,
             origin,
+            injected_context,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -18047,6 +18053,7 @@ impl MobActor {
                 ingress_authority,
                 SubmitWorkDispatchRequest {
                     content,
+                    injected_context,
                     handling_mode,
                     render_metadata,
                     ack_mode,
@@ -18161,6 +18168,9 @@ impl MobActor {
                 ingress_authority,
                 SubmitWorkDispatchRequest {
                     content,
+                    // Spawn kickoff is mob-internal coordination content; the
+                    // injected-context slot belongs to the submit-work lane.
+                    injected_context: Vec::new(),
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     render_metadata: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
@@ -18297,6 +18307,7 @@ impl MobActor {
     ) -> Result<SubmitWorkDispatchCompletion, MobError> {
         let SubmitWorkDispatchRequest {
             content,
+            injected_context,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -18311,6 +18322,16 @@ impl MobActor {
             ingress_authority = ingress_authority.variant(),
             "dispatch_member_turn_after_machine_admission started"
         );
+        // Steer dispatch realizes as live system-context appends — there is
+        // no transcript boundary for injected context to precede. Fail
+        // closed before the mode fork rather than silently dropping it.
+        if !injected_context.is_empty() && handling_mode == meerkat_core::types::HandlingMode::Steer
+        {
+            return Err(MobError::InjectedContextUndeliverable {
+                member_id: crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
+                reason: "steer dispatch carries no transcript boundary for injected context",
+            });
+        }
         let live_steer_admission = handling_mode == meerkat_core::types::HandlingMode::Steer
             && ack_mode == crate::mob_machine::SubmitWorkAckMode::IngressAccepted;
         tracing::debug!(
@@ -18408,6 +18429,9 @@ impl MobActor {
                     .await?
                 {
                     let req = meerkat_core::service::StartTurnRequest {
+                        // The admission barrier is steer-only; steer dispatch
+                        // with injected context was rejected before the mode
+                        // fork, so this carrier is invariantly empty here.
                         injected_context: Vec::new(),
                         prompt: content,
                         system_prompt: None,
@@ -18428,6 +18452,18 @@ impl MobActor {
                         operation_id,
                         member_ref: machine_member_ref,
                         req: Box::new(req),
+                    });
+                }
+                // The autonomous inbox path flows through comms plain events
+                // (`InboxItem::PlainEvent` -> classified external event ->
+                // SystemNotice transcript append): there is no user-channel
+                // work boundary for typed injected-context messages to
+                // precede. Fail closed rather than laundering the context
+                // into notice prose or silently dropping it.
+                if !injected_context.is_empty() {
+                    return Err(MobError::InjectedContextUndeliverable {
+                        member_id: crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
+                        reason: "autonomous inbox delivery carries no user-channel work boundary",
                     });
                 }
                 let injector = self
@@ -18475,7 +18511,13 @@ impl MobActor {
                     "dispatch_member_turn_after_machine_admission building turn request"
                 );
                 let req = meerkat_core::service::StartTurnRequest {
-                    injected_context: Vec::new(),
+                    // Turn-driven work requests carry no typed_turn_appends;
+                    // the injected-context field is the single lowering
+                    // carrier here. Runtime-backed members re-lower it into
+                    // the prompt input's typed slot
+                    // (`runtime_input_from_turn_request`); direct
+                    // session-service members materialize it in the runner.
+                    injected_context,
                     prompt: content,
                     system_prompt: None,
                     event_tx: None,

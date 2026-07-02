@@ -1225,6 +1225,12 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::WorkCancellationUnsupported(_) => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
+        // Spawn kickoff dispatch never carries injected context (the slot
+        // belongs to the submit-work lane), so this cannot be a spawn-many
+        // failure cause. Classify as Internal to keep the match total.
+        MobError::InjectedContextUndeliverable { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
@@ -2465,6 +2471,7 @@ impl MobHandle {
                     work_ref,
                     content: spec.content,
                     origin: spec.origin,
+                    injected_context: spec.injected_context,
                     handling_mode,
                     render_metadata,
                     ack_mode,

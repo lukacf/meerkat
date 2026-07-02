@@ -295,6 +295,14 @@ pub struct PromptInput {
     /// them into model-facing text only when building the provider request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub typed_turn_appends: Vec<ConversationAppend>,
+    /// Host-attached injected context delivered alongside (not inside) this
+    /// turn's prompt. Each entry lowers into a separate
+    /// [`ConversationAppendRole::InjectedContext`] transcript append placed
+    /// immediately BEFORE the turn's user append, in order — the typed slot
+    /// the content arrived in mints the transcript role. Additive on durable
+    /// input persistence (absent on older persisted inputs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_context: Vec<ContentInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
@@ -315,6 +323,7 @@ impl PromptInput {
             },
             content: ContentInput::Text(text.into()),
             typed_turn_appends: Vec::new(),
+            injected_context: Vec::new(),
             turn_metadata,
         }
     }
@@ -337,8 +346,15 @@ impl PromptInput {
             },
             content: input,
             typed_turn_appends: Vec::new(),
+            injected_context: Vec::new(),
             turn_metadata,
         }
+    }
+
+    /// Attach host-attached injected context to this prompt input.
+    pub fn with_injected_context(mut self, injected_context: Vec<ContentInput>) -> Self {
+        self.injected_context = injected_context;
+        self
     }
 }
 
@@ -377,6 +393,17 @@ pub struct PeerInput {
     /// durable input persistence (absent on older persisted inputs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_taint: Option<meerkat_core::comms::SenderContentTaint>,
+    /// Host-attached injected context carried by supervisor-authored work
+    /// deliveries (remote mob members over the supervisor bridge). Each entry
+    /// lowers into a separate
+    /// [`ConversationAppendRole::InjectedContext`] transcript append placed
+    /// immediately BEFORE this input's peer append, in order. Forbidden on
+    /// steer-mode deliveries (the steer realization path carries no
+    /// transcript appends — enforced by
+    /// [`crate::peer_handling_mode::validate_peer_handling_mode`]). Additive
+    /// on durable input persistence (absent on older persisted inputs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_context: Vec<ContentInput>,
 }
 
 /// Peer communication conventions.
@@ -437,6 +464,7 @@ pub fn peer_response_terminal_input(
     let display_identity = display_name.map_or_else(|| peer_id.clone(), |name| name.as_string());
 
     Input::Peer(PeerInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -990,10 +1018,33 @@ fn peer_response_terminal_context_append(
     }))
 }
 
+/// Lower host-attached injected context entries into typed
+/// `InjectedContext`-role transcript appends, preserving delivery order.
+/// The typed slot the content arrived in mints the transcript role.
+fn injected_context_appends(entries: &[ContentInput]) -> Vec<ConversationAppend> {
+    entries
+        .iter()
+        .map(|entry| ConversationAppend {
+            role: ConversationAppendRole::InjectedContext,
+            content: match entry {
+                ContentInput::Blocks(blocks) => CoreRenderable::Blocks {
+                    blocks: blocks.clone(),
+                },
+                ContentInput::Text(text) => CoreRenderable::Text { text: text.clone() },
+            },
+        })
+        .collect()
+}
+
 pub(crate) fn runtime_input_projection(
     input: &Input,
 ) -> crate::ingress_types::RuntimeInputProjection {
     crate::ingress_types::RuntimeInputProjection {
+        injected_context_appends: match input {
+            Input::Prompt(prompt) => injected_context_appends(&prompt.injected_context),
+            Input::Peer(peer) => injected_context_appends(&peer.injected_context),
+            _ => Vec::new(),
+        },
         append: input_to_append(input),
         additional_appends: match input {
             Input::Prompt(prompt) => prompt.typed_turn_appends.clone(),
@@ -1116,6 +1167,7 @@ mod tests {
     #[test]
     fn prompt_input_serde() {
         let input = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: make_header(),
             content: "hello".into(),
             typed_turn_appends: Vec::new(),
@@ -1131,6 +1183,7 @@ mod tests {
     fn prompt_input_typed_turn_appends_project_without_user_text() {
         let append = typed_runtime_notice_append("peer delivery");
         let input = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: make_header(),
             content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![append.clone()],
@@ -1145,10 +1198,127 @@ mod tests {
         assert_eq!(projection.additional_appends, vec![append]);
     }
 
+    /// Injected context on a prompt input projects into a distinct
+    /// `InjectedContext`-role append slot, preserving delivery order — never
+    /// the generic `additional_appends` carrier (which chains AFTER the user
+    /// append).
+    #[test]
+    fn prompt_input_injected_context_projects_before_user_append() {
+        let input = Input::Prompt(PromptInput {
+            injected_context: vec![
+                ContentInput::Text("ambient alpha".to_string()),
+                ContentInput::Text("ambient beta".to_string()),
+            ],
+            header: make_header(),
+            content: "the prompt".into(),
+            typed_turn_appends: Vec::new(),
+            turn_metadata: None,
+        });
+
+        let projection = runtime_input_projection(&input);
+        assert_eq!(projection.injected_context_appends.len(), 2);
+        assert!(
+            projection
+                .injected_context_appends
+                .iter()
+                .all(|append| { append.role == ConversationAppendRole::InjectedContext })
+        );
+        assert_eq!(
+            projection.injected_context_appends[0].content,
+            CoreRenderable::Text {
+                text: "ambient alpha".to_string()
+            }
+        );
+        assert_eq!(
+            projection.injected_context_appends[1].content,
+            CoreRenderable::Text {
+                text: "ambient beta".to_string()
+            }
+        );
+        assert!(
+            projection.additional_appends.is_empty(),
+            "injected context must not ride the generic typed_turn_appends carrier"
+        );
+        assert!(projection.append.is_some(), "user append must survive");
+    }
+
+    /// Injected context riding a supervisor bridge delivery projects before
+    /// the peer's own append (which lowers as a SystemNotice).
+    #[test]
+    fn peer_input_injected_context_projects_before_peer_append() {
+        let mut header = make_header();
+        header.source = InputOrigin::Peer {
+            peer_id: "peer-1".into(),
+            display_identity: Some("Peer One".into()),
+            runtime_id: None,
+        };
+        let input = Input::Peer(PeerInput {
+            injected_context: vec![ContentInput::Text("supervisor ambient".to_string())],
+            sender_taint: None,
+            header,
+            convention: Some(PeerConvention::Message),
+            content: "work content".into(),
+            payload: None,
+            handling_mode: None,
+        });
+
+        let projection = runtime_input_projection(&input);
+        assert_eq!(projection.injected_context_appends.len(), 1);
+        assert_eq!(
+            projection.injected_context_appends[0].role,
+            ConversationAppendRole::InjectedContext
+        );
+        assert!(
+            projection.append.is_some(),
+            "peer work append must survive alongside injected context"
+        );
+    }
+
+    /// Absent `injected_context` deserializes to empty (pre-field persisted
+    /// inputs stay readable) and empty is omitted on serialization.
+    #[test]
+    fn prompt_input_injected_context_serde_default_and_omission() {
+        let input = Input::Prompt(PromptInput {
+            injected_context: vec![ContentInput::Text("ambient".to_string())],
+            header: make_header(),
+            content: "hello".into(),
+            typed_turn_appends: Vec::new(),
+            turn_metadata: None,
+        });
+        let json = serde_json::to_value(&input).unwrap();
+        assert!(json.get("injected_context").is_some());
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        let Input::Prompt(prompt) = parsed else {
+            panic!("expected prompt input");
+        };
+        assert_eq!(prompt.injected_context.len(), 1);
+
+        let empty = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
+            header: make_header(),
+            content: "hello".into(),
+            typed_turn_appends: Vec::new(),
+            turn_metadata: None,
+        });
+        let mut json = serde_json::to_value(&empty).unwrap();
+        assert!(
+            json.get("injected_context").is_none(),
+            "empty injected context must be omitted on the wire"
+        );
+        // Pre-field persisted input (no key at all) deserializes to empty.
+        json.as_object_mut().unwrap().remove("injected_context");
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        let Input::Prompt(prompt) = parsed else {
+            panic!("expected prompt input");
+        };
+        assert!(prompt.injected_context.is_empty());
+    }
+
     #[test]
     fn prompt_input_typed_turn_appends_serde_roundtrip() {
         let append = typed_runtime_notice_append("typed appends persist");
         let input = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: make_header(),
             content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![append.clone()],
@@ -1167,6 +1337,7 @@ mod tests {
     #[test]
     fn peer_input_message_serde() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
@@ -1190,6 +1361,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header,
             convention: Some(PeerConvention::Message),
@@ -1256,6 +1428,7 @@ mod tests {
                 runtime_id: None,
             };
             let input = Input::Peer(PeerInput {
+                injected_context: Vec::new(),
                 sender_taint: declared,
                 header,
                 convention: Some(PeerConvention::Message),
@@ -1314,6 +1487,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header,
             convention: Some(PeerConvention::ResponseTerminal {
@@ -1363,6 +1537,7 @@ mod tests {
     fn steer_projection_uses_context_append_as_pending_system_context() {
         let input_id = InputId::new();
         let projection = crate::ingress_types::RuntimeInputProjection {
+            injected_context_appends: Vec::new(),
             append: Some(ConversationAppend {
                 role: ConversationAppendRole::SystemNotice,
                 content: CoreRenderable::Text {
@@ -1456,6 +1631,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header,
             convention: Some(PeerConvention::Message),
@@ -1488,6 +1664,7 @@ mod tests {
     fn steer_projection_filters_empty_context_and_empty_append() {
         let input_id = InputId::new();
         let context_projection = crate::ingress_types::RuntimeInputProjection {
+            injected_context_appends: Vec::new(),
             append: None,
             additional_appends: Vec::new(),
             context_append: Some(ConversationContextAppend {
@@ -1501,6 +1678,7 @@ mod tests {
         );
 
         let append_projection = crate::ingress_types::RuntimeInputProjection {
+            injected_context_appends: Vec::new(),
             append: Some(ConversationAppend {
                 role: ConversationAppendRole::SystemNotice,
                 content: CoreRenderable::Text { text: "\n".into() },
@@ -1525,6 +1703,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header,
             convention: Some(PeerConvention::ResponseTerminal {
@@ -1567,6 +1746,7 @@ mod tests {
     #[test]
     fn peer_input_request_serde() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Request {
@@ -1589,6 +1769,7 @@ mod tests {
     #[test]
     fn peer_input_response_terminal_serde() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::ResponseTerminal {
@@ -1607,6 +1788,7 @@ mod tests {
     #[test]
     fn peer_input_response_progress_serde() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::ResponseProgress {
@@ -1819,6 +2001,7 @@ mod tests {
     #[test]
     fn input_kind_id() {
         let prompt = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: make_header(),
             content: "hi".into(),
             typed_turn_appends: Vec::new(),
@@ -1827,6 +2010,7 @@ mod tests {
         assert_eq!(prompt.kind(), InputKind::Prompt);
 
         let peer_msg = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
@@ -1837,6 +2021,7 @@ mod tests {
         assert_eq!(peer_msg.kind(), InputKind::PeerMessage);
 
         let peer_req = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Request {
@@ -1928,6 +2113,7 @@ mod tests {
     #[test]
     fn peer_input_with_queue_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
@@ -2021,6 +2207,7 @@ mod tests {
     #[test]
     fn peer_input_with_steer_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
@@ -2040,6 +2227,7 @@ mod tests {
     #[test]
     fn peer_input_handling_mode_not_serialized_when_none() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),

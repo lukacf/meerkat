@@ -3460,6 +3460,7 @@ mod tests {
                     meerkat_core::SystemNoticeKind::Comms,
                     None,
                     SystemNoticeBlock::Comms {
+                        sender_taint: None,
                         kind: meerkat_core::types::CommsNoticeKind::Message,
                         direction: meerkat_core::SystemNoticeDirection::Incoming,
                         peer: Some(meerkat_core::SystemNoticePeer {

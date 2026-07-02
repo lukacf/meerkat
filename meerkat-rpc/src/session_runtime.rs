@@ -10934,6 +10934,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -11060,6 +11061,7 @@ mod tests {
             .accept_input(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -11240,6 +11242,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -11367,6 +11370,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    sender_taint: None,
                     header: meerkat_runtime::InputHeader {
                         id: meerkat_core::lifecycle::InputId::new(),
                         timestamp: chrono::Utc::now(),
@@ -11553,6 +11557,7 @@ mod tests {
         CoreCommsRuntime::send(
             &*sender,
             CommsCommand::PeerResponse {
+                content_taint: None,
                 to: PeerRoute::with_display_name(
                     operator_pubkey.to_peer_id(),
                     PeerName::new(operator_name.to_string()).expect("valid operator peer name"),
@@ -14910,6 +14915,7 @@ mod tests {
             .expect("save store-only session");
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

@@ -27,7 +27,9 @@ use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
 use crate::trust::{TrustEntry, TrustError, TrustStore, TrustedPeersView};
 use crate::types::{Envelope, MessageKind};
-use meerkat_core::comms::{GeneratedCommsTrustAuthoritySourceKind, PeerId};
+use meerkat_core::comms::{
+    GeneratedCommsTrustAuthoritySourceKind, PeerId, SendTaintOverride, SenderContentTaint,
+};
 
 type TrustSourceSet = std::collections::BTreeSet<GeneratedCommsTrustAuthoritySourceKind>;
 type PeerIdSet = std::collections::BTreeSet<PeerId>;
@@ -143,6 +145,12 @@ pub struct Router {
     /// `comms.peers` REST/RPC/MCP surface (e.g. the supervisor bridge in
     /// session-backed mob members).
     private_peer_sources: Arc<RwLock<TrustSourceMap>>,
+    /// Host-owned outbound content-taint declaration. Stamped onto every
+    /// content-bearing envelope at the single outbound choke point
+    /// ([`Router::send_with_id`]) unless a per-send override says otherwise.
+    /// Host-set config, not machine state: installed via
+    /// [`Router::set_outbound_content_taint`].
+    outbound_content_taint: RwLock<Option<SenderContentTaint>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -185,11 +193,26 @@ impl Router {
                 std::collections::BTreeMap::new(),
             )),
             private_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            outbound_content_taint: RwLock::new(None),
             config,
             require_peer_auth,
             inbox_sender,
             inproc_namespace: None,
         }
+    }
+
+    /// Install (or clear) the host-owned outbound content-taint declaration.
+    ///
+    /// `Some(taint)` stamps every subsequent content-bearing send with the
+    /// declaration; `None` sends no declaration. Per-send overrides on the
+    /// comms command surface take precedence via [`SendTaintOverride`].
+    pub fn set_outbound_content_taint(&self, taint: Option<SenderContentTaint>) {
+        *self.outbound_content_taint.write() = taint;
+    }
+
+    /// The currently-installed host-owned outbound content-taint declaration.
+    pub fn outbound_content_taint(&self) -> Option<SenderContentTaint> {
+        *self.outbound_content_taint.read()
     }
 
     /// Returns `true` if the peer is currently marked private.
@@ -530,7 +553,7 @@ impl Router {
     /// [`TrustResolveError::Ambiguous`](crate::trust::TrustResolveError::Ambiguous)
     /// case explicitly — the router will not guess.
     pub async fn send(&self, dest: PeerId, kind: MessageKind) -> Result<SendOutcome, SendError> {
-        self.send_with_id(dest, Uuid::new_v4(), kind).await
+        self.send_with_id(dest, Uuid::new_v4(), kind, None).await
     }
 
     /// Canonical send with a caller-supplied envelope id.
@@ -538,6 +561,13 @@ impl Router {
     /// Used by the correlated request/response path, which reserves a
     /// stream key before the envelope goes out so replies can correlate
     /// via `in_reply_to` without an extra local id map.
+    ///
+    /// `content_taint` is the per-send tri-state taint override: `None`
+    /// inherits the runtime-level declaration installed via
+    /// [`Router::set_outbound_content_taint`]; `Undeclared` strips the
+    /// declaration; `Declare(taint)` stamps exactly `taint`. The resolved
+    /// declaration is stamped here — the single outbound choke point — onto
+    /// content-bearing kinds, INSIDE the signed region, before signing.
     ///
     /// The returned [`SendOutcome`] carries the verified ACK truth: `acked` is
     /// `true` only when a peer ACK was received and cryptographically verified
@@ -547,11 +577,18 @@ impl Router {
         dest: PeerId,
         envelope_id: Uuid,
         kind: MessageKind,
+        content_taint: Option<SendTaintOverride>,
     ) -> Result<SendOutcome, SendError> {
         let Some(peer) = self.trusted_peer_by_peer_id(&dest) else {
             return Err(SendError::PeerNotFound(dest));
         };
         let addr = PeerAddr::parse(&peer.address.to_string())?;
+        let resolved_taint = match content_taint {
+            None => self.outbound_content_taint(),
+            Some(SendTaintOverride::Declare(taint)) => Some(taint),
+            Some(SendTaintOverride::Undeclared) => None,
+        };
+        let kind = kind.with_content_taint(resolved_taint);
         let mut envelope = Envelope {
             id: envelope_id,
             from: self.keypair.public_key(),
@@ -662,6 +699,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "needs ack".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),
@@ -718,6 +756,7 @@ mod tests {
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({"ok": true}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),
@@ -792,6 +831,7 @@ mod tests {
                 MessageKind::Message {
                     body: "cross-namespace must not deliver".to_string(),
                     blocks: None,
+                    content_taint: None,
                     handling_mode: None,
                 },
             )
@@ -877,6 +917,7 @@ mod tests {
                 MessageKind::Message {
                     body: "deliver in-namespace".to_string(),
                     blocks: None,
+                    content_taint: None,
                     handling_mode: None,
                 },
             )
@@ -1049,5 +1090,118 @@ mod tests {
             "the last private source removal clears directory privacy"
         );
         assert!(router.private_peer_ids().is_empty());
+    }
+
+    /// Ask 5 gate: the router is the single outbound taint-stamping choke
+    /// point. The runtime-level declaration is inherited when the per-send
+    /// override is absent; `Undeclared` strips it; `Declare(taint)` sets it.
+    #[tokio::test]
+    async fn send_with_id_stamps_outbound_content_taint_declaration() {
+        use crate::classify::test_support;
+        use crate::inbox::Inbox;
+        use crate::types::{InboxItem, MessageKind};
+        use meerkat_core::comms::SenderContentTaint;
+
+        let registry = InprocRegistry::global();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let namespace = format!("taint-{suffix}");
+
+        let receiver_kp = Keypair::generate();
+        let receiver_pubkey = receiver_kp.public_key();
+        let receiver_pubkey_bytes = *receiver_pubkey.as_bytes();
+        let (mut receiver_inbox, receiver_sender) = Inbox::new_classified(
+            test_support::classification_context(TrustStore::new(), false),
+        );
+        registry.register_with_meta_in_namespace(
+            &namespace,
+            "taint-receiver",
+            receiver_pubkey,
+            receiver_sender,
+            PeerMeta::default(),
+        );
+
+        let (_inbox, inbox_sender) = Inbox::new();
+        let router = Router::new(
+            Keypair::generate(),
+            CommsConfig::default(),
+            inbox_sender,
+            false,
+        )
+        .with_inproc_namespace(Some(namespace.clone()));
+        let peer_id = PeerId::from_ed25519_pubkey(&receiver_pubkey_bytes);
+        router
+            .add_trusted_peer_for_source(
+                peer(
+                    "taint-receiver",
+                    receiver_pubkey_bytes,
+                    "inproc://taint-receiver",
+                ),
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                false,
+            )
+            .expect("trust add");
+
+        let message = |body: &str| MessageKind::Message {
+            body: body.to_string(),
+            blocks: None,
+            content_taint: None,
+            handling_mode: None,
+        };
+        let mut received_taint = |expected_body: &str| {
+            let entries = receiver_inbox.try_drain_classified();
+            assert_eq!(entries.len(), 1, "expected exactly one delivered envelope");
+            let InboxItem::External { envelope } = &entries[0].item else {
+                panic!("expected external envelope");
+            };
+            let MessageKind::Message { body, .. } = &envelope.kind else {
+                panic!("expected message kind");
+            };
+            assert_eq!(body, expected_body);
+            envelope.kind.content_taint()
+        };
+
+        // No runtime declaration + absent override => no declaration.
+        router
+            .send_with_id(peer_id, Uuid::new_v4(), message("undeclared"), None)
+            .await
+            .expect("send");
+        assert_eq!(received_taint("undeclared"), None);
+
+        // Runtime declaration + absent override => inherit.
+        router.set_outbound_content_taint(Some(SenderContentTaint::Tainted));
+        router
+            .send_with_id(peer_id, Uuid::new_v4(), message("inherited"), None)
+            .await
+            .expect("send");
+        assert_eq!(
+            received_taint("inherited"),
+            Some(SenderContentTaint::Tainted)
+        );
+
+        // Runtime declaration + Undeclared override => strip.
+        router
+            .send_with_id(
+                peer_id,
+                Uuid::new_v4(),
+                message("stripped"),
+                Some(SendTaintOverride::Undeclared),
+            )
+            .await
+            .expect("send");
+        assert_eq!(received_taint("stripped"), None);
+
+        // Declare override wins over the runtime declaration.
+        router
+            .send_with_id(
+                peer_id,
+                Uuid::new_v4(),
+                message("declared"),
+                Some(SendTaintOverride::Declare(SenderContentTaint::Clean)),
+            )
+            .await
+            .expect("send");
+        assert_eq!(received_taint("declared"), Some(SenderContentTaint::Clean));
+
+        registry.unregister_in_namespace(&namespace, &receiver_pubkey);
     }
 }

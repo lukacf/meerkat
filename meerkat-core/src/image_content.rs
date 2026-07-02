@@ -339,6 +339,7 @@ mod tests {
                     id: crate::comms::PeerId::new(),
                     display_name: Some("operator".to_string()),
                 }),
+                sender_taint: None,
                 request_id: None,
                 intent: None,
                 status: None,

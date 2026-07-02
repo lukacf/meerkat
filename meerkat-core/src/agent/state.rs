@@ -2385,6 +2385,21 @@ where
                                 .collect(),
                             stop_reason: Some(stop_reason),
                             usage: Some(usage.clone()),
+                            // Typed projection of the response's provider-executed
+                            // server-tool evidence blocks, in block order, so a
+                            // foreground PostLlmResponse hook classifies
+                            // provider-native content synchronously.
+                            server_tool_content: assistant_msg
+                                .blocks
+                                .iter()
+                                .filter_map(|block| match block {
+                                    crate::types::AssistantBlock::ServerToolContent {
+                                        kind,
+                                        ..
+                                    } => Some(kind.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
                         }),
                         tool_call: None,
                         tool_result: None,
@@ -2517,6 +2532,17 @@ where
                             .map(|tool| tool.tool_name())
                             .collect::<ToolNameSet>();
 
+                        // Typed provenance projection from the active tool
+                        // catalog: hook payloads carry the `ToolDef.provenance`
+                        // owner (matched by tool name), never a source
+                        // re-derived from the name string.
+                        let provenance_for_tool = |tool_name: &str| {
+                            tool_defs
+                                .iter()
+                                .find(|tool| tool.name == tool_name)
+                                .and_then(|tool| tool.provenance.clone())
+                        };
+
                         let pre_tool_reports =
                             futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
                                 self.execute_hooks(
@@ -2533,6 +2559,7 @@ where
                                             tool_use_id: tc.id.clone(),
                                             name: tc.name.clone(),
                                             args: args.clone(),
+                                            provenance: provenance_for_tool(tc.name.as_str()),
                                         }),
                                         tool_result: None,
                                     },
@@ -2720,7 +2747,8 @@ where
                                                 tc.id.clone(),
                                                 tc.name.clone(),
                                                 &tool_result,
-                                            ),
+                                            )
+                                            .with_provenance(provenance_for_tool(tc.name.as_str())),
                                         ),
                                     },
                                     &run_id,
@@ -5125,6 +5153,7 @@ mod tests {
                             rendered_text: text,
                             handling_mode: crate::types::HandlingMode::Queue,
                             render_metadata: None,
+                            sender_taint: None,
                         },
                         ingress: crate::interaction::PeerIngressFact::peer(
                             id,
@@ -5793,6 +5822,208 @@ mod tests {
             completed_ids,
             vec![HookId::new("ran")],
             "the started hook also completes"
+        );
+    }
+
+    /// Ask 5 gate: hook payloads carry typed dispatch-time provenance and the
+    /// response's provider-executed server-tool evidence. `HookToolCall` /
+    /// `HookToolResult` project `ToolDef.provenance` from the active tool
+    /// catalog (matched by name, never re-derived from the name string), and
+    /// `HookLlmResponse.server_tool_content` projects the response's
+    /// `AssistantBlock::ServerToolContent` kinds so a foreground
+    /// `PostLlmResponse` hook classifies provider-native content synchronously
+    /// instead of racing the lossy observe stream.
+    #[tokio::test]
+    async fn hook_payloads_carry_tool_provenance_and_server_tool_content() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
+        };
+        use crate::types::{ServerToolKind, ToolProvenance, ToolSourceId, ToolSourceKind};
+
+        struct RecordingHook {
+            invocations: Mutex<Vec<HookInvocation>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for RecordingHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                self.invocations.lock().unwrap().push(invocation);
+                Ok(HookExecutionReport::empty())
+            }
+        }
+
+        struct ServerToolThenToolUseClient {
+            call_count: Mutex<u32>,
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for ServerToolThenToolUseClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        vec![
+                            AssistantBlock::ServerToolContent {
+                                id: Some("srv-1".to_string()),
+                                kind: ServerToolKind::WebSearch,
+                                content: serde_json::json!({"results": []}),
+                                meta: None,
+                            },
+                            AssistantBlock::ToolUse {
+                                id: "call-1".to_string(),
+                                name: "lookup".into(),
+                                args: serde_json::value::RawValue::from_string("{}".to_string())
+                                    .unwrap(),
+                                meta: None,
+                            },
+                        ],
+                        StopReason::ToolUse,
+                        Usage::default(),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        Usage::default(),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        struct ProvenanceToolDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for ProvenanceToolDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Ok(ToolResult::new(call.id.to_string(), "looked up".to_string(), false).into())
+            }
+        }
+
+        let provenance = ToolProvenance {
+            kind: ToolSourceKind::Mcp,
+            source_id: ToolSourceId::new("test-server"),
+        };
+        let dispatcher = ProvenanceToolDispatcher {
+            tools: vec![Arc::new(ToolDef {
+                name: "lookup".into(),
+                description: "lookup tool".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: Some(provenance.clone()),
+            })]
+            .into(),
+        };
+        let recorder = Arc::new(RecordingHook {
+            invocations: Mutex::new(Vec::new()),
+        });
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_hook_engine(Arc::clone(&recorder) as Arc<dyn HookEngine>)
+            .build_standalone(
+                Arc::new(ServerToolThenToolUseClient {
+                    call_count: Mutex::new(0),
+                }),
+                Arc::new(dispatcher),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        agent.run("prompt".to_string().into()).await.unwrap();
+
+        let invocations = recorder.invocations.lock().unwrap();
+        let post_llm = invocations
+            .iter()
+            .find(|invocation| {
+                invocation.point == HookPoint::PostLlmResponse
+                    && invocation
+                        .llm_response
+                        .as_ref()
+                        .is_some_and(|response| !response.server_tool_content.is_empty())
+            })
+            .expect("PostLlmResponse invocation with server tool content");
+        assert_eq!(
+            post_llm
+                .llm_response
+                .as_ref()
+                .expect("llm_response payload")
+                .server_tool_content,
+            vec![ServerToolKind::WebSearch],
+            "PostLlmResponse must project ServerToolContent kinds in block order"
+        );
+        let final_llm = invocations
+            .iter()
+            .filter(|invocation| invocation.point == HookPoint::PostLlmResponse)
+            .last()
+            .expect("final PostLlmResponse invocation");
+        assert!(
+            final_llm
+                .llm_response
+                .as_ref()
+                .expect("llm_response payload")
+                .server_tool_content
+                .is_empty(),
+            "a response without server tool blocks projects an empty list"
+        );
+
+        let pre_tool = invocations
+            .iter()
+            .find(|invocation| invocation.point == HookPoint::PreToolExecution)
+            .expect("PreToolExecution invocation");
+        assert_eq!(
+            pre_tool
+                .tool_call
+                .as_ref()
+                .expect("tool_call payload")
+                .provenance,
+            Some(provenance.clone()),
+            "HookToolCall must carry the ToolDef.provenance owner"
+        );
+
+        let post_tool = invocations
+            .iter()
+            .find(|invocation| invocation.point == HookPoint::PostToolExecution)
+            .expect("PostToolExecution invocation");
+        assert_eq!(
+            post_tool
+                .tool_result
+                .as_ref()
+                .expect("tool_result payload")
+                .provenance,
+            Some(provenance),
+            "HookToolResult must carry the ToolDef.provenance owner"
         );
     }
 

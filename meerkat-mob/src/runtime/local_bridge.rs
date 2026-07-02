@@ -136,6 +136,9 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                 HandlingMode::Queue => None,
                 mode => Some(mode),
             },
+            // In-process bridge deliveries carry no comms envelope, so no
+            // sender taint declaration exists.
+            sender_taint: None,
         });
 
         match self

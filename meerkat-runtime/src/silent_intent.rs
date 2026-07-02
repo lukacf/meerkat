@@ -40,6 +40,7 @@ mod tests {
 
     fn make_peer_request(intent_str: &str) -> Input {
         Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -62,6 +63,7 @@ mod tests {
 
     fn make_peer_message() -> Input {
         Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),

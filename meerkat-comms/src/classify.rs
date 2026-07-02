@@ -692,6 +692,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -724,6 +725,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -762,6 +764,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -792,6 +795,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -818,6 +822,7 @@ mod tests {
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -864,6 +869,7 @@ mod tests {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -884,6 +890,7 @@ mod tests {
                 intent: "mob.peer_retired".to_string(),
                 params: serde_json::json!({"peer": "old-agent"}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -904,6 +911,7 @@ mod tests {
                 intent: "my-silent-intent".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -925,6 +933,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -955,6 +964,7 @@ mod tests {
                     "expected_address": "inproc://peer"
                 }),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -996,6 +1006,7 @@ mod tests {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -1020,6 +1031,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -1044,12 +1056,14 @@ mod tests {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             MessageKind::Response {
@@ -1057,6 +1071,7 @@ mod tests {
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({"ok": true}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         ];
@@ -1103,6 +1118,7 @@ mod tests {
                     intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params: serde_json::json!({}),
                     blocks: None,
+                    content_taint: None,
                     handling_mode: None,
                 },
             ),
@@ -1132,6 +1148,7 @@ mod tests {
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
                         blocks: None,
+                        content_taint: None,
                         handling_mode: None,
                     },
                 ),
@@ -1158,6 +1175,7 @@ mod tests {
                         status: crate::types::Status::Completed,
                         result: serde_json::json!({"ok": true}),
                         blocks: None,
+                        content_taint: None,
                         handling_mode: None,
                     },
                 ),
@@ -1193,6 +1211,7 @@ mod tests {
                         intent: "review".to_string(),
                         params: serde_json::json!({}),
                         blocks: None,
+                        content_taint: None,
                         handling_mode: None,
                     },
                 ),
@@ -1208,6 +1227,7 @@ mod tests {
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
                         blocks: None,
+                        content_taint: None,
                         handling_mode: None,
                     },
                 ),
@@ -1235,6 +1255,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );
@@ -1362,6 +1383,7 @@ mod tests {
                     intent: "mob.peer_added".to_string(),
                     params,
                     blocks: None,
+                    content_taint: None,
                     handling_mode: None,
                 },
             );
@@ -1393,6 +1415,7 @@ mod tests {
                     }
                 }),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
         );

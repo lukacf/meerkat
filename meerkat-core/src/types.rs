@@ -1623,6 +1623,12 @@ pub enum SystemNoticeBlock {
         direction: SystemNoticeDirection,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer: Option<SystemNoticePeer>,
+        /// Sender-declared content taint carried in the signed envelope.
+        /// `None` means the sender made no declaration — a real third state
+        /// that must never be coalesced into
+        /// [`crate::comms::SenderContentTaint::Clean`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_taint: Option<crate::comms::SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1704,6 +1710,8 @@ enum SystemNoticeBlockKnown {
         #[serde(default)]
         peer: Option<SystemNoticePeer>,
         #[serde(default)]
+        sender_taint: Option<crate::comms::SenderContentTaint>,
+        #[serde(default)]
         request_id: Option<String>,
         #[serde(default)]
         intent: Option<String>,
@@ -1782,6 +1790,7 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 kind,
                 direction,
                 peer,
+                sender_taint,
                 request_id,
                 intent,
                 status,
@@ -1792,6 +1801,7 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 kind,
                 direction,
                 peer,
+                sender_taint,
                 request_id,
                 intent,
                 status,
@@ -1917,6 +1927,7 @@ impl SystemNoticeBlock {
             Self::Comms {
                 kind,
                 peer,
+                sender_taint,
                 request_id,
                 intent,
                 status,
@@ -2014,6 +2025,17 @@ impl SystemNoticeBlock {
                     && appends_extras
                 {
                     lines.push(format!("Payload: {}", format_notice_payload(payload)));
+                }
+                // Model-visible marker for DECLARED-tainted content only.
+                // `Clean` and `None` (no declaration) deliberately render
+                // identically: the typed `sender_taint` field is the carrier
+                // of the three-way distinction, and the projection flags only
+                // the state the model must treat with caution.
+                if matches!(
+                    sender_taint,
+                    Some(crate::comms::SenderContentTaint::Tainted)
+                ) {
+                    lines.push("[sender declared this content tainted]".to_string());
                 }
                 lines.join("\n")
             }

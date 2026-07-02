@@ -1329,6 +1329,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
 
     fn make_progress_input(label: &str) -> Input {
         Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -1738,6 +1739,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     let receipt = CoreCommsRuntime::send(
         requester_comms.as_ref(),
         CommsCommand::PeerRequest {
+            content_taint: None,
             to: PeerRoute::with_display_name(
                 responder_comms.public_key().to_peer_id(),
                 PeerName::new(name_b.clone()).expect("responder peer name"),
@@ -1772,6 +1774,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     CoreCommsRuntime::send(
         responder_comms.as_ref(),
         CommsCommand::PeerResponse {
+            content_taint: None,
             to: PeerRoute::with_display_name(
                 requester_comms.public_key().to_peer_id(),
                 PeerName::new(name_a.clone()).expect("requester peer name"),

@@ -800,6 +800,7 @@ impl MobSupervisorBridge {
                 intent: intent.to_string(),
                 params,
                 blocks: None,
+                content_taint: None,
                 handling_mode: HandlingMode::Queue,
                 stream: InputStreamMode::None,
             })
@@ -1118,6 +1119,7 @@ mod tests {
         );
         meerkat_runtime::test_peer_input_candidate_from_interaction(
             InboxInteraction {
+                sender_taint: None,
                 id,
                 from_route: Some(worker_peer_id),
                 from: "worker-rt".to_string(),

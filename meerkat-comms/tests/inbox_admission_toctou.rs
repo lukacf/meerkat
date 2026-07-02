@@ -224,6 +224,7 @@ fn make_signed_envelope(
         from: sender.public_key(),
         to: receiver_pubkey,
         kind: MessageKind::Message {
+            content_taint: None,
             blocks: None,
             body: "hi".to_string(),
             handling_mode: None,
@@ -468,6 +469,7 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
         from: sender.public_key(),
         to: receiver.public_key(),
         kind: MessageKind::Request {
+            content_taint: None,
             intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
             params: serde_json::json!({}),
             blocks: None,

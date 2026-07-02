@@ -45,7 +45,7 @@ pub use comms::{
     InputSource as WireCommsInputSource, InputStreamMode as WireCommsInputStreamMode, PeerAddress,
     PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
     PeerName as WireCommsPeerName, PeerSendability, PeerTransport,
-    ResponseStatus as WireCommsResponseStatus,
+    ResponseStatus as WireCommsResponseStatus, SendTaintOverride, SenderContentTaint,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::ConfigWriteResult;

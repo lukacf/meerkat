@@ -174,6 +174,7 @@ impl AgentMobToolSurface {
                     "description": description,
                 }),
                 blocks: None,
+                content_taint: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
             })
@@ -2594,6 +2595,7 @@ mod tests {
                     intent,
                     params,
                     blocks,
+                    content_taint: _,
                     handling_mode: _,
                     stream: _,
                 } => {
@@ -2609,6 +2611,7 @@ mod tests {
                         .await
                         .ok_or_else(|| SendError::PeerNotFound(to.label()))?;
                     recipient.inbox.write().await.push(InboxInteraction {
+                        sender_taint: None,
                         id: InteractionId(uuid::Uuid::new_v4()),
                         from_route: Some(self.peer_id),
                         from: self.name.clone(),

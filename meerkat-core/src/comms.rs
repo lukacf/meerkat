@@ -1351,6 +1351,61 @@ impl std::fmt::Display for PeerLifecycleKind {
     }
 }
 
+/// Sender-declared content-taint classification for peer content.
+///
+/// This is the typed vocabulary for the optional taint declaration a sender
+/// stamps onto content-bearing comms envelopes (`Message` / `Request` /
+/// `Response`). `Clean` and `Tainted` are the two DECLARED states.
+///
+/// `None` at the carriers (`MessageKind::*.content_taint`,
+/// `SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)
+/// means "the sender made no declaration" — a REAL third state. Receivers
+/// must never coalesce `None` into `Clean`: an absent declaration carries no
+/// trust information, while `Clean` is an affirmative sender claim.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderContentTaint {
+    /// The sender affirmatively declares this content clean.
+    Clean,
+    /// The sender declares this content tainted (e.g. it embeds unvetted
+    /// third-party material such as web content or tool output).
+    Tainted,
+}
+
+impl SenderContentTaint {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Tainted => "tainted",
+        }
+    }
+}
+
+impl std::fmt::Display for SenderContentTaint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Per-send tri-state override for the outbound content-taint declaration.
+///
+/// Carried as `Option<SendTaintOverride>` on the comms send surfaces: an
+/// ABSENT override (`None`) inherits the runtime-level declaration installed
+/// via `set_outbound_content_taint`; `Undeclared` strips the declaration for
+/// this send (the envelope carries no taint field); `Declare(taint)` stamps
+/// exactly `taint`. Inherit, disable, and set are three different facts — a
+/// two-state override would collapse them.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendTaintOverride {
+    /// Declare exactly this taint state for this send.
+    Declare(SenderContentTaint),
+    /// Send no declaration, even when a runtime-level declaration is set.
+    Undeclared,
+}
+
 /// Typed wire request for `comms/send`.
 ///
 /// Variants are serde-tagged on `kind` and validated structurally at the
@@ -1387,6 +1442,8 @@ pub enum CommsCommandRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
     /// Send a one-way peer lifecycle notification.
@@ -1407,6 +1464,8 @@ pub enum CommsCommandRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream: Option<InputStreamMode>,
@@ -1420,6 +1479,8 @@ pub enum CommsCommandRequest {
         result: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -1469,11 +1530,13 @@ impl CommsCommandRequest {
                 to,
                 body,
                 blocks,
+                content_taint,
                 handling_mode,
             } => CommsCommand::PeerMessage {
                 to: PeerRoute::new(to),
                 body,
                 blocks,
+                content_taint,
                 handling_mode: handling_mode.unwrap_or_default(),
             },
             CommsCommandRequest::PeerLifecycle {
@@ -1490,6 +1553,7 @@ impl CommsCommandRequest {
                 intent,
                 params,
                 blocks,
+                content_taint,
                 handling_mode,
                 stream,
             } => CommsCommand::PeerRequest {
@@ -1502,6 +1566,7 @@ impl CommsCommandRequest {
                 intent: intent.as_str().to_string(),
                 params,
                 blocks,
+                content_taint,
                 handling_mode: handling_mode.unwrap_or_default(),
                 stream: stream.unwrap_or(InputStreamMode::None),
             },
@@ -1511,6 +1576,7 @@ impl CommsCommandRequest {
                 status,
                 result,
                 blocks,
+                content_taint,
                 handling_mode,
             } => CommsCommand::PeerResponse {
                 to: PeerRoute::new(to),
@@ -1518,6 +1584,7 @@ impl CommsCommandRequest {
                 status,
                 result,
                 blocks,
+                content_taint,
                 handling_mode,
             },
         })
@@ -1599,6 +1666,8 @@ pub enum CommsCommand {
         to: PeerRoute,
         body: String,
         blocks: Option<Vec<ContentBlock>>,
+        /// Per-send taint override: `None` inherits the runtime declaration.
+        content_taint: Option<SendTaintOverride>,
         handling_mode: HandlingMode,
     },
     /// Send a one-way peer lifecycle notification.
@@ -1613,6 +1682,8 @@ pub enum CommsCommand {
         intent: String,
         params: serde_json::Value,
         blocks: Option<Vec<ContentBlock>>,
+        /// Per-send taint override: `None` inherits the runtime declaration.
+        content_taint: Option<SendTaintOverride>,
         handling_mode: HandlingMode,
         stream: InputStreamMode,
     },
@@ -1623,6 +1694,8 @@ pub enum CommsCommand {
         status: ResponseStatus,
         result: serde_json::Value,
         blocks: Option<Vec<ContentBlock>>,
+        /// Per-send taint override: `None` inherits the runtime declaration.
+        content_taint: Option<SendTaintOverride>,
         handling_mode: Option<HandlingMode>,
     },
 }

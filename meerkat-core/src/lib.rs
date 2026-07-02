@@ -118,7 +118,7 @@ pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
-    SendError, SendReceipt, StreamError, StreamScope,
+    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, StreamError, StreamScope,
 };
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,

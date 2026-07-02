@@ -208,6 +208,7 @@ mod typed_context_append_tests {
     #[test]
     fn context_system_notice_projects_only_via_notice_projection() {
         let blocks = vec![SystemNoticeBlock::Comms {
+            sender_taint: None,
             kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: SystemNoticeDirection::Incoming,
             peer: None,

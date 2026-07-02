@@ -1999,6 +1999,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2024,6 +2025,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer_message_uses_body_when_projection_text_is_empty() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2050,6 +2052,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer_request_is_runtime_owned_and_ignores_bogus_body() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2087,6 +2090,7 @@ mod tests {
     #[test]
     fn machine_batch_projection_peer_response_terminal_is_runtime_owned_from_typed_payload() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2138,6 +2142,7 @@ mod tests {
         // convention + the Result JSON verbatim; any per-fixture semantics
         // belong to the peer application, not the runtime.
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2225,6 +2230,7 @@ mod tests {
                 kind: meerkat_core::types::SystemNoticeKind::Comms,
                 body: Some("Peer message".to_string()),
                 blocks: vec![meerkat_core::types::SystemNoticeBlock::Comms {
+                    sender_taint: None,
                     kind: meerkat_core::types::CommsNoticeKind::Message,
                     direction: meerkat_core::types::SystemNoticeDirection::Incoming,
                     peer: None,
@@ -2294,6 +2300,7 @@ mod tests {
     fn peer_response_terminal_forced_immediate_boundary_is_invalid_apply_intent()
     -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2370,6 +2377,7 @@ mod tests {
         // override and the runtime-loop batch path already stages it as
         // RunStart.
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2424,6 +2432,7 @@ mod tests {
         // runtime), which later surfaced as
         // "wire requires comms runtime for '<peer>'" during respawn.
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2472,6 +2481,7 @@ mod tests {
     #[test]
     fn queued_peer_response_terminal_starts_requester_reaction_turn() -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2535,6 +2545,7 @@ mod tests {
     fn peer_response_terminal_apply_intent_is_policy_runtime_and_executor_consistent()
     -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2608,6 +2619,7 @@ mod tests {
 
     fn make_peer_message(peer_id: &str, body: &str) -> Input {
         Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2681,6 +2693,7 @@ mod tests {
 
     fn make_terminal_peer_response(peer_id: &str, request_id: &str) -> Input {
         Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2806,6 +2819,7 @@ mod tests {
         ];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963001";
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2865,6 +2879,7 @@ mod tests {
         ];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963002";
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2918,6 +2933,7 @@ mod tests {
         }];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963003";
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -2970,6 +2986,7 @@ mod tests {
         }];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963004";
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3214,6 +3231,7 @@ mod tests {
                     meerkat_core::PeerIngressKind::PlainEvent,
                 ),
                 interaction: InboxInteraction {
+                    sender_taint: None,
                     id: interaction_id,
                     from_route: None,
                     from: "event:webhook".into(),
@@ -3744,6 +3762,7 @@ mod tests {
     #[test]
     fn primitive_from_peer_terminal_has_content_turn() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3784,6 +3803,7 @@ mod tests {
         // helper batch that mixes kinds must fail instead of inventing a local
         // ContentTurn default.
         let peer = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),

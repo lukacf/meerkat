@@ -1403,8 +1403,7 @@ pub enum MobTargetBinding {
     Flow {
         mob_id: String,
         flow_id: String,
-        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-        params: Box<RawValue>,
+        params: FlowParams,
     },
     SpawnHelper {
         mob_id: String,
@@ -1458,7 +1457,7 @@ impl PartialEq for MobTargetBinding {
             ) => {
                 left_mob_id == right_mob_id
                     && left_flow_id == right_flow_id
-                    && left_params.get() == right_params.get()
+                    && left_params == right_params
             }
             (
                 Self::SpawnHelper {
@@ -1576,6 +1575,74 @@ impl fmt::Display for HostRunnableName {
         f.write_str(&self.0)
     }
 }
+
+/// Typed error for [`FlowParams`] validation.
+#[derive(Debug, thiserror::Error)]
+pub enum FlowParamsError {
+    #[error("mob flow params must be valid JSON: {detail}")]
+    InvalidJson { detail: String },
+}
+
+/// Wire-opaque flow parameters for a mob flow target, held as canonical JSON
+/// text.
+///
+/// Same canonicalization rationale as [`HostRunnableParams`]: serde's
+/// internally-tagged enum buffering cannot preserve arbitrary raw text
+/// byte-exact, so every ingress (constructor and serde) re-emits the payload
+/// through `serde_json::Value` into one canonical text form. Unlike
+/// host-runnable params, JSON `null` is preserved — the Flow contract has
+/// always allowed it as an explicit "no parameters" payload.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+pub struct FlowParams(
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))] Box<RawValue>,
+);
+
+impl FlowParams {
+    /// Parse a JSON text payload into canonical form.
+    pub fn parse(text: &str) -> Result<Self, FlowParamsError> {
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|error| FlowParamsError::InvalidJson {
+                detail: error.to_string(),
+            })?;
+        Self::try_from(value)
+    }
+
+    /// Canonical JSON text of the payload.
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+
+    /// Consume into the canonical raw JSON payload.
+    pub fn into_raw(self) -> Box<RawValue> {
+        self.0
+    }
+}
+
+impl TryFrom<serde_json::Value> for FlowParams {
+    type Error = FlowParamsError;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let canonical =
+            serde_json::to_string(&value).map_err(|error| FlowParamsError::InvalidJson {
+                detail: error.to_string(),
+            })?;
+        let raw =
+            RawValue::from_string(canonical).map_err(|error| FlowParamsError::InvalidJson {
+                detail: error.to_string(),
+            })?;
+        Ok(Self(raw))
+    }
+}
+
+impl PartialEq for FlowParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
+}
+
+impl Eq for FlowParams {}
 
 /// Typed error for [`HostRunnableParams`] validation.
 #[derive(Debug, thiserror::Error)]

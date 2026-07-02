@@ -80,7 +80,7 @@ impl MessageRange {
     /// Half-open semantics: ranges that merely touch (`self.end ==
     /// other.start`) do not overlap, and an empty range overlaps nothing.
     pub fn overlaps(&self, other: &MessageRange) -> bool {
-        self.start < other.end && other.start < self.end
+        !self.is_empty() && !other.is_empty() && self.start < other.end && other.start < self.end
     }
 }
 

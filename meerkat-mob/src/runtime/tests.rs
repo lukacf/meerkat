@@ -12467,20 +12467,25 @@ async fn test_fork_helper_tool_access_policy_reaches_session_metadata() {
     .expect("fork_helper must not hang")
     .expect("fork_helper succeeds");
 
-    let session_id = service
-        .session_id_for_comms_name("test-mob/worker/fork-gated-helper")
-        .await
-        .expect("forked helper session must exist");
-    let metadata = service
-        .persisted_session_clone(&session_id)
-        .await
-        .expect("persisted session survives helper retire in the mock")
-        .session_metadata()
-        .expect("session metadata");
+    // The one-shot helper is retired (and its comms-name mapping dropped) by
+    // the time `fork_helper` returns, so identify its session by the persisted
+    // policy itself: exactly one persisted session — the helper's — must carry
+    // the tooling policy, and the source member's session must not.
+    let persisted = service.persisted_sessions.read().await;
+    let gated_policies: Vec<_> = persisted
+        .values()
+        .filter_map(|session| {
+            session
+                .session_metadata()
+                .expect("session metadata")
+                .tooling
+                .tool_access_policy
+        })
+        .collect();
     assert_eq!(
-        metadata.tooling.tool_access_policy,
-        Some(policy),
-        "fork_helper policy must reach the helper's persisted metadata tooling section"
+        gated_policies,
+        vec![policy],
+        "fork_helper policy must reach exactly the helper's persisted metadata tooling section"
     );
 }
 

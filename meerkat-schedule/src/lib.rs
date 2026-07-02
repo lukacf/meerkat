@@ -55,16 +55,16 @@ pub use tools::{
 pub use trigger::{CronAuthoringSpec, next_due_after, occurrences_for_horizon};
 pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryCompletionFailureReason,
-    DeliveryFailureReason, DeliveryReceipt, DeliveryReceiptStage, ForkContextSpec,
-    HelperOptionsSpec, HostRunnableName, HostRunnableNameError, HostRunnableParams,
-    HostRunnableParamsError, HostRunnableTargetBinding, IdentityTargetBinding, IntervalTriggerSpec,
-    MisfirePolicy, MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass,
-    OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OccurrenceTargetProbeOutcome, OverlapPolicy,
-    ResolvedSpawnSnapshot, RuntimeCompletionOutcome, RuntimeDeliveryOutcome, Schedule,
-    ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
-    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
-    SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
-    UpdateScheduleRequest,
+    DeliveryFailureReason, DeliveryReceipt, DeliveryReceiptStage, FlowParams, FlowParamsError,
+    ForkContextSpec, HelperOptionsSpec, HostRunnableName, HostRunnableNameError,
+    HostRunnableParams, HostRunnableParamsError, HostRunnableTargetBinding, IdentityTargetBinding,
+    IntervalTriggerSpec, MisfirePolicy, MissingTargetPolicy, MobTargetBinding, Occurrence,
+    OccurrenceFailureClass, OccurrenceId, OccurrenceOrdinal, OccurrencePhase,
+    OccurrenceTargetProbeOutcome, OverlapPolicy, ResolvedSpawnSnapshot, RuntimeCompletionOutcome,
+    RuntimeDeliveryOutcome, Schedule, ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision,
+    ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
+    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
+    TriggerSpec, UpdateScheduleRequest,
 };
 
 pub const SCHEDULE_CAPABILITY_DISABLED_DESCRIPTION: &str = "config.tools.schedule_enabled is false";

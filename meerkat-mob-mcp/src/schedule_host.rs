@@ -768,6 +768,10 @@ mod tests {
         RawValue::from_string(value.to_string()).expect("valid raw json")
     }
 
+    fn flow_params(value: &str) -> meerkat_schedule::FlowParams {
+        meerkat_schedule::FlowParams::parse(value).expect("valid flow params json")
+    }
+
     fn sample_occurrence_for_target(target: TargetBinding) -> Occurrence {
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("mob-schedule-host-test".to_string()),
@@ -890,7 +894,7 @@ mod tests {
         let binding = MobTargetBinding::Flow {
             mob_id: "ops".to_string(),
             flow_id: "release-check".to_string(),
-            params: raw_json(r#"{"sha":"abc123"}"#),
+            params: flow_params(r#"{"sha":"abc123"}"#),
         };
         let occurrence = sample_occurrence(binding.clone());
 
@@ -1090,7 +1094,7 @@ mod tests {
         let binding = MobTargetBinding::Flow {
             mob_id: "ops".to_string(),
             flow_id: "release-check".to_string(),
-            params: raw_json(r"{}"),
+            params: flow_params(r"{}"),
         };
         let occurrence = sample_occurrence(binding.clone());
 
@@ -1120,7 +1124,7 @@ mod tests {
         let binding = MobTargetBinding::Flow {
             mob_id: "ops".to_string(),
             flow_id: "release-check".to_string(),
-            params: raw_json(r"{}"),
+            params: flow_params(r"{}"),
         };
         let occurrence = sample_occurrence(binding.clone());
 
@@ -1145,7 +1149,7 @@ mod tests {
         let binding = MobTargetBinding::Flow {
             mob_id: "ops".to_string(),
             flow_id: "release-check".to_string(),
-            params: raw_json(r"{}"),
+            params: flow_params(r"{}"),
         };
         let occurrence = sample_occurrence(binding.clone());
 

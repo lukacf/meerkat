@@ -10,6 +10,7 @@ mod driver;
 mod error;
 mod lifecycle;
 pub(crate) mod machines;
+mod runnable;
 mod service;
 mod store;
 mod surface;
@@ -32,6 +33,10 @@ pub use lifecycle::{
     ScheduleLifecycleError, ScheduleLifecycleInput, ScheduleLifecycleMutator,
     ScheduleWritePrecondition, StaleCompletionArrivalTrigger,
 };
+pub use runnable::{
+    HostRunnable, HostRunnableError, HostRunnableInvocation, HostRunnableOutcome,
+    HostRunnableRegistry, HostRunnableRegistryError, RunnableProbe, ScheduleRunnableHost,
+};
 pub use service::ScheduleService;
 pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,
@@ -51,9 +56,10 @@ pub use trigger::{CronAuthoringSpec, next_due_after, occurrences_for_horizon};
 pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryCompletionFailureReason,
     DeliveryFailureReason, DeliveryReceipt, DeliveryReceiptStage, ForkContextSpec,
-    HelperOptionsSpec, IdentityTargetBinding, IntervalTriggerSpec, MisfirePolicy,
-    MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrenceOrdinal, OccurrencePhase, OccurrenceTargetProbeOutcome, OverlapPolicy,
+    HelperOptionsSpec, HostRunnableName, HostRunnableNameError, HostRunnableParams,
+    HostRunnableParamsError, HostRunnableTargetBinding, IdentityTargetBinding, IntervalTriggerSpec,
+    MisfirePolicy, MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass,
+    OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OccurrenceTargetProbeOutcome, OverlapPolicy,
     ResolvedSpawnSnapshot, RuntimeCompletionOutcome, RuntimeDeliveryOutcome, Schedule,
     ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,

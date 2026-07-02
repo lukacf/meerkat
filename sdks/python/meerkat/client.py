@@ -2286,6 +2286,7 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
+        injected_context: list[WireContentInput] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
@@ -2297,6 +2298,10 @@ class MeerkatClient:
         auth_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Start a turn on a mob member.
+
+        ``injected_context`` carries host-attached ambient context delivered
+        as separate typed transcript messages immediately before the turn's
+        user message (excluded from semantic-memory indexing).
 
         ``provider_params`` and ``auth_binding`` carry the canonical
         Inherit/Set/Clear tri-state exactly as the wire does: pass
@@ -2312,6 +2317,7 @@ class MeerkatClient:
             skill_refs=_skill_refs_to_wire(skill_refs),
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,
+            injected_context=injected_context,
             keep_alive=keep_alive,
             model=model,
             provider=provider,
@@ -2719,6 +2725,7 @@ class MeerkatClient:
         *,
         work_ref: str | None = None,
         origin: WorkOrigin = "external",
+        injected_context: list[WireContentInput] | None = None,
     ) -> dict[str, Any]:
         """Submit a unit of work to a mob member through the work lane.
 
@@ -2728,7 +2735,11 @@ class MeerkatClient:
         callers never pass raw ``generation`` / ``fence_token`` values.
         ``origin`` is ``"external"`` for user-originated turns and
         ``"internal"`` for mob-orchestration work. When ``work_ref`` is
-        omitted the server generates a fresh UUID.
+        omitted the server generates a fresh UUID. ``injected_context``
+        carries host-attached ambient context delivered as separate typed
+        transcript messages immediately before the work content (queue-mode
+        turn-driven delivery only; steer and autonomous-inbox dispatch reject
+        it fail-closed).
         """
         params: dict[str, Any] = {
             "member_ref": member_ref,
@@ -2737,6 +2748,8 @@ class MeerkatClient:
         }
         if work_ref is not None:
             params["work_ref"] = work_ref
+        if injected_context:
+            params["injected_context"] = injected_context
         return await self._request("mob/submit_work", params)
 
     async def mob_cancel_work(self, mob_id: str, work_ref: str) -> dict[str, Any]:

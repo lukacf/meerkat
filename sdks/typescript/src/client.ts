@@ -445,6 +445,11 @@ function mobTurnStartPayload(
     } as MobTurnStartParams["flow_tool_overlay"];
   }
   setIfDefined(payload, "additional_instructions", options?.additionalInstructions);
+  setIfDefined(
+    payload,
+    "injected_context",
+    options?.injectedContext as MobTurnStartParams["injected_context"],
+  );
   setIfDefined(payload, "keep_alive", options?.keepAlive);
   setIfDefined(payload, "model", options?.model);
   setIfDefined(payload, "provider", options?.provider);
@@ -2013,12 +2018,17 @@ export class MeerkatClient {
    * Rust-only prior to this; `origin` is `"external"` for
    * user-originated turns and `"internal"` for mob-orchestration work.
    * When `workRef` is omitted the server generates a fresh UUID.
+   * `injectedContext` carries host-attached ambient context delivered as
+   * separate typed transcript messages immediately before the work content
+   * (queue-mode turn-driven delivery only; steer and autonomous-inbox
+   * dispatch reject it fail-closed).
    */
   async mobSubmitWork(args: {
     memberRef: string;
     content: unknown;
     workRef?: string;
     origin?: "external" | "internal";
+    injectedContext?: ContentInput[];
   }): Promise<{ mobId: string; workRef: string; memberRef: string }> {
     const params: Record<string, unknown> = {
       member_ref: args.memberRef,
@@ -2027,6 +2037,9 @@ export class MeerkatClient {
     };
     if (args.workRef !== undefined) {
       params.work_ref = args.workRef;
+    }
+    if (args.injectedContext !== undefined && args.injectedContext.length > 0) {
+      params.injected_context = args.injectedContext;
     }
     const result = await this.request("mob/submit_work", params);
     return {

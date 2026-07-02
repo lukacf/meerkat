@@ -194,6 +194,13 @@ fn migrate_memory_schema(conn: &mut Connection) -> Result<(), MemoryStoreError> 
 /// transaction of its own) so it composes with the migration's transaction;
 /// partial application outside a transaction is safe because the backfill is
 /// idempotent and re-run before every scoped read.
+///
+/// A NULL row whose `metadata_json` does not deserialize is deliberately a
+/// store-wide typed fault (it gates every scoped operation): the corrupt row
+/// cannot be attributed to any scope, so per-scope poisoning cannot contain
+/// it, and skipping or quarantining it would silently serve a store known to
+/// hold undecodable durable rows — the same fail-closed posture as
+/// [`MemoryStoreError::TextCorruption`].
 fn backfill_null_session_ids(conn: &Connection) -> Result<(), MemoryStoreError> {
     let mut null_rows = Vec::new();
     {
@@ -705,6 +712,57 @@ impl MemoryStore for HnswMemoryStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        // First pass serves an already-loaded scope without touching the
+        // insert lock. An unloaded scope reports back instead of loading
+        // inline: the lazy rebuild-and-publish must be serialized with the
+        // index/drop publishers (below), or a rebuild snapshot taken while a
+        // batch commit is in flight would publish a stale live index.
+        match self.search_pass(scope, query, limit, false).await? {
+            Some(results) => Ok(results),
+            None => {
+                let _guard = self.insert_lock.lock().await;
+                match self.search_pass(scope, query, limit, true).await? {
+                    Some(results) => Ok(results),
+                    // Structurally unreachable: the load pass always loads.
+                    // Fail closed rather than serve an empty result for a
+                    // scope whose durable rows were never consulted.
+                    None => Err(MemoryStoreError::Storage(
+                        "scope load pass did not publish a live index".to_string(),
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn enumerate_scoped(
+        &self,
+        scope: &MemorySearchScope,
+        request: MemoryEnumerationRequest,
+    ) -> Result<MemoryEnumerationPage, MemoryStoreError> {
+        self.enumerate_scoped_impl(scope, request).await
+    }
+
+    async fn drop_scope(
+        &self,
+        owner: &MemoryOwner,
+    ) -> Result<MemoryScopeDropReceipt, MemoryStoreError> {
+        self.drop_scope_impl(owner).await
+    }
+}
+
+impl HnswMemoryStore {
+    /// One search attempt over the scope's live index.
+    ///
+    /// Returns `Ok(None)` when the scope has no live index and
+    /// `load_if_missing` is false — the caller then retries under the insert
+    /// lock so the lazy rebuild is serialized with the index/drop publishers.
+    async fn search_pass(
+        &self,
+        scope: &MemorySearchScope,
+        query: &str,
+        limit: usize,
+        load_if_missing: bool,
+    ) -> Result<Option<Vec<MemoryResult>>, MemoryStoreError> {
         let query = query.to_owned();
         let scope = scope.clone();
         let db_path = self.db_path.clone();
@@ -738,10 +796,14 @@ impl MemoryStore for HnswMemoryStore {
             let conn = open_connection(&db_path)?;
             let neighbors = match loaded_neighbors {
                 Some(neighbors) => neighbors,
+                None if !load_if_missing => return Ok(None),
                 None => {
                     // Lazy per-scope load: build the live index from durable
-                    // rows, publish it, and search it. A concurrent publisher
-                    // wins the map entry; this rebuild is then dropped. The
+                    // rows, publish it, and search it. The caller holds the
+                    // insert lock, so no index/drop publisher can interleave
+                    // between the rebuild snapshot and the publish. A scope
+                    // published while we waited for the lock wins the map
+                    // entry; this rebuild is then dropped. The
                     // poison/self-heal lifecycle applies to the published
                     // entry exactly as it does to eagerly-loaded scopes.
                     let rebuilt = rebuild_scoped_index_from_db(
@@ -816,13 +878,13 @@ impl MemoryStore for HnswMemoryStore {
                 });
             }
 
-            Ok::<Vec<MemoryResult>, MemoryStoreError>(results)
+            Ok::<Option<Vec<MemoryResult>>, MemoryStoreError>(Some(results))
         })
         .await
         .map_err(|e| MemoryStoreError::TaskJoin(format!("search task join failed: {e}")))?
     }
 
-    async fn drop_scope(
+    async fn drop_scope_impl(
         &self,
         owner: &MemoryOwner,
     ) -> Result<MemoryScopeDropReceipt, MemoryStoreError> {
@@ -837,12 +899,15 @@ impl MemoryStore for HnswMemoryStore {
         tokio::task::spawn_blocking(
             move || -> Result<MemoryScopeDropReceipt, MemoryStoreError> {
                 let mut conn = open_connection(&db_path)?;
-                // Heal first: old-binary rows with a NULL projection cell must be
-                // visible to (and deleted by) the scoped DELETE below.
-                backfill_null_session_ids(&conn)?;
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+                // Heal INSIDE the delete transaction: a mixed-version writer
+                // inserting NULL-projection rows between an outside heal and
+                // the scoped DELETE would leave its rows invisible to (and
+                // surviving) the drop. The backfill is statement-at-a-time by
+                // design so it composes with this caller transaction.
+                backfill_null_session_ids(&tx)?;
                 let session_param = owner.session_id().to_string();
                 // One transaction over both tables makes the drop all-or-nothing:
                 // text rows go first (they are reachable only through the metadata
@@ -884,11 +949,14 @@ impl MemoryStore for HnswMemoryStore {
         .map_err(|e| MemoryStoreError::TaskJoin(format!("drop task join failed: {e}")))?
     }
 
-    async fn enumerate_scoped(
+    async fn enumerate_scoped_impl(
         &self,
         scope: &MemorySearchScope,
         request: MemoryEnumerationRequest,
     ) -> Result<MemoryEnumerationPage, MemoryStoreError> {
+        if request.limit == 0 {
+            return Err(MemoryStoreError::EnumerationLimitZero);
+        }
         let scope = scope.clone();
         let db_path = self.db_path.clone();
 
@@ -2334,30 +2402,24 @@ mod tests {
     /// A zero-limit request scans nothing but still reports whether raw scope
     /// rows remain past the offset.
     #[tokio::test]
-    async fn test_enumerate_scoped_limit_zero_reports_remaining() {
+    async fn test_enumerate_scoped_limit_zero_is_typed_error() {
+        // A zero limit cannot advance the raw-row cursor (`next_offset` would
+        // equal the request offset), so a standard follow-`next_offset`
+        // pagination loop would never terminate. Reject it fail-closed.
         let dir = TempDir::new().unwrap();
         let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
         let session_id = SessionId::new();
         let scope = MemorySearchScope::for_session(session_id.clone());
-        for i in 0..3 {
-            store
-                .index_scoped(request(format!("entry {i}"), &session_id))
-                .await
-                .unwrap();
-        }
+        store
+            .index_scoped(request("entry".to_string(), &session_id))
+            .await
+            .unwrap();
 
-        let page = store
+        let error = store
             .enumerate_scoped(&scope, enumeration(0, 1))
             .await
-            .unwrap();
-        assert!(page.records.is_empty());
-        assert_eq!(page.next_offset, Some(1));
-
-        let exhausted = store
-            .enumerate_scoped(&scope, enumeration(0, 3))
-            .await
-            .unwrap();
-        assert!(exhausted.records.is_empty());
-        assert_eq!(exhausted.next_offset, None);
+            .expect_err("limit zero must be rejected");
+        assert!(matches!(error, MemoryStoreError::EnumerationLimitZero));
+        assert_eq!(error.error_code(), "memory_enumeration_limit_zero");
     }
 }

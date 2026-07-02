@@ -584,7 +584,13 @@ impl Router {
         };
         let addr = PeerAddr::parse(&peer.address.to_string())?;
         let resolved_taint = match content_taint {
-            None => self.outbound_content_taint(),
+            // Absent override = inherit. A declaration the caller already
+            // constructed INTO the kind wins over the runtime-level
+            // declaration — the stamping choke point must never silently
+            // degrade an explicit Some(..) to the unset runtime default.
+            None => kind
+                .content_taint()
+                .or_else(|| self.outbound_content_taint()),
             Some(SendTaintOverride::Declare(taint)) => Some(taint),
             Some(SendTaintOverride::Undeclared) => None,
         };

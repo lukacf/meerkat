@@ -17991,6 +17991,32 @@ impl MobActor {
             entry.fence_token
         };
 
+        // Injected-context deliverability is validated BEFORE the MobMachine
+        // SubmitWork input is applied: refusing realization after admission
+        // would abandon the machine-emitted ingress effect outside the
+        // machine's typed rejection vocabulary. Steer dispatch realizes as
+        // live system-context appends and the autonomous inbox path flows
+        // through comms plain events (classified external event ->
+        // SystemNotice transcript append) — neither carries a user-channel
+        // transcript boundary for typed injected-context messages to precede,
+        // so both fail closed here: one canonical terminal path for the same
+        // semantic condition, and no admitted effect is ever left
+        // unrealized over it.
+        if !injected_context.is_empty() {
+            if handling_mode == meerkat_core::types::HandlingMode::Steer {
+                return Err(MobError::InjectedContextUndeliverable {
+                    member_id: AgentIdentity::from(agent_identity.as_str()),
+                    reason: "steer dispatch carries no transcript boundary for injected context",
+                });
+            }
+            if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+                return Err(MobError::InjectedContextUndeliverable {
+                    member_id: AgentIdentity::from(agent_identity.as_str()),
+                    reason: "autonomous inbox delivery carries no user-channel work boundary",
+                });
+            }
+        }
+
         // Project the caller's identifiers into DSL bridging types. Existing
         // members use the caller-supplied runtime/fence so MobMachine can
         // reject stale generations; auto-spawned members use the generated
@@ -18322,16 +18348,9 @@ impl MobActor {
             ingress_authority = ingress_authority.variant(),
             "dispatch_member_turn_after_machine_admission started"
         );
-        // Steer dispatch realizes as live system-context appends — there is
-        // no transcript boundary for injected context to precede. Fail
-        // closed before the mode fork rather than silently dropping it.
-        if !injected_context.is_empty() && handling_mode == meerkat_core::types::HandlingMode::Steer
-        {
-            return Err(MobError::InjectedContextUndeliverable {
-                member_id: crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
-                reason: "steer dispatch carries no transcript boundary for injected context",
-            });
-        }
+        // Injected-context deliverability (steer / autonomous-inbox) was
+        // validated in `handle_submit_work` BEFORE the MobMachine admission,
+        // so no admitted ingress effect can be abandoned over it here.
         let live_steer_admission = handling_mode == meerkat_core::types::HandlingMode::Steer
             && ack_mode == crate::mob_machine::SubmitWorkAckMode::IngressAccepted;
         tracing::debug!(
@@ -18454,18 +18473,10 @@ impl MobActor {
                         req: Box::new(req),
                     });
                 }
-                // The autonomous inbox path flows through comms plain events
-                // (`InboxItem::PlainEvent` -> classified external event ->
-                // SystemNotice transcript append): there is no user-channel
-                // work boundary for typed injected-context messages to
-                // precede. Fail closed rather than laundering the context
-                // into notice prose or silently dropping it.
-                if !injected_context.is_empty() {
-                    return Err(MobError::InjectedContextUndeliverable {
-                        member_id: crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
-                        reason: "autonomous inbox delivery carries no user-channel work boundary",
-                    });
-                }
+                // Injected context on the autonomous inbox path was rejected
+                // pre-admission in `handle_submit_work` (the plain-event path
+                // has no user-channel work boundary); the carrier is
+                // invariantly empty here.
                 let injector = self
                     .provisioner
                     .interaction_event_injector(&bridge_session_id)

@@ -610,6 +610,12 @@ export interface MobTurnStartOptions {
   readonly skillRefs?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: MobTurnStartWireOptions["additional_instructions"];
+  /**
+   * Host-attached ambient context delivered as separate typed transcript
+   * messages immediately before the turn's user message (excluded from
+   * semantic-memory indexing).
+   */
+  readonly injectedContext?: ContentInput[];
   readonly keepAlive?: MobTurnStartWireOptions["keep_alive"];
   readonly model?: MobTurnStartWireOptions["model"];
   readonly provider?: MobTurnStartWireOptions["provider"];

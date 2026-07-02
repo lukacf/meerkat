@@ -703,6 +703,15 @@ impl SharedScheduleTargetAdapter {
             Box::pin(async move {
                 Ok(match runnable_host.run_occurrence(invocation).await {
                     Ok(_) => DeliveryTerminal::completed(None),
+                    // Unregistered is the same semantic condition the probe
+                    // reports as Unknown: one condition, one terminal class,
+                    // regardless of where it is detected.
+                    Err(error @ meerkat_schedule::HostRunnableError::Unregistered { .. }) => {
+                        DeliveryTerminal::delivery_failed(
+                            error.to_string(),
+                            DeliveryFailureReason::TargetMissing,
+                        )
+                    }
                     Err(error) => DeliveryTerminal::delivery_failed(
                         error.to_string(),
                         DeliveryFailureReason::RuntimeRejected,

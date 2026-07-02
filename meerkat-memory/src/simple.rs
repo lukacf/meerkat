@@ -135,6 +135,9 @@ impl MemoryStore for SimpleMemoryStore {
         scope: &MemorySearchScope,
         request: MemoryEnumerationRequest,
     ) -> Result<MemoryEnumerationPage, MemoryStoreError> {
+        if request.limit == 0 {
+            return Err(MemoryStoreError::EnumerationLimitZero);
+        }
         let entries = self.entries.read().await;
 
         // Raw scope rows in insertion order; paging counts raw rows while the
@@ -482,12 +485,16 @@ mod tests {
         assert_eq!(after.records.len(), 2);
         assert!(after.records.iter().all(|r| r.content.contains("late")));
 
-        // Zero-limit pages scan nothing but report remaining raw rows.
-        let probe = store
+        // Zero-limit pages cannot advance the cursor and are rejected with
+        // the typed error (a follow-`next_offset` loop would never
+        // terminate) — parity with the durable store.
+        let error = store
             .enumerate_scoped(&scope, enumeration(0, 1))
             .await
-            .unwrap();
-        assert!(probe.records.is_empty());
-        assert_eq!(probe.next_offset, Some(1));
+            .expect_err("limit zero must be rejected");
+        assert!(matches!(
+            error,
+            meerkat_core::memory::MemoryStoreError::EnumerationLimitZero
+        ));
     }
 }

@@ -62,6 +62,16 @@ impl HostRunnableOutcome {
 /// Typed failure reported by a host-runnable invocation.
 #[derive(Debug, thiserror::Error)]
 pub enum HostRunnableError {
+    /// The named runnable is not registered with this host.
+    ///
+    /// This is the SAME semantic condition the probe reports as
+    /// [`RunnableProbe::Unknown`]; carrying it as a distinct typed variant
+    /// lets delivery map it onto the same terminal class (`TargetMissing`)
+    /// regardless of where it is detected — one condition, one canonical
+    /// terminal path.
+    #[error("host runnable '{name}' is not registered")]
+    Unregistered { name: HostRunnableName },
+
     /// The runnable executed and reported a failure.
     #[error("host runnable invocation failed: {detail}")]
     Failed { detail: String },
@@ -173,10 +183,11 @@ impl ScheduleRunnableHost for HostRunnableRegistry {
     ) -> Result<HostRunnableOutcome, HostRunnableError> {
         // Defensive: the registry is immutable once shared, so a delivery
         // that probed `Registered` cannot miss here. A miss means the caller
-        // skipped the probe; report it as an ordinary invocation failure.
+        // skipped the probe; the typed variant keeps the terminal class
+        // identical to the probe-time detection (`TargetMissing`).
         let Some(runnable) = self.runnables.get(&invocation.runnable) else {
-            return Err(HostRunnableError::Failed {
-                detail: format!("host runnable '{}' is not registered", invocation.runnable),
+            return Err(HostRunnableError::Unregistered {
+                name: invocation.runnable.clone(),
             });
         };
         runnable.run(invocation).await
@@ -319,15 +330,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_reports_typed_failure_for_unknown_runnable_invocation() {
+    async fn registry_reports_typed_unregistered_for_unknown_runnable_invocation() {
         let registry = HostRunnableRegistry::new();
         let error = registry
             .run_occurrence(sample_invocation("missing-runnable"))
             .await
             .expect_err("unknown runnable must fail");
-        let HostRunnableError::Failed { detail } = error;
-        assert!(detail.contains("missing-runnable"));
-        assert!(detail.contains("not registered"));
+        // The typed variant keeps delivery's terminal class identical to the
+        // probe-time detection (TargetMissing), never RuntimeRejected.
+        let HostRunnableError::Unregistered { name } = error else {
+            panic!("unknown runnable must surface the typed Unregistered variant");
+        };
+        assert_eq!(name.as_str(), "missing-runnable");
     }
 
     #[tokio::test]

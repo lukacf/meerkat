@@ -6991,6 +6991,59 @@ async fn test_mob_builder_allows_ephemeral_session_service_when_opted_in() {
 }
 
 #[tokio::test]
+async fn test_ephemeral_session_service_exposes_live_session_to_mob_read_seam() {
+    // Regression for the Inherit containment escape: the MobSessionService
+    // read seam must see the LIVE session on the ephemeral backend. The trait
+    // default's `Ok(None)` silently coalesced "session invisible to this read
+    // seam" into "session has no such fact", letting a policy-gated ephemeral
+    // parent mint unrestricted children through Inherit resolution.
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        PersistentMockBuilder,
+        16,
+    ));
+    let created = SessionService::create_session(
+        service.as_ref(),
+        CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "mock-model".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: None,
+            labels: None,
+        },
+    )
+    .await
+    .expect("create ephemeral session");
+
+    let loaded = crate::runtime::MobSessionService::load_persisted_session(
+        service.as_ref(),
+        &created.session_id,
+    )
+    .await
+    .expect("live session must be readable through the mob read seam");
+    assert_eq!(
+        loaded.map(|session| session.id().clone()),
+        Some(created.session_id.clone()),
+        "ephemeral MobSessionService::load_persisted_session must export the live session"
+    );
+
+    let missing = crate::runtime::MobSessionService::load_persisted_session(
+        service.as_ref(),
+        &SessionId::new(),
+    )
+    .await
+    .expect("unknown session id is the documented None shape");
+    assert!(
+        missing.is_none(),
+        "absent session must map to None, not an error"
+    );
+}
+
+#[tokio::test]
 async fn test_mob_handle_is_clone() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let handle2 = handle.clone();

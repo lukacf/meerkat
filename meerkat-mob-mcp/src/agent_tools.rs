@@ -644,12 +644,16 @@ impl AgentMobToolSurface {
 
     /// Resolve the spawned child's effective tool access policy.
     ///
-    /// `Inherit`/absent resolves to this (parent) session's persisted
-    /// effective policy from `SessionMetadata.tooling.tool_access_policy` —
-    /// the same field the factory persists at build. An ephemeral parent with
-    /// no durable metadata has no persisted policy and resolves to
-    /// unrestricted; a metadata READ FAULT, by contrast, fails the spawn
-    /// closed rather than silently minting an ungated child.
+    /// `Inherit`/absent resolves to this (parent) session's effective policy
+    /// from `SessionMetadata.tooling.tool_access_policy` — the same field the
+    /// factory stamps at build. Every backend exposes the parent through
+    /// `load_persisted_session`: the persistent service reads the durable
+    /// snapshot and the ephemeral service exports the LIVE session (a
+    /// restricted ephemeral parent must never mint unrestricted children
+    /// because its policy was invisible to the read seam). A metadata READ
+    /// FAULT fails the spawn closed rather than silently minting an ungated
+    /// child; a genuinely absent parent session (host/operator-authored
+    /// spawn) resolves to unrestricted.
     async fn resolve_child_tool_access_policy(
         &self,
         tool_name: &str,

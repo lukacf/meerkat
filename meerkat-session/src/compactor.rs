@@ -206,11 +206,27 @@ impl Compactor for DefaultCompactor {
             .unwrap_or(0);
         let history = &messages[non_system_start..];
 
-        // Find turn boundaries (each User message starts a turn)
+        // Find turn boundaries. Only a CONVERSATIONAL user message starts a
+        // turn: a prior compaction summary is a runtime boundary marker (and
+        // is discarded wholesale at the next compaction), and injected-context
+        // messages are host-attached ambient context delivered immediately
+        // BEFORE their turn's user message — counting either as a turn start
+        // would dilute the retained-turn budget. A retained turn is glued to
+        // the contiguous injected-context run preceding it, so a kept user
+        // message never loses the ambient context the model responded with.
         let mut turn_starts: Vec<usize> = Vec::new();
         for (i, msg) in history.iter().enumerate() {
-            if matches!(msg, Message::User(_)) {
-                turn_starts.push(i);
+            if matches!(msg, Message::User(u) if u.transcript_role.is_conversational()) {
+                let mut start = i;
+                while start > 0
+                    && matches!(
+                        &history[start - 1],
+                        Message::User(u) if u.transcript_role.is_injected_context()
+                    )
+                {
+                    start -= 1;
+                }
+                turn_starts.push(start);
             }
         }
 
@@ -462,6 +478,68 @@ mod tests {
         // Summary + last 1 turn (turn3)
         assert_eq!(result.messages.len(), 2); // summary + turn3
         assert_eq!(result.discarded.len(), 2); // turn1, turn2
+    }
+
+    #[test]
+    fn test_rebuild_injected_context_does_not_start_or_dilute_turns() {
+        // Two real turns, each preceded by an injected-context run. With a
+        // budget of 1, only the LAST conversational turn is retained — glued
+        // to its injected-context messages — and the injected messages never
+        // count as turns of their own.
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+        let messages = vec![
+            Message::User(UserMessage::injected_context("ambient a")),
+            Message::User(UserMessage::text("turn1")),
+            Message::User(UserMessage::injected_context("ambient b1")),
+            Message::User(UserMessage::injected_context("ambient b2")),
+            Message::User(UserMessage::text("turn2")),
+        ];
+        let result = c.rebuild_history(&messages, "summary");
+        // Summary + [ambient b1, ambient b2, turn2] retained.
+        assert_eq!(result.messages.len(), 4);
+        assert!(matches!(
+            &result.messages[1],
+            Message::User(u) if u.transcript_role.is_injected_context()
+                && u.text_content() == "ambient b1"
+        ));
+        assert!(matches!(
+            &result.messages[3],
+            Message::User(u) if u.text_content() == "turn2"
+        ));
+        // Discarded: [ambient a, turn1].
+        assert_eq!(result.discarded.len(), 2);
+    }
+
+    #[test]
+    fn test_rebuild_prior_summary_does_not_count_as_turn() {
+        // A prior compaction-summary message is a runtime boundary marker,
+        // not a conversational turn: with budget 1 it must be discarded while
+        // the single real turn is retained.
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+        let messages = vec![
+            Message::User(UserMessage::compaction_summary("[Context compacted] old")),
+            Message::User(UserMessage::text("turn1")),
+            Message::User(UserMessage::text("turn2")),
+        ];
+        let result = c.rebuild_history(&messages, "summary");
+        // If the prior summary counted as a turn, retain_from would land on
+        // turn1 and keep it; with summary excluded only turn2 survives.
+        assert_eq!(result.messages.len(), 2, "new summary + retained turn2");
+        assert!(matches!(
+            &result.messages[1],
+            Message::User(u) if u.text_content() == "turn2"
+        ));
+        assert_eq!(result.discarded.len(), 2, "prior summary + turn1 discarded");
+        assert!(matches!(
+            &result.discarded[0],
+            Message::User(u) if u.transcript_role.is_compaction_summary()
+        ));
     }
 
     #[test]

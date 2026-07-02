@@ -621,6 +621,12 @@ pub enum MemoryStoreError {
     #[error("memory store operation '{operation}' is unsupported by this store")]
     Unsupported { operation: &'static str },
 
+    /// An enumeration request carried `limit == 0`, which cannot advance the
+    /// raw-row cursor: `next_offset` would equal the request offset and a
+    /// standard follow-`next_offset` pagination loop would never terminate.
+    #[error("memory enumeration limit must be non-zero")]
+    EnumerationLimitZero,
+
     /// An underlying filesystem operation failed.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -646,6 +652,7 @@ impl MemoryStoreError {
             Self::ScopePoisoned => "memory_scope_poisoned",
             Self::ScopeRepairFailed { .. } => "memory_scope_repair_failed",
             Self::Unsupported { .. } => "memory_unsupported",
+            Self::EnumerationLimitZero => "memory_enumeration_limit_zero",
             Self::Io(_) => "memory_io",
         }
     }

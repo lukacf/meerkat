@@ -327,6 +327,9 @@ impl StagedSlot {
         updated_at_secs: u64,
         machine_archived_resume_authorized: bool,
     ) -> Result<Self, StagedLifecycleError> {
+        if deferred_prompt.is_none() && !deferred_injected_context.is_empty() {
+            return Err(StagedLifecycleError::InjectedContextRequiresDeferredPrompt);
+        }
         let keep_alive = build_config.keep_alive;
         let has_comms_name = build_config.comms_name.is_some();
         Ok(Self {
@@ -401,6 +404,15 @@ pub enum StagedLifecycleError {
     /// `stage` called for a session that is already staged.
     #[error("session already staged: {0}")]
     AlreadyStaged(SessionId),
+    /// Injected context staged without a deferred first-turn prompt.
+    ///
+    /// Injected context is a first-turn submit-work fact: it materializes at
+    /// promotion immediately BEFORE the deferred prompt's user message, so a
+    /// slot carrying context with no prompt has nothing to attach it to. The
+    /// constructor refuses the combination so the illegal state is not
+    /// representable in a staged slot.
+    #[error("injected context on a staged session requires a deferred first-turn prompt")]
+    InjectedContextRequiresDeferredPrompt,
     /// `begin_promotion` called while another promotion is already in flight.
     #[error("session already being promoted: {0}")]
     AlreadyPromoting(SessionId),

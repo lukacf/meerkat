@@ -204,10 +204,11 @@ Returns a JSON array of result objects:
 
     Key characteristics:
     - **Embedding**: Bag-of-words TF with hash-based dimensionality reduction (4096-dimensional vectors, L2-normalized). Each word is hashed to a bucket and its presence increments that dimension.
-    - **Persistence**: Data survives process restart. On `open()`, all existing entries are re-indexed into per-session HNSW graphs from SQLite.
-    - **Scoping**: One HNSW index per session owner; indexes are sized from the surviving entry count for that scope.
+    - **Persistence**: Data survives process restart. `open()` runs a one-time in-place schema migration (indexed `session_id` projection column + durable point-ID allocator table, inside one `BEGIN IMMEDIATE` transaction) and an idempotent heal of legacy rows; it scans and embeds **nothing**. A scope's HNSW graph is built lazily on first use (search / index / enumerate / drop), so opening the store no longer pays for every session in the realm.
+    - **Scoping**: One HNSW index per session owner, built on demand from the scope's durable rows.
+    - **Lifecycle**: `drop_scope(owner)` deletes a scope's durable rows all-or-nothing and drops its live index (dropped point IDs are never reused); `enumerate_scoped(scope, request)` pages raw scope rows in durable-id order with optional `source_range`-overlap and `indexed_after` filters (a zero `limit` is rejected with a typed error).
     - **Score conversion**: HNSW cosine distance (0 = identical, 2 = opposite) is converted to a 0..1 similarity score: `score = 1.0 - (distance / 2.0)`.
-    - **Thread safety**: Insertions are serialized via a `Mutex` to couple point ID allocation with successful writes. The scoped-index map sits behind a `RwLock` for concurrent searches.
+    - **Thread safety**: Point IDs are allocated transactionally from the durable allocator table (never reused, collision-free across concurrent store instances). Insertions, scope drops, and lazy scope loads are serialized via a `Mutex`; the scoped-index map sits behind a `RwLock` for concurrent searches.
     - **Parameters** (`HnswParams` defaults): `max_nb_connection = 16`, `max_layer = 16`, `ef_construction = 200`, `ef_search = 200`.
   </Tab>
   <Tab title="SimpleMemoryStore (test-only)">

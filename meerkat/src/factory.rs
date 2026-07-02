@@ -4759,6 +4759,11 @@ impl AgentFactory {
         let effective_schedule = build_config.override_schedule.resolve(self.enable_schedule);
         if effective_schedule && let Some(schedule_dispatcher) = build_config.schedule_tools.take()
         {
+            // Scheduled spawn/fork-helper targets fire later under host
+            // authority; the creating session's effective tool access policy
+            // must be applied at creation or a gated agent could schedule a
+            // helper that escapes its own containment.
+            let creator_tool_access_policy = build_config.tool_access_policy.clone();
             let schedule_dispatcher = match build_config.mob_member_binding.clone() {
                 Some(binding) => Arc::new(
                     meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
@@ -4767,12 +4772,16 @@ impl AgentFactory {
                         Arc::new(
                             crate::surface::MobMemberCurrentSessionScheduleResolver::new(binding),
                         ),
-                    ),
+                    )
+                    .with_creator_tool_access_policy(creator_tool_access_policy),
                 ) as Arc<dyn AgentToolDispatcher>,
-                None => Arc::new(meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
-                    schedule_dispatcher,
-                    session.id().clone(),
-                )) as Arc<dyn AgentToolDispatcher>,
+                None => Arc::new(
+                    meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
+                        schedule_dispatcher,
+                        session.id().clone(),
+                    )
+                    .with_creator_tool_access_policy(creator_tool_access_policy),
+                ) as Arc<dyn AgentToolDispatcher>,
             };
             let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![

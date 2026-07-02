@@ -340,6 +340,13 @@ pub struct SessionBuildOptions {
     /// build options so it survives deferred-session materialization, where the
     /// `AgentBuildConfig` is reconstructed from these options.
     pub initial_tool_filter: Option<crate::tool_scope::ToolFilter>,
+    /// Per-launch call-level tool access policy (existing
+    /// [`crate::ops::ToolAccessPolicy`] vocabulary). Flows into
+    /// `AgentBuildConfig.tool_access_policy`, where the factory resolves it
+    /// into the sealed execution form and gates the final composed dispatcher.
+    /// `Inherit` must be resolved by the spawn chain before build; an
+    /// unresolved `Inherit` fails the build closed.
+    pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
     /// Environment variables injected into shell tool subprocesses for this agent.
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
@@ -981,6 +988,8 @@ pub struct ResumeOverrideMask {
     pub keep_alive: bool,
     pub comms_name: bool,
     pub peer_meta: bool,
+    /// Explicit per-launch tool access policy supplied by the caller.
+    pub tool_access_policy: bool,
 }
 
 impl SessionBuildOptions {
@@ -1076,6 +1085,7 @@ impl Default for SessionBuildOptions {
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
+            tool_access_policy: None,
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
@@ -1138,6 +1148,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
+            .field("tool_access_policy", &self.tool_access_policy)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())

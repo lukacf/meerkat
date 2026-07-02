@@ -78,6 +78,7 @@ pub mod state;
 pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;
+pub mod tool_execution_policy;
 pub mod tool_scope;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
@@ -308,6 +309,9 @@ pub use tool_catalog::{
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
     ToolUnavailableReason, deferred_session_entry_count, deferred_session_schema_volume,
     select_catalog_mode_from_snapshot,
+};
+pub use tool_execution_policy::{
+    ExecutionPolicyGatedDispatcher, ToolExecutionPolicy, ToolExecutionPolicyError,
 };
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,

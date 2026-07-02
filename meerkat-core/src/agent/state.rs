@@ -6852,6 +6852,164 @@ mod tests {
         );
     }
 
+    /// Ask 6: a call denied by the call-level execution gate
+    /// ([`crate::tool_execution_policy::ExecutionPolicyGatedDispatcher`])
+    /// surfaces as an ordinary `is_error` tool result (via
+    /// `terminal_tool_outcome_for_error`) and the run CONTINUES — denial is
+    /// per-call, never run-fatal. The denied tool stays in the LLM-visible
+    /// list, so the visible-set precheck passes and the deny happens inside
+    /// dispatch.
+    #[tokio::test]
+    async fn execution_policy_gate_denial_is_ordinary_tool_error_and_run_continues() {
+        struct RecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            dispatched: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for RecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.dispatched.lock().unwrap().push(call.name.to_string());
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        struct DeniedToolCallClient {
+            call_count: Mutex<u32>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for DeniedToolCallClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "call-blocked".to_string(),
+                            name: "blocked_tool".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .expect("static raw value should parse"),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                        Usage::default(),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        Usage::default(),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let inner = Arc::new(RecordingDispatcher {
+            tools: Arc::from([
+                Arc::new(ToolDef::new(
+                    "blocked_tool",
+                    "denied by the execution policy",
+                    serde_json::json!({ "type": "object" }),
+                )),
+                Arc::new(ToolDef::new(
+                    "open_tool",
+                    "not denied",
+                    serde_json::json!({ "type": "object" }),
+                )),
+            ]),
+        });
+        let policy = crate::tool_execution_policy::ToolExecutionPolicy::resolve(
+            crate::ops::ToolAccessPolicy::DenyList(["blocked_tool"].into_iter().collect()),
+        )
+        .expect("deny list must resolve");
+        let gated = Arc::new(
+            crate::tool_execution_policy::ExecutionPolicyGatedDispatcher::new(
+                Arc::clone(&inner),
+                policy,
+            ),
+        );
+
+        let client = Arc::new(DeniedToolCallClient {
+            call_count: Mutex::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client, gated, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_with_events("call the blocked tool".to_string().into(), tx),
+        )
+        .await
+        .expect("run must complete promptly after the denial")
+        .expect("agent run must succeed — a policy denial is never run-fatal");
+
+        // The denied call resolves to an error tool result, so the second
+        // turn ends the conversation: two turns total.
+        assert_eq!(result.turns, 2);
+        assert!(
+            inner.dispatched.lock().unwrap().is_empty(),
+            "denied call must never reach the inner dispatcher"
+        );
+
+        let mut saw_denied_completion = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolExecutionCompleted {
+                name,
+                is_error,
+                content,
+                ..
+            } = event
+                && name == "blocked_tool"
+            {
+                assert!(is_error, "denied tool result must be an error");
+                let text = crate::types::text_content(&content);
+                assert!(
+                    text.contains("\"error\":\"access_denied\""),
+                    "denied tool result must carry the canonical access_denied payload, got: {text}"
+                );
+                saw_denied_completion = true;
+            }
+        }
+        assert!(
+            saw_denied_completion,
+            "dispatch loop must emit an access_denied tool completion for the gated tool"
+        );
+    }
+
     #[tokio::test]
     async fn external_tool_dispatch_clears_tool_returned_terminal_cause() {
         struct ToolAuthoredTerminalCauseDispatcher {

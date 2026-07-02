@@ -1708,6 +1708,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     additional_instructions: Optional[list[str]] = None
     auth_binding: Optional[dict[str, Any]] = None
     flow_tool_overlay: Optional[PublicTurnToolOverlay] = None
+    injected_context: Optional[list[WireContentInput]] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
     model: Optional[str] = None
@@ -1776,6 +1777,7 @@ server resolves against the live roster — callers do not pass
 `generation` or `fence_token`."""
     content: WireContentInput
     member_ref: WireMemberRef
+    injected_context: Optional[list[WireContentInput]] = None
     origin: Optional[Literal['external', 'internal']] = None
     work_ref: Optional[str] = None
 
@@ -2729,6 +2731,7 @@ class BridgeDeliveryPayload:
     input_id: str
     protocol_version: BridgeProtocolVersion
     supervisor: BridgePeerSpec
+    injected_context: Optional[list[ContentInput]] = None
 
 
 @dataclass
@@ -4881,6 +4884,7 @@ class BridgeCommandDeliverMemberInput(TypedDict, total=False):
     content: Required[ContentInput]
     epoch: Required[int]
     handling_mode: Required[HandlingMode]
+    injected_context: NotRequired[list[ContentInput]]
     input_id: Required[str]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]

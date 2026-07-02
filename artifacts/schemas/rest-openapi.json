@@ -483,6 +483,13 @@
               "handling_mode": {
                 "$ref": "#/components/schemas/HandlingMode"
               },
+              "injected_context": {
+                "description": "Host-attached injected context delivered alongside the work content.\nEach entry materializes on the member as a separate typed\ninjected-context transcript message immediately before the work\ncontent, in order. Omitted when empty, so the serialized payload is\nbyte-identical to the pre-field wire shape (see the V3 note in the\n`BridgeProtocolVersion` history for the cross-version posture).",
+                "items": {
+                  "$ref": "#/components/schemas/ContentInput"
+                },
+                "type": "array"
+              },
               "input_id": {
                 "type": "string"
               },
@@ -2892,6 +2899,9 @@
         ],
         "type": "object"
       },
+      "FlowParams": {
+        "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
+      },
       "ForkContextSpec": {
         "oneOf": [
           {
@@ -3907,7 +3917,9 @@
               "mob_id": {
                 "type": "string"
               },
-              "params": true,
+              "params": {
+                "$ref": "#/components/schemas/FlowParams"
+              },
               "type": {
                 "const": "flow",
                 "type": "string"

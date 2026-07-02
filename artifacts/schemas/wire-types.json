@@ -6984,6 +6984,13 @@
           "handling_mode": {
             "$ref": "#/$defs/HandlingMode"
           },
+          "injected_context": {
+            "description": "Host-attached injected context delivered alongside the work content.\nEach entry materializes on the member as a separate typed\ninjected-context transcript message immediately before the work\ncontent, in order. Omitted when empty, so the serialized payload is\nbyte-identical to the pre-field wire shape (see the V3 note in the\n`BridgeProtocolVersion` history for the cross-version posture).",
+            "items": {
+              "$ref": "#/$defs/ContentInput"
+            },
+            "type": "array"
+          },
           "input_id": {
             "type": "string"
           },
@@ -7704,6 +7711,13 @@
       },
       "handling_mode": {
         "$ref": "#/$defs/HandlingMode"
+      },
+      "injected_context": {
+        "description": "Host-attached injected context delivered alongside the work content.\nEach entry materializes on the member as a separate typed\ninjected-context transcript message immediately before the work\ncontent, in order. Omitted when empty, so the serialized payload is\nbyte-identical to the pre-field wire shape (see the V3 note in the\n`BridgeProtocolVersion` history for the cross-version posture).",
+        "items": {
+          "$ref": "#/$defs/ContentInput"
+        },
+        "type": "array"
       },
       "input_id": {
         "type": "string"
@@ -9467,6 +9481,13 @@
               "handling_mode": {
                 "$ref": "#/$defs/HandlingMode"
               },
+              "injected_context": {
+                "description": "Host-attached injected context delivered alongside the work content.\nEach entry materializes on the member as a separate typed\ninjected-context transcript message immediately before the work\ncontent, in order. Omitted when empty, so the serialized payload is\nbyte-identical to the pre-field wire shape (see the V3 note in the\n`BridgeProtocolVersion` history for the cross-version posture).",
+                "items": {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                "type": "array"
+              },
               "input_id": {
                 "type": "string"
               },
@@ -11178,6 +11199,13 @@
               },
               "handling_mode": {
                 "$ref": "#/$defs/HandlingMode"
+              },
+              "injected_context": {
+                "description": "Host-attached injected context delivered alongside the work content.\nEach entry materializes on the member as a separate typed\ninjected-context transcript message immediately before the work\ncontent, in order. Omitted when empty, so the serialized payload is\nbyte-identical to the pre-field wire shape (see the V3 note in the\n`BridgeProtocolVersion` history for the cross-version posture).",
+                "items": {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                "type": "array"
               },
               "input_id": {
                 "type": "string"
@@ -30474,6 +30502,9 @@
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
+      "FlowParams": {
+        "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
+      },
       "ForkContextSpec": {
         "oneOf": [
           {
@@ -30755,7 +30786,9 @@
               "mob_id": {
                 "type": "string"
               },
-              "params": true,
+              "params": {
+                "$ref": "#/$defs/FlowParams"
+              },
               "type": {
                 "const": "flow",
                 "type": "string"
@@ -32602,6 +32635,9 @@
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
+      "FlowParams": {
+        "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
+      },
       "ForkContextSpec": {
         "oneOf": [
           {
@@ -32883,7 +32919,9 @@
               "mob_id": {
                 "type": "string"
               },
-              "params": true,
+              "params": {
+                "$ref": "#/$defs/FlowParams"
+              },
               "type": {
                 "const": "flow",
                 "type": "string"
@@ -34832,6 +34870,9 @@
         ],
         "type": "string"
       },
+      "FlowParams": {
+        "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
+      },
       "ForkContextSpec": {
         "oneOf": [
           {
@@ -35113,7 +35154,9 @@
               "mob_id": {
                 "type": "string"
               },
-              "params": true,
+              "params": {
+                "$ref": "#/$defs/FlowParams"
+              },
               "type": {
                 "const": "flow",
                 "type": "string"

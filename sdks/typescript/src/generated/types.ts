@@ -1279,6 +1279,7 @@ export interface MobTurnStartParams {
   agent_identity: string;
   auth_binding?: Record<string, unknown>;
   flow_tool_overlay?: PublicTurnToolOverlay;
+  injected_context?: WireContentInput[];
   keep_alive?: boolean;
   max_tokens?: number;
   mob_id: string;
@@ -1332,6 +1333,7 @@ export interface MobRotateSupervisorResult {
 
 export interface MobSubmitWorkParams {
   content: WireContentInput;
+  injected_context?: WireContentInput[];
   member_ref: WireMemberRef;
   origin?: "external" | "internal";
   work_ref?: string;
@@ -1885,6 +1887,7 @@ export interface BridgeDeliveryPayload {
   content: ContentInput;
   epoch: number;
   handling_mode: HandlingMode;
+  injected_context?: ContentInput[];
   input_id: string;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -2495,6 +2498,7 @@ export interface BridgeCommandDeliverMemberInput {
   content: ContentInput;
   epoch: number;
   handling_mode: HandlingMode;
+  injected_context?: ContentInput[];
   input_id: string;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;

@@ -749,6 +749,13 @@
               "handling_mode": {
                 "$ref": "#/$defs/HandlingMode"
               },
+              "injected_context": {
+                "description": "Host-attached injected context delivered alongside the work content.\nEach entry materializes on the member as a separate typed\ninjected-context transcript message immediately before the work\ncontent, in order. Omitted when empty, so the serialized payload is\nbyte-identical to the pre-field wire shape (see the V3 note in the\n`BridgeProtocolVersion` history for the cross-version posture).",
+                "items": {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                "type": "array"
+              },
               "input_id": {
                 "type": "string"
               },
@@ -2867,6 +2874,9 @@
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
+      "FlowParams": {
+        "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
+      },
       "ForkContextSpec": {
         "oneOf": [
           {
@@ -3148,7 +3158,9 @@
               "mob_id": {
                 "type": "string"
               },
-              "params": true,
+              "params": {
+                "$ref": "#/$defs/FlowParams"
+              },
               "type": {
                 "const": "flow",
                 "type": "string"
@@ -16040,6 +16052,16 @@
       "content": {
         "$ref": "#/$defs/WireContentInput"
       },
+      "injected_context": {
+        "description": "Host-attached injected context delivered alongside the work content.\nEach entry materializes on the member as a separate typed\ninjected-context transcript message immediately before the work\ncontent, in order. Deliverable to queue-mode turn-driven members;\nautonomous inbox delivery rejects it with a typed error.",
+        "items": {
+          "$ref": "#/$defs/WireContentInput"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
       "member_ref": {
         "$ref": "#/$defs/WireMemberRef"
       },
@@ -17072,6 +17094,16 @@
           {
             "type": "null"
           }
+        ]
+      },
+      "injected_context": {
+        "description": "Host-attached injected context for this turn. Each entry materializes\nas a separate typed injected-context transcript message immediately\nbefore the turn's user message, in order. `mob/turn_start` already\nrejects autonomous members, so this always rides a turn-driven turn.",
+        "items": {
+          "$ref": "#/$defs/WireContentInput"
+        },
+        "type": [
+          "array",
+          "null"
         ]
       },
       "keep_alive": {
@@ -20230,6 +20262,9 @@
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
+      "FlowParams": {
+        "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
+      },
       "ForkContextSpec": {
         "oneOf": [
           {
@@ -20511,7 +20546,9 @@
               "mob_id": {
                 "type": "string"
               },
-              "params": true,
+              "params": {
+                "$ref": "#/$defs/FlowParams"
+              },
               "type": {
                 "const": "flow",
                 "type": "string"
@@ -22328,6 +22365,9 @@
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
+      "FlowParams": {
+        "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
+      },
       "ForkContextSpec": {
         "oneOf": [
           {
@@ -22609,7 +22649,9 @@
               "mob_id": {
                 "type": "string"
               },
-              "params": true,
+              "params": {
+                "$ref": "#/$defs/FlowParams"
+              },
               "type": {
                 "const": "flow",
                 "type": "string"

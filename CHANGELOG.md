@@ -23,6 +23,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `fileData`, and can register `gs://` references through the Files API before
   generation when Google bearer auth is available.
 
+## [0.7.12] - 2026-07-02
+
+Meerkat 0.7.12 lands the eight upstream asks from the MobKit agent-memory
+initiative, plus a pre-existing schedule-store fix.
+
+### Added
+
+- Typed injected-context transcript class (`TranscriptUserRole::InjectedContext`):
+  hosts attach ambient context as separate typed user-channel messages on every
+  submit-work path (service/RPC/REST create+turn, runtime inputs, mob
+  `WorkSpec`/`mob/turn_start`/`mob/submit_work`, supervisor-bridge delivery,
+  Python/TS wrappers). Injected context and discarded compaction summaries are
+  excluded from semantic-memory indexing; transcript rewrites may carry the
+  role (compaction summaries stay runtime-mintable-only, rejected fail-closed).
+- `MemoryStore` lifecycle: per-scope `drop_scope` delete/GC and paged
+  `enumerate_scoped` (durable-id order, `source_range` overlap and
+  `indexed_after` filters). `HnswMemoryStore` opens lazily — no more
+  every-session re-embed on each agent build — with an in-place SQLite
+  migration, transactional never-reused point-ID allocation, and mixed-version
+  row healing.
+- Host-supplied compaction curator (`CompactionCurator`): produces the summary
+  instead of the LLM call (zero-LLM-cost compaction); curator failure is a
+  typed `CompactionFailed` reason with no silent LLM fallback.
+- `session/transcript_revisions`: transcript revision list (with head) on the
+  JSON-RPC transcript family; restore now resolves the `current` selector.
+- Comms content-taint channel: signed-when-present `content_taint` declaration
+  on content-bearing envelopes, host-set outbound declaration with tri-state
+  per-send override, receiver-side typed `sender_taint` on comms transcript
+  notices. Hook payloads gain typed tool `provenance` and provider-native
+  `server_tool_content` for synchronous dispatch-time classification.
+- Call-level tool authorization: `SpawnMemberSpec.tool_access_policy` is now
+  enforced end-to-end via a list-preserving execution gate (prompt-cache
+  prefix unchanged; denials are ordinary tool errors). `Inherit` resolves to
+  the parent's effective policy on persistent AND ephemeral backends, and
+  agent-created schedules with helper targets inherit the creator's policy at
+  creation.
+- Host-runnable schedule targets (`target_kind: "host_runnable"`): library
+  hosts register named runnables; occurrences flow through the normal
+  occurrence lifecycle.
+
+### Fixed
+
+- Persisted Flow-target schedule rows were unreadable (raw `Box<RawValue>`
+  params cannot deserialize through internally-tagged serde buffering); Flow
+  params now use a canonicalizing carrier and old rows heal on read.
+- Prior compaction summaries and injected-context messages no longer count
+  toward the compactor's retained-turn budget; retained turns keep their
+  preceding injected-context run.
+
 ## [0.7.3] - 2026-06-14
 
 Meerkat 0.7.3 is a follow-up to 0.7.2 fixing two mob-teardown regressions

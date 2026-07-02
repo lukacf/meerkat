@@ -151,6 +151,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "WireSessionTranscriptRevision",
         ),
         RpcMethodDescriptor::typed(
+            "session/transcript_revisions",
+            "List retained transcript revision commits with the current head",
+            "ListSessionTranscriptRevisionsParams",
+            "WireSessionTranscriptRevisionList",
+        ),
+        RpcMethodDescriptor::typed(
             "session/restore_transcript_revision",
             "Commit a typed rewrite that restores a retained transcript revision",
             "RestoreSessionTranscriptRevisionParams",

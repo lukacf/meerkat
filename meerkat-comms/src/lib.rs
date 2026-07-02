@@ -46,7 +46,7 @@ pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
 pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
 pub use trust::{TrustEntry, TrustError, TrustResolveError, TrustStore, TrustedPeersView};
-pub use types::{Envelope, InboxItem, MessageKind, Status};
+pub use types::{Envelope, InboxItem, MessageKind, SenderContentTaint, Status};
 
 // Re-export high-level components
 pub use runtime::comms_bootstrap::{

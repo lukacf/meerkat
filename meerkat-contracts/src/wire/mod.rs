@@ -45,7 +45,7 @@ pub use comms::{
     InputSource as WireCommsInputSource, InputStreamMode as WireCommsInputStreamMode, PeerAddress,
     PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
     PeerName as WireCommsPeerName, PeerSendability, PeerTransport,
-    ResponseStatus as WireCommsResponseStatus,
+    ResponseStatus as WireCommsResponseStatus, SendTaintOverride, SenderContentTaint,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::ConfigWriteResult;
@@ -196,13 +196,15 @@ pub use schedule::{
 };
 pub use session::{
     ForkSessionAtParams, ForkSessionReplaceParams, InterruptResult,
-    ReadSessionTranscriptRevisionParams, RestoreSessionTranscriptRevisionParams, RevisionId,
-    RevisionSelector, RewriteSessionTranscriptParams, SessionStreamCloseParams,
-    SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult,
-    TranscriptRewriteMessage, WireAssistantBlock, WireContentBlock, WireContentInput,
-    WireInterruptOutcome, WirePromptInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
-    WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision, WireStopReason,
-    WireToolResult, WireToolResultContent, WireTranscriptSource,
+    ListSessionTranscriptRevisionsParams, ReadSessionTranscriptRevisionParams,
+    RestoreSessionTranscriptRevisionParams, RevisionId, RevisionSelector,
+    RewriteSessionTranscriptParams, SessionStreamCloseParams, SessionStreamCloseResult,
+    SessionStreamOpenParams, SessionStreamOpenResult, TranscriptRewriteMessage, WireAssistantBlock,
+    WireContentBlock, WireContentInput, WireInterruptOutcome, WirePromptInput, WireProviderMeta,
+    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
+    WireSessionTranscriptRevisionList, WireStopReason, WireToolResult, WireToolResultContent,
+    WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use stream_read::StreamReadStatus;

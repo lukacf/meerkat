@@ -125,6 +125,10 @@ impl SubmitWorkDispatchCompletion {
 
 struct SubmitWorkDispatchRequest {
     content: ContentInput,
+    /// Host-attached injected context riding with the work content.
+    /// Deliverable on queue-mode turn-driven dispatch (local and remote);
+    /// autonomous inbox delivery and steer dispatch reject it fail-closed.
+    injected_context: Vec<ContentInput>,
     handling_mode: meerkat_core::types::HandlingMode,
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
@@ -5043,6 +5047,9 @@ impl MobActor {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: None,
+                // Revival resumes the persisted session; the effective policy
+                // is restored from durable session metadata by the factory.
+                tool_access_policy: None,
                 system_prompt_override: None,
             },
             expected_session_id: bridge_session_id,
@@ -5790,6 +5797,7 @@ impl MobActor {
                         .start_turn(
                             &task_member_ref,
                             meerkat_core::service::StartTurnRequest {
+                                injected_context: Vec::new(),
                                 prompt: message.into(),
                                 system_prompt: None,
                                 event_tx: None,
@@ -6811,6 +6819,7 @@ impl MobActor {
             use meerkat_runtime::{Input, InputHeader, PromptInput};
 
             let input = Input::Prompt(PromptInput {
+                injected_context: Vec::new(),
                 header: InputHeader {
                     id: meerkat_core::lifecycle::InputId::new(),
                     timestamp: chrono::Utc::now(),
@@ -8847,7 +8856,7 @@ impl MobActor {
             context,
             labels,
             launch_mode,
-            tool_access_policy: _tool_access_policy,
+            tool_access_policy,
             budget_split_policy: _budget_split_policy,
             budget_limits,
             auto_wire_parent,
@@ -9046,6 +9055,7 @@ impl MobActor {
                                 shell_env,
                                 mob_tool_authority_context: None,
                                 inherited_tool_filter: inherited_tool_filter.clone(),
+                                tool_access_policy: tool_access_policy.clone(),
                                 system_prompt_override: system_prompt_override.clone(),
                             },
                             expected_session_id: &resume_id,
@@ -9195,6 +9205,7 @@ impl MobActor {
                 shell_env,
                 mob_tool_authority_context: None,
                 inherited_tool_filter,
+                tool_access_policy,
                 system_prompt_override,
             })
             .await?;
@@ -9759,7 +9770,7 @@ impl MobActor {
             context,
             labels,
             launch_mode: _,
-            tool_access_policy: _tool_access_policy,
+            tool_access_policy,
             budget_split_policy: _budget_split_policy,
             budget_limits,
             auto_wire_parent: _,
@@ -9832,6 +9843,7 @@ impl MobActor {
             shell_env,
             mob_tool_authority_context: None,
             inherited_tool_filter,
+            tool_access_policy,
             system_prompt_override,
         })
         .await?;
@@ -12065,6 +12077,7 @@ impl MobActor {
                 to: route,
                 body,
                 blocks,
+                content_taint: None,
                 handling_mode,
             },
         })
@@ -14326,7 +14339,7 @@ impl MobActor {
             context: replacement_context,
             labels: replacement_labels,
             launch_mode: _,
-            tool_access_policy: _tool_access_policy,
+            tool_access_policy: replacement_tool_access_policy,
             budget_split_policy: _budget_split_policy,
             budget_limits: replacement_budget_limits,
             auto_wire_parent: _,
@@ -14541,6 +14554,7 @@ impl MobActor {
             shell_env: replacement_shell_env,
             mob_tool_authority_context: None,
             inherited_tool_filter: replacement_inherited_tool_filter,
+            tool_access_policy: replacement_tool_access_policy,
             system_prompt_override: replacement_system_prompt_override,
         })
         .await?;
@@ -17860,6 +17874,7 @@ impl MobActor {
             work_ref,
             content,
             origin,
+            injected_context,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -17976,6 +17991,32 @@ impl MobActor {
             entry.fence_token
         };
 
+        // Injected-context deliverability is validated BEFORE the MobMachine
+        // SubmitWork input is applied: refusing realization after admission
+        // would abandon the machine-emitted ingress effect outside the
+        // machine's typed rejection vocabulary. Steer dispatch realizes as
+        // live system-context appends and the autonomous inbox path flows
+        // through comms plain events (classified external event ->
+        // SystemNotice transcript append) — neither carries a user-channel
+        // transcript boundary for typed injected-context messages to precede,
+        // so both fail closed here: one canonical terminal path for the same
+        // semantic condition, and no admitted effect is ever left
+        // unrealized over it.
+        if !injected_context.is_empty() {
+            if handling_mode == meerkat_core::types::HandlingMode::Steer {
+                return Err(MobError::InjectedContextUndeliverable {
+                    member_id: AgentIdentity::from(agent_identity.as_str()),
+                    reason: "steer dispatch carries no transcript boundary for injected context",
+                });
+            }
+            if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+                return Err(MobError::InjectedContextUndeliverable {
+                    member_id: AgentIdentity::from(agent_identity.as_str()),
+                    reason: "autonomous inbox delivery carries no user-channel work boundary",
+                });
+            }
+        }
+
         // Project the caller's identifiers into DSL bridging types. Existing
         // members use the caller-supplied runtime/fence so MobMachine can
         // reject stale generations; auto-spawned members use the generated
@@ -18038,6 +18079,7 @@ impl MobActor {
                 ingress_authority,
                 SubmitWorkDispatchRequest {
                     content,
+                    injected_context,
                     handling_mode,
                     render_metadata,
                     ack_mode,
@@ -18152,6 +18194,9 @@ impl MobActor {
                 ingress_authority,
                 SubmitWorkDispatchRequest {
                     content,
+                    // Spawn kickoff is mob-internal coordination content; the
+                    // injected-context slot belongs to the submit-work lane.
+                    injected_context: Vec::new(),
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     render_metadata: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
@@ -18288,6 +18333,7 @@ impl MobActor {
     ) -> Result<SubmitWorkDispatchCompletion, MobError> {
         let SubmitWorkDispatchRequest {
             content,
+            injected_context,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -18302,6 +18348,9 @@ impl MobActor {
             ingress_authority = ingress_authority.variant(),
             "dispatch_member_turn_after_machine_admission started"
         );
+        // Injected-context deliverability (steer / autonomous-inbox) was
+        // validated in `handle_submit_work` BEFORE the MobMachine admission,
+        // so no admitted ingress effect can be abandoned over it here.
         let live_steer_admission = handling_mode == meerkat_core::types::HandlingMode::Steer
             && ack_mode == crate::mob_machine::SubmitWorkAckMode::IngressAccepted;
         tracing::debug!(
@@ -18399,6 +18448,10 @@ impl MobActor {
                     .await?
                 {
                     let req = meerkat_core::service::StartTurnRequest {
+                        // The admission barrier is steer-only; steer dispatch
+                        // with injected context was rejected before the mode
+                        // fork, so this carrier is invariantly empty here.
+                        injected_context: Vec::new(),
                         prompt: content,
                         system_prompt: None,
                         event_tx: None,
@@ -18420,6 +18473,10 @@ impl MobActor {
                         req: Box::new(req),
                     });
                 }
+                // Injected context on the autonomous inbox path was rejected
+                // pre-admission in `handle_submit_work` (the plain-event path
+                // has no user-channel work boundary); the carrier is
+                // invariantly empty here.
                 let injector = self
                     .provisioner
                     .interaction_event_injector(&bridge_session_id)
@@ -18465,6 +18522,13 @@ impl MobActor {
                     "dispatch_member_turn_after_machine_admission building turn request"
                 );
                 let req = meerkat_core::service::StartTurnRequest {
+                    // Turn-driven work requests carry no typed_turn_appends;
+                    // the injected-context field is the single lowering
+                    // carrier here. Runtime-backed members re-lower it into
+                    // the prompt input's typed slot
+                    // (`runtime_input_from_turn_request`); direct
+                    // session-service members materialize it in the runner.
+                    injected_context,
                     prompt: content,
                     system_prompt: None,
                     event_tx: None,
@@ -20340,6 +20404,7 @@ impl MobActor {
                 intent: intent.to_string(),
                 params,
                 blocks: None,
+                content_taint: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
             },

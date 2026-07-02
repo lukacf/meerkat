@@ -169,8 +169,12 @@ pub use meerkat_core::{
     SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use meerkat_core::{
-    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionPage,
-    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    CompactionCurator, CompactionCuratorError, CompactionWindow, CuratedCompactionSummary,
+};
+pub use meerkat_core::{
+    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
+    SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
+    SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, TranscriptEditRunningBehavior, TranscriptRewriteCommit,
     TranscriptRewriteReason, TranscriptRewriteRecord, TranscriptRewriteSelection,
 };
@@ -183,13 +187,16 @@ pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
     DeliveryCompletion, DeliveryDispatch, DeliveryFailureReason, DeliveryReceipt,
     DeliveryReceiptStage, DeliveryTerminal, DisabledScheduleStore, ForkContextSpec,
-    HelperOptionsSpec, IdentityTargetBinding, IntervalTriggerSpec, MemoryScheduleStore,
-    MisfirePolicy, MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass,
-    OccurrenceFilter, OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy,
-    ResolvedSpawnSnapshot, SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE, SCHEDULE_TOOL_INVALID_ARGUMENTS,
+    HelperOptionsSpec, HostRunnable, HostRunnableError, HostRunnableInvocation, HostRunnableName,
+    HostRunnableNameError, HostRunnableOutcome, HostRunnableParams, HostRunnableParamsError,
+    HostRunnableRegistry, HostRunnableRegistryError, HostRunnableTargetBinding,
+    IdentityTargetBinding, IntervalTriggerSpec, MemoryScheduleStore, MisfirePolicy,
+    MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceFilter,
+    OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot,
+    RunnableProbe, SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE, SCHEDULE_TOOL_INVALID_ARGUMENTS,
     SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig,
-    ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleService,
-    ScheduleSpawnTooling, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
+    ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleRunnableHost,
+    ScheduleService, ScheduleSpawnTooling, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,

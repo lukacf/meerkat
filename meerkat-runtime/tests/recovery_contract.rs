@@ -72,6 +72,7 @@ fn make_runtime_id(label: &str) -> LogicalRuntimeId {
 
 fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),

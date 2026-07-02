@@ -1355,6 +1355,12 @@ pub enum CompactionFailureReason {
     },
     /// The LLM returned an empty summary, so there was nothing to commit.
     EmptySummary,
+    /// The host-supplied compaction curator failed to produce a summary, so
+    /// there was nothing to commit (there is no LLM fallback).
+    CuratorFailed {
+        /// Display projection of the curator error.
+        message: String,
+    },
     /// Token estimation over the history failed before summarization.
     EstimationFailed {
         /// Display projection of the serialization error.
@@ -1386,6 +1392,14 @@ impl CompactionFailureReason {
         }
     }
 
+    /// Curator failure carrying the display message.
+    #[must_use]
+    pub fn curator_failed(message: impl Into<String>) -> Self {
+        Self::CuratorFailed {
+            message: message.into(),
+        }
+    }
+
     /// Memory-indexing rejection failure.
     #[must_use]
     pub fn memory_indexing_failed(attempted_entries: usize, message: impl Into<String>) -> Self {
@@ -1409,6 +1423,9 @@ impl std::fmt::Display for CompactionFailureReason {
         match self {
             Self::LlmFailed { message, .. } => write!(f, "compaction LLM call failed: {message}"),
             Self::EmptySummary => write!(f, "LLM returned empty summary"),
+            Self::CuratorFailed { message } => {
+                write!(f, "compaction curator failed: {message}")
+            }
             Self::EstimationFailed { message } => write!(f, "token estimation failed: {message}"),
             Self::MemoryIndexingFailed {
                 attempted_entries,

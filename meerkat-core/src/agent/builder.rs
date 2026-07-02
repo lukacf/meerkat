@@ -71,6 +71,7 @@ pub struct AgentBuilder {
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
     pub(super) hook_run_overrides: HookRunOverrides,
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
+    pub(super) compaction_curator: Option<Arc<dyn crate::compact::CompactionCurator>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
@@ -227,6 +228,7 @@ impl AgentBuilder {
             hook_engine: None,
             hook_run_overrides: HookRunOverrides::default(),
             compactor: None,
+            compaction_curator: None,
             memory_store: None,
             skill_engine: None,
             checkpointer: None,
@@ -373,6 +375,15 @@ impl AgentBuilder {
     /// Set the context compactor.
     pub fn compactor(mut self, compactor: Arc<dyn crate::compact::Compactor>) -> Self {
         self.compactor = Some(compactor);
+        self
+    }
+
+    /// Set the host-supplied compaction summary curator.
+    pub fn compaction_curator(
+        mut self,
+        curator: Arc<dyn crate::compact::CompactionCurator>,
+    ) -> Self {
+        self.compaction_curator = Some(curator);
         self
     }
 
@@ -636,6 +647,7 @@ impl AgentBuilder {
             hook_engine: self.hook_engine,
             hook_run_overrides: self.hook_run_overrides,
             compactor: self.compactor,
+            compaction_curator: self.compaction_curator,
             last_input_tokens: 0,
             compaction_cadence,
             memory_store: self.memory_store,

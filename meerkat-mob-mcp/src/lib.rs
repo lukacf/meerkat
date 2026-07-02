@@ -5116,6 +5116,7 @@ mod tests {
         let service = LocalSessionService::new();
         let run = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -5157,6 +5158,7 @@ mod tests {
         let service = LocalSessionService::new();
         let run = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -5195,6 +5197,7 @@ mod tests {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
                     event_tx: None,
@@ -5233,6 +5236,7 @@ mod tests {
         let service = LocalSessionService::new();
         let run = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -5319,6 +5323,7 @@ mod tests {
         let service = LocalSessionService::new();
         let run = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -5365,6 +5370,7 @@ mod tests {
         let service = LocalSessionService::new();
         let run = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -5387,6 +5393,7 @@ mod tests {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
                     event_tx: None,
@@ -7753,6 +7760,7 @@ mod tests {
         // Create a session and its implicit mob
         let result = svc
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7810,6 +7818,7 @@ mod tests {
 
         let result = svc
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test"),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7891,6 +7900,7 @@ mod tests {
     async fn test_local_session_service_apply_runtime_turn_returns_start_turn_terminal_result() {
         let svc = LocalSessionService::new();
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "test".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7909,6 +7919,7 @@ mod tests {
             &created.session_id,
             meerkat_core::RunId::new(),
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "test".into(),
                 system_prompt: None,
                 event_tx: None,

@@ -1480,6 +1480,7 @@ async fn apply_runtime_turn(
     };
 
     let svc_req = SvcStartTurnRequest {
+        injected_context: Vec::new(),
         prompt: prompt.clone(),
         system_prompt: None,
         event_tx: Some(event_tx.clone()),
@@ -1671,6 +1672,7 @@ async fn apply_runtime_turn(
                     session_id,
                     run_id,
                     SvcStartTurnRequest {
+                        injected_context: Vec::new(),
                         prompt,
                         system_prompt: None,
                         event_tx: Some(event_tx.clone()),
@@ -4153,6 +4155,7 @@ fn help_request_to_create_session(
 
     Ok(CreateSessionRequest {
         prompt: prompt.into(),
+        injected_context: None,
         system_prompt: meerkat::SystemPromptOverride::Set(
             meerkat::help::help_system_prompt().to_string(),
         ),
@@ -4388,6 +4391,7 @@ async fn create_session_inner(
             }
         };
     let mut build = SessionBuildOptions {
+        tool_access_policy: None,
         custom_models: std::collections::BTreeMap::new(),
         image_generation_provider: None,
         auto_compact_threshold_override: None,
@@ -4452,6 +4456,7 @@ async fn create_session_inner(
     let create_provider = build.provider;
 
     let svc_req = SvcCreateSessionRequest {
+        injected_context: Vec::new(),
         model: model.to_string(),
         prompt: req.prompt.clone(),
         system_prompt: req.system_prompt,
@@ -4550,19 +4555,24 @@ async fn create_session_inner(
         }
     }
 
-    // Create input and route through runtime
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
-        req.prompt,
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
-                skill_references,
-                flow_tool_overlay: None,
-                additional_instructions: None,
-                ..Default::default()
-            },
-        ),
-    ));
+    // Create input and route through runtime. Injected context lowers
+    // through the prompt input's typed slot so the runtime batch places the
+    // InjectedContext-role appends immediately before the user append.
+    let input = meerkat_runtime::Input::Prompt(
+        meerkat_runtime::PromptInput::from_content_input(
+            req.prompt,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
+                    skill_references,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                    ..Default::default()
+                },
+            ),
+        )
+        .with_injected_context(req.injected_context.unwrap_or_default()),
+    );
 
     // Final cancel recheck before submitting input — interrupt() is a no-op
     // when no turn is running, so cancel between the last recheck and here
@@ -5442,6 +5452,7 @@ async fn continue_session_inner(
         };
         let auth_binding_override = req.auth_binding.clone().map(Into::into);
         let mut build = SessionBuildOptions {
+            tool_access_policy: None,
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,
@@ -5530,6 +5541,7 @@ async fn continue_session_inner(
             },
         };
         let create_req = SvcCreateSessionRequest {
+            injected_context: Vec::new(),
             model,
             prompt: turn_prompt.clone(),
             system_prompt: match req.system_prompt.clone() {
@@ -5666,8 +5678,8 @@ async fn continue_session_inner(
                 runtime_executor_attach_error_to_api(error),
             ));
         }
-        let input =
-            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
+        let input = meerkat_runtime::Input::Prompt(
+            meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -5683,7 +5695,9 @@ async fn continue_session_inner(
                         ..Default::default()
                     },
                 ),
-            ));
+            )
+            .with_injected_context(req.injected_context.clone().unwrap_or_default()),
+        );
         // Final cancel recheck before submitting input.
         if let Some(ctx) = req_ctx.as_ref()
             && ctx.cancel_already_requested()
@@ -5962,8 +5976,8 @@ async fn continue_session_inner(
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestTerminal::RespondWithoutPublish(Err(e));
         }
-        let input =
-            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
+        let input = meerkat_runtime::Input::Prompt(
+            meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -5979,7 +5993,9 @@ async fn continue_session_inner(
                         ..Default::default()
                     },
                 ),
-            ));
+            )
+            .with_injected_context(req.injected_context.clone().unwrap_or_default()),
+        );
         let input_id = input.id().clone();
         let mut pre_admission_registration = None;
         if let Some(admission) = pending_pre_admission.take() {
@@ -7171,6 +7187,7 @@ mod tests {
     #[test]
     fn rest_context_system_notice_projects_via_typed_notice() {
         let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
+            sender_taint: None,
             kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: meerkat_core::types::SystemNoticeDirection::Incoming,
             peer: None,
@@ -7450,6 +7467,7 @@ mod tests {
         let create_result = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7570,6 +7588,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7709,6 +7728,7 @@ mod tests {
         state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7760,6 +7780,7 @@ mod tests {
         let created = match state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7940,6 +7961,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let (request, initial_turn) =
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7993,6 +8015,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let (request, initial_turn) =
             split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -8155,6 +8178,7 @@ mod tests {
                 &state_for_turn,
                 &target_for_turn,
                 ContinueSessionRequest {
+                    injected_context: None,
                     session_id: body_session_id,
                     prompt: ContentInput::Text("block while peer terminal arrives".to_string()),
                     system_prompt: None,
@@ -8354,6 +8378,7 @@ mod tests {
             &state,
             &target_session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: target_session_id.to_string(),
                 prompt: ContentInput::Text("must not enter runtime queue".to_string()),
                 system_prompt: None,
@@ -8417,6 +8442,7 @@ mod tests {
                 &state_for_continue,
                 &target_for_continue,
                 ContinueSessionRequest {
+                    injected_context: None,
                     session_id: target_for_continue.clone(),
                     prompt: ContentInput::Text("complete after REST waiter drops".to_string()),
                     system_prompt: None,
@@ -8564,6 +8590,7 @@ mod tests {
             &state,
             &target_session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: target_session_id.to_string(),
                 prompt: ContentInput::Text("rebuild against stopped runtime".to_string()),
                 system_prompt: None,
@@ -8664,6 +8691,7 @@ mod tests {
                 &continue_state,
                 &target_for_continue,
                 ContinueSessionRequest {
+                    injected_context: None,
                     session_id: target_for_continue.clone(),
                     prompt: ContentInput::Text("complete after rebuild cleanup".to_string()),
                     system_prompt: None,
@@ -8793,6 +8821,7 @@ mod tests {
             &state,
             &target_session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: target_session_id.to_string(),
                 prompt: ContentInput::Text("must not persist keep_alive".to_string()),
                 system_prompt: None,
@@ -8865,6 +8894,7 @@ mod tests {
             &state,
             &target_session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: target_session_id.to_string(),
                 prompt: ContentInput::Text("must not apply MCP boundary".to_string()),
                 system_prompt: None,
@@ -9125,6 +9155,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -10266,6 +10297,7 @@ mod tests {
         let session_service = state.session_service.clone();
         let created = session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -10346,6 +10378,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -10424,6 +10457,7 @@ mod tests {
             .expect("runtime bindings should prepare");
         let create_result = session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -10797,6 +10831,98 @@ mod tests {
         assert_eq!(payload["text"], "ok");
     }
 
+    /// REST end-to-end acceptance for Ask 1: `injected_context` on session
+    /// create materializes as typed injected-context transcript messages
+    /// immediately before the first turn's user message, in order — visible
+    /// through the history projection's typed `transcript_role`.
+    #[tokio::test]
+    async fn test_create_session_injected_context_lands_before_user_message() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let app = router(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "What changed?",
+                            "injected_context": ["ambient alpha", "ambient beta"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("create with injected context timed out")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = payload["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let history_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{session_id}/history"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history_response.status(), StatusCode::OK);
+        let history_body = history_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let history: serde_json::Value = serde_json::from_slice(&history_body).unwrap();
+        let user_channel: Vec<(String, String)> = history["messages"]
+            .as_array()
+            .expect("history messages")
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .map(|message| {
+                (
+                    message
+                        .get("transcript_role")
+                        .and_then(|role| role.as_str())
+                        .unwrap_or("conversational")
+                        .to_string(),
+                    message["content"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            user_channel,
+            vec![
+                ("injected_context".to_string(), "ambient alpha".to_string()),
+                ("injected_context".to_string(), "ambient beta".to_string()),
+                ("conversational".to_string(), "What changed?".to_string()),
+            ],
+            "injected context must land as typed injected-context messages \
+             immediately before the first turn's user message: {history}"
+        );
+    }
+
     #[test]
     fn test_comms_send_request_peer_request_invalid_stream_rejected_at_serde() {
         let err = serde_json::from_value::<CommsSendRequest>(json!({
@@ -10984,6 +11110,7 @@ mod tests {
     #[test]
     fn test_rest_continue_requires_rebuild_matches_surface_contract() {
         let mut req = ContinueSessionRequest {
+            injected_context: None,
             session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
             prompt: ContentInput::Text("Continue".to_string()),
             system_prompt: None,
@@ -11053,6 +11180,7 @@ mod tests {
         let session_service = state.session_service.clone();
         let created = session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -11125,6 +11253,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -11163,6 +11292,7 @@ mod tests {
             &state,
             &session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: session_id.to_string(),
                 prompt: ContentInput::Text("Continue".to_string()),
                 system_prompt: None,
@@ -11211,6 +11341,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -11243,6 +11374,7 @@ mod tests {
             &state,
             &session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: session_id.to_string(),
                 prompt: inline_video_prompt(),
                 system_prompt: None,
@@ -11300,6 +11432,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -11334,6 +11467,7 @@ mod tests {
             &state,
             &session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: session_id.to_string(),
                 prompt: inline_video_prompt(),
                 system_prompt: None,
@@ -11391,6 +11525,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -11425,6 +11560,7 @@ mod tests {
             &state,
             &session_id.to_string(),
             ContinueSessionRequest {
+                injected_context: None,
                 session_id: session_id.to_string(),
                 prompt: ContentInput::Text("Continue".to_string()),
                 system_prompt: None,
@@ -11473,6 +11609,7 @@ mod tests {
         let created = state
             .session_service
             .create_session(SvcCreateSessionRequest {
+                injected_context: Vec::new(),
                 model: resolved_default_model(&state).await,
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -11506,6 +11643,7 @@ mod tests {
                 &continue_state,
                 &continue_session_id.to_string(),
                 ContinueSessionRequest {
+                    injected_context: None,
                     session_id: continue_session_id.to_string(),
                     prompt: ContentInput::Text("Continue".to_string()),
                     system_prompt: None,
@@ -12691,6 +12829,7 @@ mod tests {
             let created = state
                 .session_service
                 .create_session(SvcCreateSessionRequest {
+                    injected_context: Vec::new(),
                     model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
                     system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -12759,6 +12898,7 @@ mod tests {
             let created = state
                 .session_service
                 .create_session(SvcCreateSessionRequest {
+                    injected_context: Vec::new(),
                     model: resolved_default_model(&state).await,
                     prompt: "Hello".to_string().into(),
                     system_prompt: meerkat::SystemPromptOverride::Inherit,

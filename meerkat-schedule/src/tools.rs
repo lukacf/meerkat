@@ -198,6 +198,16 @@ pub struct CurrentSessionScheduleToolDispatcher {
     current_session_id: SessionId,
     target_resolver: Arc<dyn CurrentSessionScheduleTargetResolver>,
     tool_defs: Arc<[Arc<ToolDef>]>,
+    /// The CREATING session's effective tool access policy.
+    ///
+    /// Scheduled spawn/fork-helper targets fire later under host authority,
+    /// where MobMachine spawn admission cannot see the creator — without
+    /// creation-time containment a call-level-gated agent could schedule a
+    /// helper that escapes its own policy. When set, helper targets created
+    /// or updated through this dispatcher inherit exactly this policy
+    /// (absent/`inherit` specs are stamped; a diverging explicit spec is
+    /// denied).
+    creator_tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
 }
 
 impl CurrentSessionScheduleToolDispatcher {
@@ -225,8 +235,99 @@ impl CurrentSessionScheduleToolDispatcher {
             current_session_id,
             target_resolver,
             tool_defs,
+            creator_tool_access_policy: None,
         }
     }
+
+    /// Carry the creating session's effective tool access policy so scheduled
+    /// helper targets stay contained by it (see the field docs).
+    #[must_use]
+    pub fn with_creator_tool_access_policy(
+        mut self,
+        policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    ) -> Self {
+        self.creator_tool_access_policy = policy;
+        self
+    }
+}
+
+/// Enforce the creating session's tool access policy on scheduled mob
+/// spawn/fork-helper targets.
+///
+/// An ungated creator (`None`) passes through unchanged. For a gated creator,
+/// a helper target's `options.tool_access_policy` must resolve to EXACTLY the
+/// creator's policy: absent or `inherit` specs are stamped with it, an equal
+/// explicit spec passes, and any diverging explicit spec is denied — the
+/// scheduled spawn fires later under host authority, so creation is the only
+/// seam where the creator's containment can be applied.
+fn enforce_creator_tool_access_policy(
+    mut args: Value,
+    creator: Option<&meerkat_core::ops::ToolAccessPolicy>,
+    tool_name: &str,
+) -> Result<Value, ToolError> {
+    let Some(creator) = creator else {
+        return Ok(args);
+    };
+    let Some(target) = args
+        .as_object_mut()
+        .and_then(|object| object.get_mut("target"))
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(args);
+    };
+    if target.get("target_kind").and_then(Value::as_str) != Some("mob") {
+        return Ok(args);
+    }
+    let is_helper_target = matches!(
+        target.get("type").and_then(Value::as_str),
+        Some("spawn_helper" | "fork_helper")
+    );
+    if !is_helper_target {
+        return Ok(args);
+    }
+    if matches!(creator, meerkat_core::ops::ToolAccessPolicy::Inherit) {
+        // A creator policy of `Inherit` at this seam is a wiring fault (the
+        // spawn chain resolves Inherit before the session is built); refusing
+        // helper targets outright is the only fail-closed option.
+        return Err(ToolError::access_denied(tool_name));
+    }
+    let creator_value = serde_json::to_value(creator).map_err(|error| {
+        ToolError::execution_failed(format!(
+            "tool '{tool_name}' failed to encode the creator tool access policy: {error}"
+        ))
+    })?;
+    let options = target
+        .entry("options")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(options) = options.as_object_mut() else {
+        // Malformed options are the schedule service's typed parse error to
+        // surface; do not mask it here.
+        return Ok(args);
+    };
+    match options.get("tool_access_policy") {
+        None | Some(Value::Null) => {
+            options.insert("tool_access_policy".to_string(), creator_value);
+        }
+        Some(existing) => {
+            let requested: meerkat_core::ops::ToolAccessPolicy =
+                serde_json::from_value(existing.clone()).map_err(|error| {
+                    ToolError::invalid_arguments(
+                        tool_name,
+                        format!("invalid scheduled helper tool_access_policy: {error}"),
+                    )
+                })?;
+            match requested {
+                meerkat_core::ops::ToolAccessPolicy::Inherit => {
+                    options.insert("tool_access_policy".to_string(), creator_value);
+                }
+                explicit if &explicit == creator => {}
+                _ => {
+                    return Err(ToolError::access_denied(tool_name));
+                }
+            }
+        }
+    }
+    Ok(args)
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -257,6 +358,11 @@ impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
             self.target_resolver.as_ref(),
         )
         .map_err(|error| ToolError::invalid_arguments(call.name, error))?;
+        let rewritten = enforce_creator_tool_access_policy(
+            rewritten,
+            self.creator_tool_access_policy.as_ref(),
+            call.name,
+        )?;
         let rewritten_raw = serde_json::value::RawValue::from_string(rewritten.to_string())
             .map_err(|error| {
                 ToolError::invalid_arguments(
@@ -1445,5 +1551,176 @@ mod tests {
             );
             assert_eq!(prov.source_id, "schedule");
         }
+    }
+
+    fn allow_list_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
+        meerkat_core::ops::ToolAccessPolicy::AllowList(
+            names
+                .iter()
+                .copied()
+                .collect::<meerkat_core::types::ToolNameSet>(),
+        )
+    }
+
+    fn spawn_helper_create_args(policy_json: Option<Value>) -> Value {
+        let mut options = serde_json::Map::new();
+        if let Some(policy) = policy_json {
+            options.insert("tool_access_policy".to_string(), policy);
+        }
+        json!({
+            "name": "gated-helper",
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": (Utc::now() + Duration::minutes(1)).to_rfc3339(),
+                "every_seconds": 60
+            },
+            "target": {
+                "target_kind": "mob",
+                "type": "spawn_helper",
+                "mob_id": "ops",
+                "member_id": "helper-1",
+                "prompt": "do scheduled work",
+                "options": Value::Object(options)
+            },
+            "misfire_policy": { "type": "skip" },
+            "overlap_policy": "skip_if_running",
+            "missing_target_policy": "mark_misfired",
+            "planning_horizon_occurrences": 1
+        })
+    }
+
+    #[test]
+    fn creator_policy_passthrough_when_ungated() {
+        let args = spawn_helper_create_args(None);
+        let out = enforce_creator_tool_access_policy(args.clone(), None, "meerkat_schedule_create")
+            .expect("ungated creator passes through");
+        assert_eq!(out, args, "ungated creator must not alter the request");
+    }
+
+    #[test]
+    fn creator_policy_stamps_absent_helper_policy() {
+        let creator = allow_list_policy(&["send_message"]);
+        let out = enforce_creator_tool_access_policy(
+            spawn_helper_create_args(None),
+            Some(&creator),
+            "meerkat_schedule_create",
+        )
+        .expect("absent helper policy is stamped");
+        let stamped: meerkat_core::ops::ToolAccessPolicy =
+            serde_json::from_value(out["target"]["options"]["tool_access_policy"].clone())
+                .expect("stamped policy parses");
+        assert_eq!(stamped, creator);
+    }
+
+    #[test]
+    fn creator_policy_stamps_inherit_helper_policy() {
+        let creator = allow_list_policy(&["send_message"]);
+        let out = enforce_creator_tool_access_policy(
+            spawn_helper_create_args(Some(json!({ "type": "inherit" }))),
+            Some(&creator),
+            "meerkat_schedule_create",
+        )
+        .expect("inherit helper policy is stamped");
+        let stamped: meerkat_core::ops::ToolAccessPolicy =
+            serde_json::from_value(out["target"]["options"]["tool_access_policy"].clone())
+                .expect("stamped policy parses");
+        assert_eq!(stamped, creator);
+    }
+
+    #[test]
+    fn creator_policy_allows_matching_explicit_helper_policy() {
+        let creator = allow_list_policy(&["peers", "send_message"]);
+        // Same set, different order: comparison is typed set equality, not
+        // JSON text equality.
+        let out = enforce_creator_tool_access_policy(
+            spawn_helper_create_args(Some(json!({
+                "type": "allow_list",
+                "value": ["send_message", "peers"]
+            }))),
+            Some(&creator),
+            "meerkat_schedule_create",
+        )
+        .expect("matching explicit policy passes");
+        let kept: meerkat_core::ops::ToolAccessPolicy =
+            serde_json::from_value(out["target"]["options"]["tool_access_policy"].clone())
+                .expect("kept policy parses");
+        assert_eq!(kept, creator);
+    }
+
+    #[test]
+    fn creator_policy_denies_diverging_explicit_helper_policy() {
+        let creator = allow_list_policy(&["send_message"]);
+        let err = enforce_creator_tool_access_policy(
+            spawn_helper_create_args(Some(json!({
+                "type": "allow_list",
+                "value": ["bash"]
+            }))),
+            Some(&creator),
+            "meerkat_schedule_create",
+        )
+        .expect_err("a scheduled helper must not exceed the creator's policy");
+        assert_eq!(err, ToolError::access_denied("meerkat_schedule_create"));
+    }
+
+    #[test]
+    fn creator_policy_ignores_non_helper_targets() {
+        let creator = allow_list_policy(&["send_message"]);
+        let args = json!({
+            "target": {
+                "target_kind": "session",
+                "type": "exact_session",
+                "session_id": "01920000-0000-7000-8000-000000000001",
+                "action": { "type": "prompt", "prompt": "hello" }
+            }
+        });
+        let out = enforce_creator_tool_access_policy(
+            args.clone(),
+            Some(&creator),
+            "meerkat_schedule_create",
+        )
+        .expect("non-helper targets pass through");
+        assert_eq!(out, args);
+    }
+
+    #[test]
+    fn creator_policy_inherit_creator_fails_closed() {
+        let err = enforce_creator_tool_access_policy(
+            spawn_helper_create_args(None),
+            Some(&meerkat_core::ops::ToolAccessPolicy::Inherit),
+            "meerkat_schedule_create",
+        )
+        .expect_err("an unresolved creator Inherit is a wiring fault");
+        assert_eq!(err, ToolError::access_denied("meerkat_schedule_create"));
+    }
+
+    #[tokio::test]
+    async fn gated_creator_helper_schedule_persists_stamped_policy() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let creator = allow_list_policy(&["send_message"]);
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            SessionId::new(),
+        )
+        .with_creator_tool_access_policy(Some(creator.clone()));
+
+        let request = spawn_helper_create_args(None);
+        let raw = RawValue::from_string(request.to_string()).expect("raw args");
+        let outcome = dispatcher
+            .dispatch(tool_call(
+                "sched-gated-create",
+                "meerkat_schedule_create",
+                raw.as_ref(),
+            ))
+            .await
+            .expect("gated helper schedule create succeeds");
+        let created: Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("created schedule JSON");
+        let persisted: meerkat_core::ops::ToolAccessPolicy =
+            serde_json::from_value(created["target"]["options"]["tool_access_policy"].clone())
+                .expect("persisted policy parses");
+        assert_eq!(
+            persisted, creator,
+            "the stored schedule must carry the creator's policy"
+        );
     }
 }

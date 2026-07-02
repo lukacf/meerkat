@@ -66,6 +66,12 @@ pub enum InitialTurn {
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionParams {
     pub prompt: ContentInput,
+    /// Host-attached injected context for the first turn. Each entry
+    /// materializes as a separate typed injected-context user-channel
+    /// message immediately before the first turn's user message, in order.
+    /// Injected context is excluded from semantic-memory indexing.
+    #[serde(default)]
+    pub injected_context: Option<Vec<ContentInput>>,
     /// Controls whether the first turn runs immediately or is deferred.
     /// Defaults to `run_immediately` when absent.
     #[serde(default)]
@@ -231,7 +237,6 @@ pub async fn create_session_with_params(
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
-
     let model_was_explicit = params.model.is_some();
     // When the caller does not pin a model, the runtime's configured default is
     // resolved through the catalog-owned `resolve_create_session_default_model`
@@ -371,14 +376,22 @@ pub async fn create_session_with_params(
         }
     };
 
-    // Create the session. When deferred, stash the prompt for the first turn.
-    let deferred_prompt = if params.initial_turn == Some(InitialTurn::Deferred) {
-        Some(params.prompt.clone())
-    } else {
-        None
-    };
+    // Create the session. When deferred, stash the prompt (and any injected
+    // context) for the first turn; both materialize at promotion.
+    let injected_context = params.injected_context.unwrap_or_default();
+    let (deferred_prompt, deferred_injected_context, injected_context) =
+        if params.initial_turn == Some(InitialTurn::Deferred) {
+            (Some(params.prompt.clone()), injected_context, Vec::new())
+        } else {
+            (None, Vec::new(), injected_context)
+        };
     let session_id = match runtime
-        .create_session(build_config, params.labels, deferred_prompt)
+        .create_session(
+            build_config,
+            params.labels,
+            deferred_prompt,
+            deferred_injected_context,
+        )
         .await
     {
         Ok(sid) => sid,
@@ -496,12 +509,14 @@ pub async fn create_session_with_params(
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
         let prompt_for_turn = params.prompt.clone();
+        let injected_context_for_turn = injected_context.clone();
         let skill_refs_for_turn = skill_refs.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
                 .start_turn_via_runtime(
                     &sid_for_turn,
                     prompt_for_turn,
+                    injected_context_for_turn,
                     event_tx_for_turn,
                     skill_refs_for_turn,
                     None,
@@ -543,6 +558,7 @@ pub async fn create_session_with_params(
             .start_turn_via_runtime(
                 &session_id,
                 params.prompt,
+                injected_context,
                 mcp_event_tx,
                 skill_refs,
                 None,
@@ -737,6 +753,31 @@ mod tests {
         let json = serde_json::json!({"prompt": "hello"});
         let params: CreateSessionParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.initial_turn, None);
+    }
+
+    #[test]
+    fn create_session_params_accept_injected_context() {
+        use super::CreateSessionParams;
+        use meerkat_core::ContentInput;
+
+        // Optional injected_context parses as a list of content inputs; an
+        // absent field stays None (pre-existing wire shape unchanged).
+        let json = serde_json::json!({
+            "prompt": "hello",
+            "injected_context": [
+                "ambient one",
+                [{"type": "text", "text": "ambient two"}]
+            ]
+        });
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        let entries = params.injected_context.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], ContentInput::Text(text) if text == "ambient one"));
+        assert!(matches!(&entries[1], ContentInput::Blocks(blocks) if blocks.len() == 1));
+
+        let json = serde_json::json!({"prompt": "hello"});
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        assert!(params.injected_context.is_none());
     }
 
     #[test]

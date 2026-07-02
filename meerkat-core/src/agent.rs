@@ -1090,6 +1090,7 @@ pub trait CommsRuntime: Send + Sync {
                 rendered_text: text,
                 handling_mode: crate::types::HandlingMode::Queue,
                 render_metadata: None,
+                sender_taint: None,
             })
             .collect()
     }
@@ -1257,6 +1258,9 @@ where
     pub(super) hook_run_overrides: HookRunOverrides,
     /// Optional context compaction strategy.
     pub(crate) compactor: Option<Arc<dyn crate::compact::Compactor>>,
+    /// Optional host-supplied compaction summary curator. When present it
+    /// produces the compaction summary instead of the summarization LLM call.
+    pub(crate) compaction_curator: Option<Arc<dyn crate::compact::CompactionCurator>>,
     /// Input tokens from the last LLM response (for compaction trigger).
     pub(crate) last_input_tokens: u64,
     /// Session-scoped compaction cadence tracked across runs.

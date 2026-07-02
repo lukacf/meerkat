@@ -262,6 +262,7 @@ impl McpScheduleContext {
                 .then(|| create.additional_instructions.clone()),
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
+            tool_access_policy: None,
             shell_env: None,
             resume_override_mask: Default::default(),
             blob_store_override: None,
@@ -271,6 +272,7 @@ impl McpScheduleContext {
         };
 
         let request = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: match prompt_system_prompt

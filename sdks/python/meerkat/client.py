@@ -126,6 +126,7 @@ from .generated.types import (
     InjectSystemContextParams as RpcInjectSystemContextParams,
     InjectSystemContextResult as RpcInjectSystemContextResult,
     InterruptParams as RpcInterruptParams,
+    ListSessionTranscriptRevisionsParams as RpcListSessionTranscriptRevisionsParams,
     ListSessionsParams as RpcListSessionsParams,
     ListSessionsResult as RpcListSessionsResult,
     LoginCompleteParams as RpcLoginCompleteParams,
@@ -151,6 +152,7 @@ from .generated.types import (
     WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
     WireRunResult as RpcWireRunResult,
     WireSessionTranscriptRevision as RpcWireSessionTranscriptRevision,
+    WireSessionTranscriptRevisionList as RpcWireSessionTranscriptRevisionList,
 )
 from .mob import (
     Mob,
@@ -206,6 +208,8 @@ from .types import (
     SessionForkResult,
     SessionHistory,
     SessionTranscriptRevision,
+    SessionTranscriptRevisionEntry,
+    SessionTranscriptRevisionList,
     SessionTranscriptRewriteResult,
     SessionSummary,
     SessionMessage,
@@ -829,6 +833,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -872,7 +877,8 @@ class MeerkatClient:
             | RpcWireRunResult
         )
         params = self._build_create_params(
-            prompt, model=model, provider=provider, auth_binding=auth_binding,
+            prompt, injected_context=injected_context,
+            model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -901,6 +907,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -948,7 +955,8 @@ class MeerkatClient:
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
-            prompt, model=model, provider=provider, auth_binding=auth_binding,
+            prompt, injected_context=injected_context,
+            model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -989,6 +997,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -1036,7 +1045,8 @@ class MeerkatClient:
             | RpcWireRunResult
         )
         params = self._build_create_params(
-            prompt, model=model, provider=provider, auth_binding=auth_binding,
+            prompt, injected_context=injected_context,
+            model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -1232,6 +1242,26 @@ class MeerkatClient:
             params["limit"] = limit
         raw = await self._request("session/transcript_revision", params)
         return self._parse_session_transcript_revision(raw)
+
+    async def list_session_transcript_revisions(
+        self,
+        session_id: str,
+        *,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevisionList:
+        """List retained transcript revision commits with the current head."""
+        _rpc_signature: (
+            RpcListSessionTranscriptRevisionsParams
+            | RpcWireSessionTranscriptRevisionList
+        )
+        params: dict[str, Any] = {"session_id": session_id}
+        if offset is not None:
+            params["offset"] = offset
+        if limit is not None:
+            params["limit"] = limit
+        raw = await self._request("session/transcript_revisions", params)
+        return self._parse_session_transcript_revision_list(raw)
 
     async def fork_session_at(
         self,
@@ -2256,6 +2286,7 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
+        injected_context: list[WireContentInput] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
@@ -2267,6 +2298,10 @@ class MeerkatClient:
         auth_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Start a turn on a mob member.
+
+        ``injected_context`` carries host-attached ambient context delivered
+        as separate typed transcript messages immediately before the turn's
+        user message (excluded from semantic-memory indexing).
 
         ``provider_params`` and ``auth_binding`` carry the canonical
         Inherit/Set/Clear tri-state exactly as the wire does: pass
@@ -2282,6 +2317,7 @@ class MeerkatClient:
             skill_refs=_skill_refs_to_wire(skill_refs),
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,
+            injected_context=injected_context,
             keep_alive=keep_alive,
             model=model,
             provider=provider,
@@ -2689,6 +2725,7 @@ class MeerkatClient:
         *,
         work_ref: str | None = None,
         origin: WorkOrigin = "external",
+        injected_context: list[WireContentInput] | None = None,
     ) -> dict[str, Any]:
         """Submit a unit of work to a mob member through the work lane.
 
@@ -2698,7 +2735,11 @@ class MeerkatClient:
         callers never pass raw ``generation`` / ``fence_token`` values.
         ``origin`` is ``"external"`` for user-originated turns and
         ``"internal"`` for mob-orchestration work. When ``work_ref`` is
-        omitted the server generates a fresh UUID.
+        omitted the server generates a fresh UUID. ``injected_context``
+        carries host-attached ambient context delivered as separate typed
+        transcript messages immediately before the work content (queue-mode
+        turn-driven delivery only; steer and autonomous-inbox dispatch reject
+        it fail-closed).
         """
         params: dict[str, Any] = {
             "member_ref": member_ref,
@@ -2707,6 +2748,8 @@ class MeerkatClient:
         }
         if work_ref is not None:
             params["work_ref"] = work_ref
+        if injected_context:
+            params["injected_context"] = injected_context
         return await self._request("mob/submit_work", params)
 
     async def mob_cancel_work(self, mob_id: str, work_ref: str) -> dict[str, Any]:
@@ -2945,6 +2988,7 @@ class MeerkatClient:
         session_id: str,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -2958,6 +3002,8 @@ class MeerkatClient:
         provider_params: dict[str, Any] | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
+        if injected_context is not None:
+            params["injected_context"] = injected_context
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
@@ -2989,6 +3035,7 @@ class MeerkatClient:
         session_id: str,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -3009,6 +3056,8 @@ class MeerkatClient:
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
+        if injected_context is not None:
+            params["injected_context"] = injected_context
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
@@ -3727,6 +3776,7 @@ class MeerkatClient:
     def _build_create_params(
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -3756,6 +3806,8 @@ class MeerkatClient:
         external_tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
+        if injected_context is not None:
+            params["injected_context"] = injected_context
         if model:
             params["model"] = model
         if provider:
@@ -4125,6 +4177,45 @@ class MeerkatClient:
                     data, "messages", context
                 )
             ],
+        )
+
+    @staticmethod
+    def _parse_session_transcript_revision_list(
+        data: dict[str, Any],
+    ) -> SessionTranscriptRevisionList:
+        context = "Invalid session transcript revision list"
+        entries: list[SessionTranscriptRevisionEntry] = []
+        for entry in MeerkatClient._require_list_field(data, "entries", context):
+            if not isinstance(entry, dict):
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: entries must be objects"
+                )
+            entries.append(
+                SessionTranscriptRevisionEntry(
+                    revision=MeerkatClient._require_string_field(
+                        entry, "revision", context
+                    ),
+                    parent_revision=MeerkatClient._require_string_field(
+                        entry, "parent_revision", context
+                    ),
+                    actor=MeerkatClient._optional_string_field(
+                        entry, "actor", context
+                    ),
+                    reason=MeerkatClient._require_string_field(
+                        entry, "reason", context
+                    ),
+                    committed_at=int(
+                        MeerkatClient._require_number_field(
+                            entry, "committed_at", context
+                        )
+                    ),
+                )
+            )
+        return SessionTranscriptRevisionList(
+            head_revision=MeerkatClient._require_string_field(
+                data, "head_revision", context
+            ),
+            entries=entries,
         )
 
     @staticmethod

@@ -58,6 +58,7 @@ class _MockClient:
         skill_refs=None,
         flow_tool_overlay=None,
         additional_instructions=None,
+        injected_context=None,
         keep_alive=None,
         model=None,
         provider=None,

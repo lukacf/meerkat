@@ -142,6 +142,8 @@ mod tests {
     #[test]
     fn response_progress_is_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
+            sender_taint: None,
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: "req-1".into(),
@@ -157,6 +159,7 @@ mod tests {
     #[test]
     fn prompt_not_coalescing_eligible() {
         let input = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: make_header_with_supersession(None),
             content: "hello".into(),
             typed_turn_appends: Vec::new(),
@@ -168,6 +171,8 @@ mod tests {
     #[test]
     fn peer_message_not_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            injected_context: Vec::new(),
+            sender_taint: None,
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::Message),
             content: "hello".into(),
@@ -259,6 +264,7 @@ mod tests {
         });
         // Different kind (Prompt vs ExternalEvent) but same supersession key
         let input2 = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: make_header_with_supersession(Some("same-key")),
             content: "hello".into(),
             typed_turn_appends: Vec::new(),

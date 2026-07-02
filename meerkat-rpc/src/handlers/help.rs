@@ -34,6 +34,7 @@ pub async fn handle_ask(
     // handlers.
     let create_params = CreateSessionParams {
         prompt: ContentInput::Text(prompt),
+        injected_context: None,
         initial_turn: None,
         model: request.model,
         provider: request.provider,

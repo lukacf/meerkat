@@ -869,6 +869,7 @@ pub struct PendingPromotionCleanup {
     pub(crate) build_config: Option<AgentBuildConfig>,
     pub(crate) labels: Option<BTreeMap<String, String>>,
     pub(crate) deferred_prompt: Option<ContentInput>,
+    pub(crate) deferred_injected_context: Vec<ContentInput>,
     pub(crate) created_at_secs: u64,
     pub(crate) updated_at_secs: u64,
     pub(crate) mode: PendingPromotionCleanupMode,
@@ -892,6 +893,7 @@ impl PendingPromotionCleanup {
             build_config: Some((*slot.build_config).clone()),
             labels: slot.labels.clone(),
             deferred_prompt: slot.deferred_prompt.clone(),
+            deferred_injected_context: slot.deferred_injected_context.clone(),
             created_at_secs: slot.created_at_secs,
             updated_at_secs: slot.updated_at_secs,
             mode: PendingPromotionCleanupMode::Restore,
@@ -1099,6 +1101,7 @@ impl PendingPromotionCleanup {
                 build_config,
                 self.labels.clone(),
                 self.deferred_prompt.clone(),
+                self.deferred_injected_context.clone(),
                 self.created_at_secs,
                 self.updated_at_secs,
             )
@@ -1151,6 +1154,7 @@ impl Drop for PendingPromotionCleanup {
                 let staged_capacity_admission = self.staged_capacity_admission.take();
                 let labels = self.labels.clone();
                 let deferred_prompt = self.deferred_prompt.clone();
+                let deferred_injected_context = self.deferred_injected_context.clone();
                 let created_at_secs = self.created_at_secs;
                 let updated_at_secs = self.updated_at_secs;
                 tokio::spawn(async move {
@@ -1176,6 +1180,7 @@ impl Drop for PendingPromotionCleanup {
                             build_config,
                             labels,
                             deferred_prompt,
+                            deferred_injected_context,
                             created_at_secs,
                             updated_at_secs,
                         )

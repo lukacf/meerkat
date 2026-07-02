@@ -72,6 +72,27 @@ pub struct ResolvedSpawnTooling {
     pub override_profile: Option<meerkat_mob::Profile>,
 }
 
+/// Resolve a child's effective call-level tool access policy at the spawn seam.
+///
+/// - An explicit `AllowList`/`DenyList` is admitted as-is (presence is already
+///   the MobMachine-privileged admission fact; this function does not change
+///   admission).
+/// - `Inherit` or absent resolves to the PARENT's persisted effective policy
+///   (transitive containment: a restricted parent cannot mint an unrestricted
+///   child by spawning). The parent's effective policy is itself never
+///   `Inherit` — the factory fails the build closed before persisting one —
+///   so the result of this function is always resolved.
+/// - No parent policy (`parent_effective = None`) means unrestricted.
+pub(crate) fn effective_child_tool_access_policy(
+    requested: Option<meerkat_core::ops::ToolAccessPolicy>,
+    parent_effective: Option<meerkat_core::ops::ToolAccessPolicy>,
+) -> Option<meerkat_core::ops::ToolAccessPolicy> {
+    match requested {
+        Some(meerkat_core::ops::ToolAccessPolicy::Inherit) | None => parent_effective,
+        explicit => explicit,
+    }
+}
+
 // ─── AgentMobToolSurface ─────────────────────────────────────────────────
 
 /// Agent-internal tool surface for mob delegation and orchestration.
@@ -174,6 +195,7 @@ impl AgentMobToolSurface {
                     "description": description,
                 }),
                 blocks: None,
+                content_taint: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
             })
@@ -620,6 +642,60 @@ impl AgentMobToolSurface {
         }
     }
 
+    /// Resolve the spawned child's effective tool access policy.
+    ///
+    /// `Inherit`/absent resolves to this (parent) session's effective policy
+    /// from `SessionMetadata.tooling.tool_access_policy` — the same field the
+    /// factory stamps at build. Every backend exposes the parent through
+    /// `load_persisted_session`: the persistent service reads the durable
+    /// snapshot and the ephemeral service exports the LIVE session (a
+    /// restricted ephemeral parent must never mint unrestricted children
+    /// because its policy was invisible to the read seam). A metadata READ
+    /// FAULT fails the spawn closed rather than silently minting an ungated
+    /// child; a genuinely absent parent session (host/operator-authored
+    /// spawn) resolves to unrestricted.
+    async fn resolve_child_tool_access_policy(
+        &self,
+        tool_name: &str,
+        requested: Option<meerkat_core::ops::ToolAccessPolicy>,
+    ) -> Result<Option<meerkat_core::ops::ToolAccessPolicy>, ToolError> {
+        if matches!(
+            requested,
+            Some(
+                meerkat_core::ops::ToolAccessPolicy::AllowList(_)
+                    | meerkat_core::ops::ToolAccessPolicy::DenyList(_)
+            )
+        ) {
+            return Ok(effective_child_tool_access_policy(requested, None));
+        }
+        let parent_session = self
+            .state
+            .session_service()
+            .load_persisted_session(&self.owner_bridge_session_id)
+            .await
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{tool_name}' parent tool access policy read failed: {error}"
+                ))
+            })?;
+        let parent_effective = match parent_session.as_ref() {
+            Some(session) => session
+                .try_session_metadata()
+                .map_err(|error| {
+                    ToolError::execution_failed(format!(
+                        "tool '{tool_name}' parent session metadata is corrupt; \
+                         refusing to resolve the child tool access policy: {error}"
+                    ))
+                })?
+                .and_then(|metadata| metadata.tooling.tool_access_policy),
+            None => None,
+        };
+        Ok(effective_child_tool_access_policy(
+            requested,
+            parent_effective,
+        ))
+    }
+
     async fn record_successful_operator_action(
         &self,
         handle: &meerkat_mob::MobHandle,
@@ -875,6 +951,13 @@ impl AgentMobToolSurface {
         spec.inherited_tool_filter = resolved.inherited_tool_filter;
         spec.override_profile = resolved.override_profile;
 
+        // Transitive containment: the delegate surface carries no explicit
+        // policy, so the helper inherits this (parent) session's persisted
+        // effective tool access policy.
+        spec.tool_access_policy = self
+            .resolve_child_tool_access_policy(call.name, spec.tool_access_policy.take())
+            .await?;
+
         // Spawn via MobMcpState
         let spawn_result = self
             .state
@@ -1033,6 +1116,12 @@ impl AgentMobToolSurface {
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
         }
+        // Transitive containment: this spawn surface accepts no explicit
+        // policy argument, so `Inherit`/absent resolves to this (parent)
+        // session's persisted effective tool access policy.
+        spec.tool_access_policy = self
+            .resolve_child_tool_access_policy(call.name, spec.tool_access_policy.take())
+            .await?;
         if let Some(cref) = args.auth_binding {
             // Reconstruct origin: Configured server-side (client cannot forge it).
             spec.auth_binding = Some(cref.into());
@@ -2594,6 +2683,7 @@ mod tests {
                     intent,
                     params,
                     blocks,
+                    content_taint: _,
                     handling_mode: _,
                     stream: _,
                 } => {
@@ -2609,6 +2699,7 @@ mod tests {
                         .await
                         .ok_or_else(|| SendError::PeerNotFound(to.label()))?;
                     recipient.inbox.write().await.push(InboxInteraction {
+                        sender_taint: None,
                         id: InteractionId(uuid::Uuid::new_v4()),
                         from_route: Some(self.peer_id),
                         from: self.name.clone(),
@@ -4665,6 +4756,66 @@ mod tests {
             serde_json::from_str(&result.result.text_content()).unwrap();
         let sources = parsed["sources"].as_array().unwrap();
         assert_eq!(sources.len(), 2, "two provenance groups expected");
+    }
+
+    // ─── Tool access policy spawn resolution tests ──────────────────────
+
+    fn allow_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
+        meerkat_core::ops::ToolAccessPolicy::AllowList(names.iter().copied().collect())
+    }
+
+    fn deny_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
+        meerkat_core::ops::ToolAccessPolicy::DenyList(names.iter().copied().collect())
+    }
+
+    /// Escape regression: a restricted parent + `Inherit` (or absent) child
+    /// request must stay restricted — spawning is not a policy escape hatch.
+    #[test]
+    fn inherit_child_policy_stays_restricted_under_restricted_parent() {
+        let parent = allow_policy(&["read_file"]);
+        assert_eq!(
+            effective_child_tool_access_policy(
+                Some(meerkat_core::ops::ToolAccessPolicy::Inherit),
+                Some(parent.clone()),
+            ),
+            Some(parent.clone()),
+        );
+        assert_eq!(
+            effective_child_tool_access_policy(None, Some(parent.clone())),
+            Some(parent),
+        );
+    }
+
+    /// Explicit `AllowList`/`DenyList` is admitted as-is — presence is
+    /// already the MobMachine-privileged admission fact, and resolution must
+    /// not re-shape it.
+    #[test]
+    fn explicit_child_policy_is_admitted_as_is() {
+        let parent = allow_policy(&["read_file"]);
+        let explicit_deny = deny_policy(&["bash"]);
+        assert_eq!(
+            effective_child_tool_access_policy(Some(explicit_deny.clone()), Some(parent)),
+            Some(explicit_deny),
+        );
+        let explicit_allow = allow_policy(&["send_message"]);
+        assert_eq!(
+            effective_child_tool_access_policy(Some(explicit_allow.clone()), None),
+            Some(explicit_allow),
+        );
+    }
+
+    /// No parent policy (host/operator launch, ephemeral parent, or an
+    /// unrestricted parent) resolves `Inherit`/absent to unrestricted.
+    #[test]
+    fn inherit_without_parent_policy_resolves_unrestricted() {
+        assert_eq!(
+            effective_child_tool_access_policy(
+                Some(meerkat_core::ops::ToolAccessPolicy::Inherit),
+                None,
+            ),
+            None,
+        );
+        assert_eq!(effective_child_tool_access_policy(None, None), None);
     }
 
     // ─── SpawnTooling resolution tests (T2.3) ───────────────────────────

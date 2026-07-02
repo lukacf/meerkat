@@ -289,6 +289,9 @@ pub async fn handle_tools_call_with_context(
                 to,
                 body,
                 blocks,
+                // Agent tools carry no per-send taint override: the outbound
+                // declaration is inherited from the runtime-level host config.
+                content_taint: None,
                 handling_mode: input.handling_mode,
             };
             dispatch(ctx, command).await
@@ -303,6 +306,9 @@ pub async fn handle_tools_call_with_context(
                 intent: input.intent,
                 params: input.params,
                 blocks,
+                // Agent tools carry no per-send taint override: the outbound
+                // declaration is inherited from the runtime-level host config.
+                content_taint: None,
                 handling_mode: Some(input.handling_mode),
                 stream: Some(InputStreamMode::ReserveInteraction),
             };
@@ -322,6 +328,9 @@ pub async fn handle_tools_call_with_context(
                 status: input.status,
                 result: input.result,
                 blocks,
+                // Agent tools carry no per-send taint override: the outbound
+                // declaration is inherited from the runtime-level host config.
+                content_taint: None,
                 handling_mode: input.handling_mode,
             };
             let command = project_peer_response_command(typed_request, to)?;
@@ -466,6 +475,7 @@ fn project_peer_request_command(
         intent,
         params,
         blocks,
+        content_taint,
         handling_mode,
         stream,
         ..
@@ -480,6 +490,7 @@ fn project_peer_request_command(
         intent: intent.as_str().to_string(),
         params,
         blocks,
+        content_taint,
         handling_mode: handling_mode.unwrap_or_default(),
         stream: stream.unwrap_or(InputStreamMode::None),
     })
@@ -499,6 +510,7 @@ fn project_peer_response_command(
         status,
         result,
         blocks,
+        content_taint,
         handling_mode,
         ..
     } = core_request
@@ -511,6 +523,7 @@ fn project_peer_response_command(
         status,
         result,
         blocks,
+        content_taint,
         handling_mode,
     })
 }
@@ -602,17 +615,23 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
         CommsCommand::PeerMessage {
             body,
             blocks,
+            content_taint,
             handling_mode,
             ..
         } => {
+            // The per-send taint override rides to the router's stamping
+            // choke point even on the runtime-less fallback path.
             ctx.router
-                .send(
+                .send_with_id(
                     dest_peer_id,
+                    uuid::Uuid::new_v4(),
                     crate::types::MessageKind::Message {
                         body,
                         blocks,
+                        content_taint: None,
                         handling_mode: Some(handling_mode),
                     },
+                    content_taint,
                 )
                 .await
                 .map_err(|e| format_router_send_error(&dest_display, e))?;

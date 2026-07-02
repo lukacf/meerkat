@@ -70,6 +70,13 @@ pub enum WireConversionError {
     /// transcript message.
     #[error("invalid transcript rewrite message: {debug}")]
     TranscriptMessage { debug: String },
+    /// Rewrite ingress attempted to mint a runtime-authority transcript role.
+    /// `compaction_summary` is runtime-mintable only: hosts may declare
+    /// `conversational` or `injected_context` on rewrite ingress, never the
+    /// compaction-boundary marker the transcript-continuity save-guard trusts.
+    /// Fail-closed rejection, not silent role laundering.
+    #[error("transcript role is not host-mintable via rewrite ingress: {debug}")]
+    TranscriptRole { debug: String },
     /// Wire degradation-reason is the explicit-Unknown sentinel; no inverse
     /// mapping exists.
     #[error("unknown wire degradation-reason variant: {debug}")]

@@ -64,6 +64,7 @@ fn recovery_error_code_maps_each_variant() {
 #[test]
 fn recovered_create_request_holds_registration_flag() {
     let request = CreateSessionRequest {
+        injected_context: Vec::new(),
         model: "test-model".into(),
         prompt: ContentInput::from("hello"),
         system_prompt: meerkat::SystemPromptOverride::Inherit,

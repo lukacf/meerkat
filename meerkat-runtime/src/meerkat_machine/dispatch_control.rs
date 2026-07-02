@@ -1743,6 +1743,7 @@ mod tests {
 
     fn make_prompt(text: &str) -> Input {
         Input::Prompt(crate::input::PromptInput {
+            injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),

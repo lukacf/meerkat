@@ -5,7 +5,8 @@
 
 use crate::Session;
 use crate::compact::{
-    CompactionContext, Compactor, SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
+    CompactionContext, CompactionCurator, CompactionWindow, Compactor,
+    SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 use crate::event::AgentEvent;
 #[cfg(target_arch = "wasm32")]
@@ -24,6 +25,11 @@ pub enum CompactionError {
     /// The LLM returned an empty summary.
     #[error("LLM returned empty summary")]
     EmptySummary,
+
+    /// The host-supplied compaction curator failed to produce a summary.
+    /// There is no LLM fallback: the original history is preserved.
+    #[error("compaction curator failed: {0}")]
+    CuratorFailed(#[from] crate::compact::CompactionCuratorError),
 
     /// Failed to estimate token count (serialization error).
     #[error("token estimation failed: {0}")]
@@ -222,22 +228,29 @@ pub fn persist_compaction_cadence(
 /// Run the compaction flow.
 ///
 /// 1. Emit CompactionStarted
-/// 2. Call LLM with compaction prompt
+/// 2. Produce the summary: a configured curator substitutes summary content
+///    directly (no summarization LLM call, zero summary usage); otherwise
+///    call the LLM with the compaction prompt
 /// 3. On failure: emit CompactionFailed, return error without mutating session
+///    (a failing curator never falls back to the LLM path)
 /// 4. Rebuild history via compactor
 /// 5. Return a typed outcome; the caller commits it and emits CompactionCompleted
 pub async fn run_compaction<C>(
     client: &C,
     compactor: &Arc<dyn Compactor>,
-    messages: &[Message],
-    last_input_tokens: u64,
-    session_boundary_index: u64,
+    curator: Option<&Arc<dyn CompactionCurator>>,
+    window: CompactionWindow<'_>,
     event_tx: &Option<mpsc::Sender<AgentEvent>>,
     event_tap: &crate::event_tap::EventTap,
 ) -> Result<CompactionOutcome, CompactionError>
 where
     C: crate::agent::AgentLlmClient + ?Sized,
 {
+    let CompactionWindow {
+        messages,
+        last_input_tokens,
+        session_boundary_index,
+    } = window;
     let estimated = estimate_tokens(messages)?;
     let message_count = messages.len();
     let mut event_stream_open = true;
@@ -259,36 +272,26 @@ where
         tracing::warn!("compaction event stream receiver dropped before CompactionStarted");
     }
 
-    // 2. Build the compaction prompt messages
-    let compaction_prompt = compactor.compaction_prompt();
-    let max_summary_tokens = compactor.max_summary_tokens();
-
-    let mut compaction_messages = compactor.prepare_for_summarization(messages);
-    compaction_messages.push(Message::User(crate::types::UserMessage::text(
-        compaction_prompt.to_string(),
-    )));
-
-    // 3. Call LLM with empty tools, max_summary_tokens
-    let llm_result = client
-        .stream_response(&compaction_messages, &[], max_summary_tokens, None, None)
-        .await;
-
-    let (summary_text, summary_usage) = match llm_result {
-        Ok(result) => {
-            // Extract summary text from response blocks
-            let mut summary = String::new();
-            for block in result.blocks() {
-                if let AssistantBlock::Text { text, .. } = block {
-                    summary.push_str(text);
-                }
-            }
-            if summary.is_empty() {
+    // 2/3. Produce the summary. A configured curator owns summary content
+    // production outright: the summarization LLM call is skipped and a
+    // curator failure is terminal for this compaction attempt (no fallback).
+    let (summary_text, summary_usage) = if let Some(curator) = curator {
+        let curator_window = CompactionWindow {
+            messages,
+            last_input_tokens,
+            session_boundary_index,
+        };
+        match curator.curate_summary(curator_window).await {
+            Ok(summary) => (summary.into_string(), Usage::default()),
+            Err(e) => {
                 if event_stream_open
                     && !crate::event_tap::tap_emit(
                         event_tap,
                         event_tx.as_ref(),
                         AgentEvent::CompactionFailed {
-                            reason: crate::event::CompactionFailureReason::EmptySummary,
+                            reason: crate::event::CompactionFailureReason::curator_failed(
+                                e.to_string(),
+                            ),
                         },
                     )
                     .await
@@ -297,24 +300,69 @@ where
                         "compaction event stream receiver dropped before CompactionFailed"
                     );
                 }
-                return Err(CompactionError::EmptySummary);
+                return Err(CompactionError::CuratorFailed(e));
             }
-            (summary, result.usage().clone())
         }
-        Err(e) => {
-            if event_stream_open
-                && !crate::event_tap::tap_emit(
-                    event_tap,
-                    event_tx.as_ref(),
-                    AgentEvent::CompactionFailed {
-                        reason: crate::event::CompactionFailureReason::llm_failed(&e),
-                    },
-                )
-                .await
-            {
-                tracing::warn!("compaction event stream receiver dropped before CompactionFailed");
+    } else {
+        // Build the compaction prompt messages
+        let compaction_prompt = compactor.compaction_prompt();
+        let max_summary_tokens = compactor.max_summary_tokens();
+
+        let mut compaction_messages = compactor.prepare_for_summarization(messages);
+        compaction_messages.push(Message::User(crate::types::UserMessage::text(
+            compaction_prompt.to_string(),
+        )));
+
+        // Call LLM with empty tools, max_summary_tokens
+        let llm_result = client
+            .stream_response(&compaction_messages, &[], max_summary_tokens, None, None)
+            .await;
+
+        match llm_result {
+            Ok(result) => {
+                // Extract summary text from response blocks
+                let mut summary = String::new();
+                for block in result.blocks() {
+                    if let AssistantBlock::Text { text, .. } = block {
+                        summary.push_str(text);
+                    }
+                }
+                if summary.is_empty() {
+                    if event_stream_open
+                        && !crate::event_tap::tap_emit(
+                            event_tap,
+                            event_tx.as_ref(),
+                            AgentEvent::CompactionFailed {
+                                reason: crate::event::CompactionFailureReason::EmptySummary,
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "compaction event stream receiver dropped before CompactionFailed"
+                        );
+                    }
+                    return Err(CompactionError::EmptySummary);
+                }
+                (summary, result.usage().clone())
             }
-            return Err(CompactionError::LlmFailed(e));
+            Err(e) => {
+                if event_stream_open
+                    && !crate::event_tap::tap_emit(
+                        event_tap,
+                        event_tx.as_ref(),
+                        AgentEvent::CompactionFailed {
+                            reason: crate::event::CompactionFailureReason::llm_failed(&e),
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "compaction event stream receiver dropped before CompactionFailed"
+                    );
+                }
+                return Err(CompactionError::LlmFailed(e));
+            }
         }
     };
 
@@ -474,6 +522,7 @@ mod tests {
                 kind: crate::types::CommsNoticeKind::Message,
                 direction: SystemNoticeDirection::Incoming,
                 peer: None,
+                sender_taint: None,
                 request_id: None,
                 intent: None,
                 status: None,

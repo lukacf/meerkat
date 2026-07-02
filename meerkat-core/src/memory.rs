@@ -74,6 +74,14 @@ impl MessageRange {
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }
+
+    /// Whether this half-open range overlaps `other`.
+    ///
+    /// Half-open semantics: ranges that merely touch (`self.end ==
+    /// other.start`) do not overlap, and an empty range overlaps nothing.
+    pub fn overlaps(&self, other: &MessageRange) -> bool {
+        !self.is_empty() && !other.is_empty() && self.start < other.end && other.start < self.end
+    }
 }
 
 /// Typed origin of an indexed memory entry.
@@ -310,6 +318,80 @@ pub enum MemoryIndexDelivery {
     },
 }
 
+/// Successful receipt for an all-or-nothing scope drop.
+#[derive(Debug, Clone)]
+pub struct MemoryScopeDropReceipt {
+    /// Owner whose indexed entries were dropped.
+    pub owner: MemoryOwner,
+    /// Number of durable entries removed by the drop.
+    pub dropped_entries: usize,
+}
+
+/// Typed request for one page of scoped memory enumeration.
+///
+/// `offset` (and the resulting page's `next_offset`) count RAW scope rows in
+/// durable-id order, not post-filter records: paging stays deterministic and
+/// iteration stays complete even when `source_overlap` / `indexed_after`
+/// filter rows out of a page, so a page may carry fewer than `limit` records.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryEnumerationRequest {
+    /// Maximum number of raw scope rows scanned for this page.
+    pub limit: usize,
+    /// Raw scope-row offset (durable-id order) to start scanning from.
+    pub offset: usize,
+    /// Admit only records whose typed source message range overlaps this
+    /// half-open range.
+    pub source_overlap: Option<MessageRange>,
+    /// Admit only records indexed strictly after this instant. Source-range
+    /// offsets restart per compaction generation; scopes are append-only, so
+    /// the previous generation's `indexed_at` high-water disambiguates them.
+    pub indexed_after: Option<crate::time_compat::SystemTime>,
+}
+
+impl MemoryEnumerationRequest {
+    /// Whether `metadata` survives this request's post-deserialize filters.
+    ///
+    /// The filter semantics have exactly one owner (this method) so every
+    /// store applies them identically: `source_overlap` admits records whose
+    /// typed source range overlaps the requested half-open range (a source
+    /// without a range never overlaps); `indexed_after` admits records
+    /// indexed strictly after the given instant.
+    pub fn admits(&self, metadata: &MemoryMetadata) -> bool {
+        if let Some(range) = self.source_overlap {
+            match metadata.source.source_range() {
+                Some(source_range) if source_range.overlaps(&range) => {}
+                _ => return false,
+            }
+        }
+        if let Some(after) = self.indexed_after
+            && metadata.indexed_at <= after
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// One page of scoped memory enumeration.
+#[derive(Debug, Clone)]
+pub struct MemoryEnumerationPage {
+    /// Records surviving the request's post-filters, in durable-id order.
+    pub records: Vec<MemoryRecord>,
+    /// Raw scope-row offset of the next page, or `None` when no raw scope
+    /// rows remain past this page.
+    pub next_offset: Option<usize>,
+}
+
+/// One enumerated memory record: content plus typed metadata, no ranking
+/// score (enumeration is provenance-ordered, not relevance-ranked).
+#[derive(Debug, Clone)]
+pub struct MemoryRecord {
+    /// The text content of the memory.
+    pub content: String,
+    /// Metadata about the source.
+    pub metadata: MemoryMetadata,
+}
+
 /// Typed embedding model contract owning vector generation.
 ///
 /// The model is the authority for how text becomes a ranking vector; stores
@@ -431,6 +513,39 @@ pub trait MemoryStore: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryResult>, MemoryStoreError>;
+
+    /// Atomically drop every indexed entry owned by `owner`.
+    ///
+    /// All-or-nothing per scope: either every durable entry for the owner is
+    /// removed or none are. Other owners' entries are untouched. Unsupported
+    /// by default for stores without a deletion capability.
+    async fn drop_scope(
+        &self,
+        owner: &MemoryOwner,
+    ) -> Result<MemoryScopeDropReceipt, MemoryStoreError> {
+        let _ = owner;
+        Err(MemoryStoreError::Unsupported {
+            operation: "drop_scope",
+        })
+    }
+
+    /// Enumerate one page of a scope's records in durable-id order.
+    ///
+    /// Paging counts raw scope rows (see [`MemoryEnumerationRequest`]); the
+    /// `source_overlap` / `indexed_after` filters run on typed metadata after
+    /// deserialization, so a page may return fewer than `limit` records.
+    /// Corrupt durable rows propagate as typed faults, never silently
+    /// skipped. Unsupported by default.
+    async fn enumerate_scoped(
+        &self,
+        scope: &MemorySearchScope,
+        request: MemoryEnumerationRequest,
+    ) -> Result<MemoryEnumerationPage, MemoryStoreError> {
+        let _ = (scope, request);
+        Err(MemoryStoreError::Unsupported {
+            operation: "enumerate_scoped",
+        })
+    }
 }
 
 /// Errors from memory store operations.
@@ -502,6 +617,16 @@ pub enum MemoryStoreError {
         repair: Box<MemoryStoreError>,
     },
 
+    /// The store does not implement the requested optional operation.
+    #[error("memory store operation '{operation}' is unsupported by this store")]
+    Unsupported { operation: &'static str },
+
+    /// An enumeration request carried `limit == 0`, which cannot advance the
+    /// raw-row cursor: `next_offset` would equal the request offset and a
+    /// standard follow-`next_offset` pagination loop would never terminate.
+    #[error("memory enumeration limit must be non-zero")]
+    EnumerationLimitZero,
+
     /// An underlying filesystem operation failed.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -526,7 +651,219 @@ impl MemoryStoreError {
             Self::IndexDivergence { .. } => "memory_index_divergence",
             Self::ScopePoisoned => "memory_scope_poisoned",
             Self::ScopeRepairFailed { .. } => "memory_scope_repair_failed",
+            Self::Unsupported { .. } => "memory_unsupported",
+            Self::EnumerationLimitZero => "memory_enumeration_limit_zero",
             Self::Io(_) => "memory_io",
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::time_compat::{Duration, UNIX_EPOCH};
+
+    fn range(start: u64, end: u64) -> MessageRange {
+        MessageRange::new(start, end).unwrap()
+    }
+
+    #[test]
+    fn overlaps_is_half_open() {
+        // Proper overlap.
+        assert!(range(0, 5).overlaps(&range(4, 6)));
+        assert!(range(4, 6).overlaps(&range(0, 5)));
+        // Containment overlaps.
+        assert!(range(0, 10).overlaps(&range(3, 4)));
+        assert!(range(3, 4).overlaps(&range(0, 10)));
+        // Touching ranges do not overlap (half-open).
+        assert!(!range(0, 5).overlaps(&range(5, 10)));
+        assert!(!range(5, 10).overlaps(&range(0, 5)));
+        // Disjoint ranges do not overlap.
+        assert!(!range(0, 2).overlaps(&range(7, 9)));
+    }
+
+    #[test]
+    fn empty_range_never_overlaps() {
+        assert!(!range(3, 3).overlaps(&range(0, 10)));
+        assert!(!range(0, 10).overlaps(&range(3, 3)));
+        assert!(!range(3, 3).overlaps(&range(3, 3)));
+    }
+
+    #[test]
+    fn unsupported_error_code_is_stable() {
+        assert_eq!(
+            MemoryStoreError::Unsupported {
+                operation: "drop_scope",
+            }
+            .error_code(),
+            "memory_unsupported"
+        );
+    }
+
+    fn metadata_at(
+        indexed_at: crate::time_compat::SystemTime,
+        source: MemorySource,
+    ) -> MemoryMetadata {
+        MemoryMetadata {
+            session_id: crate::types::SessionId::new(),
+            source,
+            indexed_at,
+        }
+    }
+
+    #[test]
+    fn enumeration_request_admits_on_source_overlap() {
+        let request = MemoryEnumerationRequest {
+            limit: 10,
+            offset: 0,
+            source_overlap: Some(range(4, 6)),
+            indexed_after: None,
+        };
+        let overlapping = metadata_at(
+            UNIX_EPOCH,
+            MemorySource::Compaction {
+                source_range: range(0, 5),
+            },
+        );
+        let disjoint = metadata_at(
+            UNIX_EPOCH,
+            MemorySource::Compaction {
+                source_range: range(6, 9),
+            },
+        );
+        assert!(request.admits(&overlapping));
+        assert!(!request.admits(&disjoint));
+    }
+
+    #[test]
+    fn enumeration_request_indexed_after_is_strict() {
+        let boundary = UNIX_EPOCH + Duration::from_secs(100);
+        let request = MemoryEnumerationRequest {
+            limit: 10,
+            offset: 0,
+            source_overlap: None,
+            indexed_after: Some(boundary),
+        };
+        let at_boundary = metadata_at(
+            boundary,
+            MemorySource::Compaction {
+                source_range: range(0, 1),
+            },
+        );
+        let after_boundary = metadata_at(
+            boundary + Duration::from_secs(1),
+            MemorySource::Compaction {
+                source_range: range(0, 1),
+            },
+        );
+        let before_boundary = metadata_at(
+            UNIX_EPOCH,
+            MemorySource::Compaction {
+                source_range: range(0, 1),
+            },
+        );
+        assert!(!request.admits(&at_boundary));
+        assert!(request.admits(&after_boundary));
+        assert!(!request.admits(&before_boundary));
+    }
+
+    #[test]
+    fn enumeration_request_filters_compose() {
+        let request = MemoryEnumerationRequest {
+            limit: 10,
+            offset: 0,
+            source_overlap: Some(range(0, 5)),
+            indexed_after: Some(UNIX_EPOCH + Duration::from_secs(100)),
+        };
+        let both = metadata_at(
+            UNIX_EPOCH + Duration::from_secs(200),
+            MemorySource::Compaction {
+                source_range: range(2, 3),
+            },
+        );
+        let wrong_range = metadata_at(
+            UNIX_EPOCH + Duration::from_secs(200),
+            MemorySource::Compaction {
+                source_range: range(5, 9),
+            },
+        );
+        let too_early = metadata_at(
+            UNIX_EPOCH,
+            MemorySource::Compaction {
+                source_range: range(2, 3),
+            },
+        );
+        assert!(request.admits(&both));
+        assert!(!request.admits(&wrong_range));
+        assert!(!request.admits(&too_early));
+    }
+
+    /// Minimal store implementing only the required trait surface, pinning
+    /// the fail-closed `Unsupported` defaults for the optional lifecycle
+    /// methods.
+    struct MinimalStore;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl MemoryStore for MinimalStore {
+        async fn index_scoped_batch(
+            &self,
+            batch: MemoryIndexBatch,
+        ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+            let (scope, requests) = batch.into_parts();
+            Ok(MemoryIndexReceipt {
+                scope,
+                indexed_entries: requests.len(),
+            })
+        }
+
+        async fn search(
+            &self,
+            _scope: &MemorySearchScope,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn drop_scope_default_is_typed_unsupported() {
+        let store = MinimalStore;
+        let owner = MemoryOwner::canonical_session(crate::types::SessionId::new());
+        let error = store.drop_scope(&owner).await.unwrap_err();
+        assert!(matches!(
+            error,
+            MemoryStoreError::Unsupported {
+                operation: "drop_scope",
+            }
+        ));
+        assert_eq!(error.error_code(), "memory_unsupported");
+    }
+
+    #[tokio::test]
+    async fn enumerate_scoped_default_is_typed_unsupported() {
+        let store = MinimalStore;
+        let scope = MemorySearchScope::for_session(crate::types::SessionId::new());
+        let error = store
+            .enumerate_scoped(
+                &scope,
+                MemoryEnumerationRequest {
+                    limit: 10,
+                    offset: 0,
+                    source_overlap: None,
+                    indexed_after: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MemoryStoreError::Unsupported {
+                operation: "enumerate_scoped",
+            }
+        ));
+        assert_eq!(error.error_code(), "memory_unsupported");
     }
 }

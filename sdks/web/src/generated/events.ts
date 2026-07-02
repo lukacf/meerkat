@@ -101,6 +101,9 @@ export type CompactionFailureReason = {
 } | {
   kind: "empty_summary";
 } | {
+  kind: "curator_failed";
+  message: string;
+} | {
   kind: "estimation_failed";
   message: string;
 } | {

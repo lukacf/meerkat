@@ -881,6 +881,14 @@ class InterruptParams:
 
 
 @dataclass
+class ListSessionTranscriptRevisionsParams:
+    """Request payload for `session/transcript_revisions`."""
+    session_id: str
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+
+
+@dataclass
 class ListSessionsParams:
     """Parameters for `session/list` (all optional)."""
     labels: Optional[dict[str, str]] = None
@@ -1098,6 +1106,14 @@ class WireSessionTranscriptRevision:
     session_id: str
     limit: Optional[int] = None
     session_ref: Optional[str] = None
+
+
+@dataclass
+class WireSessionTranscriptRevisionList:
+    """Ordered (oldest-first) transcript revision commit list in canonical wire
+format."""
+    entries: list[dict[str, Any]]
+    head_revision: str
 
 
 @dataclass
@@ -1692,6 +1708,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     additional_instructions: Optional[list[str]] = None
     auth_binding: Optional[dict[str, Any]] = None
     flow_tool_overlay: Optional[PublicTurnToolOverlay] = None
+    injected_context: Optional[list[WireContentInput]] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
     model: Optional[str] = None
@@ -1760,6 +1777,7 @@ server resolves against the live roster — callers do not pass
 `generation` or `fence_token`."""
     content: WireContentInput
     member_ref: WireMemberRef
+    injected_context: Optional[list[WireContentInput]] = None
     origin: Optional[Literal['external', 'internal']] = None
     work_ref: Optional[str] = None
 
@@ -2713,6 +2731,7 @@ class BridgeDeliveryPayload:
     input_id: str
     protocol_version: BridgeProtocolVersion
     supervisor: BridgePeerSpec
+    injected_context: Optional[list[ContentInput]] = None
 
 
 @dataclass
@@ -4790,6 +4809,7 @@ class CommsCommandInput(TypedDict, total=False):
 class CommsCommandPeerMessage(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
+    content_taint: NotRequired[SendTaintOverride]
     handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['peer_message']]
     to: Required[PeerId]
@@ -4802,6 +4822,7 @@ class CommsCommandPeerLifecycle(TypedDict, total=False):
 
 class CommsCommandPeerRequest(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[SendTaintOverride]
     handling_mode: NotRequired[HandlingMode]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
@@ -4811,6 +4832,7 @@ class CommsCommandPeerRequest(TypedDict, total=False):
 
 class CommsCommandPeerResponse(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[SendTaintOverride]
     handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
@@ -4862,6 +4884,7 @@ class BridgeCommandDeliverMemberInput(TypedDict, total=False):
     content: Required[ContentInput]
     epoch: Required[int]
     handling_mode: Required[HandlingMode]
+    injected_context: NotRequired[list[ContentInput]]
     input_id: Required[str]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
@@ -5063,6 +5086,7 @@ class CommsSendParamsInput(TypedDict, total=False):
 class CommsSendParamsPeerMessage(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
+    content_taint: NotRequired[SendTaintOverride]
     handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['peer_message']]
     session_id: Required[str]
@@ -5077,6 +5101,7 @@ class CommsSendParamsPeerLifecycle(TypedDict, total=False):
 
 class CommsSendParamsPeerRequest(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[SendTaintOverride]
     handling_mode: NotRequired[HandlingMode]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
@@ -5087,6 +5112,7 @@ class CommsSendParamsPeerRequest(TypedDict, total=False):
 
 class CommsSendParamsPeerResponse(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[SendTaintOverride]
     handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
@@ -5194,6 +5220,29 @@ PeerDirectorySource = Literal['trusted', 'inproc', 'trusted_and_inproc', 'unknow
 
 # Comms/session-stream RPC contract for PeerSendability.
 PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
+
+# Sender-declared content-taint classification for peer content.
+#
+# This is the typed vocabulary for the optional taint declaration a sender
+# stamps onto content-bearing comms envelopes (`Message` / `Request` /
+# `Response`). `Clean` and `Tainted` are the two DECLARED states.
+#
+# `None` at the carriers (`MessageKind::*.content_taint`,
+# `SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)
+# means "the sender made no declaration" — a REAL third state. Receivers
+# must never coalesce `None` into `Clean`: an absent declaration carries no
+# trust information, while `Clean` is an affirmative sender claim.
+SenderContentTaint = Literal['clean', 'tainted']
+
+# Per-send tri-state override for the outbound content-taint declaration.
+#
+# Carried as `Option<SendTaintOverride>` on the comms send surfaces: an
+# ABSENT override (`None`) inherits the runtime-level declaration installed
+# via `set_outbound_content_taint`; `Undeclared` strips the declaration for
+# this send (the envelope carries no taint field); `Declare(taint)` stamps
+# exactly `taint`. Inherit, disable, and set are three different facts — a
+# two-state override would collapse them.
+SendTaintOverride = dict[str, SenderContentTaint] | Literal['undeclared']
 
 
 def parse_work_completion_policy(value: Any) -> "WorkCompletionPolicy":

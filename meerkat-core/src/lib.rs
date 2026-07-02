@@ -78,6 +78,7 @@ pub mod state;
 pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;
+pub mod tool_execution_policy;
 pub mod tool_scope;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
@@ -118,16 +119,18 @@ pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
-    SendError, SendReceipt, StreamError, StreamScope,
+    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, StreamError, StreamScope,
 };
 pub use compact::{
-    CompactionConfig, CompactionContext, CompactionResult, Compactor,
+    CompactionConfig, CompactionContext, CompactionCurator, CompactionCuratorError,
+    CompactionResult, CompactionWindow, Compactor, CuratedCompactionSummary,
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 pub use memory::{
-    EmbeddingModel, HnswParams, MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest,
-    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryResult,
-    MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError, MessageRange,
+    EmbeddingModel, HnswParams, MemoryEnumerationPage, MemoryEnumerationRequest, MemoryIndexBatch,
+    MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryOwner,
+    MemoryRankingPolicy, MemoryRecord, MemoryResult, MemoryScopeDropReceipt, MemorySearchScope,
+    MemorySource, MemoryStore, MemoryStoreError, MessageRange,
 };
 pub use model_profile::{ModelCatalog, ModelProfile};
 pub use model_registry::{
@@ -271,8 +274,9 @@ pub use service::{
     SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult, SessionHistoryPage,
     SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
-    SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionPage,
-    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
+    SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
+    SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsRequest,
     StageToolResultsResult, StartTurnRequest, TranscriptEditError, TranscriptEditRunningBehavior,
     TranscriptReplacement, TranscriptRewriteCommit, TranscriptRewriteReason,
@@ -308,6 +312,9 @@ pub use tool_catalog::{
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
     ToolUnavailableReason, deferred_session_entry_count, deferred_session_schema_volume,
     select_catalog_mode_from_snapshot,
+};
+pub use tool_execution_policy::{
+    ExecutionPolicyGatedDispatcher, ToolExecutionPolicy, ToolExecutionPolicyError,
 };
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,

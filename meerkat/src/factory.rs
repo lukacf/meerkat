@@ -311,6 +311,11 @@ pub struct AgentBuildConfig {
     /// Per-build auto-compaction threshold override (tokens, non-zero).
     /// Wins over the global config knob and model-aware scaling.
     pub auto_compact_threshold_override: Option<std::num::NonZeroU64>,
+    /// Host-supplied compaction summary curator. When set, the agent loop
+    /// asks the curator for the compaction summary instead of running the
+    /// summarization LLM call; the compaction trigger and history rebuild
+    /// stay with the configured compactor.
+    pub compaction_curator_override: Option<Arc<dyn meerkat_core::CompactionCurator>>,
     /// Max tokens per turn. If `None`, uses `Config::max_tokens`.
     pub max_tokens: Option<u32>,
     /// Typed per-request system-prompt policy.
@@ -523,6 +528,19 @@ pub struct AgentBuildConfig {
     /// owned directly by the build config (mirroring
     /// `initial_tool_visibility_state`).
     pub initial_tool_filter: Option<meerkat_core::ToolFilter>,
+    /// Per-launch call-level tool access policy (the existing
+    /// [`meerkat_core::ops::ToolAccessPolicy`] vocabulary).
+    ///
+    /// Resolved into the sealed [`meerkat_core::ToolExecutionPolicy`] and
+    /// applied as the OUTERMOST dispatcher composition: execution of a denied
+    /// tool fails with an ordinary `access_denied` tool error while the
+    /// LLM-visible tool list (`tools()`/`tool_catalog()`) stays byte-identical
+    /// (no prompt-cache prefix change). `Inherit` must be resolved by the
+    /// spawn chain before build; an unresolved `Inherit` fails the build
+    /// closed with a typed error. The effective policy is persisted into
+    /// `SessionMetadata.tooling.tool_access_policy` so children can inherit
+    /// it transitively.
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -536,6 +554,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field(
                 "auto_compact_threshold_override",
                 &self.auto_compact_threshold_override,
+            )
+            .field(
+                "compaction_curator_override",
+                &self.compaction_curator_override.is_some(),
             )
             .field("max_tokens", &self.max_tokens)
             .field("system_prompt", &{
@@ -628,6 +650,7 @@ impl std::fmt::Debug for AgentBuildConfig {
                 &self.initial_tool_visibility_state.is_some(),
             )
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
+            .field("tool_access_policy", &self.tool_access_policy)
             .finish()
     }
 }
@@ -642,6 +665,7 @@ impl AgentBuildConfig {
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,
+            compaction_curator_override: None,
             max_tokens: None,
             system_prompt: crate::SystemPromptOverride::Inherit,
             output_schema: None,
@@ -700,6 +724,7 @@ impl AgentBuildConfig {
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_visibility_state: None,
             initial_tool_filter: None,
+            tool_access_policy: None,
         }
     }
 
@@ -811,6 +836,7 @@ impl AgentBuildConfig {
         self.additional_instructions = build.additional_instructions.clone();
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
+        self.tool_access_policy = build.tool_access_policy.clone();
         self.shell_env = build.shell_env.clone();
         self.checkpointer = build.checkpointer.clone();
         self.call_timeout_override = build.call_timeout_override.clone();
@@ -872,6 +898,7 @@ impl AgentBuildConfig {
             additional_instructions: self.additional_instructions.clone(),
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
+            tool_access_policy: self.tool_access_policy.clone(),
             shell_env: self.shell_env.clone(),
             checkpointer: self.checkpointer.clone(),
             call_timeout_override: self.call_timeout_override.clone(),
@@ -2791,6 +2818,12 @@ impl AgentFactory {
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
         }
+        // Effective call-level tool access policy: restore the persisted
+        // policy unless the caller supplied an explicit one — a restricted
+        // session must not escape its execution gate by being resumed.
+        if !mask.tool_access_policy && build_config.tool_access_policy.is_none() {
+            build_config.tool_access_policy = metadata.tooling.tool_access_policy.clone();
+        }
         if !mask.keep_alive {
             build_config.keep_alive = metadata.keep_alive;
         }
@@ -3722,6 +3755,8 @@ impl AgentFactory {
             build_config.override_web_search,
             ToolCategoryOverride::Inherit
         );
+        build_config.resume_override_mask.tool_access_policy |=
+            build_config.tool_access_policy.is_some();
 
         let explicit_mob_override =
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
@@ -4724,6 +4759,11 @@ impl AgentFactory {
         let effective_schedule = build_config.override_schedule.resolve(self.enable_schedule);
         if effective_schedule && let Some(schedule_dispatcher) = build_config.schedule_tools.take()
         {
+            // Scheduled spawn/fork-helper targets fire later under host
+            // authority; the creating session's effective tool access policy
+            // must be applied at creation or a gated agent could schedule a
+            // helper that escapes its own containment.
+            let creator_tool_access_policy = build_config.tool_access_policy.clone();
             let schedule_dispatcher = match build_config.mob_member_binding.clone() {
                 Some(binding) => Arc::new(
                     meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
@@ -4732,12 +4772,16 @@ impl AgentFactory {
                         Arc::new(
                             crate::surface::MobMemberCurrentSessionScheduleResolver::new(binding),
                         ),
-                    ),
+                    )
+                    .with_creator_tool_access_policy(creator_tool_access_policy),
                 ) as Arc<dyn AgentToolDispatcher>,
-                None => Arc::new(meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
-                    schedule_dispatcher,
-                    session.id().clone(),
-                )) as Arc<dyn AgentToolDispatcher>,
+                None => Arc::new(
+                    meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
+                        schedule_dispatcher,
+                        session.id().clone(),
+                    )
+                    .with_creator_tool_access_policy(creator_tool_access_policy),
+                ) as Arc<dyn AgentToolDispatcher>,
             };
             let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
@@ -5273,6 +5317,19 @@ impl AgentFactory {
             .structured_output_retries
             .unwrap_or(config.agent.structured_output_retries);
 
+        // Resolve the per-launch tool access policy into the sealed execution
+        // form BEFORE session metadata is persisted: an unresolved `Inherit`
+        // is a wiring fault (the spawn chain owns Inherit resolution — a child
+        // inherits its parent's persisted effective policy; host launches with
+        // no parent resolve to unrestricted) and must fail the build closed
+        // rather than persist or silently un-gate the session.
+        let tool_execution_policy = build_config
+            .tool_access_policy
+            .clone()
+            .map(meerkat_core::ToolExecutionPolicy::resolve)
+            .transpose()
+            .map_err(|err| BuildAgentError::Config(format!("Tool access policy: {err}")))?;
+
         // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
         // effective bool. This ensures Inherit survives across save/resume cycles so
         // the session continues to follow future runtime defaults.
@@ -5300,6 +5357,9 @@ impl AgentFactory {
             metadata.tooling.workgraph = build_config.override_workgraph;
             metadata.tooling.image_generation = build_config.override_image_generation;
             metadata.tooling.web_search = build_config.override_web_search;
+            // Effective (resolved) policy only — an unresolved `Inherit`
+            // failed the build above, so `Inherit` can never persist here.
+            metadata.tooling.tool_access_policy = build_config.tool_access_policy.clone();
             if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
                 metadata.tooling.active_skills = active_skill_ids.clone();
             }
@@ -5335,6 +5395,9 @@ impl AgentFactory {
                     workgraph: build_config.override_workgraph,
                     image_generation: build_config.override_image_generation,
                     web_search: build_config.override_web_search,
+                    // Effective (resolved) policy only — an unresolved
+                    // `Inherit` failed the build above.
+                    tool_access_policy: build_config.tool_access_policy.clone(),
                     active_skills: active_skill_ids.clone(),
                 },
                 keep_alive: build_config.keep_alive,
@@ -5512,6 +5575,11 @@ impl AgentFactory {
             ));
             builder = builder.compactor(compactor);
         }
+        // Host-supplied summary curator: substitutes summary content
+        // production only; the trigger/rebuild stay with the compactor above.
+        if let Some(curator) = build_config.compaction_curator_override {
+            builder = builder.compaction_curator(curator);
+        }
 
         // 12d. Wire skill engine for per-turn /skill-ref activation
         if let Some(engine) = skill_engine {
@@ -5596,6 +5664,26 @@ impl AgentFactory {
                 control_dispatcher,
             ]));
             hoisted_control_visibility_provider = Some(visibility_provider);
+        }
+
+        // 12i. Call-level tool execution gate — the OUTERMOST composition.
+        // Applied after every gateway/memory/catalog-control composition so
+        // memory_search and every gateway-composed tool is gated. The gate
+        // forwards `tools()`/`tool_catalog()` byte-identically (the
+        // LLM-visible list — and therefore the prompt-cache prefix — is
+        // unchanged); a denied call surfaces as an ordinary `access_denied`
+        // tool error that the agent loop converts into an `is_error` tool
+        // result, and the run continues. The ops-lifecycle binding (step 9d)
+        // ran on the inner dispatcher before this wrap, and the wrapper
+        // forwards `bind_mcp_server_lifecycle_handle` /
+        // `bind_external_tool_surface_handle` so later handle binds still
+        // reach the inner dispatcher. Provider-native server tools never
+        // traverse the dispatcher and cannot be gated here; hosts that need
+        // them gated must disable the native capability on gated builds.
+        if let Some(policy) = tool_execution_policy {
+            tools = Arc::new(meerkat_core::ExecutionPolicyGatedDispatcher::new(
+                tools, policy,
+            ));
         }
 
         // 13. Build agent. AgentFactory owns the policy composition above; core

@@ -529,6 +529,7 @@ mod image_generation_substrate {
             .expect("baseline text model should be configured");
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: "make an image".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -553,6 +554,7 @@ mod image_generation_substrate {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "make an image".to_string().into(),
+                injected_context: Vec::new(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
@@ -621,6 +623,7 @@ mod scenario_22_session_service_lifecycle {
         eprintln!("[scenario 22] Creating session...");
         let create_result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: smoke_model(),
                 prompt: "I am EphBot. Remember this name.".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -652,6 +655,7 @@ mod scenario_22_session_service_lifecycle {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: "What is my name? Reply in one sentence.".to_string().into(),
                     system_prompt: None,
                     event_tx: None,

@@ -1035,6 +1035,12 @@ impl SessionBackend {
             },
             content: prompt,
             typed_turn_appends: req.runtime.typed_turn_appends.clone(),
+            // Runtime-backed members lower injected context through the
+            // prompt input's typed slot so the runtime batch places the
+            // InjectedContext-role appends before the user append — the
+            // request field must not also reach the runner (one lowering
+            // owner per mode).
+            injected_context: req.injected_context.clone(),
             turn_metadata: Some(turn_metadata),
         })
     }
@@ -1479,6 +1485,7 @@ mod tests {
     #[test]
     fn session_owned_eager_member_create_gets_runtime_execution_kind_stamp() {
         let mut req = meerkat_core::service::CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: "hello".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -1738,6 +1745,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             m
         });
         let req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: primitive.extract_content_input(),
             system_prompt: None,
             event_tx: queued_context.map(|context| context.event_tx),
@@ -3331,6 +3339,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                         input_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
                         content: req.prompt.clone(),
                         handling_mode: req.runtime.handling_mode,
+                        // Rides the delivery payload; the receiving runtime
+                        // lowers it as InjectedContext-role appends before
+                        // the peer work append (empty is omitted on the
+                        // wire, keeping pre-field byte compatibility).
+                        injected_context: req.injected_context.clone(),
                     },
                 );
                 let response: super::bridge_protocol::BridgeDeliveryResponse = self

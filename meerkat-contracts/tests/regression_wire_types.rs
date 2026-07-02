@@ -271,6 +271,7 @@ fn wire_session_history_required_fields() {
             },
             WireSessionMessage::User {
                 content: meerkat_contracts::WireContentInput::Text("user".to_string()),
+                transcript_role: meerkat_core::types::TranscriptUserRole::Conversational,
                 interaction_id: None,
                 run_id: None,
                 created_at: "2026-04-27T00:00:01Z".to_string(),

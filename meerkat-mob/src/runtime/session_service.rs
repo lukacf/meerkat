@@ -469,6 +469,28 @@ where
         meerkat_session::EphemeralSessionService::<B>::execution_snapshot(self, session_id).await
     }
 
+    /// Export the LIVE session: for the ephemeral backend the live session is
+    /// the canonical session, and callers that read session-owned facts
+    /// through this seam (e.g. parent tool-access-policy resolution for
+    /// spawn/fork `Inherit`) must see it. The trait default's `Ok(None)`
+    /// would silently coalesce "session invisible to this read seam" into
+    /// "session has no such fact" — on the policy path that is a fail-open
+    /// containment escape (a restricted parent minting unrestricted
+    /// children).
+    async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        match meerkat_session::EphemeralSessionService::<B>::export_session(self, session_id).await
+        {
+            Ok(session) => Ok(Some(session)),
+            // A genuinely absent session is the documented `None` shape;
+            // every other fault propagates so policy resolution fails closed.
+            Err(SessionError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,

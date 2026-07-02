@@ -879,6 +879,7 @@ fn pictionary_history_page(texts: Vec<(&str, &str)>) -> meerkat_core::SessionHis
                     meerkat_core::types::SystemNoticeKind::Comms,
                     Some(text.to_string()),
                     meerkat_core::types::SystemNoticeBlock::Comms {
+                        sender_taint: None,
                         kind: meerkat_core::types::CommsNoticeKind::Message,
                         direction: meerkat_core::types::SystemNoticeDirection::Incoming,
                         peer: Some(meerkat_core::types::SystemNoticePeer {

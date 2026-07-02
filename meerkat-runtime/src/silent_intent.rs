@@ -40,6 +40,8 @@ mod tests {
 
     fn make_peer_request(intent_str: &str) -> Input {
         Input::Peer(PeerInput {
+            injected_context: Vec::new(),
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -62,6 +64,8 @@ mod tests {
 
     fn make_peer_message() -> Input {
         Input::Peer(PeerInput {
+            injected_context: Vec::new(),
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -114,6 +118,7 @@ mod tests {
     #[test]
     fn prompt_input_not_silent() {
         let input = Input::Prompt(PromptInput {
+            injected_context: Vec::new(),
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),

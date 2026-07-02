@@ -60,6 +60,12 @@
       "result_type": "WireSessionTranscriptRevision"
     },
     {
+      "description": "List retained transcript revision commits with the current head",
+      "name": "session/transcript_revisions",
+      "params_type": "ListSessionTranscriptRevisionsParams",
+      "result_type": "WireSessionTranscriptRevisionList"
+    },
+    {
       "description": "Commit a typed rewrite that restores a retained transcript revision",
       "name": "session/restore_transcript_revision",
       "params_type": "RestoreSessionTranscriptRevisionParams",

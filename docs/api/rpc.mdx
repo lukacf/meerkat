@@ -90,6 +90,7 @@ subset.
 | `session/history` | Session | `ReadSessionHistoryParams` | `WireSessionHistory` | Get committed session transcript messages |
 | `session/rewrite_transcript` | Session | `RewriteSessionTranscriptParams` | `SessionTranscriptRewriteResult` | Commit a same-session transcript rewrite |
 | `session/transcript_revision` | Session | `ReadSessionTranscriptRevisionParams` | `WireSessionTranscriptRevision` | Read a transcript revision by id |
+| `session/transcript_revisions` | Session | `ListSessionTranscriptRevisionsParams` | `WireSessionTranscriptRevisionList` | List retained transcript revision commits with the current head |
 | `session/restore_transcript_revision` | Session | `RestoreSessionTranscriptRevisionParams` | `SessionTranscriptRewriteResult` | Restore an earlier transcript revision in place |
 | `session/fork_at` | Session | `ForkSessionAtParams` | `SessionForkResult` | Fork an idle session at a transcript message index |
 | `session/fork_replace` | Session | `ForkSessionReplaceParams` | `SessionForkResult` | Fork an idle session and apply a typed transcript replacement |
@@ -405,6 +406,13 @@ Only `prompt` is required. All other fields are optional and fall back to config
   The user prompt to send to the agent.
 </ParamField>
 
+<ParamField body="injected_context" type="ContentInput[] | null" default="null">
+  Host-attached injected context for the first turn. Each entry materializes
+  as a separate typed injected-context user-channel message immediately before
+  the first turn's user message, in order; injected context is excluded from
+  semantic-memory indexing.
+</ParamField>
+
 <ParamField body="model" type="string | null" default="claude-sonnet-4-6">
   Model name (e.g. `"claude-opus-4-8"`, `"gpt-5.5"`).
 </ParamField>
@@ -574,11 +582,37 @@ Read one retained transcript revision body by revision id.
 Use `"current"` to read the active transcript head, or pass a concrete revision returned
 by `session/rewrite_transcript` or `session/restore_transcript_revision`.
 
+### session/transcript_revisions
+
+List retained transcript revision commits (oldest first) together with the current
+transcript head revision. Each entry records the revision the commit produced, the
+parent it was applied against, the recorded actor, the rendered rewrite reason, and
+the commit timestamp.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "session/transcript_revisions",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "offset": 0,
+    "limit": 50
+  }
+}
+```
+
+Sessions without any rewrite commit return an empty list; `head_revision` still names
+the active transcript head. Pass a returned `revision` to `session/transcript_revision`
+to read the retained body, or to `session/restore_transcript_revision` to restore it.
+
 ### session/restore_transcript_revision
 
 Restore a retained transcript revision as the active transcript head without changing
 the session identity. Restore is represented as another rewrite commit so the graph
 remains append-only even though the source transcript projection is updated in place.
+`revision` accepts the same selector as `session/transcript_revision`: `"current"`
+resolves to the head revision, so restoring it surfaces the typed no-op rewrite error.
 
 ```json
 {
@@ -788,6 +822,13 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
 
 <ParamField body="prompt" type="string" required>
   The follow-up prompt.
+</ParamField>
+
+<ParamField body="injected_context" type="ContentInput[] | null" default="null">
+  Host-attached injected context for this turn. Each entry materializes as a
+  separate typed injected-context user-channel message immediately before the
+  turn's user message, in order; injected context is excluded from
+  semantic-memory indexing.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="from session">

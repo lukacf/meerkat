@@ -1246,6 +1246,11 @@ struct MockSessionService {
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     start_turn_prompts: RwLock<Vec<(SessionId, String)>>,
+    /// Per turn request: the user-channel shape the runner would materialize
+    /// — `(is_injected_context, text)` pairs in transcript order, derived
+    /// from the request's active lowering carrier (typed appends in runtime
+    /// mode, the `injected_context` field + prompt in direct mode).
+    start_turn_user_channel: RwLock<Vec<(SessionId, Vec<(bool, String)>)>>,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     cancel_after_boundary_supported: AtomicBool,
@@ -1312,6 +1317,7 @@ impl MockSessionService {
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             start_turn_prompts: RwLock::new(Vec::new()),
+            start_turn_user_channel: RwLock::new(Vec::new()),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             cancel_after_boundary_supported: AtomicBool::new(true),
@@ -1423,6 +1429,10 @@ impl MockSessionService {
 
     async fn recorded_start_turn_prompts(&self) -> Vec<(SessionId, String)> {
         self.start_turn_prompts.read().await.clone()
+    }
+
+    async fn recorded_start_turn_user_channel(&self) -> Vec<(SessionId, Vec<(bool, String)>)> {
+        self.start_turn_user_channel.read().await.clone()
     }
 
     async fn recorded_external_tools_flags(&self) -> Vec<bool> {
@@ -1932,6 +1942,7 @@ impl SessionService for MockSessionService {
                     web_search: build
                         .map(|b| b.override_web_search)
                         .unwrap_or(ToolCategoryOverride::Inherit),
+                    tool_access_policy: build.and_then(|b| b.tool_access_policy.clone()),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
@@ -2063,6 +2074,30 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), req.prompt.text_content()));
+        let user_channel: Vec<(bool, String)> = if req.runtime.typed_turn_appends.is_empty() {
+            req.injected_context
+                .iter()
+                .map(|entry| (true, entry.text_content()))
+                .chain(std::iter::once((false, req.prompt.text_content())))
+                .collect()
+        } else {
+            use meerkat_core::lifecycle::run_primitive::ConversationAppendRole;
+            req.runtime
+                .typed_turn_appends
+                .iter()
+                .filter_map(|append| match append.role {
+                    ConversationAppendRole::InjectedContext => {
+                        Some((true, append.content.render_text()))
+                    }
+                    ConversationAppendRole::User => Some((false, append.content.render_text())),
+                    _ => None,
+                })
+                .collect()
+        };
+        self.start_turn_user_channel
+            .write()
+            .await
+            .push((id.clone(), user_channel));
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
@@ -4929,6 +4964,7 @@ async fn spawn_live_external_peer_with_transport(
                         loop {
                             match responder_runtime
                                 .send(CommsCommand::PeerResponse {
+                                    content_taint: None,
                                     to: to.clone(),
                                     in_reply_to: candidate.interaction.id,
                                     status: meerkat_core::interaction::ResponseStatus::Completed,
@@ -6955,6 +6991,59 @@ async fn test_mob_builder_allows_ephemeral_session_service_when_opted_in() {
 }
 
 #[tokio::test]
+async fn test_ephemeral_session_service_exposes_live_session_to_mob_read_seam() {
+    // Regression for the Inherit containment escape: the MobSessionService
+    // read seam must see the LIVE session on the ephemeral backend. The trait
+    // default's `Ok(None)` silently coalesced "session invisible to this read
+    // seam" into "session has no such fact", letting a policy-gated ephemeral
+    // parent mint unrestricted children through Inherit resolution.
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        PersistentMockBuilder,
+        16,
+    ));
+    let created = SessionService::create_session(
+        service.as_ref(),
+        CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "mock-model".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: None,
+            labels: None,
+        },
+    )
+    .await
+    .expect("create ephemeral session");
+
+    let loaded = crate::runtime::MobSessionService::load_persisted_session(
+        service.as_ref(),
+        &created.session_id,
+    )
+    .await
+    .expect("live session must be readable through the mob read seam");
+    assert_eq!(
+        loaded.map(|session| session.id().clone()),
+        Some(created.session_id.clone()),
+        "ephemeral MobSessionService::load_persisted_session must export the live session"
+    );
+
+    let missing = crate::runtime::MobSessionService::load_persisted_session(
+        service.as_ref(),
+        &SessionId::new(),
+    )
+    .await
+    .expect("unknown session id is the documented None shape");
+    assert!(
+        missing.is_none(),
+        "absent session must map to None, not an error"
+    );
+}
+
+#[tokio::test]
 async fn test_mob_handle_is_clone() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let handle2 = handle.clone();
@@ -8167,6 +8256,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         .expect("old supervisor bridge should explicitly trust peer for stale-epoch probe");
     let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
         super::bridge_protocol::BridgeDeliveryPayload {
+            injected_context: Vec::new(),
             supervisor: old_bridge
                 .supervisor_spec()
                 .await
@@ -12390,6 +12480,103 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
     );
 }
 
+/// Ask 6 spawn-site threading: an explicit `tool_access_policy` on the spawn
+/// spec must ride `SpawnMemberSpec` -> actor -> `BuildAgentConfigParams` ->
+/// `AgentBuildConfig` -> `SessionBuildOptions` and land in the member
+/// session's persisted metadata tooling section (the field children inherit
+/// from). Regression for the spec field previously being destructured and
+/// ignored at the actor spawn sites.
+#[tokio::test]
+async fn test_spawn_spec_tool_access_policy_reaches_session_metadata() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let policy = meerkat_core::ops::ToolAccessPolicy::AllowList(
+        ["send_message", "peers"].into_iter().collect(),
+    );
+    let spec = SpawnMemberSpec::new(
+        ProfileName::from("worker"),
+        AgentIdentity::from("gated-worker"),
+    )
+    .with_tool_access_policy(policy.clone());
+    handle.spawn_spec(spec).await.expect("spawn gated member");
+
+    let session_id = service
+        .session_id_for_comms_name("test-mob/worker/gated-worker")
+        .await
+        .expect("gated member session must exist");
+    let metadata = service
+        .persisted_session_clone(&session_id)
+        .await
+        .expect("persisted session")
+        .session_metadata()
+        .expect("session metadata");
+    assert_eq!(
+        metadata.tooling.tool_access_policy,
+        Some(policy),
+        "spec policy must reach the member's persisted metadata tooling section"
+    );
+}
+
+/// Ask 6: `HelperOptions.tool_access_policy` on `fork_helper` is honored —
+/// the forked helper's session persists the policy in its metadata tooling
+/// section.
+#[tokio::test]
+async fn test_fork_helper_tool_access_policy_reaches_session_metadata() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_id = AgentIdentity::from("fork-gated-source");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            AgentIdentity::from("fork-gated-source"),
+            Some("source context".into()),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn source member");
+
+    let policy = meerkat_core::ops::ToolAccessPolicy::DenyList(["bash"].into_iter().collect());
+    let helper_id = AgentIdentity::from("fork-gated-helper");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle.fork_helper(
+            &source_id,
+            helper_id,
+            "continue gated",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                role_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                tool_access_policy: Some(policy.clone()),
+                ..HelperOptions::default()
+            },
+        ),
+    )
+    .await
+    .expect("fork_helper must not hang")
+    .expect("fork_helper succeeds");
+
+    // The one-shot helper is retired (and its comms-name mapping dropped) by
+    // the time `fork_helper` returns, so identify its session by the persisted
+    // policy itself: exactly one persisted session — the helper's — must carry
+    // the tooling policy, and the source member's session must not.
+    let persisted = service.persisted_sessions.read().await;
+    let gated_policies: Vec<_> = persisted
+        .values()
+        .filter_map(|session| {
+            session
+                .session_metadata()
+                .expect("session metadata")
+                .tooling
+                .tool_access_policy
+        })
+        .collect();
+    assert_eq!(
+        gated_policies,
+        vec![policy],
+        "fork_helper policy must reach exactly the helper's persisted metadata tooling section"
+    );
+}
+
 #[tokio::test]
 async fn test_spawn_helper_defaults_to_turn_driven_even_when_profile_is_autonomous() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -13526,6 +13713,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
         .start_turn(
             &sid,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "non-flow turn".to_string().into(),
                 system_prompt: None,
                 event_tx: None,
@@ -13955,6 +14143,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
 
     let orphan = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "orphan".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -14298,6 +14487,7 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
 
     let replacement = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "replacement".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -15235,6 +15425,7 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
     let _ = service.enable_runtime_adapter();
     let initial = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Set(
@@ -15322,6 +15513,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("mob-communication")
                         .expect("valid skill name"),
@@ -15363,6 +15555,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
+                tool_access_policy: None,
                 inherited_tool_filter: None,
                 system_prompt_override: None,
             },
@@ -15383,6 +15576,7 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
     let _ = service.enable_runtime_adapter();
     let initial = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Set(
@@ -22557,6 +22751,7 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
 
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "abort absent cleanup".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -22641,6 +22836,7 @@ async fn cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_s
     let session_id = session.id().clone();
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "idle cleanup ordering".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -22732,6 +22928,7 @@ async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_r
 
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "abort archive failure".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -22849,6 +23046,7 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
 
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "retire active runtime turn".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23381,6 +23579,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
     provisioner
         .provision_member(super::provisioner::ProvisionMemberRequest {
             create_session: CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "local binding provision".to_string().into(),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23421,6 +23620,7 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
     let service = Arc::new(MockSessionService::new());
     let session = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter boundary".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23477,6 +23677,7 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
     service.set_cancel_after_boundary_supported(false);
     let session = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter unsupported boundary".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23529,6 +23730,7 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
     let service = Arc::new(MockSessionService::new());
     let session = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter hard cancel".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -30531,6 +30733,7 @@ async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settle
     let receipt = CoreCommsRuntime::send(
         &*comms_a,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(&*comms_a, &test_comms_name("worker", "w-prekickoff")).await,
             body: "body: immediate orchestration after wait_for_ready".to_string(),
             blocks: Some(vec![
@@ -30660,6 +30863,7 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
         let receipt = CoreCommsRuntime::send(
             &*comms_lead,
             CommsCommand::PeerMessage {
+                content_taint: None,
                 to: test_peer_route(&*comms_lead, &test_comms_name("worker", agent_identity)).await,
                 body: format!("body: fanout to {agent_identity}"),
                 blocks: Some(vec![
@@ -30812,6 +31016,7 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
     CoreCommsRuntime::send(
         &*artist_comms,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(&*artist_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: first peer message".to_string(),
             blocks: Some(vec![
@@ -30849,6 +31054,7 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
     CoreCommsRuntime::send(
         &*helper_comms,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(&*helper_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: second peer message while running".to_string(),
             blocks: None,
@@ -31411,6 +31617,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let receipt = CoreCommsRuntime::send(
         &*requester_comms,
         CommsCommand::PeerRequest {
+            content_taint: None,
             to: test_peer_route(&*requester_comms, &test_comms_name("worker", "w-responder")).await,
             intent: "interpret_image".to_string(),
             params: serde_json::json!({"description":"tower with a light"}),
@@ -31445,6 +31652,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerResponse {
+            content_taint: None,
             to: test_peer_route(&*responder_comms, &test_comms_name("lead", "l-requester")).await,
             in_reply_to: request_id,
             status: meerkat_core::ResponseStatus::Completed,
@@ -31695,6 +31903,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(
                 &*responder_comms,
                 &test_comms_name("lead", "l-running-requester"),
@@ -31727,6 +31936,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     let request_receipt = CoreCommsRuntime::send(
         &*requester_comms,
         CommsCommand::PeerRequest {
+            content_taint: None,
             to: test_peer_route(
                 &*requester_comms,
                 &test_comms_name("worker", "w-running-responder"),
@@ -31766,6 +31976,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerResponse {
+            content_taint: None,
             to: test_peer_route(
                 &*responder_comms,
                 &test_comms_name("lead", "l-running-requester"),
@@ -32484,6 +32695,156 @@ async fn test_internal_queued_submit_work_drains_after_running_turn() {
     );
 }
 
+/// Ask 1 (design item 7), turn-driven work lane: injected context on a
+/// `WorkSpec` reaches the member's turn request as the user-channel shape
+/// `[injected..., work content]`, in delivery order.
+#[tokio::test]
+async fn test_turn_driven_submit_work_delivers_injected_context_before_work_content() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-injected-context");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("summarize the findings".to_string(), WorkOrigin::Internal)
+                .with_injected_context(vec![
+                    meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+                    meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+                ]),
+        )
+        .await
+        .expect("submit work with injected context");
+
+    wait_for_start_turn_call_count(
+        &service,
+        1,
+        "turn-driven work with injected context should start a turn",
+    )
+    .await;
+
+    let records = service.recorded_start_turn_user_channel().await;
+    let (_, user_channel) = records.last().expect("one turn request recorded");
+    assert_eq!(
+        user_channel,
+        &vec![
+            (true, "ambient alpha".to_string()),
+            (true, "ambient beta".to_string()),
+            (false, "summarize the findings".to_string()),
+        ],
+        "injected context must reach the member turn request as typed \
+         injected-context entries before the work content, in order"
+    );
+}
+
+/// Ask 1 (design item 7), autonomous decision: the autonomous inbox path
+/// flows through comms plain events (no user-channel work boundary), so
+/// non-empty injected context is rejected fail-closed with a typed error —
+/// never silently dropped.
+#[tokio::test]
+async fn test_autonomous_submit_work_with_injected_context_rejected() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("lead-injected-context");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let baseline_injects = service.inject_call_count();
+    let err = handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("do the thing".to_string(), WorkOrigin::External).with_injected_context(
+                vec![meerkat_core::types::ContentInput::Text(
+                    "ambient".to_string(),
+                )],
+            ),
+        )
+        .await
+        .expect_err("autonomous inbox delivery cannot carry injected context");
+    assert!(
+        matches!(err, MobError::InjectedContextUndeliverable { .. }),
+        "expected typed InjectedContextUndeliverable, got {err:?}"
+    );
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects,
+        "rejected work must not be partially injected"
+    );
+}
+
+/// Ask 1 (design item 7), steer decision: steer dispatch realizes as live
+/// system-context appends (no transcript boundary), so injected context on a
+/// steer-mode work submission is rejected fail-closed with a typed error.
+#[tokio::test]
+async fn test_steer_submit_work_with_injected_context_rejected() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-steer-injected");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let err = handle
+        .submit_work_with_mode(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("urgent update".to_string(), WorkOrigin::Internal).with_injected_context(
+                vec![meerkat_core::types::ContentInput::Text(
+                    "ambient".to_string(),
+                )],
+            ),
+            HandlingMode::Steer,
+        )
+        .await
+        .expect_err("steer dispatch cannot carry injected context");
+    assert!(
+        matches!(err, MobError::InjectedContextUndeliverable { .. }),
+        "expected typed InjectedContextUndeliverable, got {err:?}"
+    );
+}
+
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
@@ -32560,6 +32921,7 @@ async fn test_wire_enables_peer_request_delivery() {
     let _ = CoreCommsRuntime::drain_inbox_interactions(&*comms_b).await;
 
     let cmd = meerkat_core::comms::CommsCommand::PeerRequest {
+        content_taint: None,
         to: test_peer_route(&*comms_a, &comms_name_b).await,
         intent: "mob.test_ping".to_string(),
         params: serde_json::json!({"test": true}),
@@ -41055,6 +41417,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::StaleEventCursor { .. } => "stale_event_cursor".to_string(),
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
         MobError::WorkCancellationUnsupported(_) => "work_cancellation_unsupported".to_string(),
+        MobError::InjectedContextUndeliverable { .. } => {
+            "injected_context_undeliverable".to_string()
+        }
         MobError::ActorCommandChannelClosed => "actor_command_channel_closed".to_string(),
         MobError::ActorReplyChannelClosed => "actor_reply_channel_closed".to_string(),
         MobError::BridgeSessionNotInLiveAuthority { .. } => {

@@ -176,6 +176,14 @@ pub struct CreateSessionRequest {
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
+    /// Host-attached injected context for the first turn (default empty).
+    ///
+    /// Each entry materializes as a separate typed injected-context
+    /// user-channel message ([`crate::types::TranscriptUserRole::InjectedContext`])
+    /// immediately BEFORE the first turn's user message, in order. Injected
+    /// context is excluded from semantic-memory indexing and never satisfies
+    /// the transcript-continuity save-guard.
+    pub injected_context: Vec<ContentInput>,
     /// Typed per-request system-prompt policy (Inherit/Set/Disable).
     pub system_prompt: crate::config::SystemPromptOverride,
     /// Max tokens per LLM turn.
@@ -340,6 +348,13 @@ pub struct SessionBuildOptions {
     /// build options so it survives deferred-session materialization, where the
     /// `AgentBuildConfig` is reconstructed from these options.
     pub initial_tool_filter: Option<crate::tool_scope::ToolFilter>,
+    /// Per-launch call-level tool access policy (existing
+    /// [`crate::ops::ToolAccessPolicy`] vocabulary). Flows into
+    /// `AgentBuildConfig.tool_access_policy`, where the factory resolves it
+    /// into the sealed execution form and gates the final composed dispatcher.
+    /// `Inherit` must be resolved by the spawn chain before build; an
+    /// unresolved `Inherit` fails the build closed.
+    pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
     /// Environment variables injected into shell tool subprocesses for this agent.
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
@@ -981,6 +996,8 @@ pub struct ResumeOverrideMask {
     pub keep_alive: bool,
     pub comms_name: bool,
     pub peer_meta: bool,
+    /// Explicit per-launch tool access policy supplied by the caller.
+    pub tool_access_policy: bool,
 }
 
 impl SessionBuildOptions {
@@ -1076,6 +1093,7 @@ impl Default for SessionBuildOptions {
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
+            tool_access_policy: None,
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
@@ -1138,6 +1156,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
+            .field("tool_access_policy", &self.tool_access_policy)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())
@@ -1239,6 +1258,15 @@ impl StartTurnRuntimeSemantics {
 pub struct StartTurnRequest {
     /// User prompt for this turn (text or multimodal).
     pub prompt: ContentInput,
+    /// Host-attached injected context for this turn (default empty).
+    ///
+    /// Each entry materializes as a separate typed injected-context
+    /// user-channel message ([`crate::types::TranscriptUserRole::InjectedContext`])
+    /// immediately BEFORE the turn's user message, in order. When the runtime
+    /// authors the turn (`runtime.typed_turn_appends` non-empty), injected
+    /// context must arrive as `InjectedContext`-role appends instead — the
+    /// agent run ingress fails closed if both carriers are populated.
+    pub injected_context: Vec<ContentInput>,
     /// Optional system prompt override for a deferred session's first turn.
     ///
     /// This is only supported before the session has any conversation history.
@@ -1545,6 +1573,46 @@ impl SessionTranscriptRevisionPage {
             messages: messages[start..end].to_vec(),
         }
     }
+}
+
+/// Query parameters for listing retained transcript revision commits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTranscriptRevisionListQuery {
+    /// Maximum number of commit entries to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Number of commit entries to skip from the start of the commit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+}
+
+/// One transcript rewrite commit projected for revision-list reads.
+///
+/// Mirrors the typed [`TranscriptRewriteCommit`] owner: `reason` is the
+/// [`Display`](std::fmt::Display) projection of the typed
+/// [`TranscriptRewriteReason`], never a separately-owned string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTranscriptRevisionListEntry {
+    /// Revision the commit produced.
+    pub revision: String,
+    /// Revision the commit was applied against.
+    pub parent_revision: String,
+    /// Actor recorded on the commit, when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Display projection of the typed rewrite reason.
+    pub reason: String,
+    /// Commit timestamp.
+    pub committed_at: SystemTime,
+}
+
+/// Ordered (oldest-first) transcript revision commit list for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTranscriptRevisionList {
+    /// Revision commits in append order, sliced per the list query.
+    pub entries: Vec<SessionTranscriptRevisionListEntry>,
+    /// Current transcript head revision.
+    pub head_revision: String,
 }
 
 /// Explicit behavior for transcript fork/edit requests when the source
@@ -1914,6 +1982,19 @@ pub trait SessionServiceHistoryExt: SessionService {
         let _ = (id, query);
         Err(SessionError::Unsupported(
             "read_transcript_revision".to_string(),
+        ))
+    }
+
+    /// List retained transcript revision commits (oldest first) together with
+    /// the current head revision.
+    async fn list_transcript_revisions(
+        &self,
+        id: &SessionId,
+        query: SessionTranscriptRevisionListQuery,
+    ) -> Result<SessionTranscriptRevisionList, SessionError> {
+        let _ = (id, query);
+        Err(SessionError::Unsupported(
+            "list_transcript_revisions".to_string(),
         ))
     }
 }

@@ -124,6 +124,7 @@ import type {
   InjectSystemContextParams as RpcInjectSystemContextParams,
   InjectSystemContextResult as RpcInjectSystemContextResult,
   InterruptParams as RpcInterruptParams,
+  ListSessionTranscriptRevisionsParams as RpcListSessionTranscriptRevisionsParams,
   ListSessionsParams as RpcListSessionsParams,
   ListSessionsResult as RpcListSessionsResult,
   LiveCommitInputResult as RpcLiveCommitInputResult,
@@ -153,6 +154,7 @@ import type {
   WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
   WireRunResult as RpcWireRunResult,
   WireSessionTranscriptRevision as RpcWireSessionTranscriptRevision,
+  WireSessionTranscriptRevisionList as RpcWireSessionTranscriptRevisionList,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -221,6 +223,8 @@ import type {
   SessionMessage,
   SessionOptions,
   SessionTranscriptRevision,
+  SessionTranscriptRevisionEntry,
+  SessionTranscriptRevisionList,
   SessionTranscriptRewriteResult,
   SessionToolResult,
   SkillKey,
@@ -441,6 +445,11 @@ function mobTurnStartPayload(
     } as MobTurnStartParams["flow_tool_overlay"];
   }
   setIfDefined(payload, "additional_instructions", options?.additionalInstructions);
+  setIfDefined(
+    payload,
+    "injected_context",
+    options?.injectedContext as MobTurnStartParams["injected_context"],
+  );
   setIfDefined(payload, "keep_alive", options?.keepAlive);
   setIfDefined(payload, "model", options?.model);
   setIfDefined(payload, "provider", options?.provider);
@@ -1050,6 +1059,24 @@ export class MeerkatClient {
     }
     const raw = await this.request("session/transcript_revision", params);
     return MeerkatClient.parseSessionTranscriptRevision(raw);
+  }
+
+  async listSessionTranscriptRevisions(
+    sessionId: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevisionList> {
+    type _RpcSignature = [RpcListSessionTranscriptRevisionsParams, RpcWireSessionTranscriptRevisionList];
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+    };
+    if (options?.offset !== undefined) {
+      params.offset = options.offset;
+    }
+    if (options?.limit !== undefined) {
+      params.limit = options.limit;
+    }
+    const raw = await this.request("session/transcript_revisions", params);
+    return MeerkatClient.parseSessionTranscriptRevisionList(raw);
   }
 
   async forkSessionAt(
@@ -1991,12 +2018,17 @@ export class MeerkatClient {
    * Rust-only prior to this; `origin` is `"external"` for
    * user-originated turns and `"internal"` for mob-orchestration work.
    * When `workRef` is omitted the server generates a fresh UUID.
+   * `injectedContext` carries host-attached ambient context delivered as
+   * separate typed transcript messages immediately before the work content
+   * (queue-mode turn-driven delivery only; steer and autonomous-inbox
+   * dispatch reject it fail-closed).
    */
   async mobSubmitWork(args: {
     memberRef: string;
     content: unknown;
     workRef?: string;
     origin?: "external" | "internal";
+    injectedContext?: ContentInput[];
   }): Promise<{ mobId: string; workRef: string; memberRef: string }> {
     const params: Record<string, unknown> = {
       member_ref: args.memberRef,
@@ -2005,6 +2037,9 @@ export class MeerkatClient {
     };
     if (args.workRef !== undefined) {
       params.work_ref = args.workRef;
+    }
+    if (args.injectedContext !== undefined && args.injectedContext.length > 0) {
+      params.injected_context = args.injectedContext;
     }
     const result = await this.request("mob/submit_work", params);
     return {
@@ -2623,6 +2658,9 @@ export class MeerkatClient {
     options?: TurnOptions,
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
+    if (options?.injectedContext != null) {
+      params.injected_context = options.injectedContext;
+    }
     const wireRefs = skillRefsToWire(options?.skillRefs);
     if (wireRefs) {
       params.skill_refs = wireRefs;
@@ -2669,6 +2707,9 @@ export class MeerkatClient {
 
     const responsePromise = this.registerRequest(requestId);
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
+    if (options?.injectedContext != null) {
+      params.injected_context = options.injectedContext;
+    }
     const wireRefs = skillRefsToWire(options?.skillRefs);
     if (wireRefs) {
       params.skill_refs = wireRefs;
@@ -4006,6 +4047,27 @@ export class MeerkatClient {
     };
   }
 
+  static parseSessionTranscriptRevisionList(
+    data: Record<string, unknown>,
+  ): SessionTranscriptRevisionList {
+    const context = "Invalid session transcript revision list response";
+    if (!Array.isArray(data.entries)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: entries must be a list`);
+    }
+    const rawEntries = data.entries as Array<Record<string, unknown>>;
+    const entries: SessionTranscriptRevisionEntry[] = rawEntries.map((entry) => ({
+      revision: MeerkatClient.requireStringField(entry, "revision", context),
+      parentRevision: MeerkatClient.requireStringField(entry, "parent_revision", context),
+      actor: entry.actor != null ? String(entry.actor) : undefined,
+      reason: MeerkatClient.requireStringField(entry, "reason", context),
+      committedAt: MeerkatClient.requireNumberField(entry, "committed_at", context),
+    }));
+    return {
+      headRevision: MeerkatClient.requireStringField(data, "head_revision", context),
+      entries,
+    };
+  }
+
   static parseSessionForkResult(data: Record<string, unknown>): SessionForkResult {
     const context = "Invalid session fork response";
     return {
@@ -4375,6 +4437,7 @@ export class MeerkatClient {
     const params: Record<string, unknown> = { prompt };
     if (!options) return params;
 
+    if (options.injectedContext != null) params.injected_context = options.injectedContext;
     if (options.model) params.model = options.model;
     if (options.provider) params.provider = options.provider;
     if (options.systemPrompt) params.system_prompt = options.systemPrompt;

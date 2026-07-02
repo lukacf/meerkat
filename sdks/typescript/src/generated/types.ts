@@ -681,6 +681,12 @@ export interface InterruptParams {
   session_id: string;
 }
 
+export interface ListSessionTranscriptRevisionsParams {
+  limit?: number;
+  offset?: number;
+  session_id: string;
+}
+
 export interface ListSessionsParams {
   labels?: Record<string, string>;
   limit?: number;
@@ -850,6 +856,11 @@ export interface WireSessionTranscriptRevision {
   revision: string;
   session_id: string;
   session_ref?: string;
+}
+
+export interface WireSessionTranscriptRevisionList {
+  entries: Record<string, unknown>[];
+  head_revision: string;
 }
 
 export interface MobWireParams {
@@ -1268,6 +1279,7 @@ export interface MobTurnStartParams {
   agent_identity: string;
   auth_binding?: Record<string, unknown>;
   flow_tool_overlay?: PublicTurnToolOverlay;
+  injected_context?: WireContentInput[];
   keep_alive?: boolean;
   max_tokens?: number;
   mob_id: string;
@@ -1321,6 +1333,7 @@ export interface MobRotateSupervisorResult {
 
 export interface MobSubmitWorkParams {
   content: WireContentInput;
+  injected_context?: WireContentInput[];
   member_ref: WireMemberRef;
   origin?: "external" | "internal";
   work_ref?: string;
@@ -1874,6 +1887,7 @@ export interface BridgeDeliveryPayload {
   content: ContentInput;
   epoch: number;
   handling_mode: HandlingMode;
+  injected_context?: ContentInput[];
   input_id: string;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -2414,6 +2428,7 @@ export interface CommsCommandInput {
 export interface CommsCommandPeerMessage {
   blocks?: ContentBlock[];
   body: string;
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   kind: "peer_message";
   to: PeerId;
@@ -2428,6 +2443,7 @@ export interface CommsCommandPeerLifecycle {
 
 export interface CommsCommandPeerRequest {
   blocks?: ContentBlock[];
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
@@ -2438,6 +2454,7 @@ export interface CommsCommandPeerRequest {
 
 export interface CommsCommandPeerResponse {
   blocks?: ContentBlock[];
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
@@ -2481,6 +2498,7 @@ export interface BridgeCommandDeliverMemberInput {
   content: ContentInput;
   epoch: number;
   handling_mode: HandlingMode;
+  injected_context?: ContentInput[];
   input_id: string;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -2682,6 +2700,7 @@ export interface CommsSendParamsInput {
 export interface CommsSendParamsPeerMessage {
   blocks?: ContentBlock[];
   body: string;
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   kind: "peer_message";
   session_id: string;
@@ -2698,6 +2717,7 @@ export interface CommsSendParamsPeerLifecycle {
 
 export interface CommsSendParamsPeerRequest {
   blocks?: ContentBlock[];
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
@@ -2709,6 +2729,7 @@ export interface CommsSendParamsPeerRequest {
 
 export interface CommsSendParamsPeerResponse {
   blocks?: ContentBlock[];
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
@@ -2772,6 +2793,10 @@ export type PeerTransport = "inproc" | "uds" | "tcp";
 export type PeerDirectorySource = "trusted" | "inproc" | "trusted_and_inproc" | "unknown";
 
 export type PeerSendability = "peer_message" | "peer_request" | "peer_response";
+
+export type SenderContentTaint = "clean" | "tainted";
+
+export type SendTaintOverride = { declare: SenderContentTaint } | "undeclared";
 
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";

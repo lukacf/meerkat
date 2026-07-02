@@ -26,6 +26,7 @@ use meerkat_runtime::{
 
 fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),

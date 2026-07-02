@@ -108,6 +108,13 @@ pub enum ConversationAppendRole {
     SystemNotice,
     /// Tool result.
     Tool,
+    /// Host-attached injected context on the user channel.
+    ///
+    /// Lowers into a `Message::User` carrying
+    /// [`crate::types::TranscriptUserRole::InjectedContext`], so the typed
+    /// slot the content arrived in — not free-form role strings — mints the
+    /// transcript role.
+    InjectedContext,
 }
 
 /// A single conversation append operation.
@@ -1357,6 +1364,32 @@ impl RunPrimitive {
         }
     }
 
+    /// Host-attached injected-context entries carried by this primitive's
+    /// appends, projected back to content inputs in delivery order.
+    ///
+    /// Used when a surface re-lowers the primitive through a direct
+    /// `StartTurnRequest` (deferred-session promotion) and must move the
+    /// injected context onto the request's typed carrier instead of the
+    /// cleared appends.
+    pub fn injected_context_content_inputs(&self) -> Vec<crate::types::ContentInput> {
+        match self {
+            RunPrimitive::StagedInput(staged) => staged
+                .appends
+                .iter()
+                .filter(|append| append.role == ConversationAppendRole::InjectedContext)
+                .map(|append| content_input_from_core_renderable(&append.content))
+                .collect(),
+            RunPrimitive::ImmediateAppend(append)
+                if append.role == ConversationAppendRole::InjectedContext =>
+            {
+                vec![content_input_from_core_renderable(&append.content)]
+            }
+            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => {
+                Vec::new()
+            }
+        }
+    }
+
     /// Return the canonical runtime apply boundary for this primitive.
     pub fn apply_boundary(&self) -> RunApplyBoundary {
         match self {
@@ -1434,6 +1467,14 @@ pub fn content_input_from_conversation_appends(
 ) -> crate::types::ContentInput {
     let mut all_blocks = Vec::new();
     for append in appends {
+        // Injected context is delivered ALONGSIDE the turn's boundary
+        // content, never inside it: those appends materialize as separate
+        // typed transcript messages. Folding them into the extracted prompt
+        // would bake the ambient context into the user message (and
+        // double-deliver it wherever the extraction is re-lowered).
+        if append.role == ConversationAppendRole::InjectedContext {
+            continue;
+        }
         append_content_blocks(&append.content, &mut all_blocks);
     }
     content_input_from_blocks(all_blocks)
@@ -1658,6 +1699,7 @@ mod tests {
                         id: crate::comms::PeerId::new(),
                         display_name: Some("worker-1".to_string()),
                     }),
+                    sender_taint: None,
                     request_id: Some(crate::time_compat::new_uuid_v7().to_string()),
                     intent: Some("checksum_token".to_string()),
                     status: None,
@@ -1957,11 +1999,20 @@ mod tests {
             ConversationAppendRole::Assistant,
             ConversationAppendRole::SystemNotice,
             ConversationAppendRole::Tool,
+            ConversationAppendRole::InjectedContext,
         ] {
             let json = serde_json::to_value(role).unwrap();
             let parsed: ConversationAppendRole = serde_json::from_value(json).unwrap();
             assert_eq!(role, parsed);
         }
+    }
+
+    #[test]
+    fn conversation_append_role_injected_context_is_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ConversationAppendRole::InjectedContext).unwrap(),
+            serde_json::json!("injected_context"),
+        );
     }
 
     #[test]

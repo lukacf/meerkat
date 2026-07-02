@@ -1227,7 +1227,21 @@ impl Message {
     /// flattened `String`.
     pub fn indexable_content(&self) -> MemoryIndexableContent {
         match self {
-            Message::User(u) => MemoryIndexableContent::Indexable(u.text_content()),
+            // The typed transcript role is the indexability owner for the user
+            // channel: ordinary conversation indexes, while runtime compaction
+            // summaries (projections of already-indexed history) and
+            // host-attached injected context carry typed exclusion reasons.
+            Message::User(u) => match u.transcript_role {
+                TranscriptUserRole::Conversational => {
+                    MemoryIndexableContent::Indexable(u.text_content())
+                }
+                TranscriptUserRole::CompactionSummary => {
+                    MemoryIndexableContent::Excluded(MemoryIndexExclusion::CompactionSummary)
+                }
+                TranscriptUserRole::InjectedContext => {
+                    MemoryIndexableContent::Excluded(MemoryIndexExclusion::InjectedContext)
+                }
+            },
             Message::BlockAssistant(ba) => {
                 let mut result = String::new();
                 for text in ba.text_blocks() {
@@ -1305,6 +1319,12 @@ pub enum MemoryIndexExclusion {
     SystemNotice,
     /// Tool results — structured data, not conversation prose.
     ToolResults,
+    /// Runtime compaction summary — a projection of already-indexed history;
+    /// re-indexing it would promote the projection to source content.
+    CompactionSummary,
+    /// Host-attached injected context — ambient material delivered alongside
+    /// (not inside) the user's message; not user-authored conversation.
+    InjectedContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1623,6 +1643,12 @@ pub enum SystemNoticeBlock {
         direction: SystemNoticeDirection,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer: Option<SystemNoticePeer>,
+        /// Sender-declared content taint carried in the signed envelope.
+        /// `None` means the sender made no declaration — a real third state
+        /// that must never be coalesced into
+        /// [`crate::comms::SenderContentTaint::Clean`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_taint: Option<crate::comms::SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1704,6 +1730,8 @@ enum SystemNoticeBlockKnown {
         #[serde(default)]
         peer: Option<SystemNoticePeer>,
         #[serde(default)]
+        sender_taint: Option<crate::comms::SenderContentTaint>,
+        #[serde(default)]
         request_id: Option<String>,
         #[serde(default)]
         intent: Option<String>,
@@ -1782,6 +1810,7 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 kind,
                 direction,
                 peer,
+                sender_taint,
                 request_id,
                 intent,
                 status,
@@ -1792,6 +1821,7 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 kind,
                 direction,
                 peer,
+                sender_taint,
                 request_id,
                 intent,
                 status,
@@ -1917,6 +1947,7 @@ impl SystemNoticeBlock {
             Self::Comms {
                 kind,
                 peer,
+                sender_taint,
                 request_id,
                 intent,
                 status,
@@ -2014,6 +2045,17 @@ impl SystemNoticeBlock {
                     && appends_extras
                 {
                     lines.push(format!("Payload: {}", format_notice_payload(payload)));
+                }
+                // Model-visible marker for DECLARED-tainted content only.
+                // `Clean` and `None` (no declaration) deliberately render
+                // identically: the typed `sender_taint` field is the carrier
+                // of the three-way distinction, and the projection flags only
+                // the state the model must treat with caution.
+                if matches!(
+                    sender_taint,
+                    Some(crate::comms::SenderContentTaint::Tainted)
+                ) {
+                    lines.push("[sender declared this content tainted]".to_string());
                 }
                 lines.join("\n")
             }
@@ -2136,6 +2178,11 @@ pub enum TranscriptUserRole {
     Conversational,
     /// A runtime-produced compaction summary that opens a rebuilt transcript.
     CompactionSummary,
+    /// Host-attached ambient context delivered alongside (not inside) the
+    /// user's message. Excluded from semantic-memory indexing, and it never
+    /// satisfies the transcript-continuity save-guard
+    /// ([`Self::is_compaction_summary`] stays `CompactionSummary`-only).
+    InjectedContext,
 }
 
 impl TranscriptUserRole {
@@ -2151,6 +2198,12 @@ impl TranscriptUserRole {
     #[must_use]
     pub fn is_compaction_summary(&self) -> bool {
         matches!(self, Self::CompactionSummary)
+    }
+
+    /// Whether this user message is host-attached injected context.
+    #[must_use]
+    pub fn is_injected_context(&self) -> bool {
+        matches!(self, Self::InjectedContext)
     }
 }
 
@@ -2204,6 +2257,34 @@ impl UserMessage {
             render_metadata: None,
             identity: TranscriptMessageIdentity::default(),
             transcript_role: TranscriptUserRole::CompactionSummary,
+            created_at: message_timestamp_now(),
+        }
+    }
+
+    /// Create a text-only host-attached injected-context message.
+    ///
+    /// The returned message carries [`TranscriptUserRole::InjectedContext`] so
+    /// consumers (semantic-memory indexing, wire projections) read the typed
+    /// fact instead of classifying the rendered content.
+    pub fn injected_context(content: impl Into<String>) -> Self {
+        Self {
+            content: ContentBlock::text_vec(content.into()),
+            render_metadata: None,
+            identity: TranscriptMessageIdentity::default(),
+            transcript_role: TranscriptUserRole::InjectedContext,
+            created_at: message_timestamp_now(),
+        }
+    }
+
+    /// Create a multimodal host-attached injected-context message.
+    ///
+    /// Block-bearing sibling of [`UserMessage::injected_context`].
+    pub fn injected_context_with_blocks(content: Vec<ContentBlock>) -> Self {
+        Self {
+            content,
+            render_metadata: None,
+            identity: TranscriptMessageIdentity::default(),
+            transcript_role: TranscriptUserRole::InjectedContext,
             created_at: message_timestamp_now(),
         }
     }

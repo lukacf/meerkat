@@ -8198,6 +8198,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         // source for per-turn policy.
         let pre_turn_context_appends = cli_terminal_pre_turn_context_appends(&primitive);
         let turn_req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: primitive.extract_content_input(),
             system_prompt: None,
             event_tx: self.event_tx.clone(),
@@ -9322,6 +9323,7 @@ async fn run_agent(
             CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
         let mut build = SessionBuildOptions {
+            tool_access_policy: None,
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,
@@ -9405,6 +9407,7 @@ async fn run_agent(
 
         // Route through SessionService::create_session()
         let create_req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: model.to_string(),
             prompt: prompt.to_string().into(),
             system_prompt: match system_prompt {
@@ -10085,6 +10088,7 @@ async fn resume_session_with_llm_override(
             log_stage("service.create_session(start)");
             let create_result = service
                 .create_session(CreateSessionRequest {
+                    injected_context: Vec::new(),
                     model,
                     prompt: prompt.clone().into(),
                     system_prompt,
@@ -10821,6 +10825,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         let result = self
             .service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: create.model.clone(),
                 prompt: "".into(),
                 system_prompt: match prompt_system_prompt
@@ -14975,6 +14980,7 @@ mod tests {
     #[test]
     fn cli_context_system_notice_projects_via_typed_notice() {
         let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
+            sender_taint: None,
             kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: meerkat_core::types::SystemNoticeDirection::Incoming,
             peer: None,
@@ -17168,6 +17174,7 @@ default_model = "gemma"
             workgraph: meerkat_core::ToolCategoryOverride::Disable,
             image_generation: meerkat_core::ToolCategoryOverride::Disable,
             web_search: meerkat_core::ToolCategoryOverride::Disable,
+            tool_access_policy: None,
             active_skills: None,
         };
 
@@ -20775,6 +20782,7 @@ capabilities = ["rpc"]
         );
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "list tools".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -20830,6 +20838,7 @@ capabilities = ["rpc"]
 
         let created = wrapper
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -20882,6 +20891,7 @@ capabilities = ["rpc"]
             &created.session_id,
             meerkat_core::RunId::new(),
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "delegate kickoff".to_string().into(),
                 system_prompt: None,
                 event_tx: None,
@@ -20947,6 +20957,7 @@ capabilities = ["rpc"]
             .expect("runtime bindings should be prepared");
         let created = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -21001,6 +21012,7 @@ capabilities = ["rpc"]
             &created.session_id,
             meerkat_core::RunId::new(),
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "delegate kickoff".to_string().into(),
                 system_prompt: None,
                 event_tx: None,
@@ -21152,6 +21164,7 @@ capabilities = ["rpc"]
         ));
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -21290,6 +21303,7 @@ capabilities = ["rpc"]
 
         let created = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -21363,6 +21377,7 @@ capabilities = ["rpc"]
 
         let created = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -21435,6 +21450,7 @@ capabilities = ["rpc"]
             .expect("runtime bindings should be prepared");
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -21504,6 +21520,7 @@ capabilities = ["rpc"]
             .expect("runtime bindings should be prepared");
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,

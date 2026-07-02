@@ -858,6 +858,7 @@ mod tests {
                 &receiver_keypair.public_key(),
                 Uuid::new_v4(),
                 MessageKind::Message {
+                    content_taint: None,
                     blocks: None,
                     body: "hello inproc".to_string(),
                     handling_mode: None,
@@ -903,6 +904,7 @@ mod tests {
                 &unknown,
                 Uuid::new_v4(),
                 MessageKind::Message {
+                    content_taint: None,
                     blocks: None,
                     body: "hello".to_string(),
                     handling_mode: None,
@@ -933,6 +935,7 @@ mod tests {
                 &receiver_keypair.public_key(),
                 Uuid::new_v4(),
                 MessageKind::Message {
+                    content_taint: None,
                     blocks: None,
                     body: "hello".to_string(),
                     handling_mode: None,
@@ -979,6 +982,7 @@ mod tests {
                 &receiver_keypair.public_key(),
                 Uuid::new_v4(),
                 MessageKind::Message {
+                    content_taint: None,
                     blocks: None,
                     body: "hello scoped".to_string(),
                     handling_mode: None,
@@ -996,6 +1000,7 @@ mod tests {
                 &receiver_keypair.public_key(),
                 Uuid::new_v4(),
                 MessageKind::Message {
+                    content_taint: None,
                     blocks: None,
                     body: "should not deliver".to_string(),
                     handling_mode: None,
@@ -1042,6 +1047,7 @@ mod tests {
                 &target_pubkey,
                 Uuid::new_v4(),
                 MessageKind::Message {
+                    content_taint: None,
                     blocks: None,
                     body: "hello canonical".to_string(),
                     handling_mode: None,
@@ -1090,6 +1096,7 @@ mod tests {
                 &target_pubkey,
                 Uuid::new_v4(),
                 MessageKind::Message {
+                    content_taint: None,
                     blocks: None,
                     body: "ambiguous identity".to_string(),
                     handling_mode: None,

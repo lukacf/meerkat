@@ -208,6 +208,7 @@ mod typed_context_append_tests {
     #[test]
     fn context_system_notice_projects_only_via_notice_projection() {
         let blocks = vec![SystemNoticeBlock::Comms {
+            sender_taint: None,
             kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
             direction: SystemNoticeDirection::Incoming,
             peer: None,
@@ -532,6 +533,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             (_, pre_admission) => {
                 drop(pre_admission);
                 let req = meerkat_core::service::StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt,
                     system_prompt: None,
                     event_tx: Some(event_tx),

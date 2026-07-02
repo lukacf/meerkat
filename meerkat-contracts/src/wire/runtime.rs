@@ -283,6 +283,16 @@ pub struct RuntimeAcceptResult {
 // -----------------------------------------------------------------------
 
 /// Typed wire projection of `ConversationAppendRole`.
+///
+/// Deliberately narrower than the core enum: `InjectedContext` is NOT
+/// mirrored here. This wire vocabulary feeds the accept-input ingress params
+/// ([`SessionAcceptInputParams`]), which has no live host consumer — every
+/// shipping submit-work path delivers injected context through its typed
+/// slot (`StartTurnRequest.injected_context`, the runtime `PromptInput` /
+/// `PeerInput` slots, `WorkSpec.injected_context`, RPC/REST request params).
+/// Letting this ingress mint the role from a wire string would bypass the
+/// slot-derived-role authenticity invariant, so an `injected_context` role
+/// fails closed at this serde boundary instead.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]

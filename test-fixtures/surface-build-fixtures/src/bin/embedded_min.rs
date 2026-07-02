@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = build_embedded_service(factory, config.clone(), 4, schedule_tools);
     let result = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: config.agent.model.clone(),
             prompt: "Say ok".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,

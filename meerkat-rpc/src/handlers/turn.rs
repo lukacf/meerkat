@@ -69,6 +69,12 @@ pub struct StartTurnParams {
     >,
     #[serde(default)]
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
+    /// Host-attached injected context for this turn. Each entry materializes
+    /// as a separate typed injected-context user-channel message immediately
+    /// before the turn's user message, in order. Injected context is
+    /// excluded from semantic-memory indexing.
+    #[serde(default)]
+    pub injected_context: Option<Vec<ContentInput>>,
 }
 
 /// Parameters for `turn/interrupt` — canonical wire type from contracts.
@@ -239,6 +245,7 @@ pub async fn start_turn_with_params(
         .start_turn_via_runtime(
             &session_id,
             params.prompt,
+            params.injected_context.unwrap_or_default(),
             mcp_event_tx,
             skill_refs,
             params.flow_tool_overlay,
@@ -293,6 +300,44 @@ pub async fn handle_interrupt(
             InterruptResult::from_outcome(session_id.to_string(), outcome),
         ),
         Err(err) => RpcResponse::error(id, err.code, err.message),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod start_turn_params_tests {
+    use super::StartTurnParams;
+    use meerkat_core::ContentInput;
+
+    /// The optional `injected_context` param parses as a list of
+    /// content inputs (text or block form), matching the `prompt` treatment.
+    #[test]
+    fn start_turn_params_accept_injected_context() {
+        let params: StartTurnParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session-1",
+            "prompt": "hello",
+            "injected_context": [
+                "ambient one",
+                [{"type": "text", "text": "ambient two"}]
+            ]
+        }))
+        .unwrap();
+        let entries = params.injected_context.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], ContentInput::Text(text) if text == "ambient one"));
+        assert!(matches!(&entries[1], ContentInput::Blocks(blocks) if blocks.len() == 1));
+    }
+
+    /// Absent `injected_context` stays `None` — the pre-existing wire shape
+    /// is unchanged (deny_unknown_fields still accepts the old payload).
+    #[test]
+    fn start_turn_params_default_injected_context_to_none() {
+        let params: StartTurnParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session-1",
+            "prompt": "hello"
+        }))
+        .unwrap();
+        assert!(params.injected_context.is_none());
     }
 }
 

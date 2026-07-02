@@ -470,6 +470,7 @@ fn pre_registration_observation_noops_match_post_unregister_and_commands_reject(
 
 fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),

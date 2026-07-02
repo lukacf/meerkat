@@ -9,7 +9,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::comms::{
-    PeerId, PeerLifecycleKind, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, TrustedPeerDescriptor,
+    PeerId, PeerLifecycleKind, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SenderContentTaint,
+    TrustedPeerDescriptor,
 };
 use crate::types::{ContentBlock, HandlingMode, RenderMetadata};
 
@@ -105,6 +106,12 @@ pub struct InboxInteraction {
     pub handling_mode: HandlingMode,
     /// Optional normalized rendering metadata carried alongside the interaction.
     pub render_metadata: Option<RenderMetadata>,
+    /// Sender-declared content taint carried inside the signed envelope, when
+    /// the sender made a declaration. `None` means "no declaration" — a real
+    /// third state that must never be coalesced into
+    /// [`SenderContentTaint::Clean`]. This is content-adjacent payload (like
+    /// `render_metadata`): it makes no admission or routing decision.
+    pub sender_taint: Option<SenderContentTaint>,
 }
 
 /// Canonical model-facing text projection for an external event.
@@ -1011,6 +1018,7 @@ mod tests {
                 class: crate::types::RenderClass::SystemNotice,
                 salience: crate::types::RenderSalience::Urgent,
             }),
+            sender_taint: None,
         };
 
         assert_eq!(interaction.handling_mode, HandlingMode::Steer);

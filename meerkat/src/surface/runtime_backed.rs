@@ -101,6 +101,9 @@ pub enum SurfaceRuntimeMaterializeError {
 
 pub struct RuntimeBackedInitialTurn {
     prompt: meerkat_core::types::ContentInput,
+    /// Host-attached injected context moved off the eager create request; it
+    /// rides into the first turn's `StartTurnRequest` exactly like `prompt`.
+    injected_context: Vec<meerkat_core::types::ContentInput>,
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
     turn_metadata: RuntimeTurnMetadata,
 }
@@ -125,6 +128,9 @@ pub fn split_runtime_backed_eager_create_request(
         &mut request.prompt,
         meerkat_core::types::ContentInput::Text(String::new()),
     );
+    // Injected context is a first-turn submit-work fact; it moves with the
+    // prompt onto the initial turn (the deferred create carries none).
+    let injected_context = std::mem::take(&mut request.injected_context);
     let event_tx = request.event_tx.take();
     request.initial_turn = InitialTurnPolicy::Defer;
     request.deferred_prompt_policy = DeferredPromptPolicy::Discard;
@@ -133,6 +139,7 @@ pub fn split_runtime_backed_eager_create_request(
         request,
         Some(RuntimeBackedInitialTurn {
             prompt,
+            injected_context,
             event_tx,
             turn_metadata: meerkat_runtime::runtime_stamped_prompt_turn_metadata(Some(
                 turn_metadata,
@@ -146,6 +153,7 @@ fn start_turn_request_from_initial_turn(
 ) -> StartTurnRequest {
     StartTurnRequest {
         prompt: initial_turn.prompt,
+        injected_context: initial_turn.injected_context,
         system_prompt: None,
         event_tx: initial_turn.event_tx,
         runtime: StartTurnRuntimeSemantics::new(
@@ -671,6 +679,7 @@ fn start_turn_request_from_primitive(
     };
 
     Ok(meerkat_core::service::StartTurnRequest {
+        injected_context: Vec::new(),
         prompt: primitive.extract_content_input(),
         system_prompt: None,
         event_tx: None,
@@ -1031,6 +1040,7 @@ mod tests {
 
     fn make_request(build: SessionBuildOptions) -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: meerkat_core::ContentInput::Text(String::new()),
             system_prompt: crate::SystemPromptOverride::Set(

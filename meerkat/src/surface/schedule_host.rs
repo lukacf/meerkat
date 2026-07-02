@@ -10,9 +10,10 @@ use meerkat_runtime::{
 };
 use meerkat_schedule::{
     DeliveryCompletion, DeliveryCompletionFailureReason, DeliveryDispatch, DeliveryFailureReason,
-    DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal, IdentityTargetBinding,
-    MobTargetBinding, Occurrence, OccurrencePhase, ScheduleDomainError, ScheduleDriver,
-    ScheduleDriverConfig, ScheduleFilter, ScheduleService, ScheduleStoreKind,
+    DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal, HostRunnableInvocation,
+    HostRunnableParams, HostRunnableTargetBinding, IdentityTargetBinding, MobTargetBinding,
+    Occurrence, OccurrencePhase, RunnableProbe, ScheduleDomainError, ScheduleDriver,
+    ScheduleDriverConfig, ScheduleFilter, ScheduleRunnableHost, ScheduleService, ScheduleStoreKind,
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
     UpdateScheduleRequest,
@@ -343,6 +344,7 @@ pub struct SharedScheduleTargetAdapter {
     schedule_service: ScheduleService,
     session_host: Arc<dyn SurfaceScheduleSessionHost>,
     mob_host: Arc<dyn SurfaceScheduleMobHost>,
+    runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
 }
 
 impl SharedScheduleTargetAdapter {
@@ -355,7 +357,17 @@ impl SharedScheduleTargetAdapter {
             schedule_service,
             session_host,
             mob_host,
+            runnable_host: None,
         }
+    }
+
+    /// Attach a host-runnable registry to this adapter.
+    ///
+    /// Default is no registry: `host_runnable` targets then probe `Missing`
+    /// and deliveries fail with `TargetMissing`.
+    pub fn with_runnable_host(mut self, runnable_host: Arc<dyn ScheduleRunnableHost>) -> Self {
+        self.runnable_host = Some(runnable_host);
+        self
     }
 
     async fn resolve_session(
@@ -636,6 +648,78 @@ impl SharedScheduleTargetAdapter {
             }
         }
     }
+
+    /// Dispatch a `host_runnable` target through the in-process runnable seam.
+    ///
+    /// Failure mapping for an in-process callback (deliberate decision):
+    /// - unregistered runnable or no configured registry → `TargetMissing`
+    ///   (the named target does not exist on this host);
+    /// - a `HostRunnableError` returned by the callback → `RuntimeRejected`
+    ///   (the executing runtime refused or failed the work);
+    /// - `TransportError` is deliberately NOT reachable: there is no
+    ///   transport hop in an in-process invocation, so no outcome can
+    ///   honestly be a transport fault. (Counter-precedent: mob targets own
+    ///   the target-kind-specific `MobRejected` reason; host runnables map
+    ///   onto the existing shared reasons instead of minting a new
+    ///   machine-vocabulary variant.)
+    fn deliver_host_runnable(
+        &self,
+        occurrence: &Occurrence,
+        binding: &HostRunnableTargetBinding,
+    ) -> DeliveryDispatch {
+        let Some(runnable_host) = &self.runnable_host else {
+            return immediate_delivery_failure(
+                occurrence,
+                format!(
+                    "host runnable '{}' is unavailable: no runnable registry is configured on this surface",
+                    binding.runnable
+                ),
+                DeliveryFailureReason::TargetMissing,
+                None,
+                None,
+            );
+        };
+        if runnable_host.probe_runnable(&binding.runnable) == RunnableProbe::Unknown {
+            return immediate_delivery_failure(
+                occurrence,
+                format!("host runnable '{}' is not registered", binding.runnable),
+                DeliveryFailureReason::TargetMissing,
+                None,
+                None,
+            );
+        }
+
+        let invocation = HostRunnableInvocation {
+            occurrence_id: occurrence.occurrence_id.clone(),
+            schedule_id: occurrence.schedule_id.clone(),
+            runnable: binding.runnable.clone(),
+            trigger_time: occurrence.due_at_utc,
+            params: binding.params.clone().map(HostRunnableParams::into_raw),
+        };
+        let runnable_host = Arc::clone(runnable_host);
+        async_completion_dispatch(
+            occurrence,
+            None,
+            Box::pin(async move {
+                Ok(match runnable_host.run_occurrence(invocation).await {
+                    Ok(_) => DeliveryTerminal::completed(None),
+                    // Unregistered is the same semantic condition the probe
+                    // reports as Unknown: one condition, one terminal class,
+                    // regardless of where it is detected.
+                    Err(error @ meerkat_schedule::HostRunnableError::Unregistered { .. }) => {
+                        DeliveryTerminal::delivery_failed(
+                            error.to_string(),
+                            DeliveryFailureReason::TargetMissing,
+                        )
+                    }
+                    Err(error) => DeliveryTerminal::delivery_failed(
+                        error.to_string(),
+                        DeliveryFailureReason::RuntimeRejected,
+                    ),
+                })
+            }),
+        )
+    }
 }
 
 #[async_trait]
@@ -667,6 +751,25 @@ impl ScheduleTargetProbe for SharedScheduleTargetAdapter {
                 self.session_host.probe_identity_target(binding).await
             }
             TargetBinding::Mob(binding) => self.mob_host.probe_mob_target(binding).await,
+            TargetBinding::HostRunnable(binding) => {
+                let Some(runnable_host) = &self.runnable_host else {
+                    return Ok(TargetProbeOutcome::Missing {
+                        detail: Some(format!(
+                            "host runnable '{}' is unavailable: no runnable registry is configured on this surface",
+                            binding.runnable
+                        )),
+                    });
+                };
+                Ok(match runnable_host.probe_runnable(&binding.runnable) {
+                    RunnableProbe::Registered => TargetProbeOutcome::Ready,
+                    RunnableProbe::Unknown => TargetProbeOutcome::Missing {
+                        detail: Some(format!(
+                            "host runnable '{}' is not registered",
+                            binding.runnable
+                        )),
+                    },
+                })
+            }
         }
     }
 }
@@ -704,6 +807,9 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
             }
             TargetBinding::Mob(binding) => {
                 self.mob_host.deliver_mob_target(occurrence, binding).await
+            }
+            TargetBinding::HostRunnable(binding) => {
+                Ok(self.deliver_host_runnable(occurrence, binding))
             }
         }
     }
@@ -1524,5 +1630,447 @@ mod tests {
             panic!("legacy session target should migrate to identity target");
         };
         assert_eq!(binding.identity(), "domain:security");
+    }
+
+    // -----------------------------------------------------------------------
+    // HostRunnable targets
+    // -----------------------------------------------------------------------
+
+    use meerkat_schedule::{
+        HostRunnable, HostRunnableError, HostRunnableName, HostRunnableOutcome,
+        HostRunnableRegistry, OccurrenceFailureClass,
+    };
+
+    struct RecordingHostRunnable {
+        invocations: Arc<Mutex<Vec<HostRunnableInvocation>>>,
+        failure_detail: Option<String>,
+    }
+
+    #[async_trait]
+    impl HostRunnable for RecordingHostRunnable {
+        async fn run(
+            &self,
+            invocation: HostRunnableInvocation,
+        ) -> Result<HostRunnableOutcome, HostRunnableError> {
+            self.invocations
+                .lock()
+                .expect("invocation lock")
+                .push(invocation);
+            match &self.failure_detail {
+                Some(detail) => Err(HostRunnableError::Failed {
+                    detail: detail.clone(),
+                }),
+                None => Ok(HostRunnableOutcome::completed()),
+            }
+        }
+    }
+
+    fn runnable_name(value: &str) -> HostRunnableName {
+        HostRunnableName::parse(value).expect("valid runnable name")
+    }
+
+    fn host_runnable_target(name: &str, params: Option<&str>) -> TargetBinding {
+        TargetBinding::host_runnable(HostRunnableTargetBinding {
+            runnable: runnable_name(name),
+            params: params.map(|raw| HostRunnableParams::parse(raw).expect("valid raw params")),
+        })
+    }
+
+    fn registry_with(name: &str, runnable: Arc<dyn HostRunnable>) -> Arc<dyn ScheduleRunnableHost> {
+        let mut registry = HostRunnableRegistry::new();
+        registry
+            .register(runnable_name(name), runnable)
+            .expect("runnable registration");
+        Arc::new(registry)
+    }
+
+    fn host_runnable_adapter(
+        service: ScheduleService,
+        runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
+    ) -> SharedScheduleTargetAdapter {
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
+            materialize_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = SharedScheduleTargetAdapter::new(service, session_host, mob_host);
+        match runnable_host {
+            Some(runnable_host) => adapter.with_runnable_host(runnable_host),
+            None => adapter,
+        }
+    }
+
+    fn recording_runnable(
+        failure_detail: Option<&str>,
+    ) -> (
+        Arc<RecordingHostRunnable>,
+        Arc<Mutex<Vec<HostRunnableInvocation>>>,
+    ) {
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let runnable = Arc::new(RecordingHostRunnable {
+            invocations: Arc::clone(&invocations),
+            failure_detail: failure_detail.map(str::to_string),
+        });
+        (runnable, invocations)
+    }
+
+    #[tokio::test]
+    async fn host_runnable_probe_matrix_reports_ready_only_when_registered() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let mut occurrence = sample_occurrence();
+        occurrence.target_snapshot = host_runnable_target("nightly-report", None);
+
+        // No runnable host configured on the surface.
+        let adapter = host_runnable_adapter(service.clone(), None);
+        let probe = adapter.probe_target(&occurrence).await.expect("probe");
+        let TargetProbeOutcome::Missing { detail } = probe else {
+            panic!("expected missing probe without a runnable host, got {probe:?}");
+        };
+        assert!(
+            detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("no runnable registry")),
+            "missing detail should explain the absent registry: {detail:?}"
+        );
+
+        // A registry is configured but the named runnable is not registered.
+        let (runnable, _invocations) = recording_runnable(None);
+        let adapter = host_runnable_adapter(
+            service.clone(),
+            Some(registry_with("other-runnable", runnable)),
+        );
+        let probe = adapter.probe_target(&occurrence).await.expect("probe");
+        let TargetProbeOutcome::Missing { detail } = probe else {
+            panic!("expected missing probe for unregistered runnable, got {probe:?}");
+        };
+        assert!(
+            detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("not registered")),
+            "missing detail should name the unregistered runnable: {detail:?}"
+        );
+
+        // The named runnable is registered.
+        let (runnable, _invocations) = recording_runnable(None);
+        let adapter =
+            host_runnable_adapter(service, Some(registry_with("nightly-report", runnable)));
+        let probe = adapter.probe_target(&occurrence).await.expect("probe");
+        assert!(matches!(probe, TargetProbeOutcome::Ready));
+    }
+
+    #[tokio::test]
+    async fn host_runnable_delivery_without_registry_fails_target_missing() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let adapter = host_runnable_adapter(ScheduleService::new(store), None);
+        let mut occurrence = sample_occurrence();
+        occurrence.target_snapshot = host_runnable_target("nightly-report", None);
+
+        let dispatch = adapter
+            .deliver_occurrence(&occurrence)
+            .await
+            .expect("delivery dispatch");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(DeliveryFailureReason::TargetMissing)
+        );
+        assert!(
+            terminal
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("no runnable registry")),
+            "failure detail should explain the absent registry: {:?}",
+            terminal.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn host_runnable_delivery_unregistered_fails_target_missing() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let (runnable, invocations) = recording_runnable(None);
+        let adapter = host_runnable_adapter(
+            ScheduleService::new(store),
+            Some(registry_with("other-runnable", runnable)),
+        );
+        let mut occurrence = sample_occurrence();
+        occurrence.target_snapshot = host_runnable_target("nightly-report", None);
+
+        let dispatch = adapter
+            .deliver_occurrence(&occurrence)
+            .await
+            .expect("delivery dispatch");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(DeliveryFailureReason::TargetMissing)
+        );
+        assert!(
+            invocations.lock().expect("invocation lock").is_empty(),
+            "an unregistered runnable must never be invoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_runnable_delivery_success_completes_with_typed_invocation() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let (runnable, invocations) = recording_runnable(None);
+        let adapter = host_runnable_adapter(
+            ScheduleService::new(store),
+            Some(registry_with("nightly-report", runnable)),
+        );
+        let mut occurrence = sample_occurrence();
+        occurrence.target_snapshot = host_runnable_target("nightly-report", Some(r#"{"depth":3}"#));
+
+        let dispatch = adapter
+            .deliver_occurrence(&occurrence)
+            .await
+            .expect("delivery dispatch");
+        assert_eq!(
+            dispatch.receipt.stage,
+            DeliveryReceiptStage::DispatchAccepted
+        );
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+
+        assert_eq!(terminal.phase, OccurrencePhase::Completed);
+        assert_eq!(terminal.delivery_failure_reason, None);
+
+        let recorded = invocations.lock().expect("invocation lock");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].occurrence_id, occurrence.occurrence_id);
+        assert_eq!(recorded[0].schedule_id, occurrence.schedule_id);
+        assert_eq!(recorded[0].runnable.as_str(), "nightly-report");
+        assert_eq!(recorded[0].trigger_time, occurrence.due_at_utc);
+        assert_eq!(
+            recorded[0]
+                .params
+                .as_deref()
+                .map(serde_json::value::RawValue::get),
+            Some(r#"{"depth":3}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn host_runnable_delivery_callback_error_maps_to_runtime_rejected() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let (runnable, _invocations) = recording_runnable(Some("downstream export failed"));
+        let adapter = host_runnable_adapter(
+            ScheduleService::new(store),
+            Some(registry_with("nightly-report", runnable)),
+        );
+        let mut occurrence = sample_occurrence();
+        occurrence.target_snapshot = host_runnable_target("nightly-report", None);
+
+        let dispatch = adapter
+            .deliver_occurrence(&occurrence)
+            .await
+            .expect("delivery dispatch");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(DeliveryFailureReason::RuntimeRejected)
+        );
+        assert!(
+            terminal
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("downstream export failed")),
+            "failure detail should carry the callback error: {:?}",
+            terminal.detail
+        );
+    }
+
+    async fn wait_for_occurrence_phase(
+        service: &ScheduleService,
+        schedule_id: &meerkat_schedule::ScheduleId,
+        expected_phase: OccurrencePhase,
+    ) -> Occurrence {
+        for _ in 0..50 {
+            let occurrences = service
+                .list_occurrences(schedule_id)
+                .await
+                .expect("list occurrences");
+            if let Some(occurrence) = occurrences
+                .into_iter()
+                .find(|occurrence| occurrence.phase == expected_phase)
+            {
+                return occurrence;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for occurrence phase {expected_phase:?}");
+    }
+
+    async fn create_host_runnable_schedule(
+        service: &ScheduleService,
+        name: &str,
+        params: Option<&str>,
+    ) -> meerkat_schedule::Schedule {
+        service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some(format!("host-runnable-{name}")),
+                description: None,
+                trigger: meerkat_schedule::TriggerSpec::Once {
+                    due_at_utc: chrono::Utc::now() - ChronoDuration::seconds(1),
+                },
+                target: host_runnable_target(name, params),
+                misfire_policy: meerkat_schedule::MisfirePolicy::Skip,
+                overlap_policy: meerkat_schedule::OverlapPolicy::AllowConcurrent,
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("host runnable schedule create should pass public api validation")
+    }
+
+    fn host_runnable_driver(
+        service: ScheduleService,
+        store: Arc<dyn ScheduleStore>,
+        adapter: Arc<SharedScheduleTargetAdapter>,
+    ) -> ScheduleDriver {
+        ScheduleDriver::new(
+            service,
+            store,
+            adapter.clone(),
+            adapter,
+            "host-runnable-driver",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: ChronoDuration::seconds(30),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn host_runnable_schedule_completes_through_real_driver_tick() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule =
+            create_host_runnable_schedule(&service, "nightly-report", Some(r#"{"depth":3}"#)).await;
+
+        let (runnable, invocations) = recording_runnable(None);
+        let adapter = Arc::new(host_runnable_adapter(
+            service.clone(),
+            Some(registry_with("nightly-report", runnable)),
+        ));
+        let driver = host_runnable_driver(service.clone(), store.clone(), adapter);
+
+        let report = driver.tick_once().await.expect("driver tick");
+        assert_eq!(report.claimed_occurrences, 1);
+
+        let occurrence =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await;
+        assert_eq!(occurrence.failure_class, None);
+
+        // Occurrence lifecycle parity with session/mob targets: the driver
+        // records the dispatch receipt and the terminal completion receipt
+        // through the occurrence authority.
+        let receipts = store
+            .list_receipts(&occurrence.occurrence_id)
+            .await
+            .expect("receipts");
+        assert!(
+            receipts
+                .iter()
+                .any(|receipt| receipt.stage == DeliveryReceiptStage::DispatchStarted),
+            "dispatch receipt should be recorded"
+        );
+        assert_eq!(
+            receipts.last().map(|receipt| receipt.stage),
+            Some(DeliveryReceiptStage::Completed),
+            "terminal receipt should record completion"
+        );
+
+        let recorded = invocations.lock().expect("invocation lock");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].occurrence_id, occurrence.occurrence_id);
+        assert_eq!(recorded[0].schedule_id, schedule.schedule_id);
+    }
+
+    #[tokio::test]
+    async fn host_runnable_schedule_failure_records_runtime_rejected_through_driver() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = create_host_runnable_schedule(&service, "nightly-report", None).await;
+
+        let (runnable, _invocations) = recording_runnable(Some("downstream export failed"));
+        let adapter = Arc::new(host_runnable_adapter(
+            service.clone(),
+            Some(registry_with("nightly-report", runnable)),
+        ));
+        let driver = host_runnable_driver(service.clone(), store.clone(), adapter);
+
+        driver.tick_once().await.expect("driver tick");
+
+        let occurrence = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::DeliveryFailed,
+        )
+        .await;
+        assert_eq!(
+            occurrence.failure_class,
+            Some(OccurrenceFailureClass::RuntimeRejected)
+        );
+
+        let receipts = store
+            .list_receipts(&occurrence.occurrence_id)
+            .await
+            .expect("receipts");
+        let last_receipt = receipts.last().expect("terminal receipt");
+        assert_eq!(last_receipt.stage, DeliveryReceiptStage::DeliveryFailed);
+        assert_eq!(
+            last_receipt.failure_class,
+            Some(OccurrenceFailureClass::RuntimeRejected)
+        );
+        assert!(
+            last_receipt
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("downstream export failed")),
+            "terminal receipt should carry the callback failure detail: {:?}",
+            last_receipt.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn host_runnable_schedule_without_registry_misfires_through_driver() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = create_host_runnable_schedule(&service, "nightly-report", None).await;
+
+        let adapter = Arc::new(host_runnable_adapter(service.clone(), None));
+        let driver = host_runnable_driver(service.clone(), store.clone(), adapter);
+
+        driver.tick_once().await.expect("driver tick");
+
+        // MissingTargetPolicy::MarkMisfired: the probe reports Missing, the
+        // occurrence authority classifies the misfire — same machine path as
+        // missing session/mob targets.
+        let occurrence =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Misfired)
+                .await;
+        assert_eq!(
+            occurrence.failure_class,
+            Some(OccurrenceFailureClass::TargetMissing)
+        );
     }
 }

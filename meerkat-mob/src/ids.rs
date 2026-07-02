@@ -377,6 +377,14 @@ pub struct WorkSpec {
     /// Whether this is an externally-originated turn (user input) or an
     /// internally-originated turn (mob coordination).
     pub origin: WorkOrigin,
+    /// Host-attached injected context delivered alongside (not inside) the
+    /// work content. Each entry materializes as a separate typed
+    /// injected-context transcript message immediately before the work
+    /// content, in order. Deliverable on queue-mode turn-driven dispatch
+    /// (local and remote); autonomous inbox delivery and steer-mode dispatch
+    /// reject it fail-closed with a typed [`crate::MobError`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_context: Vec<meerkat_core::types::ContentInput>,
 }
 
 impl WorkSpec {
@@ -387,7 +395,17 @@ impl WorkSpec {
         Self {
             content: content.into(),
             origin,
+            injected_context: Vec::new(),
         }
+    }
+
+    /// Attach host-attached injected context to this work spec.
+    pub fn with_injected_context(
+        mut self,
+        injected_context: Vec<meerkat_core::types::ContentInput>,
+    ) -> Self {
+        self.injected_context = injected_context;
+        self
     }
 }
 
@@ -615,6 +633,34 @@ mod tests {
             let decoded: WorkOrigin = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded, origin);
         }
+    }
+
+    #[test]
+    fn test_work_spec_injected_context_serde_default_and_omission() {
+        // Absent field defaults to empty (pre-field payloads stay readable).
+        let decoded: WorkSpec =
+            serde_json::from_str(r#"{"content":"do something","origin":"External"}"#).unwrap();
+        assert!(decoded.injected_context.is_empty());
+
+        // Empty is omitted; non-empty round-trips in order.
+        let empty = WorkSpec::new("do something".to_owned(), WorkOrigin::External);
+        let value = serde_json::to_value(&empty).unwrap();
+        assert!(value.get("injected_context").is_none());
+
+        let spec = WorkSpec::new("do something".to_owned(), WorkOrigin::External)
+            .with_injected_context(vec![
+                meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+                meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+            ]);
+        let encoded = serde_json::to_string(&spec).unwrap();
+        let decoded: WorkSpec = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded.injected_context,
+            vec![
+                meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+                meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+            ],
+        );
     }
 
     #[test]

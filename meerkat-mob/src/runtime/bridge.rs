@@ -38,11 +38,18 @@ pub trait MobBoundMemberRuntimeBridge: Send + Sync {
     /// Deliver one logical input to the member. Duplicate `input_id` values
     /// join the same in-flight admission or return the original acceptance
     /// result.
+    ///
+    /// `injected_context` carries host-attached injected context alongside
+    /// the work content; each entry materializes as a separate typed
+    /// injected-context transcript message immediately before the work
+    /// content (mirrors `BridgeDeliveryPayload::injected_context` on the
+    /// remote protocol).
     async fn deliver_member_input(
         &self,
         input_id: &str,
         content: ContentInput,
         handling_mode: HandlingMode,
+        injected_context: Vec<ContentInput>,
     ) -> Result<BridgeDeliveryResponse, MobError>;
 
     // --- Observation ---

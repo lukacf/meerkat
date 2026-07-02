@@ -152,6 +152,14 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   overlay) still deserializes on a V3 receiver; the receiver then rejects
 ///   it with a typed `UnsupportedProtocolVersion` cause instead of a raw
 ///   serde error. New supervisor authorities default to V3.
+/// - `3` (additive, no bump): `DeliverMemberInput` payloads may carry
+///   `BridgeDeliveryPayload::injected_context`. Empty is omitted, so
+///   deliveries without injected context stay byte-identical in both
+///   directions. A non-empty value sent to a pre-field receiver fails loud
+///   at its `deny_unknown_fields` serde boundary (pre-1.0 posture). Unlike
+///   the V3 overlay, no receiver-side semantic fold depends on the field
+///   being understood to keep the rest of the payload sound, so the
+///   version-gated typed rejection the V3 bump bought is not demanded here.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -812,6 +820,14 @@ pub struct BridgeDeliveryPayload {
     pub input_id: String,
     pub content: meerkat_core::types::ContentInput,
     pub handling_mode: meerkat_core::types::HandlingMode,
+    /// Host-attached injected context delivered alongside the work content.
+    /// Each entry materializes on the member as a separate typed
+    /// injected-context transcript message immediately before the work
+    /// content, in order. Omitted when empty, so the serialized payload is
+    /// byte-identical to the pre-field wire shape (see the V3 note in the
+    /// `BridgeProtocolVersion` history for the cross-version posture).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_context: Vec<meerkat_core::types::ContentInput>,
 }
 
 /// Outcome of a delivery attempt.
@@ -1326,8 +1342,57 @@ mod tests {
             input_id: "input-1".to_string(),
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
+            injected_context: Vec::new(),
         });
         assert_command_round_trip(&cmd);
+    }
+
+    #[test]
+    fn bridge_command_deliver_member_input_with_injected_context_round_trip() {
+        let cmd = BridgeCommand::DeliverMemberInput(BridgeDeliveryPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 2,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            input_id: "input-1".to_string(),
+            content: meerkat_core::types::ContentInput::Text("hello".to_string()),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            injected_context: vec![
+                meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
+                meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
+            ],
+        });
+        assert_command_round_trip(&cmd);
+    }
+
+    /// Byte-compat pin: an empty `injected_context` is omitted from the
+    /// serialized delivery payload, so deliveries without injected context
+    /// stay byte-identical to the pre-field wire shape, and a pre-field
+    /// payload (no key) deserializes to empty.
+    #[test]
+    fn bridge_delivery_payload_empty_injected_context_is_byte_compatible() {
+        let payload = BridgeDeliveryPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 2,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            input_id: "input-1".to_string(),
+            content: meerkat_core::types::ContentInput::Text("hello".to_string()),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            injected_context: Vec::new(),
+        };
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        assert!(
+            value.get("injected_context").is_none(),
+            "empty injected_context must be omitted: {value}"
+        );
+
+        let mut pre_field = serde_json::to_value(&payload).expect("serialize payload");
+        pre_field
+            .as_object_mut()
+            .expect("payload object")
+            .remove("injected_context");
+        let parsed: BridgeDeliveryPayload =
+            serde_json::from_value(pre_field).expect("pre-field payload deserializes");
+        assert!(parsed.injected_context.is_empty());
     }
 
     #[test]

@@ -113,6 +113,14 @@ pub struct BuildAgentConfigParams<'a> {
     /// When set, stored in canonical session tool-visibility state so the
     /// runtime-backed core build restores it through the machine owner.
     pub inherited_tool_filter: Option<InheritedToolVisibilityAuthority>,
+    /// Per-launch call-level tool access policy from the spawn spec.
+    ///
+    /// `AllowList`/`DenyList` ride into `AgentBuildConfig.tool_access_policy`
+    /// and become the factory's outermost dispatch gate. `Inherit` reaching
+    /// this compiler is host/operator authority — agent-facing spawn surfaces
+    /// resolve `Inherit` to the parent's persisted effective policy before
+    /// the spec reaches the actor — and resolves to unrestricted.
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// Typed per-spawn system prompt replacement.
     pub system_prompt_override: Option<crate::runtime::SpawnSystemPromptOverride>,
 }
@@ -148,6 +156,7 @@ pub async fn build_agent_config(
         shell_env,
         mob_tool_authority_context,
         inherited_tool_filter,
+        tool_access_policy,
         system_prompt_override,
     } = params;
 
@@ -316,6 +325,17 @@ pub async fn build_agent_config(
         config.initial_tool_visibility_state = Some(authority);
     }
 
+    // Call-level tool access policy: `AllowList`/`DenyList` become the
+    // factory's outermost dispatch gate. `Inherit` at this seam is
+    // host/operator authority (agent-facing spawn surfaces resolve `Inherit`
+    // to the parent's persisted effective policy before the spec reaches the
+    // actor) and resolves to unrestricted — the factory fails closed on any
+    // `Inherit` that would otherwise leak through.
+    config.tool_access_policy = match tool_access_policy {
+        Some(meerkat_core::ops::ToolAccessPolicy::Inherit) | None => None,
+        explicit => explicit,
+    };
+
     Ok(config)
 }
 
@@ -467,6 +487,7 @@ pub fn to_create_session_request(
     let build_options = config.to_session_build_options();
 
     CreateSessionRequest {
+        injected_context: Vec::new(),
         model: config.model.clone(),
         prompt,
         system_prompt: config.system_prompt.clone(),
@@ -804,6 +825,7 @@ mod tests {
                     workgraph: meerkat_core::session::ToolCategoryOverride::Enable,
                     image_generation: meerkat_core::session::ToolCategoryOverride::Enable,
                     web_search: meerkat_core::session::ToolCategoryOverride::Inherit,
+                    tool_access_policy: None,
                     active_skills: None,
                 },
                 keep_alive: false,
@@ -858,6 +880,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -865,6 +888,67 @@ mod tests {
         .expect("build_agent_config");
 
         assert!(!config.keep_alive, "keep_alive must be false for mob spawn");
+    }
+
+    /// Spawn-site threading: the spec's `tool_access_policy` must reach
+    /// `AgentBuildConfig.tool_access_policy` (the seam the factory gates on).
+    #[tokio::test]
+    async fn test_build_agent_config_threads_tool_access_policy() {
+        let def = sample_definition();
+        let profile = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
+        let profile_name = ProfileName::from("lead");
+        let agent_identity = AgentIdentity::from("lead-1");
+        let params = |policy: Option<meerkat_core::ops::ToolAccessPolicy>| BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &profile_name,
+            agent_identity: &agent_identity,
+            profile,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            tool_access_policy: policy,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        };
+
+        let allow = meerkat_core::ops::ToolAccessPolicy::AllowList(
+            ["read_file", "send_message"].into_iter().collect(),
+        );
+        let config = build_agent_config(params(Some(allow.clone())))
+            .await
+            .expect("build_agent_config");
+        assert_eq!(
+            config.tool_access_policy,
+            Some(allow),
+            "explicit spec policy must ride into AgentBuildConfig"
+        );
+
+        let deny = meerkat_core::ops::ToolAccessPolicy::DenyList(["bash"].into_iter().collect());
+        let config = build_agent_config(params(Some(deny.clone())))
+            .await
+            .expect("build_agent_config");
+        assert_eq!(config.tool_access_policy, Some(deny));
+
+        // Host/operator authority: `Inherit` reaching this compiler resolves
+        // to unrestricted (agent-facing surfaces resolve Inherit to the
+        // parent's persisted policy before the spec reaches the actor). An
+        // `Inherit` leaking into `AgentBuildConfig` would fail the factory
+        // build closed instead.
+        let config = build_agent_config(params(Some(meerkat_core::ops::ToolAccessPolicy::Inherit)))
+            .await
+            .expect("build_agent_config");
+        assert_eq!(config.tool_access_policy, None);
+
+        let config = build_agent_config(params(None))
+            .await
+            .expect("build_agent_config");
+        assert_eq!(config.tool_access_policy, None);
     }
 
     #[tokio::test]
@@ -885,6 +969,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -925,6 +1010,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -966,6 +1052,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -999,6 +1086,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1055,6 +1143,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1106,6 +1195,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1179,6 +1269,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: Some(inherited_authority),
             system_prompt_override: None,
         })
@@ -1232,6 +1323,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: Some(inherited_authority.clone()),
             system_prompt_override: None,
         })
@@ -1301,6 +1393,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: injected_authority(),
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1348,6 +1441,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
+                tool_access_policy: None,
                 inherited_tool_filter: None,
                 system_prompt_override: None,
             },
@@ -1395,6 +1489,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
+                tool_access_policy: None,
                 inherited_tool_filter: None,
                 system_prompt_override: None,
             },
@@ -1484,6 +1579,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
+                tool_access_policy: None,
                 inherited_tool_filter: Some(inherited_authority.clone()),
                 system_prompt_override: None,
             },
@@ -1582,6 +1678,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
+                tool_access_policy: None,
                 inherited_tool_filter: Some(inherited_authority),
                 system_prompt_override: None,
             },
@@ -1627,6 +1724,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1655,6 +1753,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1692,6 +1791,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: Some(crate::SpawnSystemPromptOverride::Replace(
                 "OB3 replacement prompt".to_string(),
@@ -1731,6 +1831,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1773,6 +1874,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1815,6 +1917,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1851,6 +1954,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1878,6 +1982,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1907,6 +2012,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -1978,6 +2084,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2027,6 +2134,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
+                tool_access_policy: None,
                 inherited_tool_filter: None,
                 system_prompt_override: None,
             },
@@ -2086,6 +2194,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2135,6 +2244,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2169,6 +2279,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2200,6 +2311,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2247,6 +2359,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2342,6 +2455,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2405,6 +2519,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })
@@ -2538,6 +2653,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_authority_context: None,
+            tool_access_policy: None,
             inherited_tool_filter: None,
             system_prompt_override: None,
         })

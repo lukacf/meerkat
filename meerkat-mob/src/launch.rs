@@ -50,7 +50,10 @@ impl MemberLaunchMode {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ForkContext {
-    /// Full conversation history via `Session::fork()` (O(1) CoW).
+    /// Full conversation history, read from the source member's session via
+    /// the `SessionService` and rendered as a TEXT context block prepended to
+    /// the new member's initial prompt. The child gets a fresh session — no
+    /// `Session::fork()` copy-on-write is involved.
     #[default]
     FullHistory,
     /// Last N messages from the source session.

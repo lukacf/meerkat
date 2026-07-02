@@ -944,6 +944,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "test".to_string(),
                 handling_mode: None,
@@ -958,6 +959,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Request {
+                content_taint: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
                 blocks: None,
@@ -970,6 +972,7 @@ mod tests {
     fn make_response_envelope(in_reply_to: Uuid) -> Envelope {
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Response {
+            content_taint: None,
             in_reply_to,
             status: crate::types::Status::Completed,
             result: serde_json::json!({"ok": true}),
@@ -1307,6 +1310,7 @@ mod tests {
 
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Request {
+            content_taint: None,
             intent: "review".to_string(),
             params: serde_json::json!({}),
             blocks: None,
@@ -1331,6 +1335,7 @@ mod tests {
 
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Response {
+            content_taint: None,
             in_reply_to: Uuid::new_v4(),
             status: crate::types::Status::Completed,
             result: serde_json::json!({}),
@@ -1411,6 +1416,7 @@ mod tests {
 
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Request {
+            content_taint: None,
             intent: "mob.peer_added".to_string(),
             params: serde_json::json!({"peer": "new-agent"}),
             blocks: None,
@@ -2141,6 +2147,7 @@ mod tests {
             from: sender.public_key(),
             to: receiver.public_key(),
             kind: MessageKind::Request {
+                content_taint: None,
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,

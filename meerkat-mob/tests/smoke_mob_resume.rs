@@ -386,6 +386,7 @@ async fn send_peer_message_direct(
         .unwrap_or_else(|| panic!("target peer {target_name} missing from peers: {peers:?}"));
     let receipt = runtime
         .send(CommsCommand::PeerMessage {
+            content_taint: None,
             to: PeerRoute::with_display_name(peer.peer_id, peer.name.clone()),
             body: body.to_string(),
             blocks: None,

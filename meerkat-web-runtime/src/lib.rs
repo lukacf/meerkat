@@ -1492,6 +1492,7 @@ fn build_session_request_with_auth_binding(
     build_config.app_context = config.app_context.clone();
 
     Ok(meerkat_core::service::CreateSessionRequest {
+        injected_context: Vec::new(),
         model: config.model.clone(),
         prompt: "".into(),
         system_prompt: match system_prompt {
@@ -1734,6 +1735,7 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
         .start_turn(
             &session_id,
             meerkat_core::service::StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: content_input,
                 system_prompt: None,
                 event_tx: None,
@@ -3578,6 +3580,7 @@ capabilities = [{capability_values}]
             build_service_infrastructure(config, 8).expect("build runtime services");
         let created = service
             .create_session(meerkat_core::service::CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -3620,6 +3623,7 @@ capabilities = [{capability_values}]
             build_service_infrastructure(config, 8).expect("build runtime services");
         let created = service
             .create_session(meerkat_core::service::CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,

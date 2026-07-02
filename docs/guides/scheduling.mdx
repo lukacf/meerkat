@@ -261,6 +261,27 @@ Example flow target:
 }
 ```
 
+### Host-runnable targets
+
+`target_kind: "host_runnable"` fires a named callback the embedding host
+registered with the schedule surface at startup (library hosts only — the
+stock `rkat` binaries register none). Occurrences flow through the normal
+occurrence lifecycle, so listing, history, receipts, and failure surfaces
+work exactly as for session and mob targets. An unregistered runnable is a
+missing target (your `missing_target_policy` applies); a callback failure
+records a `runtime_rejected` delivery failure.
+
+```json
+{
+  "target_kind": "host_runnable",
+  "runnable": "nightly-consolidation",
+  "params": { "depth": 3 }
+}
+```
+
+`params` is an optional host-owned JSON payload handed to the runnable
+verbatim; meerkat never interprets it.
+
 ## Policies
 
 ### Misfire policy

@@ -197,9 +197,9 @@ For command and HTTP hooks, the serialized wire payload additionally carries `pr
 
 <Accordion title="Supporting types">
 - **`HookLlmRequest`**: `max_tokens`, `temperature`, `provider_params`, `message_count`
-- **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`
-- **`HookToolCall`**: `tool_use_id`, `name`, `args`
-- **`HookToolResult`**: `tool_use_id`, `name`, `content_blocks`, `is_error` (the wire payload adds a serialize-only `content` text projection)
+- **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`, `server_tool_content` (typed `ServerToolKind` projection of provider-native server-tool blocks in the response, e.g. web search — empty when none; lets a foreground hook classify provider-native content ingestion synchronously)
+- **`HookToolCall`**: `tool_use_id`, `name`, `args`, `provenance` (typed `ToolProvenance` of the called tool — kind + source id, e.g. an MCP server name — projected from the tool's `ToolDef`; absent for tools without declared provenance)
+- **`HookToolResult`**: `tool_use_id`, `name`, `content_blocks`, `is_error`, `provenance` (as on `HookToolCall`; the wire payload adds a serialize-only `content` text projection)
 </Accordion>
 
 `HookToolResult.content_blocks` carries the typed tool-result blocks, including image blocks, in original order. The wire payload also serializes a `content` string -- a text projection derived from `content_blocks` for external command/HTTP hooks; in Rust, use `HookToolResult::text_projection()`. Both are observational projections and cannot be returned as a rewrite.

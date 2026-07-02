@@ -2841,6 +2841,7 @@ impl MobBuilder {
                             shell_env: restore_spec.shell_env.clone(),
                             mob_tool_authority_context: None,
                             inherited_tool_filter: restore_spec.inherited_tool_filter.clone(),
+                            tool_access_policy: restore_spec.tool_access_policy.clone(),
                             system_prompt_override: restore_spec.system_prompt_override.clone(),
                         },
                         expected_session_id: &bridge_session_id,
@@ -3034,6 +3035,7 @@ impl MobBuilder {
                 shell_env: restore_spec.shell_env.clone(),
                 mob_tool_authority_context: None,
                 inherited_tool_filter: restore_spec.inherited_tool_filter.clone(),
+                tool_access_policy: restore_spec.tool_access_policy.clone(),
                 system_prompt_override: restore_spec.system_prompt_override.clone(),
             })
             .await?;
@@ -3558,6 +3560,7 @@ impl MobBuilder {
                         .start_turn(
                             &orchestrator_entry.member_ref,
                             meerkat_core::service::StartTurnRequest {
+                                injected_context: Vec::new(),
                                 prompt: resume_message.into(),
                                 system_prompt: None,
                                 event_tx: None,

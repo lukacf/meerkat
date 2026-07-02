@@ -286,6 +286,22 @@ export interface SessionTranscriptRevision {
   readonly messages: readonly SessionMessage[];
 }
 
+/** One transcript rewrite commit in a session's revision graph. */
+export interface SessionTranscriptRevisionEntry {
+  readonly revision: string;
+  readonly parentRevision: string;
+  readonly actor?: string;
+  readonly reason: string;
+  /** Commit timestamp as seconds since the Unix epoch. */
+  readonly committedAt: number;
+}
+
+/** Ordered (oldest-first) transcript revision commit list for a session. */
+export interface SessionTranscriptRevisionList {
+  readonly headRevision: string;
+  readonly entries: readonly SessionTranscriptRevisionEntry[];
+}
+
 /** Behavior for transcript edit requests when the source session has active work. */
 export type TranscriptEditRunningBehavior = "reject";
 
@@ -416,6 +432,13 @@ export interface SessionIngressOptions {
 
 /** Per-turn options for normal turns and deferred first turns. */
 export interface TurnOptions {
+  /**
+   * Host-attached injected context for this turn. Each entry materializes as
+   * a separate typed injected-context user-channel message immediately
+   * before the turn's user message, in order. Injected context is excluded
+   * from semantic-memory indexing.
+   */
+  readonly injectedContext?: readonly ContentInput[];
   readonly skillRefs?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: string[];
@@ -587,6 +610,12 @@ export interface MobTurnStartOptions {
   readonly skillRefs?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: MobTurnStartWireOptions["additional_instructions"];
+  /**
+   * Host-attached ambient context delivered as separate typed transcript
+   * messages immediately before the turn's user message (excluded from
+   * semantic-memory indexing).
+   */
+  readonly injectedContext?: ContentInput[];
   readonly keepAlive?: MobTurnStartWireOptions["keep_alive"];
   readonly model?: MobTurnStartWireOptions["model"];
   readonly provider?: MobTurnStartWireOptions["provider"];
@@ -1048,6 +1077,13 @@ export interface WorkGraphItemLookupOptions {
 
 /** Options for creating a new session. */
 export interface SessionOptions {
+  /**
+   * Host-attached injected context for the first turn. Each entry
+   * materializes as a separate typed injected-context user-channel message
+   * immediately before the first turn's user message, in order. Injected
+   * context is excluded from semantic-memory indexing.
+   */
+  injectedContext?: readonly ContentInput[];
   model?: string;
   provider?: string;
   systemPrompt?: string;

@@ -320,6 +320,7 @@ mod runtime_backed_llm_reconfigure_tests {
 
     fn create_deferred_request(prompt: &str) -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "test".to_string(),
             prompt: prompt.to_string().into(),
             deferred_prompt_policy: DeferredPromptPolicy::Discard,

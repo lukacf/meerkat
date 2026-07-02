@@ -97,6 +97,12 @@ pub struct RuntimeInputSemantics {
 // render payload is a `serde_json::Value`, which is `PartialEq` but not `Eq`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeInputProjection {
+    /// Host-attached injected-context appends staged immediately BEFORE
+    /// `append` (the input's own transcript append) when the batch primitive
+    /// is constructed. A distinct slot — not `additional_appends` — because
+    /// the ordering invariant is "injected context lands before the turn's
+    /// user/peer append" and `additional_appends` chain AFTER it.
+    pub injected_context_appends: Vec<ConversationAppend>,
     pub append: Option<ConversationAppend>,
     pub additional_appends: Vec<ConversationAppend>,
     pub context_append: Option<ConversationContextAppend>,

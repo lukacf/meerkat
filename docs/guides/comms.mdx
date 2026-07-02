@@ -124,6 +124,10 @@ pub struct Envelope {
 ```
 
 The signable bytes are computed by serializing `(id, from, to, kind)` as CBOR, then recursively sorting all map keys by canonical order (RFC 8949) before encoding. This ensures deterministic signing across implementations.
+
+Content-bearing kinds (`Message` / `Request` / `Response`) carry optional signed-when-present metadata fields (`blocks`, `content_taint`, `handling_mode`): a field that is absent (`None`) is omitted from the encoding entirely, so older envelopes stay byte-identical and keep verifying, while a present field lives inside the signed region because `kind` is part of the signable tuple. `content_taint` is the sender-declared content-taint declaration (`clean` / `tainted`); an omitted declaration is a real third state that receivers must never coalesce into `clean`.
+
+Cross-version note: an envelope carrying `content_taint` sent to an older receiver fails signature verification there (the older signable projection differs), so under the default `require_peer_auth = true` the envelope is dropped with a typed `InvalidSignature` error - loud and fail-closed. With `require_peer_auth = false` the older receiver skips verification and the declaration silently drops out of its typed view.
 </Accordion>
 
 ## Trust model

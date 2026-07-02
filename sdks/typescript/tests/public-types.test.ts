@@ -240,6 +240,7 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   skillRefs: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
   flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
   additionalInstructions: ["stay concise"],
+  injectedContext: ["remembered operator preferences"],
   keepAlive: true,
   model: "gpt-test",
   provider: "openai",
@@ -274,6 +275,7 @@ type MobTurnStartSupportedWireOptionKeys =
   | "additional_instructions"
   | "auth_binding"
   | "flow_tool_overlay"
+  | "injected_context"
   | "keep_alive"
   | "max_tokens"
   | "model"

@@ -325,7 +325,7 @@ impl SessionRuntime {
             build_config.llm_client_override = Some(default_llm_client);
         }
 
-        self.create_session(build_config, Some(create.labels.clone()), None)
+        self.create_session(build_config, Some(create.labels.clone()), None, Vec::new())
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.message))
     }

@@ -154,6 +154,61 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "flow_target_serde_test",
+    aliases = aliases(
+        package_name = "meerkat-schedule",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "flow_target_serde",
+    crate_root = "tests/flow_target_serde.rs",
+    crate_features = [
+        "schema",
+        "skills",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/schedule-workflow/SKILL.md",
+    ],
+    srcs = [
+        "tests/flow_target_serde.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.11",
+        "CARGO_BIN_NAME": "flow_target_serde",
+        "CARGO_MANIFEST_DIR": "./meerkat-schedule",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-schedule",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-capabilities:meerkat_capabilities",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-schedule",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 rust_library(
     name = "meerkat_schedule_machine_schema_exports",
     aliases = aliases(package_name = "meerkat-schedule"),
@@ -225,6 +280,7 @@ rust_library(
 test_suite(
     name = "fast_tests",
     tests = [
+        ":flow_target_serde_test",
         ":meerkat_schedule_unit_test",
     ],
 )

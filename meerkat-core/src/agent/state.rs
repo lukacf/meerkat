@@ -1253,9 +1253,12 @@ where
                         let outcome = crate::agent::compact::run_compaction(
                             self.client.as_ref(),
                             compactor,
-                            self.session.messages(),
-                            self.last_input_tokens,
-                            current_boundary_index,
+                            self.compaction_curator.as_ref(),
+                            crate::compact::CompactionWindow {
+                                messages: self.session.messages(),
+                                last_input_tokens: self.last_input_tokens,
+                                session_boundary_index: current_boundary_index,
+                            },
                             event_tx,
                             &self.event_tap,
                         )
@@ -2385,6 +2388,21 @@ where
                                 .collect(),
                             stop_reason: Some(stop_reason),
                             usage: Some(usage.clone()),
+                            // Typed projection of the response's provider-executed
+                            // server-tool evidence blocks, in block order, so a
+                            // foreground PostLlmResponse hook classifies
+                            // provider-native content synchronously.
+                            server_tool_content: assistant_msg
+                                .blocks
+                                .iter()
+                                .filter_map(|block| match block {
+                                    crate::types::AssistantBlock::ServerToolContent {
+                                        kind,
+                                        ..
+                                    } => Some(kind.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
                         }),
                         tool_call: None,
                         tool_result: None,
@@ -2517,6 +2535,17 @@ where
                             .map(|tool| tool.tool_name())
                             .collect::<ToolNameSet>();
 
+                        // Typed provenance projection from the active tool
+                        // catalog: hook payloads carry the `ToolDef.provenance`
+                        // owner (matched by tool name), never a source
+                        // re-derived from the name string.
+                        let provenance_for_tool = |tool_name: &str| {
+                            tool_defs
+                                .iter()
+                                .find(|tool| tool.name == tool_name)
+                                .and_then(|tool| tool.provenance.clone())
+                        };
+
                         let pre_tool_reports =
                             futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
                                 self.execute_hooks(
@@ -2533,6 +2562,7 @@ where
                                             tool_use_id: tc.id.clone(),
                                             name: tc.name.clone(),
                                             args: args.clone(),
+                                            provenance: provenance_for_tool(tc.name.as_str()),
                                         }),
                                         tool_result: None,
                                     },
@@ -2720,7 +2750,8 @@ where
                                                 tc.id.clone(),
                                                 tc.name.clone(),
                                                 &tool_result,
-                                            ),
+                                            )
+                                            .with_provenance(provenance_for_tool(tc.name.as_str())),
                                         ),
                                     },
                                     &run_id,
@@ -3438,7 +3469,10 @@ mod tests {
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
-    use crate::compact::{CompactionContext, CompactionResult, Compactor};
+    use crate::compact::{
+        CompactionContext, CompactionCurator, CompactionCuratorError, CompactionResult,
+        CompactionWindow, Compactor, CuratedCompactionSummary,
+    };
     use crate::error::{
         AgentError, LlmFailureReason, LlmProviderError, LlmProviderErrorKind, ToolError,
     };
@@ -4242,6 +4276,68 @@ mod tests {
                 messages: compacted,
                 discarded: messages.iter().take(discarded_len).cloned().collect(),
             }
+        }
+    }
+
+    struct SubstitutingCurator {
+        seen_windows: Mutex<Vec<(usize, u64, u64)>>,
+    }
+
+    impl SubstitutingCurator {
+        fn new() -> Self {
+            Self {
+                seen_windows: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_windows(&self) -> Vec<(usize, u64, u64)> {
+            self.seen_windows.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CompactionCurator for SubstitutingCurator {
+        async fn curate_summary(
+            &self,
+            window: CompactionWindow<'_>,
+        ) -> Result<CuratedCompactionSummary, CompactionCuratorError> {
+            self.seen_windows.lock().unwrap().push((
+                window.messages.len(),
+                window.last_input_tokens,
+                window.session_boundary_index,
+            ));
+            CuratedCompactionSummary::new("curated summary")
+        }
+    }
+
+    struct FailingCurator;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CompactionCurator for FailingCurator {
+        async fn curate_summary(
+            &self,
+            _window: CompactionWindow<'_>,
+        ) -> Result<CuratedCompactionSummary, CompactionCuratorError> {
+            Err(CompactionCuratorError::Failed(
+                "curator offline".to_string(),
+            ))
+        }
+    }
+
+    struct EmptySummaryCurator;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CompactionCurator for EmptySummaryCurator {
+        async fn curate_summary(
+            &self,
+            _window: CompactionWindow<'_>,
+        ) -> Result<CuratedCompactionSummary, CompactionCuratorError> {
+            // Exercises the fallible constructor: whitespace-only text can
+            // never mint a CuratedCompactionSummary.
+            CuratedCompactionSummary::new("   ")
         }
     }
 
@@ -5125,6 +5221,7 @@ mod tests {
                             rendered_text: text,
                             handling_mode: crate::types::HandlingMode::Queue,
                             render_metadata: None,
+                            sender_taint: None,
                         },
                         ingress: crate::interaction::PeerIngressFact::peer(
                             id,
@@ -5523,6 +5620,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_curator_substitutes_summary_without_llm_call() {
+        // The failing client errors on any summarization call ("COMPACT NOW"),
+        // so a completed compaction proves the curator substituted summary
+        // production and the LLM path was never entered.
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let curator = Arc::new(SubstitutingCurator::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .compaction_curator(curator.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("curated compaction should commit and continue the turn");
+
+        let mut saw_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::CompactionCompleted { summary_tokens, .. } = event {
+                assert_eq!(
+                    summary_tokens, 0,
+                    "curated summaries consume no LLM tokens; summary usage must be zero"
+                );
+                saw_completed = true;
+            }
+        }
+        assert!(
+            saw_completed,
+            "curator-produced compaction should complete via the normal commit path"
+        );
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec!["first".to_string(), "second".to_string()],
+            "the summarization LLM call must be skipped entirely when a curator is configured"
+        );
+        assert_eq!(
+            curator.seen_windows().len(),
+            1,
+            "the curator should be invoked exactly once per compaction"
+        );
+        assert!(
+            agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::User(user)
+                    if user.transcript_role.is_compaction_summary()
+                        && user.text_content().contains("curated summary")
+            )),
+            "the committed history must carry the curated summary as a typed compaction-summary message"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_curator_failure_emits_typed_event_and_preserves_history() {
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .compaction_curator(Arc::new(FailingCurator))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("curator failure should preserve history and continue the turn");
+
+        let mut saw_curator_failure = false;
+        let mut saw_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::CompactionFailed {
+                    reason: crate::event::CompactionFailureReason::CuratorFailed { message },
+                } => {
+                    assert!(
+                        message.contains("curator offline"),
+                        "unexpected curator failure message: {message}"
+                    );
+                    saw_curator_failure = true;
+                }
+                crate::event::AgentEvent::CompactionCompleted { .. } => {
+                    saw_completed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_curator_failure,
+            "curator failure should surface as a typed CuratorFailed compaction failure"
+        );
+        assert!(
+            !saw_completed,
+            "compaction must not complete when the curator fails"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "a failed curator must leave the original history untouched"
+        );
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec!["first".to_string(), "second".to_string()],
+            "a failing curator must never fall back to the summarization LLM call"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_curator_empty_summary_surfaces_typed_error() {
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .compaction_curator(Arc::new(EmptySummaryCurator))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("empty curated summary should preserve history and continue the turn");
+
+        let mut saw_empty_failure = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::CompactionFailed {
+                reason: crate::event::CompactionFailureReason::CuratorFailed { message },
+            } = event
+            {
+                assert!(
+                    message.contains("empty compaction summary"),
+                    "unexpected curator failure message: {message}"
+                );
+                saw_empty_failure = true;
+            }
+        }
+        assert!(
+            saw_empty_failure,
+            "an empty curated summary must surface as a typed CuratorFailed compaction failure"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "an empty curated summary must leave the original history untouched"
+        );
+    }
+
+    #[tokio::test]
     async fn run_completed_event_uses_canonical_text_after_hook_observation() {
         use crate::hooks::{
             HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookOutcome,
@@ -5793,6 +6049,207 @@ mod tests {
             completed_ids,
             vec![HookId::new("ran")],
             "the started hook also completes"
+        );
+    }
+
+    /// Ask 5 gate: hook payloads carry typed dispatch-time provenance and the
+    /// response's provider-executed server-tool evidence. `HookToolCall` /
+    /// `HookToolResult` project `ToolDef.provenance` from the active tool
+    /// catalog (matched by name, never re-derived from the name string), and
+    /// `HookLlmResponse.server_tool_content` projects the response's
+    /// `AssistantBlock::ServerToolContent` kinds so a foreground
+    /// `PostLlmResponse` hook classifies provider-native content synchronously
+    /// instead of racing the lossy observe stream.
+    #[tokio::test]
+    async fn hook_payloads_carry_tool_provenance_and_server_tool_content() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
+        };
+        use crate::types::{ServerToolKind, ToolProvenance, ToolSourceId, ToolSourceKind};
+
+        struct RecordingHook {
+            invocations: Mutex<Vec<HookInvocation>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for RecordingHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                self.invocations.lock().unwrap().push(invocation);
+                Ok(HookExecutionReport::empty())
+            }
+        }
+
+        struct ServerToolThenToolUseClient {
+            call_count: Mutex<u32>,
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for ServerToolThenToolUseClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        vec![
+                            AssistantBlock::ServerToolContent {
+                                id: Some("srv-1".to_string()),
+                                kind: ServerToolKind::WebSearch,
+                                content: serde_json::json!({"results": []}),
+                                meta: None,
+                            },
+                            AssistantBlock::ToolUse {
+                                id: "call-1".to_string(),
+                                name: "lookup".into(),
+                                args: serde_json::value::RawValue::from_string("{}".to_string())
+                                    .unwrap(),
+                                meta: None,
+                            },
+                        ],
+                        StopReason::ToolUse,
+                        Usage::default(),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        Usage::default(),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        struct ProvenanceToolDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for ProvenanceToolDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Ok(ToolResult::new(call.id.to_string(), "looked up".to_string(), false).into())
+            }
+        }
+
+        let provenance = ToolProvenance {
+            kind: ToolSourceKind::Mcp,
+            source_id: ToolSourceId::new("test-server"),
+        };
+        let dispatcher = ProvenanceToolDispatcher {
+            tools: vec![Arc::new(ToolDef {
+                name: "lookup".into(),
+                description: "lookup tool".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: Some(provenance.clone()),
+            })]
+            .into(),
+        };
+        let recorder = Arc::new(RecordingHook {
+            invocations: Mutex::new(Vec::new()),
+        });
+
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_hook_engine(Arc::clone(&recorder) as Arc<dyn HookEngine>)
+            .build_standalone(
+                Arc::new(ServerToolThenToolUseClient {
+                    call_count: Mutex::new(0),
+                }),
+                Arc::new(dispatcher),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        agent.run("prompt".to_string().into()).await.unwrap();
+
+        let invocations = recorder.invocations.lock().unwrap();
+        let post_llm = invocations
+            .iter()
+            .find(|invocation| {
+                invocation.point == HookPoint::PostLlmResponse
+                    && invocation
+                        .llm_response
+                        .as_ref()
+                        .is_some_and(|response| !response.server_tool_content.is_empty())
+            })
+            .expect("PostLlmResponse invocation with server tool content");
+        assert_eq!(
+            post_llm
+                .llm_response
+                .as_ref()
+                .expect("llm_response payload")
+                .server_tool_content,
+            vec![ServerToolKind::WebSearch],
+            "PostLlmResponse must project ServerToolContent kinds in block order"
+        );
+        let final_llm = invocations
+            .iter()
+            .rfind(|invocation| invocation.point == HookPoint::PostLlmResponse)
+            .expect("final PostLlmResponse invocation");
+        assert!(
+            final_llm
+                .llm_response
+                .as_ref()
+                .expect("llm_response payload")
+                .server_tool_content
+                .is_empty(),
+            "a response without server tool blocks projects an empty list"
+        );
+
+        let pre_tool = invocations
+            .iter()
+            .find(|invocation| invocation.point == HookPoint::PreToolExecution)
+            .expect("PreToolExecution invocation");
+        assert_eq!(
+            pre_tool
+                .tool_call
+                .as_ref()
+                .expect("tool_call payload")
+                .provenance,
+            Some(provenance.clone()),
+            "HookToolCall must carry the ToolDef.provenance owner"
+        );
+
+        let post_tool = invocations
+            .iter()
+            .find(|invocation| invocation.point == HookPoint::PostToolExecution)
+            .expect("PostToolExecution invocation");
+        assert_eq!(
+            post_tool
+                .tool_result
+                .as_ref()
+                .expect("tool_result payload")
+                .provenance,
+            Some(provenance),
+            "HookToolResult must carry the ToolDef.provenance owner"
         );
     }
 
@@ -6849,6 +7306,165 @@ mod tests {
         assert!(
             saw_timeout_completion,
             "normal dispatch loop must emit a timeout tool completion for the hanging tool"
+        );
+    }
+
+    /// Ask 6: a call denied by the call-level execution gate
+    /// ([`crate::tool_execution_policy::ExecutionPolicyGatedDispatcher`])
+    /// surfaces as an ordinary `is_error` tool result (via
+    /// `terminal_tool_outcome_for_error`) and the run CONTINUES — denial is
+    /// per-call, never run-fatal. The denied tool stays in the LLM-visible
+    /// list, so the visible-set precheck passes and the deny happens inside
+    /// dispatch.
+    #[tokio::test]
+    async fn execution_policy_gate_denial_is_ordinary_tool_error_and_run_continues() {
+        struct RecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            dispatched: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for RecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.dispatched.lock().unwrap().push(call.name.to_string());
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        struct DeniedToolCallClient {
+            call_count: Mutex<u32>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for DeniedToolCallClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "call-blocked".to_string(),
+                            name: "blocked_tool".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .expect("static raw value should parse"),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                        Usage::default(),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        Usage::default(),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let inner = Arc::new(RecordingDispatcher {
+            tools: Arc::from([
+                Arc::new(ToolDef::new(
+                    "blocked_tool",
+                    "denied by the execution policy",
+                    serde_json::json!({ "type": "object" }),
+                )),
+                Arc::new(ToolDef::new(
+                    "open_tool",
+                    "not denied",
+                    serde_json::json!({ "type": "object" }),
+                )),
+            ]),
+            dispatched: Mutex::new(Vec::new()),
+        });
+        let policy = crate::tool_execution_policy::ToolExecutionPolicy::resolve(
+            crate::ops::ToolAccessPolicy::DenyList(["blocked_tool"].into_iter().collect()),
+        )
+        .expect("deny list must resolve");
+        let gated = Arc::new(
+            crate::tool_execution_policy::ExecutionPolicyGatedDispatcher::new(
+                Arc::clone(&inner),
+                policy,
+            ),
+        );
+
+        let client = Arc::new(DeniedToolCallClient {
+            call_count: Mutex::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client, gated, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_with_events("call the blocked tool".to_string().into(), tx),
+        )
+        .await
+        .expect("run must complete promptly after the denial")
+        .expect("agent run must succeed — a policy denial is never run-fatal");
+
+        // The denied call resolves to an error tool result, so the second
+        // turn ends the conversation: two turns total.
+        assert_eq!(result.turns, 2);
+        assert!(
+            inner.dispatched.lock().unwrap().is_empty(),
+            "denied call must never reach the inner dispatcher"
+        );
+
+        let mut saw_denied_completion = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolExecutionCompleted {
+                name,
+                is_error,
+                content,
+                ..
+            } = event
+                && name == "blocked_tool"
+            {
+                assert!(is_error, "denied tool result must be an error");
+                let text = crate::types::text_content(&content);
+                assert!(
+                    text.contains("\"error\":\"access_denied\""),
+                    "denied tool result must carry the canonical access_denied payload, got: {text}"
+                );
+                saw_denied_completion = true;
+            }
+        }
+        assert!(
+            saw_denied_completion,
+            "dispatch loop must emit an access_denied tool completion for the gated tool"
         );
     }
 

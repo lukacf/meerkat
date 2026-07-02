@@ -5666,7 +5666,7 @@ mod tests {
             agent.session().messages().iter().any(|message| matches!(
                 message,
                 Message::User(user)
-                    if user.is_compaction_summary()
+                    if user.transcript_role.is_compaction_summary()
                         && user.text_content().contains("curated summary")
             )),
             "the committed history must carry the curated summary as a typed compaction-summary message"
@@ -7405,6 +7405,7 @@ mod tests {
                     serde_json::json!({ "type": "object" }),
                 )),
             ]),
+            dispatched: Mutex::new(Vec::new()),
         });
         let policy = crate::tool_execution_policy::ToolExecutionPolicy::resolve(
             crate::ops::ToolAccessPolicy::DenyList(["blocked_tool"].into_iter().collect()),

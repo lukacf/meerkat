@@ -375,7 +375,7 @@ mod tests {
     impl OpsLifecycleRegistry for UnsupportedOpsRegistry {
         fn register_operation(
             &self,
-            _spec: crate::ops::OperationSpec,
+            _spec: crate::ops_lifecycle::OperationSpec,
         ) -> Result<(), OpsLifecycleError> {
             Err(unsupported("register_operation"))
         }
@@ -858,12 +858,13 @@ mod tests {
             ExecutionPolicyGatedDispatcher::new(Arc::clone(&inner), allow_list(&["alpha"])),
         );
         let extra_handle = Arc::clone(&gated);
-        let err = gated
-            .bind_ops_lifecycle(
-                Arc::new(UnsupportedOpsRegistry),
-                crate::types::SessionId::new(),
-            )
-            .expect_err("shared wrapper ownership must refuse rebind");
+        let err = match gated.bind_ops_lifecycle(
+            Arc::new(UnsupportedOpsRegistry),
+            crate::types::SessionId::new(),
+        ) {
+            Ok(_) => panic!("shared wrapper ownership must refuse rebind"),
+            Err(err) => err,
+        };
         assert_eq!(err, OpsLifecycleBindError::SharedOwnership);
         drop(extra_handle);
     }

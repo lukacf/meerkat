@@ -3456,6 +3456,7 @@ async fn handle_meerkat_run(
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let create_provider = input.provider.map(ProviderInput::to_provider);
     let mut build = SessionBuildOptions {
+        tool_access_policy: None,
         custom_models: std::collections::BTreeMap::new(),
         image_generation_provider: None,
         auto_compact_threshold_override: None,
@@ -3881,6 +3882,7 @@ async fn handle_meerkat_resume(
     .map_err(|error| ToolCallError::invalid_params(error.to_string()))?;
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
+            tool_access_policy: None,
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,

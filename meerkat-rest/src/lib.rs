@@ -4403,6 +4403,7 @@ async fn create_session_inner(
             }
         };
     let mut build = SessionBuildOptions {
+        tool_access_policy: None,
         custom_models: std::collections::BTreeMap::new(),
         image_generation_provider: None,
         auto_compact_threshold_override: None,
@@ -5470,6 +5471,7 @@ async fn continue_session_inner(
         };
         let auth_binding_override = req.auth_binding.clone().map(Into::into);
         let mut build = SessionBuildOptions {
+            tool_access_policy: None,
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,

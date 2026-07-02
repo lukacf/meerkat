@@ -9323,6 +9323,7 @@ async fn run_agent(
             CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
         let mut build = SessionBuildOptions {
+            tool_access_policy: None,
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,

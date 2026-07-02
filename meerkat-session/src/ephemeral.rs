@@ -6922,6 +6922,7 @@ mod admission_window_tests {
         command_tx
             .send(SessionCommand::StartTurn {
                 prompt: request.prompt,
+                injected_context: request.injected_context,
                 runtime: Box::new(request.runtime),
                 event_tx: request.event_tx,
                 result_tx,
@@ -7461,6 +7462,7 @@ mod archive_shutdown_drain_tests {
         command_tx
             .send(SessionCommand::StartTurn {
                 prompt: request.prompt,
+                injected_context: request.injected_context,
                 runtime: Box::new(request.runtime),
                 event_tx: request.event_tx,
                 result_tx,
@@ -7529,6 +7531,7 @@ mod archive_shutdown_drain_tests {
         command_tx
             .send(SessionCommand::StartTurn {
                 prompt: request.prompt,
+                injected_context: request.injected_context,
                 runtime: Box::new(request.runtime),
                 event_tx: request.event_tx,
                 result_tx,

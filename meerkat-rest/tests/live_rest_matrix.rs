@@ -152,6 +152,7 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
     let result = state
         .session_service
         .create_session(SvcCreateSessionRequest {
+            injected_context: Vec::new(),
             model: default_model,
             prompt: prompt.to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,

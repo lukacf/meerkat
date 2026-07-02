@@ -315,6 +315,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         let result = self
             .service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: create.model.clone(),
                 prompt: ContentInput::Text(String::new()),
                 system_prompt: match prompt_system_prompt
@@ -987,6 +988,7 @@ async fn setup_session(
     };
 
     let req = CreateSessionRequest {
+        injected_context: Vec::new(),
         model: model.to_string(),
         prompt: ContentInput::Text(String::new()),
         system_prompt: meerkat::SystemPromptOverride::Set(system_prompt.to_string()),
@@ -1153,6 +1155,7 @@ fn start_turn_request_from_primitive(
         _ => Vec::new(),
     };
     Ok(StartTurnRequest {
+        injected_context: Vec::new(),
         prompt: primitive.extract_content_input(),
         system_prompt: None,
         event_tx: None,
@@ -2444,6 +2447,7 @@ mod tests {
         let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("inspect target tools".to_string()),
             system_prompt: meerkat::SystemPromptOverride::Set("test target".to_string()),
@@ -2589,6 +2593,7 @@ mod tests {
             .await
             .unwrap();
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: meerkat::SystemPromptOverride::Set("cleanup".to_string()),
@@ -2728,6 +2733,7 @@ mod tests {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: ContentInput::Text("run shell".to_string()),
                     system_prompt: None,
                     event_tx: None,
@@ -2805,6 +2811,7 @@ mod tests {
 
         let capture2: Arc<CaptureClient> = Arc::new(CaptureClient::default());
         let req2 = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
             system_prompt: meerkat::SystemPromptOverride::Set("test".into()),
@@ -2940,6 +2947,7 @@ mod tests {
         ));
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.5".to_string(),
             prompt: ContentInput::Text("list tools".into()),
             system_prompt: meerkat::SystemPromptOverride::Set("test".into()),

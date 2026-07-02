@@ -346,6 +346,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         run_id,
                         step_id,
                         StartTurnRequest {
+                            injected_context: Vec::new(),
                             prompt: message,
                             system_prompt: None,
                             event_tx: Some(event_tx),

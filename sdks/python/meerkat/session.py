@@ -131,6 +131,7 @@ class Session:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -151,6 +152,7 @@ class Session:
         result = await self._client._start_turn(  # noqa: SLF001
             self._id,
             prompt,
+            injected_context=injected_context,
             skill_refs=skill_refs,
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,
@@ -170,6 +172,7 @@ class Session:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -196,6 +199,7 @@ class Session:
         return self._client._start_turn_streaming(  # noqa: SLF001
             self._id,
             prompt,
+            injected_context=injected_context,
             skill_refs=skill_refs,
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,
@@ -449,6 +453,7 @@ class DeferredSession:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -469,6 +474,7 @@ class DeferredSession:
         return await self._client._start_turn(  # noqa: SLF001
             self._id,
             prompt,
+            injected_context=injected_context,
             skill_refs=skill_refs,
             flow_tool_overlay=flow_tool_overlay,
             additional_instructions=additional_instructions,

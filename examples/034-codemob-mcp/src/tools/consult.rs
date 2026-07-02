@@ -73,6 +73,7 @@ pub async fn handle(
         }
 
         let req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: prompt.into(),
             system_prompt: None,
             event_tx: None,
@@ -144,6 +145,7 @@ pub async fn handle(
     build.provider_params = provider_params;
 
     let req = CreateSessionRequest {
+        injected_context: Vec::new(),
         model,
         prompt: prompt.into(),
         system_prompt: meerkat_core::SystemPromptOverride::Set(system_prompt),

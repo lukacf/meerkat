@@ -4154,6 +4154,7 @@ impl MobHandle {
         let created = self
             .session_service
             .create_session(meerkat_core::service::CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: ContentInput::from("test generated mob operation owner"),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,

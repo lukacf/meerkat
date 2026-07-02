@@ -598,6 +598,7 @@ mod orchestrator {
             };
 
             let create_req = CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: build_config.model.clone(),
                 prompt,
                 system_prompt: build_config.system_prompt.clone(),

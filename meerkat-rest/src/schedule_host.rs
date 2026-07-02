@@ -184,6 +184,7 @@ impl RestScheduleContext {
         }
 
         let create_req = SvcCreateSessionRequest {
+            injected_context: Vec::new(),
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: build_config.system_prompt.clone(),

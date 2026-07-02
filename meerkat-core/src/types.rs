@@ -1227,7 +1227,21 @@ impl Message {
     /// flattened `String`.
     pub fn indexable_content(&self) -> MemoryIndexableContent {
         match self {
-            Message::User(u) => MemoryIndexableContent::Indexable(u.text_content()),
+            // The typed transcript role is the indexability owner for the user
+            // channel: ordinary conversation indexes, while runtime compaction
+            // summaries (projections of already-indexed history) and
+            // host-attached injected context carry typed exclusion reasons.
+            Message::User(u) => match u.transcript_role {
+                TranscriptUserRole::Conversational => {
+                    MemoryIndexableContent::Indexable(u.text_content())
+                }
+                TranscriptUserRole::CompactionSummary => {
+                    MemoryIndexableContent::Excluded(MemoryIndexExclusion::CompactionSummary)
+                }
+                TranscriptUserRole::InjectedContext => {
+                    MemoryIndexableContent::Excluded(MemoryIndexExclusion::InjectedContext)
+                }
+            },
             Message::BlockAssistant(ba) => {
                 let mut result = String::new();
                 for text in ba.text_blocks() {
@@ -1305,6 +1319,12 @@ pub enum MemoryIndexExclusion {
     SystemNotice,
     /// Tool results — structured data, not conversation prose.
     ToolResults,
+    /// Runtime compaction summary — a projection of already-indexed history;
+    /// re-indexing it would promote the projection to source content.
+    CompactionSummary,
+    /// Host-attached injected context — ambient material delivered alongside
+    /// (not inside) the user's message; not user-authored conversation.
+    InjectedContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2158,6 +2178,11 @@ pub enum TranscriptUserRole {
     Conversational,
     /// A runtime-produced compaction summary that opens a rebuilt transcript.
     CompactionSummary,
+    /// Host-attached ambient context delivered alongside (not inside) the
+    /// user's message. Excluded from semantic-memory indexing, and it never
+    /// satisfies the transcript-continuity save-guard
+    /// ([`Self::is_compaction_summary`] stays `CompactionSummary`-only).
+    InjectedContext,
 }
 
 impl TranscriptUserRole {
@@ -2173,6 +2198,12 @@ impl TranscriptUserRole {
     #[must_use]
     pub fn is_compaction_summary(&self) -> bool {
         matches!(self, Self::CompactionSummary)
+    }
+
+    /// Whether this user message is host-attached injected context.
+    #[must_use]
+    pub fn is_injected_context(&self) -> bool {
+        matches!(self, Self::InjectedContext)
     }
 }
 
@@ -2226,6 +2257,34 @@ impl UserMessage {
             render_metadata: None,
             identity: TranscriptMessageIdentity::default(),
             transcript_role: TranscriptUserRole::CompactionSummary,
+            created_at: message_timestamp_now(),
+        }
+    }
+
+    /// Create a text-only host-attached injected-context message.
+    ///
+    /// The returned message carries [`TranscriptUserRole::InjectedContext`] so
+    /// consumers (semantic-memory indexing, wire projections) read the typed
+    /// fact instead of classifying the rendered content.
+    pub fn injected_context(content: impl Into<String>) -> Self {
+        Self {
+            content: ContentBlock::text_vec(content.into()),
+            render_metadata: None,
+            identity: TranscriptMessageIdentity::default(),
+            transcript_role: TranscriptUserRole::InjectedContext,
+            created_at: message_timestamp_now(),
+        }
+    }
+
+    /// Create a multimodal host-attached injected-context message.
+    ///
+    /// Block-bearing sibling of [`UserMessage::injected_context`].
+    pub fn injected_context_with_blocks(content: Vec<ContentBlock>) -> Self {
+        Self {
+            content,
+            render_metadata: None,
+            identity: TranscriptMessageIdentity::default(),
+            transcript_role: TranscriptUserRole::InjectedContext,
             created_at: message_timestamp_now(),
         }
     }

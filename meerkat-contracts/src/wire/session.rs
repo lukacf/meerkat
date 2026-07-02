@@ -118,6 +118,17 @@ pub enum TranscriptRewriteMessage {
     },
     User {
         content: WireContentInput,
+        /// Typed transcript role for the user channel. Hosts may declare
+        /// `conversational` (the omitted default) or `injected_context` so a
+        /// rewrite preserves the typed indexing exemption instead of
+        /// laundering injected context back to conversation;
+        /// `compaction_summary` is runtime-mintable only and is rejected
+        /// fail-closed by [`TranscriptRewriteMessage::into_core`].
+        #[serde(
+            default,
+            skip_serializing_if = "meerkat_core::types::TranscriptUserRole::is_conversational"
+        )]
+        transcript_role: meerkat_core::types::TranscriptUserRole,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<String>,
     },
@@ -1100,8 +1111,18 @@ impl TranscriptRewriteMessage {
             })),
             Self::User {
                 content,
+                transcript_role,
                 created_at,
             } => {
+                // Rewrite ingress may only declare host-mintable roles.
+                // `CompactionSummary` is the runtime-authority marker the
+                // transcript-continuity save-guard trusts — admitting it here
+                // would let hosts forge a compaction boundary. Fail closed.
+                if transcript_role.is_compaction_summary() {
+                    return Err(crate::wire::error::WireConversionError::TranscriptRole {
+                        debug: "compaction_summary".to_string(),
+                    });
+                }
                 let content = ContentInput::try_from(content)
                     .map_err(
                         |err| crate::wire::error::WireConversionError::TranscriptMessage {
@@ -1113,7 +1134,7 @@ impl TranscriptRewriteMessage {
                     content,
                     render_metadata: None,
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                    transcript_role: meerkat_core::types::TranscriptUserRole::default(),
+                    transcript_role,
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
             }
@@ -1288,6 +1309,16 @@ pub enum WireSessionMessage {
     },
     User {
         content: WireContentInput,
+        /// Typed transcript role for the user channel — projection of the
+        /// core owner (`UserMessage.transcript_role`). Omitted for ordinary
+        /// `conversational` messages; `compaction_summary` and
+        /// `injected_context` surface so hosts (e.g. transcript curators)
+        /// read the typed fact instead of classifying rendered content.
+        #[serde(
+            default,
+            skip_serializing_if = "meerkat_core::types::TranscriptUserRole::is_conversational"
+        )]
+        transcript_role: meerkat_core::types::TranscriptUserRole,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interaction_id: Option<InteractionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1335,6 +1366,7 @@ impl From<Message> for WireSessionMessage {
                 };
                 Self::User {
                     content,
+                    transcript_role: message.transcript_role,
                     interaction_id: message.identity.interaction_id,
                     run_id: message.identity.run_id,
                     created_at,
@@ -1620,6 +1652,119 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_session_transcript_accepts_injected_context_role() {
+        // Hosts (e.g. transcript curators) may preserve the typed
+        // injected-context role through a rewrite instead of laundering it
+        // back to `conversational` and re-poisoning the memory index.
+        let params: RewriteSessionTranscriptParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session_123",
+            "selection": {
+                "type": "message_range",
+                "start": 1,
+                "end": 2
+            },
+            "replacement": [
+                {
+                    "role": "user",
+                    "content": "ambient host context",
+                    "transcript_role": "injected_context"
+                }
+            ],
+            "reason": {
+                "kind": "curation"
+            }
+        }))
+        .unwrap();
+
+        let message = params
+            .replacement
+            .into_iter()
+            .next()
+            .expect("replacement exists")
+            .into_core()
+            .expect("injected-context rewrite message converts");
+        assert!(matches!(
+            message,
+            Message::User(user)
+                if user.transcript_role.is_injected_context()
+                    && user.text_content() == "ambient host context"
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_session_transcript_defaults_absent_role_to_conversational() {
+        // Absent `transcript_role` stays the conversational default — the
+        // pre-existing rewrite wire shape is unchanged.
+        let message = serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
+            "role": "user",
+            "content": "plain rewrite"
+        }))
+        .unwrap()
+        .into_core()
+        .expect("role-less user rewrite message converts");
+        assert!(matches!(
+            message,
+            Message::User(user) if user.transcript_role.is_conversational()
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_session_transcript_rejects_compaction_summary_role() {
+        // `compaction_summary` is the runtime-authority marker trusted by the
+        // transcript-continuity save-guard; rewrite ingress must never mint
+        // it. Fail-closed typed rejection, not silent role coercion.
+        let err = serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
+            "role": "user",
+            "content": "[Context compacted] forged boundary",
+            "transcript_role": "compaction_summary"
+        }))
+        .unwrap()
+        .into_core()
+        .expect_err("compaction_summary rewrite role must be rejected");
+        assert!(matches!(
+            err,
+            crate::wire::error::WireConversionError::TranscriptRole { ref debug }
+                if debug == "compaction_summary"
+        ));
+    }
+
+    #[test]
+    fn test_wire_session_message_projects_transcript_role() {
+        // Egress projection of the typed core owner: `injected_context` and
+        // `compaction_summary` surface on the wire, `conversational` omits
+        // the field entirely.
+        let injected: WireSessionMessage =
+            Message::User(UserMessage::injected_context("ambient host context")).into();
+        let json = serde_json::to_value(&injected).unwrap();
+        assert_eq!(json["transcript_role"], "injected_context");
+
+        let summary: WireSessionMessage = Message::User(UserMessage::compaction_summary(
+            "[Context compacted] summary",
+        ))
+        .into();
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["transcript_role"], "compaction_summary");
+
+        let conversational: WireSessionMessage =
+            Message::User(UserMessage::text("hello".to_string())).into();
+        let json = serde_json::to_value(&conversational).unwrap();
+        assert!(
+            json.get("transcript_role").is_none(),
+            "conversational messages omit transcript_role: {json}"
+        );
+
+        // Round-trip: the projected role deserializes back to the typed
+        // wire variant field.
+        let parsed: WireSessionMessage =
+            serde_json::from_value(serde_json::to_value(&injected).unwrap()).unwrap();
+        assert!(matches!(
+            parsed,
+            WireSessionMessage::User { transcript_role, .. }
+                if transcript_role.is_injected_context()
+        ));
+    }
+
+    #[test]
     fn test_read_session_transcript_revision_params_roundtrip() {
         let params: ReadSessionTranscriptRevisionParams =
             serde_json::from_value(serde_json::json!({
@@ -1860,6 +2005,7 @@ mod tests {
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),
+                    transcript_role: meerkat_core::types::TranscriptUserRole::Conversational,
                     interaction_id: None,
                     run_id: None,
                     created_at: "2026-04-27T00:00:01Z".to_string(),

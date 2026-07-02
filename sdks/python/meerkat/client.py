@@ -829,6 +829,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -872,7 +873,8 @@ class MeerkatClient:
             | RpcWireRunResult
         )
         params = self._build_create_params(
-            prompt, model=model, provider=provider, auth_binding=auth_binding,
+            prompt, injected_context=injected_context,
+            model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -901,6 +903,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -948,7 +951,8 @@ class MeerkatClient:
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
-            prompt, model=model, provider=provider, auth_binding=auth_binding,
+            prompt, injected_context=injected_context,
+            model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -989,6 +993,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -1036,7 +1041,8 @@ class MeerkatClient:
             | RpcWireRunResult
         )
         params = self._build_create_params(
-            prompt, model=model, provider=provider, auth_binding=auth_binding,
+            prompt, injected_context=injected_context,
+            model=model, provider=provider, auth_binding=auth_binding,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
@@ -2945,6 +2951,7 @@ class MeerkatClient:
         session_id: str,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -2958,6 +2965,8 @@ class MeerkatClient:
         provider_params: dict[str, Any] | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
+        if injected_context is not None:
+            params["injected_context"] = injected_context
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
@@ -2989,6 +2998,7 @@ class MeerkatClient:
         session_id: str,
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
         flow_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -3009,6 +3019,8 @@ class MeerkatClient:
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
+        if injected_context is not None:
+            params["injected_context"] = injected_context
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
@@ -3727,6 +3739,7 @@ class MeerkatClient:
     def _build_create_params(
         prompt: str | list[ContentBlock],
         *,
+        injected_context: list[str | list[ContentBlock]] | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -3756,6 +3769,8 @@ class MeerkatClient:
         external_tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
+        if injected_context is not None:
+            params["injected_context"] = injected_context
         if model:
             params["model"] = model
         if provider:

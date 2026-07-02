@@ -357,6 +357,7 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
         let build = materialized_build_options(&self.build_template, create)?;
 
         Ok(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
             // Parse the schedule-spec prompt representation once at this
@@ -701,6 +702,7 @@ mod tests {
     ))]
     fn make_runtime_backed_request(comms_name: &str, keep_alive: bool) -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: crate::SystemPromptOverride::Set(

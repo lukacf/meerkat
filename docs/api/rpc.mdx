@@ -405,6 +405,13 @@ Only `prompt` is required. All other fields are optional and fall back to config
   The user prompt to send to the agent.
 </ParamField>
 
+<ParamField body="injected_context" type="ContentInput[] | null" default="null">
+  Host-attached injected context for the first turn. Each entry materializes
+  as a separate typed injected-context user-channel message immediately before
+  the first turn's user message, in order; injected context is excluded from
+  semantic-memory indexing.
+</ParamField>
+
 <ParamField body="model" type="string | null" default="claude-sonnet-4-6">
   Model name (e.g. `"claude-opus-4-8"`, `"gpt-5.5"`).
 </ParamField>
@@ -788,6 +795,13 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
 
 <ParamField body="prompt" type="string" required>
   The follow-up prompt.
+</ParamField>
+
+<ParamField body="injected_context" type="ContentInput[] | null" default="null">
+  Host-attached injected context for this turn. Each entry materializes as a
+  separate typed injected-context user-channel message immediately before the
+  turn's user message, in order; injected context is excluded from
+  semantic-memory indexing.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="from session">

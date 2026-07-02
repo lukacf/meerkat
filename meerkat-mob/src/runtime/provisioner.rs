@@ -1479,6 +1479,7 @@ mod tests {
     #[test]
     fn session_owned_eager_member_create_gets_runtime_execution_kind_stamp() {
         let mut req = meerkat_core::service::CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: "hello".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -1738,6 +1739,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             m
         });
         let req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: primitive.extract_content_input(),
             system_prompt: None,
             event_tx: queued_context.map(|context| context.event_tx),

@@ -51,6 +51,23 @@ fn user_message_from_operator_renderable(
     }
 }
 
+fn injected_context_message_from_operator_renderable(
+    content: CoreRenderable,
+) -> Result<crate::types::UserMessage, AgentError> {
+    match content {
+        CoreRenderable::Text { text } => Ok(crate::types::UserMessage::injected_context(text)),
+        CoreRenderable::Blocks { blocks } => Ok(
+            crate::types::UserMessage::injected_context_with_blocks(blocks),
+        ),
+        CoreRenderable::SystemNotice { .. }
+        | CoreRenderable::Json { .. }
+        | CoreRenderable::Reference { .. } => Err(AgentError::ConfigError(
+            "role=injected_context transcript append only accepts operator text or content blocks"
+                .to_string(),
+        )),
+    }
+}
+
 fn run_input_from_admitted_pending_tail(
     messages: &[Message],
     admitted_tail: ObservedSessionTailKind,
@@ -1078,7 +1095,8 @@ where
 
     /// Run the agent with a user message.
     pub async fn run(&mut self, user_input: ContentInput) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), None, None).await
+        self.run_inner(user_input, Vec::new(), Vec::new(), None, None)
+            .await
     }
 
     /// Run the agent with events streamed to the provided channel.
@@ -1087,22 +1105,32 @@ where
         user_input: ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
-        self.run_inner(user_input, Vec::new(), None, Some(event_tx))
+        self.run_inner(user_input, Vec::new(), Vec::new(), None, Some(event_tx))
             .await
     }
 
     /// Run the agent with provider-facing prompt content derived from typed
     /// runtime appends, while persisting those appends according to their roles.
+    ///
+    /// `injected_context` carries host-attached ambient context for the direct
+    /// (non-runtime) path: each entry materializes as a separate typed
+    /// injected-context user-channel message immediately before the turn's
+    /// user message. When `typed_turn_appends` is non-empty the runtime
+    /// authored every transcript append for this turn (injected context
+    /// arrives as `InjectedContext`-role appends), so passing both is a
+    /// caller error — exactly one lowering owner per mode.
     pub async fn run_with_events_and_typed_turn_appends(
         &mut self,
         user_input: ContentInput,
         typed_turn_appends: Vec<ConversationAppend>,
+        injected_context: Vec<ContentInput>,
         transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
         self.run_inner(
             user_input,
             typed_turn_appends,
+            injected_context,
             transcript_identity,
             Some(event_tx),
         )
@@ -1210,6 +1238,12 @@ where
                 };
                 self.session.push(Message::SystemNotice(notice));
             }
+            ConversationAppendRole::InjectedContext => {
+                let message = self.stamp_user_message_identity(
+                    injected_context_message_from_operator_renderable(append.content)?,
+                );
+                self.session.push(Message::User(message));
+            }
             ConversationAppendRole::Assistant | ConversationAppendRole::Tool => {
                 return Err(AgentError::ConfigError(
                     "runtime transcript append role is not supported for turn start".to_string(),
@@ -1227,11 +1261,25 @@ where
         &mut self,
         user_input: ContentInput,
         typed_turn_appends: Vec<ConversationAppend>,
+        injected_context: Vec<ContentInput>,
         transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
         self.set_active_transcript_identity(transcript_identity);
+
+        // Exactly one lowering owner per mode: when the runtime authored the
+        // turn's typed appends, injected context must arrive as
+        // `InjectedContext`-role appends — a separate direct-path carrier here
+        // would double-append or silently drop. Fail closed instead.
+        if !typed_turn_appends.is_empty() && !injected_context.is_empty() {
+            self.clear_runtime_execution_kind();
+            return Err(AgentError::ConfigError(
+                "injected context must be lowered into typed turn appends when the runtime \
+                 authors the turn transcript"
+                    .to_string(),
+            ));
+        }
 
         if let Err(err) = self.require_runtime_execution_kind() {
             self.clear_runtime_execution_kind();
@@ -1287,6 +1335,19 @@ where
         }
 
         if typed_turn_appends.is_empty() {
+            // Materialize host-attached injected context as separate typed
+            // user-channel messages immediately BEFORE the turn's user
+            // message, in delivery order. The typed slot the content arrived
+            // in mints the transcript role — never free-form role strings.
+            for entry in injected_context {
+                let injected_message = if entry.has_non_text_content() {
+                    crate::types::UserMessage::injected_context_with_blocks(entry.into_blocks())
+                } else {
+                    crate::types::UserMessage::injected_context(entry.text_content())
+                };
+                let injected_message = self.stamp_user_message_identity(injected_message);
+                self.session.push(Message::User(injected_message));
+            }
             // Add user message — preserve image blocks when present.
             let user_message = if user_input.has_non_text_content() {
                 crate::types::UserMessage::with_blocks(user_input.into_blocks())
@@ -2141,6 +2202,7 @@ mod skill_activation_effect_tests {
             .run_with_events_and_typed_turn_appends(
                 "Still here.".to_string().into(),
                 Vec::new(),
+                Vec::new(),
                 Some(transcript_identity),
                 tx,
             )
@@ -2218,6 +2280,176 @@ mod skill_activation_effect_tests {
             .expect("effect should persist a block assistant message");
         assert_eq!(assistant.identity.interaction_id, Some(interaction_id));
         assert_eq!(assistant.identity.run_id, Some(run_id));
+    }
+
+    /// Ask 1 direct-path lowering: each injected-context entry materializes as
+    /// a SEPARATE typed injected-context user-channel message immediately
+    /// BEFORE the turn's user message, in delivery order.
+    #[tokio::test]
+    async fn direct_path_materializes_injected_context_before_user_message() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "the actual prompt".to_string().into(),
+                Vec::new(),
+                vec![
+                    "first ambient entry".to_string().into(),
+                    crate::types::ContentInput::Blocks(vec![crate::types::ContentBlock::Text {
+                        text: "second ambient entry".to_string(),
+                    }]),
+                ],
+                None,
+                tx,
+            )
+            .await
+            .expect("mock turn should complete");
+
+        let user_messages: Vec<&crate::types::UserMessage> = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            user_messages.len(),
+            3,
+            "two injected-context messages plus the turn's user message"
+        );
+        assert!(
+            user_messages[0].transcript_role.is_injected_context(),
+            "first injected entry must carry the typed injected-context role"
+        );
+        assert_eq!(user_messages[0].text_content(), "first ambient entry");
+        assert!(
+            user_messages[1].transcript_role.is_injected_context(),
+            "second injected entry must carry the typed injected-context role"
+        );
+        assert_eq!(user_messages[1].text_content(), "second ambient entry");
+        assert!(
+            user_messages[2].transcript_role.is_conversational(),
+            "the turn's user message stays conversational"
+        );
+        assert_eq!(user_messages[2].text_content(), "the actual prompt");
+    }
+
+    /// Exactly one lowering owner per mode: when the runtime authored the
+    /// turn's typed appends, a direct-path injected-context carrier must fail
+    /// closed instead of double-appending or silently dropping.
+    #[tokio::test]
+    async fn injected_context_with_typed_turn_appends_fails_closed() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let initial_message_count = agent.session().messages().len();
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        let err = agent
+            .run_with_events_and_typed_turn_appends(
+                "prompt".to_string().into(),
+                vec![crate::lifecycle::run_primitive::ConversationAppend {
+                    role: ConversationAppendRole::User,
+                    content: CoreRenderable::Text {
+                        text: "runtime-authored prompt".to_string(),
+                    },
+                }],
+                vec!["ambient".to_string().into()],
+                None,
+                tx,
+            )
+            .await
+            .expect_err("both carriers non-empty must fail closed");
+
+        assert!(
+            matches!(err, AgentError::ConfigError(_)),
+            "expected typed config error, got {err:?}"
+        );
+        assert_eq!(
+            agent.session().messages().len(),
+            initial_message_count,
+            "fail-closed rejection must not commit any transcript message"
+        );
+    }
+
+    /// Runtime-mode lowering owner: an `InjectedContext`-role typed append
+    /// lowers into a typed injected-context user message, preserving append
+    /// order relative to the user append.
+    #[tokio::test]
+    async fn injected_context_typed_append_lowers_to_typed_user_message() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "projected prompt".to_string().into(),
+                vec![
+                    crate::lifecycle::run_primitive::ConversationAppend {
+                        role: ConversationAppendRole::InjectedContext,
+                        content: CoreRenderable::Text {
+                            text: "runtime-lowered ambient context".to_string(),
+                        },
+                    },
+                    crate::lifecycle::run_primitive::ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "the user prompt".to_string(),
+                        },
+                    },
+                ],
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await
+            .expect("mock turn should complete");
+
+        let user_messages: Vec<&crate::types::UserMessage> = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_messages.len(), 2);
+        assert!(user_messages[0].transcript_role.is_injected_context());
+        assert_eq!(
+            user_messages[0].text_content(),
+            "runtime-lowered ambient context"
+        );
+        assert!(user_messages[1].transcript_role.is_conversational());
+        assert_eq!(user_messages[1].text_content(), "the user prompt");
+    }
+
+    /// An `InjectedContext` append only accepts operator text or content
+    /// blocks — the same operator-renderable restriction as the user role.
+    #[tokio::test]
+    async fn injected_context_typed_append_rejects_non_operator_renderable() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        let err = agent
+            .run_with_events_and_typed_turn_appends(
+                "prompt".to_string().into(),
+                vec![crate::lifecycle::run_primitive::ConversationAppend {
+                    role: ConversationAppendRole::InjectedContext,
+                    content: CoreRenderable::Json {
+                        value: serde_json::json!({"not": "operator content"}),
+                    },
+                }],
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await
+            .expect_err("json renderable must be rejected for injected-context appends");
+        assert!(
+            matches!(err, AgentError::ConfigError(_)),
+            "expected typed config error, got {err:?}"
+        );
     }
 
     /// Row #84: a successful activation produces a typed activation record (the

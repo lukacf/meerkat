@@ -176,6 +176,14 @@ pub struct CreateSessionRequest {
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
+    /// Host-attached injected context for the first turn (default empty).
+    ///
+    /// Each entry materializes as a separate typed injected-context
+    /// user-channel message ([`crate::types::TranscriptUserRole::InjectedContext`])
+    /// immediately BEFORE the first turn's user message, in order. Injected
+    /// context is excluded from semantic-memory indexing and never satisfies
+    /// the transcript-continuity save-guard.
+    pub injected_context: Vec<ContentInput>,
     /// Typed per-request system-prompt policy (Inherit/Set/Disable).
     pub system_prompt: crate::config::SystemPromptOverride,
     /// Max tokens per LLM turn.
@@ -1250,6 +1258,15 @@ impl StartTurnRuntimeSemantics {
 pub struct StartTurnRequest {
     /// User prompt for this turn (text or multimodal).
     pub prompt: ContentInput,
+    /// Host-attached injected context for this turn (default empty).
+    ///
+    /// Each entry materializes as a separate typed injected-context
+    /// user-channel message ([`crate::types::TranscriptUserRole::InjectedContext`])
+    /// immediately BEFORE the turn's user message, in order. When the runtime
+    /// authors the turn (`runtime.typed_turn_appends` non-empty), injected
+    /// context must arrive as `InjectedContext`-role appends instead — the
+    /// agent run ingress fails closed if both carriers are populated.
+    pub injected_context: Vec<ContentInput>,
     /// Optional system prompt override for a deferred session's first turn.
     ///
     /// This is only supported before the session has any conversation history.

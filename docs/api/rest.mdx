@@ -275,6 +275,14 @@ Create and run a new session.
   The user prompt to send to the agent.
 </ParamField>
 
+<ParamField body="injected_context" type="ContentInput[] | null" default="null">
+  Host-attached injected context for the first turn. Each entry materializes
+  as a separate typed injected-context user-channel message immediately before
+  the first turn's user message, in order; injected context is excluded from
+  semantic-memory indexing. Older REST servers silently ignore this field
+  (existing REST version-skew posture).
+</ParamField>
+
 <ParamField body="system_prompt" type="SystemPromptOverride" default="inherit">
   Typed per-request system-prompt policy: omit/`null` to inherit, a string to
   set an explicit prompt, or `{"action": "disable"}` to suppress every prompt
@@ -454,6 +462,14 @@ Continue an existing session.
 
 <ParamField body="prompt" type="string" required>
   Follow-up prompt.
+</ParamField>
+
+<ParamField body="injected_context" type="ContentInput[] | null" default="null">
+  Host-attached injected context for this turn. Each entry materializes as a
+  separate typed injected-context user-channel message immediately before the
+  turn's user message, in order; injected context is excluded from
+  semantic-memory indexing. Older REST servers silently ignore this field
+  (existing REST version-skew posture).
 </ParamField>
 
 <ParamField body="system_prompt" type="string | null" default="null">

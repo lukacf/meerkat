@@ -946,6 +946,7 @@ mod scenario_09_session_service {
 
         // 1. Create session (runs first turn)
         let create_req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: smoke_model(),
             prompt: "Hello, I am testing the session service."
                 .to_string()
@@ -999,6 +1000,7 @@ mod scenario_09_session_service {
 
         // 3. Start follow-up turn
         let turn_req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: "What did I just say to you?".to_string().into(),
             system_prompt: None,
             event_tx: None,
@@ -1494,6 +1496,7 @@ mod scenario_22_runtime_host_comms {
             );
 
             let turn_req = StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: prompt.into(),
                 system_prompt: None,
                 event_tx: None,
@@ -1574,6 +1577,7 @@ mod scenario_22_runtime_host_comms {
             ..Default::default()
         };
         let req_a = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: smoke_model(),
             prompt: "You are Agent A. Acknowledge peer messages briefly."
                 .to_string()

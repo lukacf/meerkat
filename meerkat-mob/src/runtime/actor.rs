@@ -5793,6 +5793,7 @@ impl MobActor {
                         .start_turn(
                             &task_member_ref,
                             meerkat_core::service::StartTurnRequest {
+                                injected_context: Vec::new(),
                                 prompt: message.into(),
                                 system_prompt: None,
                                 event_tx: None,
@@ -18407,6 +18408,7 @@ impl MobActor {
                     .await?
                 {
                     let req = meerkat_core::service::StartTurnRequest {
+                        injected_context: Vec::new(),
                         prompt: content,
                         system_prompt: None,
                         event_tx: None,
@@ -18473,6 +18475,7 @@ impl MobActor {
                     "dispatch_member_turn_after_machine_admission building turn request"
                 );
                 let req = meerkat_core::service::StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: content,
                     system_prompt: None,
                     event_tx: None,

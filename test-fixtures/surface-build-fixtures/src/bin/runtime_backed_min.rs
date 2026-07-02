@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &runtime_adapter,
         meerkat::Session::new(),
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: config.agent.model.clone(),
             prompt: "".to_string().into(),
             system_prompt: meerkat::SystemPromptOverride::Set("runtime-backed fixture".to_string()),

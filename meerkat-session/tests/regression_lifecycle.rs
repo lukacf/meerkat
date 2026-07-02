@@ -616,6 +616,7 @@ fn make_snapshot_service(
 
 fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
+        injected_context: Vec::new(),
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
         system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -631,6 +632,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
 
 fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
+        injected_context: Vec::new(),
         initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Stage,
         ..create_req(prompt)
@@ -639,6 +641,7 @@ fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
 
 fn create_req_with_labels(prompt: &str, labels: BTreeMap<String, String>) -> CreateSessionRequest {
     CreateSessionRequest {
+        injected_context: Vec::new(),
         labels: Some(labels),
         ..create_req(prompt)
     }
@@ -646,6 +649,7 @@ fn create_req_with_labels(prompt: &str, labels: BTreeMap<String, String>) -> Cre
 
 fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
+        injected_context: Vec::new(),
         prompt: prompt.to_string().into(),
         system_prompt: None,
         event_tx: None,
@@ -1225,6 +1229,7 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
         .start_turn(
             &created.session_id,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "steer me".into(),
                 system_prompt: None,
                 event_tx: None,

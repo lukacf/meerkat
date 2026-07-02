@@ -2396,6 +2396,73 @@ mod tests {
         Ok(())
     }
 
+    /// Ask 1 save-guard invariant: the injected-context transcript role must
+    /// NOT satisfy the transcript-continuity save-guard. Only the
+    /// runtime-minted `CompactionSummary` role admits a divergent rewrite
+    /// parent (`is_compaction_summary()` stays `CompactionSummary`-only).
+    #[test]
+    fn run_boundary_guard_rejects_context_summary_tail_with_injected_context_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new(
+            "runtime system before context refresh",
+        )));
+        previous.push(Message::User(UserMessage::text(
+            "Turn 1 request".to_string(),
+        )));
+        previous.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Turn 1 answer".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let mut incoming = Session::with_id(previous.id().clone());
+        incoming.push(Message::System(SystemMessage::new(
+            "runtime system after context refresh",
+        )));
+        incoming.push(Message::User(UserMessage::text(
+            "Verbose context that will be compacted".to_string(),
+        )));
+        for message in previous.messages()[1..].iter().cloned() {
+            incoming.push(message);
+        }
+        incoming.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "Turn 2 generated answer".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let parent_revision = incoming.transcript_revision()?;
+        // Same rendered shape, but the boundary message carries the typed
+        // injected-context role instead of the compaction-summary role. The
+        // guard reads the typed marker: injected context is host-attached
+        // ambient content, not a runtime compaction boundary.
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::injected_context(
+                "[Context compacted] Earlier runtime context".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            Some(parent_revision),
+        )?;
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. }
+                | SessionStoreError::MonotonicityViolation { .. })
+        ));
+        Ok(())
+    }
+
     #[test]
     fn run_boundary_guard_rejects_runtime_parent_with_inserted_message_before_tail()
     -> Result<(), Box<dyn std::error::Error>> {

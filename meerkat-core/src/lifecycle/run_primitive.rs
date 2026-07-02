@@ -108,6 +108,13 @@ pub enum ConversationAppendRole {
     SystemNotice,
     /// Tool result.
     Tool,
+    /// Host-attached injected context on the user channel.
+    ///
+    /// Lowers into a `Message::User` carrying
+    /// [`crate::types::TranscriptUserRole::InjectedContext`], so the typed
+    /// slot the content arrived in — not free-form role strings — mints the
+    /// transcript role.
+    InjectedContext,
 }
 
 /// A single conversation append operation.
@@ -1958,11 +1965,20 @@ mod tests {
             ConversationAppendRole::Assistant,
             ConversationAppendRole::SystemNotice,
             ConversationAppendRole::Tool,
+            ConversationAppendRole::InjectedContext,
         ] {
             let json = serde_json::to_value(role).unwrap();
             let parsed: ConversationAppendRole = serde_json::from_value(json).unwrap();
             assert_eq!(role, parsed);
         }
+    }
+
+    #[test]
+    fn conversation_append_role_injected_context_is_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ConversationAppendRole::InjectedContext).unwrap(),
+            serde_json::json!("injected_context"),
+        );
     }
 
     #[test]

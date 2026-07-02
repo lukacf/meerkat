@@ -5365,6 +5365,7 @@ impl SessionRuntime {
             }
 
             let req = StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: prompt.clone(),
                 system_prompt: None,
                 event_tx: Some(event_tx.clone()),
@@ -5543,6 +5544,7 @@ impl SessionRuntime {
                 .pending_session_event_fanout_tx(session_id, event_tx)
                 .await;
             let create_req = CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: build_config.model.clone(),
                 prompt: runtime_prompt.clone(),
                 system_prompt: build_config.system_prompt.clone(),
@@ -5558,6 +5560,7 @@ impl SessionRuntime {
                 create_req,
                 run_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: runtime_prompt,
                     system_prompt: None,
                     event_tx: Some(event_tx),
@@ -5608,6 +5611,7 @@ impl SessionRuntime {
             recovered_create.runtime_was_registered,
             run_id,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt,
                 system_prompt: None,
                 event_tx: Some(event_tx),
@@ -5986,6 +5990,7 @@ impl SessionRuntime {
                 .await;
 
             let create_req = CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: build_config.model.clone(),
                 prompt: ContentInput::Text(String::new()),
                 system_prompt: build_config.system_prompt.clone(),
@@ -6001,6 +6006,7 @@ impl SessionRuntime {
                 session_id.clone(),
                 create_req,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: turn_prompt,
                     system_prompt: None,
                     event_tx: Some(event_tx),
@@ -6118,6 +6124,7 @@ impl SessionRuntime {
             .await?;
 
         let req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: turn_prompt.clone(),
             system_prompt: None,
             event_tx: Some(event_tx.clone()),
@@ -9801,6 +9808,7 @@ mod tests {
         initial_turn: InitialTurnPolicy,
     ) -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: build_config.model.clone(),
             prompt: ContentInput::Text("service-created session".to_string()),
             system_prompt: build_config.system_prompt.clone(),
@@ -9815,6 +9823,7 @@ mod tests {
 
     fn service_start_turn_request(prompt: &str) -> StartTurnRequest {
         StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: ContentInput::Text(prompt.to_string()),
             system_prompt: None,
             event_tx: None,
@@ -9828,6 +9837,7 @@ mod tests {
 
     fn service_resume_pending_request() -> StartTurnRequest {
         StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: None,
             event_tx: None,
@@ -14016,6 +14026,7 @@ mod tests {
         let created = runtime
             .service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
                 system_prompt: build_config.system_prompt.clone(),
@@ -14064,6 +14075,7 @@ mod tests {
         let created = runtime
             .service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: build_config.model.clone(),
                 prompt: "Hello".to_string().into(),
                 system_prompt: build_config.system_prompt.clone(),
@@ -17646,6 +17658,7 @@ mod tests {
         } = slot;
         let build_config = *build_config;
         let create_req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: build_config.system_prompt.clone(),
@@ -17727,6 +17740,7 @@ mod tests {
         } = slot;
         let build_config = *build_config;
         let create_req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: build_config.model.clone(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: build_config.system_prompt.clone(),

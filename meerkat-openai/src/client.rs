@@ -6136,6 +6136,7 @@ mod tests {
                 SystemNoticeKind::Comms,
                 None,
                 SystemNoticeBlock::Comms {
+                    sender_taint: None,
                     kind: meerkat_core::types::CommsNoticeKind::Message,
                     direction: SystemNoticeDirection::Incoming,
                     peer: Some(SystemNoticePeer {

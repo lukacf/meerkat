@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::identity::{Keypair, PubKey, Signature};
 use ciborium::value::{CanonicalValue, Value};
 use meerkat_core::comms::PeerLifecycleKind;
+pub use meerkat_core::comms::SenderContentTaint;
 use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Response status for Request messages.
@@ -50,6 +51,14 @@ pub enum MessageKind {
         /// multimodal content; `body` remains the canonical text projection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        /// Sender-declared content taint. Lives INSIDE the signed region
+        /// (`kind` is part of the signable tuple): omitted-when-`None` keeps
+        /// old envelopes byte-identical and verifying; present-when-`Some` is
+        /// covered by the signature. `None` = no declaration — a real third
+        /// state receivers must never coalesce into
+        /// [`SenderContentTaint::Clean`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -59,6 +68,10 @@ pub enum MessageKind {
         params: JsonValue,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        /// Sender-declared content taint (signed-when-present; see
+        /// [`MessageKind::Message::content_taint`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -74,11 +87,46 @@ pub enum MessageKind {
         result: JsonValue,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        /// Sender-declared content taint (signed-when-present; see
+        /// [`MessageKind::Message::content_taint`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
     /// Acknowledgment of message receipt.
     Ack { in_reply_to: Uuid },
+}
+
+impl MessageKind {
+    /// Sender-declared content taint carried by this kind, when it is a
+    /// content-bearing kind (`Message` / `Request` / `Response`) and a
+    /// declaration is present.
+    #[must_use]
+    pub fn content_taint(&self) -> Option<SenderContentTaint> {
+        match self {
+            Self::Message { content_taint, .. }
+            | Self::Request { content_taint, .. }
+            | Self::Response { content_taint, .. } => *content_taint,
+            Self::Lifecycle { .. } | Self::Ack { .. } => None,
+        }
+    }
+
+    /// Stamp the resolved outbound taint declaration onto content-bearing
+    /// kinds. Non-content kinds (`Lifecycle` / `Ack`) are returned unchanged.
+    ///
+    /// This is the router's single outbound stamping hook: construction sites
+    /// leave `content_taint` as `None` and [`crate::router::Router`] resolves
+    /// the effective declaration at the send choke point.
+    pub(crate) fn with_content_taint(mut self, taint: Option<SenderContentTaint>) -> Self {
+        match &mut self {
+            Self::Message { content_taint, .. }
+            | Self::Request { content_taint, .. }
+            | Self::Response { content_taint, .. } => *content_taint = taint,
+            Self::Lifecycle { .. } | Self::Ack { .. } => {}
+        }
+        self
+    }
 }
 
 /// A signed message envelope.
@@ -214,16 +262,19 @@ mod tests {
         let msg = MessageKind::Message {
             body: "hello".to_string(),
             blocks: None,
+            content_taint: None,
             handling_mode: None,
         };
         if let MessageKind::Message {
             body,
             blocks,
+            content_taint,
             handling_mode,
         } = msg
         {
             assert_eq!(body, "hello");
             assert_eq!(blocks, None);
+            assert_eq!(content_taint, None);
             assert_eq!(handling_mode, None);
         } else {
             panic!("Expected Message variant");
@@ -236,18 +287,21 @@ mod tests {
             intent: "review-pr".to_string(),
             params: serde_json::json!({"pr": 42}),
             blocks: None,
+            content_taint: None,
             handling_mode: None,
         };
         if let MessageKind::Request {
             intent,
             params,
             blocks,
+            content_taint,
             handling_mode,
         } = req
         {
             assert_eq!(intent, "review-pr");
             assert_eq!(params["pr"], 42);
             assert_eq!(blocks, None);
+            assert_eq!(content_taint, None);
             assert_eq!(handling_mode, None);
         } else {
             panic!("Expected Request variant");
@@ -262,6 +316,7 @@ mod tests {
             status: Status::Completed,
             result: serde_json::json!({"approved": true}),
             blocks: None,
+            content_taint: None,
             handling_mode: None,
         };
         if let MessageKind::Response {
@@ -299,6 +354,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
@@ -324,12 +380,14 @@ mod tests {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             MessageKind::Request {
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             MessageKind::Response {
@@ -337,6 +395,21 @@ mod tests {
                 status: Status::Completed,
                 result: serde_json::json!(null),
                 blocks: None,
+                content_taint: None,
+                handling_mode: None,
+            },
+            MessageKind::Message {
+                body: "declared".to_string(),
+                blocks: None,
+                content_taint: Some(SenderContentTaint::Tainted),
+                handling_mode: None,
+            },
+            MessageKind::Response {
+                in_reply_to: Uuid::new_v4(),
+                status: Status::Completed,
+                result: serde_json::json!(null),
+                blocks: None,
+                content_taint: Some(SenderContentTaint::Clean),
                 handling_mode: None,
             },
             MessageKind::Ack {
@@ -360,6 +433,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
@@ -443,6 +517,7 @@ mod tests {
         let msg = MessageKind::Message {
             body: "test".to_string(),
             blocks: None,
+            content_taint: None,
             handling_mode: None,
         };
         let mut buf = Vec::new();
@@ -466,6 +541,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
@@ -487,6 +563,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
@@ -508,6 +585,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
@@ -525,6 +603,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
@@ -563,6 +642,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                content_taint: None,
                 handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
@@ -851,6 +931,7 @@ mod tests {
                     data: "iVBORw0KGgo=".into(),
                 },
             ]),
+            content_taint: None,
             handling_mode: None,
         };
         let mut buf = Vec::new();
@@ -869,6 +950,7 @@ mod tests {
         let kind = MessageKind::Message {
             body: "test".to_string(),
             blocks: None,
+            content_taint: None,
             handling_mode: None,
         };
 
@@ -898,6 +980,147 @@ mod tests {
         assert!(
             value.get("blocks").is_none(),
             "blocks: None should not appear in JSON"
+        );
+        // content_taint: None is omitted from the wire exactly like blocks —
+        // undeclared taint keeps old envelopes byte-identical and verifying.
+        assert!(
+            value.get("content_taint").is_none(),
+            "content_taint: None should not appear in JSON"
+        );
+        let cbor_value: ciborium::value::Value = {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&envelope.kind, &mut buf).unwrap();
+            ciborium::from_reader(&buf[..]).unwrap()
+        };
+        let ciborium::value::Value::Map(entries) = cbor_value else {
+            panic!("MessageKind should encode as a CBOR map");
+        };
+        assert!(
+            !entries.iter().any(|(key, _)| matches!(
+                key,
+                ciborium::value::Value::Text(text) if text == "content_taint"
+            )),
+            "content_taint: None should not appear in CBOR"
+        );
+    }
+
+    #[test]
+    fn test_rct_contracts_signable_bytes_with_content_taint_are_canonical() {
+        // Exact-byte pin for a DECLARED taint: `content_taint` (len 13) sorts
+        // immediately before `handling_mode` (len 13, lexicographically later)
+        // in the RFC 8949 length-then-lex canonical key order. Any change to
+        // the signed encoding of the taint declaration breaks this pin.
+        let envelope = Envelope {
+            id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            from: PubKey::new([1u8; 32]),
+            to: PubKey::new([2u8; 32]),
+            kind: MessageKind::Message {
+                body: "hello".to_string(),
+                blocks: None,
+                content_taint: Some(SenderContentTaint::Tainted),
+                handling_mode: Some(HandlingMode::Queue),
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+
+        let bytes = envelope.signable_bytes();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[
+            0x84, 0x50, 0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66,
+            0x55, 0x44, 0x00, 0x00, 0x58, 0x20,
+        ]);
+        expected.extend(std::iter::repeat_n(0x01, 32));
+        expected.extend_from_slice(&[0x58, 0x20]);
+        expected.extend(std::iter::repeat_n(0x02, 32));
+        // Map of 4 entries in canonical order:
+        //   "body" -> "hello", "type" -> "message",
+        //   "content_taint" -> "tainted", "handling_mode" -> "queue".
+        expected.push(0xa4);
+        expected.extend_from_slice(&[0x64, b'b', b'o', b'd', b'y']);
+        expected.extend_from_slice(&[0x65, b'h', b'e', b'l', b'l', b'o']);
+        expected.extend_from_slice(&[0x64, b't', b'y', b'p', b'e']);
+        expected.extend_from_slice(&[0x67, b'm', b'e', b's', b's', b'a', b'g', b'e']);
+        expected.extend_from_slice(&[
+            0x6d, b'c', b'o', b'n', b't', b'e', b'n', b't', b'_', b't', b'a', b'i', b'n', b't',
+        ]);
+        expected.extend_from_slice(&[0x67, b't', b'a', b'i', b'n', b't', b'e', b'd']);
+        expected.extend_from_slice(&[
+            0x6d, b'h', b'a', b'n', b'd', b'l', b'i', b'n', b'g', b'_', b'm', b'o', b'd', b'e',
+        ]);
+        expected.extend_from_slice(&[0x65, b'q', b'u', b'e', b'u', b'e']);
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn envelope_with_content_taint_signs_and_verifies() {
+        use crate::identity::Keypair;
+
+        for taint in [SenderContentTaint::Clean, SenderContentTaint::Tainted] {
+            let keypair = Keypair::generate();
+            let mut envelope = Envelope {
+                id: Uuid::new_v4(),
+                from: keypair.public_key(),
+                to: PubKey::new([2u8; 32]),
+                kind: MessageKind::Request {
+                    intent: "review".to_string(),
+                    params: serde_json::json!({"pr": 7}),
+                    blocks: None,
+                    content_taint: Some(taint),
+                    handling_mode: None,
+                },
+                sig: Signature::new([0u8; 64]),
+            };
+            envelope.sign(&keypair);
+            assert!(
+                envelope.verify(),
+                "envelope with content_taint {taint} should verify"
+            );
+
+            // The declaration is inside the signed region: flipping it after
+            // signing must break verification.
+            envelope.kind = envelope.kind.with_content_taint(Some(match taint {
+                SenderContentTaint::Clean => SenderContentTaint::Tainted,
+                SenderContentTaint::Tainted => SenderContentTaint::Clean,
+            }));
+            assert!(
+                !envelope.verify(),
+                "tampered content_taint must fail signature verification"
+            );
+        }
+    }
+
+    #[test]
+    fn content_taint_none_and_clean_are_distinct_wire_states() {
+        // None (no declaration) omits the field; Clean is an affirmative,
+        // serialized declaration. A receiver coalescing the two would erase
+        // the sender's claim; the wire keeps them distinct.
+        let undeclared = MessageKind::Message {
+            body: "hello".to_string(),
+            blocks: None,
+            content_taint: None,
+            handling_mode: None,
+        };
+        let clean = MessageKind::Message {
+            body: "hello".to_string(),
+            blocks: None,
+            content_taint: Some(SenderContentTaint::Clean),
+            handling_mode: None,
+        };
+        assert_ne!(undeclared, clean);
+
+        let undeclared_json = serde_json::to_value(&undeclared).unwrap();
+        let clean_json = serde_json::to_value(&clean).unwrap();
+        assert!(undeclared_json.get("content_taint").is_none());
+        assert_eq!(clean_json["content_taint"], "clean");
+
+        let undeclared_roundtrip: MessageKind = serde_json::from_value(undeclared_json).unwrap();
+        let clean_roundtrip: MessageKind = serde_json::from_value(clean_json).unwrap();
+        assert_eq!(undeclared_roundtrip.content_taint(), None);
+        assert_eq!(
+            clean_roundtrip.content_taint(),
+            Some(SenderContentTaint::Clean)
         );
     }
 }

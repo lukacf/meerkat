@@ -147,6 +147,10 @@ fn peer_input_from_ingress_fact(
         },
         payload: peer_payload(interaction),
         handling_mode,
+        // Content-adjacent metadata from the classified interaction: the
+        // sender's signed taint declaration (when one was made) rides to the
+        // typed transcript notice.
+        sender_taint: interaction.sender_taint,
     }))
 }
 
@@ -372,6 +376,7 @@ mod tests {
     #[test]
     fn message_to_peer_input() {
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
@@ -403,9 +408,47 @@ mod tests {
         }
     }
 
+    /// Ask 5 gate: the classified interaction's sender-declared content taint
+    /// threads through to `PeerInput.sender_taint` as content-adjacent
+    /// metadata, and `None` (no declaration) survives as `None` — never
+    /// coalesced into `Clean`.
+    #[test]
+    fn message_sender_taint_threads_to_peer_input() {
+        use meerkat_core::comms::SenderContentTaint;
+
+        for declared in [
+            Some(SenderContentTaint::Tainted),
+            Some(SenderContentTaint::Clean),
+            None,
+        ] {
+            let interaction = InboxInteraction {
+                sender_taint: declared,
+                from_route: None,
+                from: "peer-1".into(),
+                content: InteractionContent::Message {
+                    body: "hello".into(),
+                    blocks: None,
+                },
+                id: make_interaction_id(),
+                rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+            };
+            let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
+            let Input::Peer(p) = &input else {
+                panic!("Expected PeerInput");
+            };
+            assert_eq!(
+                p.sender_taint, declared,
+                "sender taint must ride the classified projection unchanged"
+            );
+        }
+    }
+
     #[test]
     fn request_to_peer_input() {
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Request {
@@ -452,6 +495,7 @@ mod tests {
         let request_id = make_interaction_id();
         let classified = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "test-mob/lead/l-requester".into(),
                 content: InteractionContent::Request {
@@ -513,6 +557,7 @@ mod tests {
             response_terminality: None,
             ingress: plain_event_ingress(id, "webhook"),
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
@@ -557,6 +602,7 @@ mod tests {
                 PeerIngressConvention::Message,
             ),
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
@@ -608,6 +654,7 @@ mod tests {
                 ),
             ),
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "display-agent".into(),
                 content: InteractionContent::Request {
@@ -656,6 +703,7 @@ mod tests {
                 convention: PeerIngressConvention::Message,
             },
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "display-agent".into(),
                 content: InteractionContent::Message {
@@ -684,6 +732,7 @@ mod tests {
     #[test]
     fn request_body_preserves_rendered_text_and_structured_payload() {
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: None,
             from: "event:webhook".into(),
             content: InteractionContent::Request {
@@ -717,6 +766,7 @@ mod tests {
             },
         ];
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
@@ -756,6 +806,7 @@ mod tests {
         let peer_id = PeerId::new();
         let classified = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: Some(peer_id),
                 from: "vision-peer".into(),
                 content: InteractionContent::Request {
@@ -817,6 +868,7 @@ mod tests {
             },
         ];
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
@@ -862,6 +914,7 @@ mod tests {
             response_terminality: None,
             ingress: plain_event_ingress(id, "webhook"),
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
@@ -904,6 +957,7 @@ mod tests {
             response_terminality: None,
             ingress: plain_event_ingress(id, "webhook"),
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
@@ -938,6 +992,7 @@ mod tests {
             uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f2").unwrap(),
         );
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: Some(route_id),
             from: "Peer One".into(),
             content: InteractionContent::Response {
@@ -1009,6 +1064,7 @@ mod tests {
         let id = make_interaction_id();
         let classified = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "peer-1".into(),
                 content: InteractionContent::Response {
@@ -1062,6 +1118,7 @@ mod tests {
         let id = make_interaction_id();
         let classified = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "peer-1".into(),
                 content: InteractionContent::Response {
@@ -1111,6 +1168,7 @@ mod tests {
         let interaction_id = make_interaction_id();
         let candidate = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "Peer One".into(),
                 content: InteractionContent::Response {
@@ -1159,6 +1217,7 @@ mod tests {
             uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f3").unwrap(),
         );
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: Some(route_id),
             from: "peer-1".into(),
             content: InteractionContent::Response {
@@ -1190,6 +1249,7 @@ mod tests {
     fn response_accepted_to_progress() {
         let in_reply_to = make_interaction_id();
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Response {
@@ -1233,6 +1293,7 @@ mod tests {
         let id = make_interaction_id();
         let classified = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "peer-1".into(),
                 content: InteractionContent::Response {
@@ -1286,6 +1347,7 @@ mod tests {
     #[test]
     fn peer_source_includes_runtime_id() {
         let interaction = InboxInteraction {
+            sender_taint: None,
             from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
@@ -1322,6 +1384,7 @@ mod tests {
         let in_reply_to = make_interaction_id();
         let interactions = vec![
             InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "p".into(),
                 content: InteractionContent::Message {
@@ -1334,6 +1397,7 @@ mod tests {
                 render_metadata: None,
             },
             InboxInteraction {
+                sender_taint: None,
                 from_route: None,
                 from: "p".into(),
                 content: InteractionContent::Request {
@@ -1347,6 +1411,7 @@ mod tests {
                 render_metadata: None,
             },
             InboxInteraction {
+                sender_taint: None,
                 from_route: Some(meerkat_core::comms::PeerId::from_uuid(
                     uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f6").unwrap(),
                 )),

@@ -10,7 +10,8 @@
 pub use meerkat_core::comms::{
     CommsCommandError, CommsPeerRequestIntent, InputSource, InputStreamMode, PeerAddress,
     PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
-    PeerLifecycleKind, PeerName, PeerSendability, PeerTransport,
+    PeerLifecycleKind, PeerName, PeerSendability, PeerTransport, SendTaintOverride,
+    SenderContentTaint,
 };
 pub use meerkat_core::interaction::ResponseStatus;
 pub use meerkat_core::types::HandlingMode;
@@ -200,6 +201,10 @@ pub enum CommsCommandRequest {
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        /// Per-send tri-state taint override: absent inherits the
+        /// runtime-level outbound declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -214,6 +219,10 @@ pub enum CommsCommandRequest {
         params: CommsPeerRequestParams,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        /// Per-send tri-state taint override: absent inherits the
+        /// runtime-level outbound declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +236,10 @@ pub enum CommsCommandRequest {
         result: Option<CommsPeerResponseResult>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        /// Per-send tri-state taint override: absent inherits the
+        /// runtime-level outbound declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -266,11 +279,13 @@ impl CommsCommandRequest {
                 to,
                 body,
                 blocks,
+                content_taint,
                 handling_mode,
             } => meerkat_core::comms::CommsCommandRequest::PeerMessage {
                 to,
                 body: single_authority_body(body, &blocks),
                 blocks,
+                content_taint,
                 handling_mode,
             },
             Self::PeerLifecycle {
@@ -289,6 +304,7 @@ impl CommsCommandRequest {
                 intent,
                 params,
                 blocks,
+                content_taint,
                 handling_mode,
                 stream,
             } => {
@@ -314,6 +330,7 @@ impl CommsCommandRequest {
                         )
                     })?,
                     blocks,
+                    content_taint,
                     handling_mode,
                     stream,
                 }
@@ -324,6 +341,7 @@ impl CommsCommandRequest {
                 status,
                 result,
                 blocks,
+                content_taint,
                 handling_mode,
             } => meerkat_core::comms::CommsCommandRequest::PeerResponse {
                 to,
@@ -339,6 +357,7 @@ impl CommsCommandRequest {
                     None => serde_json::Value::Null,
                 },
                 blocks,
+                content_taint,
                 handling_mode,
             },
         })
@@ -377,6 +396,10 @@ pub enum CommsSendParams {
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        /// Per-send tri-state taint override: absent inherits the
+        /// runtime-level outbound declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -393,6 +416,10 @@ pub enum CommsSendParams {
         params: CommsPeerRequestParams,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        /// Per-send tri-state taint override: absent inherits the
+        /// runtime-level outbound declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,6 +434,10 @@ pub enum CommsSendParams {
         result: Option<CommsPeerResponseResult>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        /// Per-send tri-state taint override: absent inherits the
+        /// runtime-level outbound declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SendTaintOverride>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -456,12 +487,14 @@ impl CommsSendParams {
                 to,
                 body,
                 blocks,
+                content_taint,
                 handling_mode,
                 ..
             } => CommsCommandRequest::PeerMessage {
                 to,
                 body,
                 blocks,
+                content_taint,
                 handling_mode,
             },
             Self::PeerLifecycle {
@@ -479,6 +512,7 @@ impl CommsSendParams {
                 intent,
                 params,
                 blocks,
+                content_taint,
                 handling_mode,
                 stream,
                 ..
@@ -487,6 +521,7 @@ impl CommsSendParams {
                 intent,
                 params,
                 blocks,
+                content_taint,
                 handling_mode,
                 stream,
             },
@@ -496,6 +531,7 @@ impl CommsSendParams {
                 status,
                 result,
                 blocks,
+                content_taint,
                 handling_mode,
                 ..
             } => CommsCommandRequest::PeerResponse {
@@ -504,6 +540,7 @@ impl CommsSendParams {
                 status,
                 result,
                 blocks,
+                content_taint,
                 handling_mode,
             },
         }
@@ -1002,6 +1039,7 @@ mod tests {
             to: peer_id(),
             body: "lone body".to_string(),
             blocks: None,
+            content_taint: None,
             handling_mode: None,
         };
 
@@ -1013,6 +1051,58 @@ mod tests {
             panic!("expected core peer message");
         };
         assert_eq!(body, "lone body");
+    }
+
+    #[test]
+    fn peer_message_content_taint_defaults_absent_and_threads_to_core() {
+        // Absent on the wire => `None` (inherit the runtime declaration) — a
+        // different fact from an explicit `undeclared` strip or a declared
+        // taint state.
+        let inherited = serde_json::from_value::<CommsSendParams>(json!({
+            "session_id": "sid_1",
+            "kind": "peer_message",
+            "to": peer_id().to_string(),
+            "body": "hello"
+        }))
+        .expect("peer message without content_taint should deserialize");
+        let command = inherited
+            .into_command()
+            .into_command(&meerkat_core::types::SessionId::new())
+            .expect("peer message should project to core command");
+        let meerkat_core::comms::CommsCommand::PeerMessage { content_taint, .. } = command else {
+            panic!("expected core peer message");
+        };
+        assert_eq!(content_taint, None);
+
+        for (wire, expected) in [
+            (
+                json!({"declare": "tainted"}),
+                SendTaintOverride::Declare(SenderContentTaint::Tainted),
+            ),
+            (
+                json!({"declare": "clean"}),
+                SendTaintOverride::Declare(SenderContentTaint::Clean),
+            ),
+            (json!("undeclared"), SendTaintOverride::Undeclared),
+        ] {
+            let params = serde_json::from_value::<CommsSendParams>(json!({
+                "session_id": "sid_1",
+                "kind": "peer_message",
+                "to": peer_id().to_string(),
+                "body": "hello",
+                "content_taint": wire
+            }))
+            .expect("peer message with content_taint should deserialize");
+            let command = params
+                .into_command()
+                .into_command(&meerkat_core::types::SessionId::new())
+                .expect("peer message should project to core command");
+            let meerkat_core::comms::CommsCommand::PeerMessage { content_taint, .. } = command
+            else {
+                panic!("expected core peer message");
+            };
+            assert_eq!(content_taint, Some(expected));
+        }
     }
 
     #[test]

@@ -5756,6 +5756,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-forward-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -5804,6 +5805,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-steer-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            sender_taint: None,
             header: meerkat_runtime::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -6866,6 +6868,7 @@ mod tests {
         CoreCommsRuntime::send(
             &*sender,
             CommsCommand::PeerResponse {
+                content_taint: None,
                 to: PeerRoute::with_display_name(
                     operator_pubkey.to_peer_id(),
                     PeerName::new(format!("{mob_id}/worker/worker-1")).expect("valid peer name"),

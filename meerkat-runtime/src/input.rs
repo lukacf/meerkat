@@ -369,6 +369,14 @@ pub struct PeerInput {
     /// [`validate_peer_handling_mode`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handling_mode: Option<HandlingMode>,
+    /// Sender-declared content taint carried inside the signed comms
+    /// envelope, when the sender made a declaration. `None` means "no
+    /// declaration" — a real third state that must never be coalesced into
+    /// [`meerkat_core::comms::SenderContentTaint::Clean`]. Content-adjacent
+    /// payload only: it makes no admission or routing decision. Additive on
+    /// durable input persistence (absent on older persisted inputs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_taint: Option<meerkat_core::comms::SenderContentTaint>,
 }
 
 /// Peer communication conventions.
@@ -450,6 +458,9 @@ pub fn peer_response_terminal_input(
         content: ContentInput::Text(String::new()),
         payload: Some(result),
         handling_mode: None,
+        // Bridge-projected terminal responses carry no comms envelope, so no
+        // sender declaration exists.
+        sender_taint: None,
     })
 }
 
@@ -823,6 +834,10 @@ fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
             kind,
             direction: SystemNoticeDirection::Incoming,
             peer: notice_peer,
+            // The envelope's sender-declared taint rides into the typed
+            // transcript notice; `None` (no declaration) stays distinct from
+            // an affirmative `Clean` declaration.
+            sender_taint: peer.sender_taint,
             request_id,
             intent,
             status,
@@ -960,6 +975,10 @@ fn peer_response_terminal_context_append(
                     id: fact.source.route_identity.peer_id(),
                     display_name: Some(fact.source.display_identity.to_string()),
                 }),
+                // This context append is derived from the machine-echoed
+                // terminal apply intent, which carries no content facts - no
+                // sender declaration is available here.
+                sender_taint: None,
                 request_id: Some(fact.correlation_id.to_string()),
                 intent: None,
                 status: Some(fact.status.label().to_string()),
@@ -1148,6 +1167,7 @@ mod tests {
     #[test]
     fn peer_input_message_serde() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
             content: "hi there".into(),
@@ -1170,6 +1190,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header,
             convention: Some(PeerConvention::Message),
             content: ContentInput::Blocks(vec![
@@ -1217,6 +1238,71 @@ mod tests {
         );
     }
 
+    /// Ask 5 gate (receiver end-to-end at the transcript notice): a peer
+    /// input carrying the envelope's sender-declared taint produces a typed
+    /// `SystemNoticeBlock::Comms` whose `sender_taint` preserves the
+    /// declaration, and the model projection appends a marker for `Tainted`
+    /// ONLY — `Clean` and `None` (no declaration) deliberately render
+    /// identically while the typed field stays distinct.
+    #[test]
+    fn peer_message_sender_taint_reaches_typed_comms_notice_and_model_projection() {
+        use meerkat_core::comms::SenderContentTaint;
+
+        let notice_block = |declared: Option<SenderContentTaint>| {
+            let mut header = make_header();
+            header.source = InputOrigin::Peer {
+                peer_id: "018f6f79-7a82-7c4e-a552-a3b86f963005".into(),
+                display_identity: Some("display-agent".into()),
+                runtime_id: None,
+            };
+            let input = Input::Peer(PeerInput {
+                sender_taint: declared,
+                header,
+                convention: Some(PeerConvention::Message),
+                content: "hello from peer".into(),
+                payload: None,
+                handling_mode: None,
+            });
+            let projection = runtime_input_projection(&input);
+            let append = projection.append.expect("conversation append");
+            let CoreRenderable::SystemNotice { blocks, .. } = append.content else {
+                panic!("expected typed system notice");
+            };
+            blocks.first().cloned().expect("comms block")
+        };
+
+        let tainted_block = notice_block(Some(SenderContentTaint::Tainted));
+        let clean_block = notice_block(Some(SenderContentTaint::Clean));
+        let undeclared_block = notice_block(None);
+
+        let taint_of = |block: &meerkat_core::types::SystemNoticeBlock| {
+            let meerkat_core::types::SystemNoticeBlock::Comms { sender_taint, .. } = block else {
+                panic!("expected comms block");
+            };
+            *sender_taint
+        };
+        assert_eq!(taint_of(&tainted_block), Some(SenderContentTaint::Tainted));
+        assert_eq!(taint_of(&clean_block), Some(SenderContentTaint::Clean));
+        assert_eq!(
+            taint_of(&undeclared_block),
+            None,
+            "no declaration must stay None in the transcript, never coalesced into Clean"
+        );
+
+        let tainted_text = tainted_block.model_projection_text();
+        let clean_text = clean_block.model_projection_text();
+        let undeclared_text = undeclared_block.model_projection_text();
+        assert!(
+            tainted_text.contains("[sender declared this content tainted]"),
+            "declared taint must be model-visible: {tainted_text}"
+        );
+        assert_eq!(
+            clean_text, undeclared_text,
+            "Clean and no-declaration deliberately render identically; the typed field is the carrier"
+        );
+        assert!(!clean_text.contains("tainted"));
+    }
+
     #[test]
     fn peer_response_terminal_context_is_deferred_to_machine_batch_projection() {
         let route_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f2";
@@ -1228,6 +1314,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header,
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_id.into(),
@@ -1369,6 +1456,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header,
             convention: Some(PeerConvention::Message),
             content: "please look at this while you work".into(),
@@ -1437,6 +1525,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header,
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_id.into(),
@@ -1478,6 +1567,7 @@ mod tests {
     #[test]
     fn peer_input_request_serde() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Request {
                 request_id: "req-1".into(),
@@ -1499,6 +1589,7 @@ mod tests {
     #[test]
     fn peer_input_response_terminal_serde() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: "req-1".into(),
@@ -1516,6 +1607,7 @@ mod tests {
     #[test]
     fn peer_input_response_progress_serde() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: "req-1".into(),
@@ -1735,6 +1827,7 @@ mod tests {
         assert_eq!(prompt.kind(), InputKind::Prompt);
 
         let peer_msg = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
             content: "hi".into(),
@@ -1744,6 +1837,7 @@ mod tests {
         assert_eq!(peer_msg.kind(), InputKind::PeerMessage);
 
         let peer_req = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Request {
                 request_id: "r".into(),
@@ -1834,6 +1928,7 @@ mod tests {
     #[test]
     fn peer_input_with_queue_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
             content: "hi".into(),
@@ -1926,6 +2021,7 @@ mod tests {
     #[test]
     fn peer_input_with_steer_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
             content: "hi".into(),
@@ -1944,6 +2040,7 @@ mod tests {
     #[test]
     fn peer_input_handling_mode_not_serialized_when_none() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
             content: "hi".into(),

@@ -142,6 +142,7 @@ mod tests {
     #[test]
     fn response_progress_is_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: "req-1".into(),
@@ -168,6 +169,7 @@ mod tests {
     #[test]
     fn peer_message_not_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::Message),
             content: "hello".into(),

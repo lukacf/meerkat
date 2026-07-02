@@ -12071,6 +12071,7 @@ impl MobActor {
                 to: route,
                 body,
                 blocks,
+                content_taint: None,
                 handling_mode,
             },
         })
@@ -20347,6 +20348,7 @@ impl MobActor {
                 intent: intent.to_string(),
                 params,
                 blocks: None,
+                content_taint: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
             },

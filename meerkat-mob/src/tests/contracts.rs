@@ -451,6 +451,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
 
     // Send PeerRequest from sender to receiver
     let request_cmd = CommsCommand::PeerRequest {
+        content_taint: None,
         to: inproc_peer_route(&receiver_name, receiver.as_ref()).expect("valid peer route"),
         intent: "mob.ping".to_string(),
         params: serde_json::json!({"seq": 1}),
@@ -521,6 +522,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
 
     // Receiver sends PeerResponse back
     let response_cmd = CommsCommand::PeerResponse {
+        content_taint: None,
         to: inproc_peer_route(&sender_name, sender.as_ref()).expect("valid peer route"),
         in_reply_to: request_id,
         status: meerkat_core::ResponseStatus::Completed,
@@ -640,6 +642,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
     // installed, the send path fires `PeerRequestSent` before the
     // reservation commits — an install-then-reject would refuse to send.
     let request_cmd = CommsCommand::PeerRequest {
+        content_taint: None,
         to: inproc_peer_route(&receiver_name, &receiver).unwrap(),
         intent: "mob.ping".into(),
         params: serde_json::json!({"seq": 1}),
@@ -807,6 +810,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     let ok_receipt = CoreCommsRuntime::send(
         sender.as_ref(),
         CommsCommand::PeerRequest {
+            content_taint: None,
             to: inproc_peer_route(&receiver_name, &receiver).unwrap(),
             intent: "mob.ping".into(),
             params: serde_json::json!({"seq": 2}),
@@ -918,6 +922,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
     CoreCommsRuntime::send(
         responder.as_ref(),
         CommsCommand::PeerResponse {
+            content_taint: None,
             to: inproc_peer_route(&originator_name, &originator).unwrap(),
             in_reply_to,
             status: meerkat_core::ResponseStatus::Accepted,
@@ -938,6 +943,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
     CoreCommsRuntime::send(
         responder.as_ref(),
         CommsCommand::PeerResponse {
+            content_taint: None,
             to: inproc_peer_route(&originator_name, &originator).unwrap(),
             in_reply_to,
             status: meerkat_core::ResponseStatus::Completed,
@@ -1106,6 +1112,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
 
     // Verify send works before removal
     let cmd = CommsCommand::PeerMessage {
+        content_taint: None,
         to: inproc_peer_route(&receiver_name, &receiver).expect("valid peer route"),
         body: "before removal".to_string(),
         blocks: None,
@@ -1141,6 +1148,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
 
     // Verify send fails after removal
     let cmd_after = CommsCommand::PeerMessage {
+        content_taint: None,
         to: inproc_peer_route(&receiver_name, &receiver).expect("valid peer route"),
         body: "after removal".to_string(),
         blocks: None,
@@ -1520,6 +1528,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
 
     // Verify comms request before additional turns.
     let before_cmd = CommsCommand::PeerRequest {
+        content_taint: None,
         to: inproc_peer_route(&b_name, &comms_b).expect("valid peer route"),
         intent: "mob.contract.before".to_string(),
         params: serde_json::json!({"step": "before_turn"}),
@@ -1557,6 +1566,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
 
     // Verify comms still works after extra turn.
     let after_cmd = CommsCommand::PeerRequest {
+        content_taint: None,
         to: inproc_peer_route(&a_name, &comms_a).expect("valid peer route"),
         intent: "mob.contract.after".to_string(),
         params: serde_json::json!({"step": "after_turn"}),

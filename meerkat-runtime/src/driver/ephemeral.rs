@@ -3486,6 +3486,7 @@ mod tests {
 
     fn peer_message_input() -> Input {
         Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3531,6 +3532,7 @@ mod tests {
 
     fn progress_input_with_supersession(label: &str, supersession_key: &str) -> Input {
         Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -4270,6 +4272,7 @@ mod tests {
             .unwrap();
 
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),

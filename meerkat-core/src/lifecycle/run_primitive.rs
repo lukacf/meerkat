@@ -1658,6 +1658,7 @@ mod tests {
                         id: crate::comms::PeerId::new(),
                         display_name: Some("worker-1".to_string()),
                     }),
+                    sender_taint: None,
                     request_id: Some(crate::time_compat::new_uuid_v7().to_string()),
                     intent: Some("checksum_token".to_string()),
                     status: None,

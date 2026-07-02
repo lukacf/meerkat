@@ -474,6 +474,7 @@ mod tests {
                 kind: crate::types::CommsNoticeKind::Message,
                 direction: SystemNoticeDirection::Incoming,
                 peer: None,
+                sender_taint: None,
                 request_id: None,
                 intent: None,
                 status: None,

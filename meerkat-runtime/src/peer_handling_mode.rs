@@ -61,6 +61,7 @@ mod tests {
     #[test]
     fn response_progress_with_handling_mode_rejected() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: "r".into(),
@@ -80,6 +81,7 @@ mod tests {
     #[test]
     fn response_terminal_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: "r".into(),
@@ -95,6 +97,7 @@ mod tests {
     #[test]
     fn response_terminal_with_queue_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: "r".into(),
@@ -110,6 +113,7 @@ mod tests {
     #[test]
     fn message_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Message),
             content: "hi".into(),
@@ -122,6 +126,7 @@ mod tests {
     #[test]
     fn request_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: Some(PeerConvention::Request {
                 request_id: "r".into(),
@@ -137,6 +142,7 @@ mod tests {
     #[test]
     fn no_convention_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            sender_taint: None,
             header: make_header(),
             convention: None,
             content: "hi".into(),
@@ -165,6 +171,7 @@ mod tests {
             None,
         ] {
             let input = Input::Peer(PeerInput {
+                sender_taint: None,
                 header: make_header(),
                 convention,
                 content: "hi".into(),

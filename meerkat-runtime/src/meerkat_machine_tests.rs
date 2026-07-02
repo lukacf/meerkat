@@ -1905,6 +1905,7 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
         .expect("register session with executor");
 
     let input = Input::Peer(crate::input::PeerInput {
+        sender_taint: None,
         header: crate::input::InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -2178,6 +2179,7 @@ async fn fail_machine_run_does_not_fabricate_runtime_apply_failure_cause() {
 
 fn make_progress_input(label: &str) -> Input {
     Input::Peer(crate::input::PeerInput {
+        sender_taint: None,
         header: crate::input::InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -6326,6 +6328,7 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
     events.lock().expect("events mutex poisoned").clear();
 
     let peer_input = Input::Peer(crate::input::PeerInput {
+        sender_taint: None,
         header: crate::input::InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -6581,6 +6584,7 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
     queued_control_calls.store(0, Ordering::SeqCst);
 
     let peer_input = Input::Peer(crate::input::PeerInput {
+        sender_taint: None,
         header: crate::input::InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -6915,6 +6919,7 @@ fn interrupt_yielding_peer_input_with_idempotency(
     idempotency_key: Option<IdempotencyKey>,
 ) -> (Input, InputId) {
     let input = Input::Peer(crate::input::PeerInput {
+        sender_taint: None,
         header: crate::input::InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -7084,6 +7089,7 @@ async fn explicit_running_steer_admission_injects_live_boundary_context_once() {
     queued_boundary_cancel_calls.store(0, Ordering::SeqCst);
 
     let steered_peer_input = Input::Peer(crate::input::PeerInput {
+        sender_taint: None,
         header: crate::input::InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -22245,6 +22251,7 @@ fn runtime_parity_prompt(text: &str) -> Input {
 
 fn runtime_parity_peer_message(text: &str) -> Input {
     Input::Peer(crate::input::PeerInput {
+        sender_taint: None,
         header: crate::input::InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
@@ -22520,6 +22527,7 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
         let outcome = driver
             .as_driver_mut()
             .accept_input(Input::Peer(crate::input::PeerInput {
+                sender_taint: None,
                 header: crate::input::InputHeader {
                     id: InputId::new(),
                     timestamp: Utc::now(),

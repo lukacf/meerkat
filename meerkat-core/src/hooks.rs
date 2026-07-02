@@ -2,7 +2,10 @@
 
 use crate::error::AgentError;
 use crate::event::{AgentErrorClass, AgentErrorReport, ToolCallArguments};
-use crate::types::{ContentBlock, RunInput, SessionId, StopReason, ToolResult, Usage};
+use crate::types::{
+    ContentBlock, RunInput, ServerToolKind, SessionId, StopReason, ToolProvenance, ToolResult,
+    Usage,
+};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -216,6 +219,13 @@ pub struct HookLlmResponse {
     pub stop_reason: Option<StopReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Typed kinds of provider-executed server-tool evidence present in this
+    /// response (`AssistantBlock::ServerToolContent` blocks), in block order.
+    /// Projection of the typed block owner: a foreground `PostLlmResponse`
+    /// hook classifies provider-native content (e.g. web search) synchronously
+    /// from this field instead of racing the lossy observe stream.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server_tool_content: Vec<ServerToolKind>,
 }
 
 /// Tool call view exposed to hooks.
@@ -225,6 +235,12 @@ pub struct HookToolCall {
     pub tool_use_id: String,
     pub name: String,
     pub args: ToolCallArguments,
+    /// Typed provenance of the dispatched tool definition, when the active
+    /// tool catalog carries one. Projection of the `ToolDef.provenance` owner
+    /// (never re-derived from the tool name string): dispatch-time policy
+    /// hooks steer on this typed field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ToolProvenance>,
 }
 
 /// Tool result view exposed to hooks.
@@ -250,6 +266,11 @@ pub struct HookToolResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_blocks: Vec<ContentBlock>,
     pub is_error: bool,
+    /// Typed provenance of the dispatched tool definition, when the active
+    /// tool catalog carries one. Projection of the `ToolDef.provenance` owner
+    /// (never re-derived from the tool name string).
+    #[serde(default)]
+    pub provenance: Option<ToolProvenance>,
 }
 
 impl Serialize for HookToolResult {
@@ -261,9 +282,12 @@ impl Serialize for HookToolResult {
         // `content` is a serialize-only text projection derived from the
         // canonical `content_blocks` for external hook consumers (row #331).
         // The field count is `tool_use_id`, `name`, `content`, `is_error`,
-        // plus `content_blocks` when present.
+        // plus `content_blocks` and `provenance` when present.
         let mut len = 4;
         if !self.content_blocks.is_empty() {
+            len += 1;
+        }
+        if self.provenance.is_some() {
             len += 1;
         }
         let mut state = serializer.serialize_struct("HookToolResult", len)?;
@@ -274,6 +298,9 @@ impl Serialize for HookToolResult {
             state.serialize_field("content_blocks", &self.content_blocks)?;
         }
         state.serialize_field("is_error", &self.is_error)?;
+        if let Some(provenance) = &self.provenance {
+            state.serialize_field("provenance", provenance)?;
+        }
         state.end()
     }
 }
@@ -293,7 +320,16 @@ impl HookToolResult {
             name: name.into(),
             content_blocks: result.content.clone(),
             is_error: result.is_error,
+            provenance: None,
         }
+    }
+
+    /// Attach the typed provenance of the dispatched tool definition
+    /// (chainable builder, mirroring [`crate::types::ToolDef::with_provenance`]).
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Option<ToolProvenance>) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     /// Presentation-only text projection derived from the canonical typed
@@ -618,6 +654,7 @@ mod tests {
             name: "test_tool".into(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
+            provenance: None,
         };
         // text projection concatenates text from blocks; image blocks produce "[image: image/png]"
         assert_eq!(hook_result.text_projection(), "hello\n[image: image/png]");
@@ -631,6 +668,7 @@ mod tests {
             name: "test_tool".into(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
+            provenance: None,
         };
         assert_eq!(hook_result.text_projection(), "just text");
         assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
@@ -722,6 +760,7 @@ mod tests {
             name: "tool".into(),
             content_blocks: vec![text_block("alpha"), image_block("image/png", "AAAA")],
             is_error: false,
+            provenance: None,
         };
         assert_eq!(
             result.text_projection(),
@@ -762,6 +801,7 @@ mod tests {
             name: "tool".into(),
             content_blocks: vec![text_block("alpha"), image_block("image/png", "AAAA")],
             is_error: false,
+            provenance: None,
         };
         let json = serde_json::to_value(&original).expect("serialize");
         assert_eq!(
@@ -804,6 +844,100 @@ mod tests {
             serde_json::to_value(&decoded).expect("re-serialize")["prompt"],
             serde_json::json!("typed prompt")
         );
+    }
+
+    /// Ask 5 wire discipline: `provenance` is additive on the external hook
+    /// envelope — omitted when absent (old payloads stay byte-stable), a
+    /// typed projection of `ToolDef.provenance` when present, and round-trips
+    /// through the custom `HookToolResult` serializer.
+    #[test]
+    fn hook_tool_payload_provenance_is_additive_and_round_trips() {
+        use crate::types::{ToolProvenance, ToolSourceId, ToolSourceKind};
+
+        let call = HookToolCall {
+            tool_use_id: "tc_1".into(),
+            name: "lookup".into(),
+            args: ToolCallArguments::empty(),
+            provenance: None,
+        };
+        let json = serde_json::to_value(&call).expect("serialize");
+        assert!(
+            json.get("provenance").is_none(),
+            "absent provenance must be omitted from the hook wire envelope"
+        );
+
+        let provenance = ToolProvenance {
+            kind: ToolSourceKind::Mcp,
+            source_id: ToolSourceId::new("test-server"),
+        };
+        let call_with = HookToolCall {
+            provenance: Some(provenance.clone()),
+            ..call
+        };
+        let json = serde_json::to_value(&call_with).expect("serialize");
+        assert_eq!(json["provenance"]["kind"], serde_json::json!("mcp"));
+        let decoded: HookToolCall = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.provenance, Some(provenance.clone()));
+
+        let result = HookToolResult {
+            tool_use_id: "tc_1".into(),
+            name: "lookup".into(),
+            content_blocks: vec![text_block("ok")],
+            is_error: false,
+            provenance: None,
+        };
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert!(
+            json.get("provenance").is_none(),
+            "absent provenance must be omitted by the custom serializer"
+        );
+        let result_with = result.with_provenance(Some(provenance.clone()));
+        let json = serde_json::to_value(&result_with).expect("serialize");
+        assert_eq!(
+            json["provenance"]["source_id"],
+            serde_json::json!("test-server")
+        );
+        let decoded: HookToolResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.provenance, Some(provenance));
+    }
+
+    /// Ask 5 wire discipline: `server_tool_content` is a projection of the
+    /// response's `AssistantBlock::ServerToolContent` kinds — an empty list is
+    /// omitted from the envelope (old payloads stay byte-stable) and typed
+    /// kinds round-trip.
+    #[test]
+    fn hook_llm_response_server_tool_content_is_additive_and_typed() {
+        use crate::types::ServerToolKind;
+
+        let response = HookLlmResponse {
+            assistant_text: "done".into(),
+            tool_call_names: Vec::new(),
+            stop_reason: Some(StopReason::EndTurn),
+            usage: None,
+            server_tool_content: Vec::new(),
+        };
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert!(
+            json.get("server_tool_content").is_none(),
+            "empty server tool content must be omitted from the hook wire envelope"
+        );
+
+        let response = HookLlmResponse {
+            server_tool_content: vec![
+                ServerToolKind::WebSearch,
+                ServerToolKind::ProviderNative {
+                    name: "code_exec".to_string(),
+                },
+            ],
+            ..response
+        };
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(
+            json["server_tool_content"][0]["kind"],
+            serde_json::json!("web_search")
+        );
+        let decoded: HookLlmResponse = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.server_tool_content, response.server_tool_content);
     }
 
     /// K3 invariant: a pending-tool-results run carries the typed

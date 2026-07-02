@@ -31,6 +31,7 @@ use meerkat_runtime::{
 
 fn make_progress_input(label: &str) -> Input {
     Input::Peer(PeerInput {
+        sender_taint: None,
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),

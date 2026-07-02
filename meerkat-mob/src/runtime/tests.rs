@@ -4930,6 +4930,7 @@ async fn spawn_live_external_peer_with_transport(
                         loop {
                             match responder_runtime
                                 .send(CommsCommand::PeerResponse {
+                                    content_taint: None,
                                     to: to.clone(),
                                     in_reply_to: candidate.interaction.id,
                                     status: meerkat_core::interaction::ResponseStatus::Completed,
@@ -30626,6 +30627,7 @@ async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settle
     let receipt = CoreCommsRuntime::send(
         &*comms_a,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(&*comms_a, &test_comms_name("worker", "w-prekickoff")).await,
             body: "body: immediate orchestration after wait_for_ready".to_string(),
             blocks: Some(vec![
@@ -30755,6 +30757,7 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
         let receipt = CoreCommsRuntime::send(
             &*comms_lead,
             CommsCommand::PeerMessage {
+                content_taint: None,
                 to: test_peer_route(&*comms_lead, &test_comms_name("worker", agent_identity)).await,
                 body: format!("body: fanout to {agent_identity}"),
                 blocks: Some(vec![
@@ -30907,6 +30910,7 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
     CoreCommsRuntime::send(
         &*artist_comms,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(&*artist_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: first peer message".to_string(),
             blocks: Some(vec![
@@ -30944,6 +30948,7 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
     CoreCommsRuntime::send(
         &*helper_comms,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(&*helper_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: second peer message while running".to_string(),
             blocks: None,
@@ -31506,6 +31511,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let receipt = CoreCommsRuntime::send(
         &*requester_comms,
         CommsCommand::PeerRequest {
+            content_taint: None,
             to: test_peer_route(&*requester_comms, &test_comms_name("worker", "w-responder")).await,
             intent: "interpret_image".to_string(),
             params: serde_json::json!({"description":"tower with a light"}),
@@ -31540,6 +31546,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerResponse {
+            content_taint: None,
             to: test_peer_route(&*responder_comms, &test_comms_name("lead", "l-requester")).await,
             in_reply_to: request_id,
             status: meerkat_core::ResponseStatus::Completed,
@@ -31790,6 +31797,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerMessage {
+            content_taint: None,
             to: test_peer_route(
                 &*responder_comms,
                 &test_comms_name("lead", "l-running-requester"),
@@ -31822,6 +31830,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     let request_receipt = CoreCommsRuntime::send(
         &*requester_comms,
         CommsCommand::PeerRequest {
+            content_taint: None,
             to: test_peer_route(
                 &*requester_comms,
                 &test_comms_name("worker", "w-running-responder"),
@@ -31861,6 +31870,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerResponse {
+            content_taint: None,
             to: test_peer_route(
                 &*responder_comms,
                 &test_comms_name("lead", "l-running-requester"),
@@ -32655,6 +32665,7 @@ async fn test_wire_enables_peer_request_delivery() {
     let _ = CoreCommsRuntime::drain_inbox_interactions(&*comms_b).await;
 
     let cmd = meerkat_core::comms::CommsCommand::PeerRequest {
+        content_taint: None,
         to: test_peer_route(&*comms_a, &comms_name_b).await,
         intent: "mob.test_ping".to_string(),
         params: serde_json::json!({"test": true}),

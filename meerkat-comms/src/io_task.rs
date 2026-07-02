@@ -275,6 +275,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -313,6 +314,7 @@ mod tests {
             from: sender_keypair.public_key(),
             to: receiver_keypair.public_key(),
             kind: MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -361,6 +363,7 @@ mod tests {
             &sender_keypair,
             other_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -400,6 +403,7 @@ mod tests {
             &untrusted_keypair, // Not in trusted list
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -437,6 +441,7 @@ mod tests {
             from: sender_keypair.public_key(),
             to: receiver_keypair.public_key(),
             kind: MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -483,6 +488,7 @@ mod tests {
             &sender_keypair, // not in trusted list
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -527,6 +533,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -573,6 +580,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -617,6 +625,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -657,6 +666,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: Some(vec![meerkat_core::ContentBlock::Image {
                     media_type: "image/png".to_string(),
                     data: "abc".into(),
@@ -699,6 +709,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Request {
+                content_taint: None,
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -772,6 +783,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Response {
+                content_taint: None,
                 in_reply_to: Uuid::new_v4(),
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({}),
@@ -813,6 +825,7 @@ mod tests {
             from: sender_keypair.public_key(),
             to: receiver_keypair.public_key(),
             kind: MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -859,6 +872,7 @@ mod tests {
             &sender_keypair, // Not trusted
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -902,6 +916,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,
@@ -946,6 +961,7 @@ mod tests {
             &sender_keypair,
             receiver_keypair.public_key(),
             MessageKind::Message {
+                content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
                 handling_mode: None,

@@ -262,6 +262,7 @@ fn peer_terminal_notice_projection_does_not_default_missing_status() {
             id: crate::comms::PeerId::new(),
             display_name: Some("Peer A".to_string()),
         }),
+        sender_taint: None,
         request_id: Some("request-1".to_string()),
         intent: None,
         status: None,
@@ -329,6 +330,63 @@ fn comms_notice_kind_unknown_round_trips_via_other() {
 }
 
 #[test]
+fn comms_notice_sender_taint_none_and_clean_are_distinct_but_render_identically() {
+    // Pin: `None` (no declaration) and `Clean` (affirmative declaration) are
+    // DISTINCT typed states that must never be coalesced by receivers, while
+    // the model projection deliberately renders them identically - the typed
+    // `sender_taint` field is the carrier of the three-way distinction and
+    // only a DECLARED taint gets a model-visible marker.
+    let block = |sender_taint: Option<crate::comms::SenderContentTaint>| SystemNoticeBlock::Comms {
+        kind: CommsNoticeKind::Message,
+        direction: SystemNoticeDirection::Incoming,
+        peer: Some(SystemNoticePeer {
+            id: crate::comms::PeerId::new(),
+            display_name: Some("Peer A".to_string()),
+        }),
+        sender_taint,
+        request_id: None,
+        intent: None,
+        status: None,
+        summary: Some("Peer message".to_string()),
+        payload: None,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }],
+    };
+
+    let undeclared = block(None);
+    let clean = block(Some(crate::comms::SenderContentTaint::Clean));
+    let tainted = block(Some(crate::comms::SenderContentTaint::Tainted));
+
+    // Typed field stays distinct on the wire.
+    let undeclared_wire = serde_json::to_value(&undeclared).unwrap();
+    let clean_wire = serde_json::to_value(&clean).unwrap();
+    let tainted_wire = serde_json::to_value(&tainted).unwrap();
+    assert!(undeclared_wire.get("sender_taint").is_none());
+    assert_eq!(clean_wire["sender_taint"], json!("clean"));
+    assert_eq!(tainted_wire["sender_taint"], json!("tainted"));
+    let undeclared_roundtrip: SystemNoticeBlock = serde_json::from_value(undeclared_wire).unwrap();
+    let clean_roundtrip: SystemNoticeBlock = serde_json::from_value(clean_wire).unwrap();
+    assert_ne!(undeclared_roundtrip, clean_roundtrip);
+
+    // Model projection: None and Clean render identically; only Tainted
+    // appends the marker.
+    let undeclared_text = undeclared.model_projection_text();
+    let clean_text = clean.model_projection_text();
+    let tainted_text = tainted.model_projection_text();
+    assert_eq!(undeclared_text, clean_text);
+    assert!(!undeclared_text.contains("tainted"));
+    assert!(
+        tainted_text.contains("[sender declared this content tainted]"),
+        "declared taint must be model-visible: {tainted_text}"
+    );
+    assert!(
+        tainted_text.starts_with(&undeclared_text),
+        "taint marker must be appended, not replace the projection"
+    );
+}
+
+#[test]
 fn comms_block_round_trips_through_wire_with_typed_peer_id() {
     // The peer routing identity is typed but serializes as a hyphenated UUID
     // string on the wire, so persisted transcripts stay byte-stable.
@@ -340,6 +398,7 @@ fn comms_block_round_trips_through_wire_with_typed_peer_id() {
             id: peer_id,
             display_name: Some("Analyst".to_string()),
         }),
+        sender_taint: None,
         request_id: Some("request-9".to_string()),
         intent: Some("checksum".to_string()),
         status: None,

@@ -812,6 +812,9 @@ fn peer_input_from_delivery_payload(
         content: payload.content,
         payload: None,
         handling_mode: Some(payload.handling_mode),
+        // Bridge delivery payloads are supervisor-authored work deliveries,
+        // not peer comms envelopes: no sender taint declaration exists.
+        sender_taint: None,
     })
 }
 
@@ -1384,6 +1387,7 @@ async fn send_bridge_response(
             status,
             result,
             blocks: None,
+            content_taint: None,
             handling_mode: None,
         })
         .await
@@ -3997,6 +4001,7 @@ mod tests {
         let sender = "partial-authority-peer";
         PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 id,
                 from_route: None,
                 from: sender.to_string(),
@@ -4043,6 +4048,7 @@ mod tests {
         let in_reply_to = InteractionId(Uuid::new_v4());
         PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 id,
                 from_route: Some(PeerId::new()),
                 from: "response-peer".to_string(),
@@ -4646,6 +4652,7 @@ mod tests {
         let sender_label = sender_pubkey.to_pubkey_string();
         let candidate = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 id,
                 from_route: None,
                 from: sender_pubkey.to_pubkey_string(),
@@ -4981,6 +4988,7 @@ mod tests {
         );
         let request_receipt = supervisor_runtime
             .send(CommsCommand::PeerRequest {
+                content_taint: None,
                 to: PeerRoute::with_display_name(member_spec.peer_id, member_spec.name.clone()),
                 intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::to_value(&command).expect("serialize bridge command"),
@@ -5141,6 +5149,7 @@ mod tests {
         );
         let request_receipt = supervisor_runtime
             .send(CommsCommand::PeerRequest {
+                content_taint: None,
                 to: PeerRoute::with_display_name(member_spec.peer_id, member_spec.name.clone()),
                 intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::to_value(&command).expect("serialize bridge command"),
@@ -6006,6 +6015,7 @@ mod tests {
         };
         PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 id,
                 from_route: None,
                 from: "test-mob/__mob_supervisor__".to_string(),
@@ -6092,6 +6102,7 @@ mod tests {
             content: "poke".to_string().into(),
             payload: None,
             handling_mode: None,
+            sender_taint: None,
         });
         let semantics =
             crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
@@ -6539,6 +6550,7 @@ mod tests {
         let interaction_id = InteractionId(Uuid::new_v4());
         let candidate = PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 id: interaction_id,
                 from_route: None,
                 from: PEER_ID_SUPERVISOR.to_string(),
@@ -7804,6 +7816,7 @@ mod tests {
         let id = ingress.interaction_id;
         PeerInputCandidate {
             interaction: InboxInteraction {
+                sender_taint: None,
                 id,
                 from_route: None,
                 from: sender.to_string(),

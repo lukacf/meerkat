@@ -308,6 +308,8 @@ pub use wire::{
     ScheduleListResult,
     ScheduleOccurrencesParams,
     ScheduleOccurrencesResult,
+    SendTaintOverride,
+    SenderContentTaint,
     ServerCapabilities,
     ServerInfo,
     SessionExternalEventEnvelope,

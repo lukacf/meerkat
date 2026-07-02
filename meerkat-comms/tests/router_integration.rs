@@ -33,6 +33,7 @@ async fn integration_real_router_unknown_peer_fails_closed() {
         .send(
             unknown_peer_id,
             MessageKind::Message {
+                content_taint: None,
                 body: "hello".to_string(),
                 blocks: None,
                 handling_mode: None,
@@ -68,6 +69,7 @@ async fn integration_real_router_inproc_peer_not_found() {
         .send(
             meerkat_comms::router::peer_id_from_pubkey(&receiver_pubkey),
             MessageKind::Message {
+                content_taint: None,
                 body: "hello".to_string(),
                 blocks: None,
                 handling_mode: None,

@@ -1090,6 +1090,7 @@ pub trait CommsRuntime: Send + Sync {
                 rendered_text: text,
                 handling_mode: crate::types::HandlingMode::Queue,
                 render_metadata: None,
+                sender_taint: None,
             })
             .collect()
     }

@@ -44,7 +44,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.11",
+        "CARGO_PKG_VERSION": "0.7.12",
         "CARGO_MANIFEST_DIR": "./meerkat-openai",
     },
     proc_macro_deps = all_crate_deps(
@@ -81,7 +81,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.11",
+        "CARGO_PKG_VERSION": "0.7.12",
         "CARGO_MANIFEST_DIR": "./meerkat-openai",
     },
     proc_macro_deps = all_crate_deps(
@@ -122,7 +122,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.11",
+        "CARGO_PKG_VERSION": "0.7.12",
         "CARGO_MANIFEST_DIR": "./meerkat-openai",
     },
     tags = [
@@ -181,7 +181,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.11",
+        "CARGO_PKG_VERSION": "0.7.12",
         "CARGO_BIN_NAME": "mock_realtime_ws_selftest",
         "CARGO_MANIFEST_DIR": "./meerkat-openai",
     },
@@ -237,7 +237,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.11",
+        "CARGO_PKG_VERSION": "0.7.12",
         "CARGO_BIN_NAME": "oauth_resolve",
         "CARGO_MANIFEST_DIR": "./meerkat-openai",
     },

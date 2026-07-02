@@ -608,7 +608,6 @@ mod tests {
         TriggerSpec,
     };
     use meerkat_core::tool_scope::ToolFilter;
-    use serde_json::value::RawValue;
 
     #[derive(Debug)]
     struct RecordingMobRuntime {
@@ -762,10 +761,6 @@ mod tests {
         ) -> Result<(), MobError> {
             Ok(())
         }
-    }
-
-    fn raw_json(value: &str) -> Box<RawValue> {
-        RawValue::from_string(value.to_string()).expect("valid raw json")
     }
 
     fn flow_params(value: &str) -> meerkat_schedule::FlowParams {

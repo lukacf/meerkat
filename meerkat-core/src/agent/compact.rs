@@ -239,15 +239,18 @@ pub async fn run_compaction<C>(
     client: &C,
     compactor: &Arc<dyn Compactor>,
     curator: Option<&Arc<dyn CompactionCurator>>,
-    messages: &[Message],
-    last_input_tokens: u64,
-    session_boundary_index: u64,
+    window: CompactionWindow<'_>,
     event_tx: &Option<mpsc::Sender<AgentEvent>>,
     event_tap: &crate::event_tap::EventTap,
 ) -> Result<CompactionOutcome, CompactionError>
 where
     C: crate::agent::AgentLlmClient + ?Sized,
 {
+    let CompactionWindow {
+        messages,
+        last_input_tokens,
+        session_boundary_index,
+    } = window;
     let estimated = estimate_tokens(messages)?;
     let message_count = messages.len();
     let mut event_stream_open = true;
@@ -273,12 +276,12 @@ where
     // production outright: the summarization LLM call is skipped and a
     // curator failure is terminal for this compaction attempt (no fallback).
     let (summary_text, summary_usage) = if let Some(curator) = curator {
-        let window = CompactionWindow {
+        let curator_window = CompactionWindow {
             messages,
             last_input_tokens,
             session_boundary_index,
         };
-        match curator.curate_summary(window).await {
+        match curator.curate_summary(curator_window).await {
             Ok(summary) => (summary.into_string(), Usage::default()),
             Err(e) => {
                 if event_stream_open

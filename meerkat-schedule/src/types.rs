@@ -2874,7 +2874,7 @@ impl UpdateScheduleRequest {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_core::ToolNameSet;

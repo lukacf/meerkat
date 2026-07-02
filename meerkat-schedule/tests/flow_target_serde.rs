@@ -4,6 +4,7 @@
 //! `FlowParams` carrier, the raw `Box<RawValue>` field failed to deserialize
 //! through serde's internally-tagged content buffering, bricking every
 //! persisted Flow-target row on read.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_schedule::{FlowParams, MobTargetBinding, TargetBinding};
 

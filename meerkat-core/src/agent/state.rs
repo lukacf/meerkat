@@ -1254,9 +1254,11 @@ where
                             self.client.as_ref(),
                             compactor,
                             self.compaction_curator.as_ref(),
-                            self.session.messages(),
-                            self.last_input_tokens,
-                            current_boundary_index,
+                            crate::compact::CompactionWindow {
+                                messages: self.session.messages(),
+                                last_input_tokens: self.last_input_tokens,
+                                session_boundary_index: current_boundary_index,
+                            },
                             event_tx,
                             &self.event_tap,
                         )
@@ -6210,8 +6212,7 @@ mod tests {
         );
         let final_llm = invocations
             .iter()
-            .filter(|invocation| invocation.point == HookPoint::PostLlmResponse)
-            .last()
+            .rfind(|invocation| invocation.point == HookPoint::PostLlmResponse)
             .expect("final PostLlmResponse invocation");
         assert!(
             final_llm

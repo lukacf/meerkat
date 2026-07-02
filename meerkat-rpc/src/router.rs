@@ -18,8 +18,8 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
     SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionHistoryQuery,
-    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionQuery,
-    SessionTranscriptRewriteRequest,
+    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionListQuery,
+    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
 };
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
@@ -1576,6 +1576,9 @@ impl MethodRouter {
             "session/transcript_revision" => {
                 self.handle_session_transcript_revision(id, params).await
             }
+            "session/transcript_revisions" => {
+                self.handle_session_transcript_revisions(id, params).await
+            }
             "session/rewrite_transcript" => {
                 self.handle_session_rewrite_transcript(id, params).await
             }
@@ -2320,6 +2323,55 @@ impl MethodRouter {
                 .await
             {
                 Ok(revision) => RpcResponse::success(id, revision),
+                Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+            },
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned session transcript revisions cannot be read through the generic session surface",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
+    async fn handle_session_transcript_revisions(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ListSessionTranscriptRevisionsParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => match self
+                .runtime
+                .list_session_transcript_revisions_rich(
+                    &session_id,
+                    SessionTranscriptRevisionListQuery {
+                        limit: params.limit,
+                        offset: params.offset,
+                    },
+                )
+                .await
+            {
+                Ok(list) => RpcResponse::success(id, list),
                 Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
             },
             #[cfg(feature = "mob")]

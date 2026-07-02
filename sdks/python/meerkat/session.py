@@ -35,6 +35,7 @@ from .types import (
     SessionForkResult,
     SessionHistory,
     SessionTranscriptRevision,
+    SessionTranscriptRevisionList,
     SessionTranscriptRewriteResult,
     SkillKey,
     SkillRef,
@@ -298,6 +299,19 @@ class Session:
         return await self._client.read_session_transcript_revision(  # noqa: SLF001
             self._id,
             revision,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def transcript_revisions(
+        self,
+        *,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevisionList:
+        """List retained transcript revision commits with the current head."""
+        return await self._client.list_session_transcript_revisions(  # noqa: SLF001
+            self._id,
             offset=offset,
             limit=limit,
         )
@@ -570,6 +584,19 @@ class DeferredSession:
         return await self._client.read_session_transcript_revision(  # noqa: SLF001
             self._id,
             revision,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def transcript_revisions(
+        self,
+        *,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevisionList:
+        """List retained transcript revision commits with the current head."""
+        return await self._client.list_session_transcript_revisions(  # noqa: SLF001
+            self._id,
             offset=offset,
             limit=limit,
         )

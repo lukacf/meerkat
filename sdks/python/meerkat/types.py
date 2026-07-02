@@ -672,6 +672,25 @@ class SessionTranscriptRevision:
     messages: list[SessionMessage] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class SessionTranscriptRevisionEntry:
+    """One transcript rewrite commit in a session's revision graph."""
+
+    revision: str = ""
+    parent_revision: str = ""
+    actor: str | None = None
+    reason: str = ""
+    committed_at: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTranscriptRevisionList:
+    """Ordered (oldest-first) transcript revision commit list for a session."""
+
+    head_revision: str = ""
+    entries: list[SessionTranscriptRevisionEntry] = field(default_factory=list)
+
+
 TranscriptEditRunningBehavior = Literal["reject"]
 """Behavior for transcript edit requests when the source session has active work."""
 

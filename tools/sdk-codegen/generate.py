@@ -219,6 +219,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "InjectSystemContextParams",
     "InjectSystemContextResult",
     "InterruptParams",
+    "ListSessionTranscriptRevisionsParams",
     "ListSessionsParams",
     "ListSessionsResult",
     "LoginCompleteParams",
@@ -241,6 +242,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "SessionTranscriptRewriteResult",
     "WireProvisionApiKeyResult",
     "WireSessionTranscriptRevision",
+    "WireSessionTranscriptRevisionList",
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [

@@ -681,6 +681,12 @@ export interface InterruptParams {
   session_id: string;
 }
 
+export interface ListSessionTranscriptRevisionsParams {
+  limit?: number;
+  offset?: number;
+  session_id: string;
+}
+
 export interface ListSessionsParams {
   labels?: Record<string, string>;
   limit?: number;
@@ -850,6 +856,11 @@ export interface WireSessionTranscriptRevision {
   revision: string;
   session_id: string;
   session_ref?: string;
+}
+
+export interface WireSessionTranscriptRevisionList {
+  entries: Record<string, unknown>[];
+  head_revision: string;
 }
 
 export interface MobWireParams {
@@ -2414,6 +2425,7 @@ export interface CommsCommandInput {
 export interface CommsCommandPeerMessage {
   blocks?: ContentBlock[];
   body: string;
+  content_taint?: { declare: SenderContentTaint } | "undeclared";
   handling_mode?: HandlingMode;
   kind: "peer_message";
   to: PeerId;
@@ -2428,6 +2440,7 @@ export interface CommsCommandPeerLifecycle {
 
 export interface CommsCommandPeerRequest {
   blocks?: ContentBlock[];
+  content_taint?: { declare: SenderContentTaint } | "undeclared";
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
@@ -2438,6 +2451,7 @@ export interface CommsCommandPeerRequest {
 
 export interface CommsCommandPeerResponse {
   blocks?: ContentBlock[];
+  content_taint?: { declare: SenderContentTaint } | "undeclared";
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
@@ -2682,6 +2696,7 @@ export interface CommsSendParamsInput {
 export interface CommsSendParamsPeerMessage {
   blocks?: ContentBlock[];
   body: string;
+  content_taint?: { declare: SenderContentTaint } | "undeclared";
   handling_mode?: HandlingMode;
   kind: "peer_message";
   session_id: string;
@@ -2698,6 +2713,7 @@ export interface CommsSendParamsPeerLifecycle {
 
 export interface CommsSendParamsPeerRequest {
   blocks?: ContentBlock[];
+  content_taint?: { declare: SenderContentTaint } | "undeclared";
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
@@ -2709,6 +2725,7 @@ export interface CommsSendParamsPeerRequest {
 
 export interface CommsSendParamsPeerResponse {
   blocks?: ContentBlock[];
+  content_taint?: { declare: SenderContentTaint } | "undeclared";
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";

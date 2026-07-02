@@ -881,6 +881,14 @@ class InterruptParams:
 
 
 @dataclass
+class ListSessionTranscriptRevisionsParams:
+    """Request payload for `session/transcript_revisions`."""
+    session_id: str
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+
+
+@dataclass
 class ListSessionsParams:
     """Parameters for `session/list` (all optional)."""
     labels: Optional[dict[str, str]] = None
@@ -1098,6 +1106,14 @@ class WireSessionTranscriptRevision:
     session_id: str
     limit: Optional[int] = None
     session_ref: Optional[str] = None
+
+
+@dataclass
+class WireSessionTranscriptRevisionList:
+    """Ordered (oldest-first) transcript revision commit list in canonical wire
+format."""
+    entries: list[dict[str, Any]]
+    head_revision: str
 
 
 @dataclass
@@ -4790,6 +4806,7 @@ class CommsCommandInput(TypedDict, total=False):
 class CommsCommandPeerMessage(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
+    content_taint: NotRequired[dict[str, SenderContentTaint] | Literal['undeclared']]
     handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['peer_message']]
     to: Required[PeerId]
@@ -4802,6 +4819,7 @@ class CommsCommandPeerLifecycle(TypedDict, total=False):
 
 class CommsCommandPeerRequest(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[dict[str, SenderContentTaint] | Literal['undeclared']]
     handling_mode: NotRequired[HandlingMode]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
@@ -4811,6 +4829,7 @@ class CommsCommandPeerRequest(TypedDict, total=False):
 
 class CommsCommandPeerResponse(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[dict[str, SenderContentTaint] | Literal['undeclared']]
     handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
@@ -5063,6 +5082,7 @@ class CommsSendParamsInput(TypedDict, total=False):
 class CommsSendParamsPeerMessage(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
     body: Required[str]
+    content_taint: NotRequired[dict[str, SenderContentTaint] | Literal['undeclared']]
     handling_mode: NotRequired[HandlingMode]
     kind: Required[Literal['peer_message']]
     session_id: Required[str]
@@ -5077,6 +5097,7 @@ class CommsSendParamsPeerLifecycle(TypedDict, total=False):
 
 class CommsSendParamsPeerRequest(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[dict[str, SenderContentTaint] | Literal['undeclared']]
     handling_mode: NotRequired[HandlingMode]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
@@ -5087,6 +5108,7 @@ class CommsSendParamsPeerRequest(TypedDict, total=False):
 
 class CommsSendParamsPeerResponse(TypedDict, total=False):
     blocks: NotRequired[list[ContentBlock]]
+    content_taint: NotRequired[dict[str, SenderContentTaint] | Literal['undeclared']]
     handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]

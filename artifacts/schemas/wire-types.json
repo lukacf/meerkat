@@ -1405,6 +1405,24 @@
             "type": "object"
           },
           {
+            "description": "The host-supplied compaction curator failed to produce a summary, so\nthere was nothing to commit (there is no LLM fallback).",
+            "properties": {
+              "kind": {
+                "const": "curator_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the curator error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Token estimation over the history failed before summarization.",
             "properties": {
               "kind": {
@@ -10579,6 +10597,44 @@
         ],
         "type": "string"
       },
+      "SendTaintOverride": {
+        "description": "Per-send tri-state override for the outbound content-taint declaration.\n\nCarried as `Option<SendTaintOverride>` on the comms send surfaces: an\nABSENT override (`None`) inherits the runtime-level declaration installed\nvia `set_outbound_content_taint`; `Undeclared` strips the declaration for\nthis send (the envelope carries no taint field); `Declare(taint)` stamps\nexactly `taint`. Inherit, disable, and set are three different facts — a\ntwo-state override would collapse them.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Declare exactly this taint state for this send.",
+            "properties": {
+              "declare": {
+                "$ref": "#/$defs/SenderContentTaint"
+              }
+            },
+            "required": [
+              "declare"
+            ],
+            "type": "object"
+          },
+          {
+            "const": "undeclared",
+            "description": "Send no declaration, even when a runtime-level declaration is set.",
+            "type": "string"
+          }
+        ]
+      },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
+      },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
@@ -10684,6 +10740,17 @@
           "body": {
             "type": "string"
           },
+          "content_taint": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SendTaintOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-send tri-state taint override: absent inherits the\nruntime-level outbound declaration."
+          },
           "handling_mode": {
             "anyOf": [
               {
@@ -10746,6 +10813,17 @@
               "null"
             ]
           },
+          "content_taint": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SendTaintOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-send tri-state taint override: absent inherits the\nruntime-level outbound declaration."
+          },
           "handling_mode": {
             "anyOf": [
               {
@@ -10799,6 +10877,17 @@
               "array",
               "null"
             ]
+          },
+          "content_taint": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SendTaintOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-send tri-state taint override: absent inherits the\nruntime-level outbound declaration."
           },
           "handling_mode": {
             "anyOf": [
@@ -14717,6 +14806,24 @@
             },
             "required": [
               "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The host-supplied compaction curator failed to produce a summary, so\nthere was nothing to commit (there is no LLM fallback).",
+            "properties": {
+              "kind": {
+                "const": "curator_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the curator error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
             ],
             "type": "object"
           },
@@ -30488,6 +30595,37 @@
         },
         "type": "object"
       },
+      "HostRunnableName": {
+        "description": "Validated name of a host-registered runnable.\n\nThe name is the durable identity of the runnable inside\n[`HostRunnableTargetBinding`] — it participates in the target's stable\nkey — so it is parsed fail-closed at every ingress (constructor and\nserde).",
+        "type": "string"
+      },
+      "HostRunnableParams": {
+        "description": "Wire-opaque host payload for a host-runnable target, held as canonical\nJSON text.\n\nThe payload participates in the target's durable stable key, and serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form — making the\nstable key independent of the host's original formatting and idempotent\nacross store round-trips. Meerkat never interprets the content beyond\nJSON validity; JSON `null` is rejected fail-closed because \"no payload\"\nis represented by omitting params entirely."
+      },
+      "HostRunnableTargetBinding": {
+        "description": "Schedule target that fires a host-registered runnable.\n\nThe runnable is invoked in-process through the schedule runnable host\nseam (`ScheduleRunnableHost`); `params` is a wire-opaque host payload\nhanded to the runnable in canonical JSON text form — meerkat never\ninterprets it. The serde shape is frozen at introduction: it participates\nin the target's stable key and persisted rows must keep deserializing.",
+        "properties": {
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HostRunnableParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Wire-opaque host payload handed to the runnable at invocation time."
+          },
+          "runnable": {
+            "$ref": "#/$defs/HostRunnableName",
+            "description": "Name of the host-registered runnable to invoke."
+          }
+        },
+        "required": [
+          "runnable"
+        ],
+        "type": "object"
+      },
       "IdentityTargetBinding": {
         "oneOf": [
           {
@@ -31829,6 +31967,19 @@
               "target_kind"
             ],
             "type": "object"
+          },
+          {
+            "$ref": "#/$defs/HostRunnableTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "host_runnable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -32570,6 +32721,37 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "HostRunnableName": {
+        "description": "Validated name of a host-registered runnable.\n\nThe name is the durable identity of the runnable inside\n[`HostRunnableTargetBinding`] — it participates in the target's stable\nkey — so it is parsed fail-closed at every ingress (constructor and\nserde).",
+        "type": "string"
+      },
+      "HostRunnableParams": {
+        "description": "Wire-opaque host payload for a host-runnable target, held as canonical\nJSON text.\n\nThe payload participates in the target's durable stable key, and serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form — making the\nstable key independent of the host's original formatting and idempotent\nacross store round-trips. Meerkat never interprets the content beyond\nJSON validity; JSON `null` is rejected fail-closed because \"no payload\"\nis represented by omitting params entirely."
+      },
+      "HostRunnableTargetBinding": {
+        "description": "Schedule target that fires a host-registered runnable.\n\nThe runnable is invoked in-process through the schedule runnable host\nseam (`ScheduleRunnableHost`); `params` is a wire-opaque host payload\nhanded to the runnable in canonical JSON text form — meerkat never\ninterprets it. The serde shape is frozen at introduction: it participates\nin the target's stable key and persisted rows must keep deserializing.",
+        "properties": {
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HostRunnableParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Wire-opaque host payload handed to the runnable at invocation time."
+          },
+          "runnable": {
+            "$ref": "#/$defs/HostRunnableName",
+            "description": "Name of the host-registered runnable to invoke."
+          }
+        },
+        "required": [
+          "runnable"
+        ],
         "type": "object"
       },
       "IdentityTargetBinding": {
@@ -33979,6 +34161,19 @@
               "target_kind"
             ],
             "type": "object"
+          },
+          {
+            "$ref": "#/$defs/HostRunnableTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "host_runnable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -34756,6 +34951,37 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "HostRunnableName": {
+        "description": "Validated name of a host-registered runnable.\n\nThe name is the durable identity of the runnable inside\n[`HostRunnableTargetBinding`] — it participates in the target's stable\nkey — so it is parsed fail-closed at every ingress (constructor and\nserde).",
+        "type": "string"
+      },
+      "HostRunnableParams": {
+        "description": "Wire-opaque host payload for a host-runnable target, held as canonical\nJSON text.\n\nThe payload participates in the target's durable stable key, and serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form — making the\nstable key independent of the host's original formatting and idempotent\nacross store round-trips. Meerkat never interprets the content beyond\nJSON validity; JSON `null` is rejected fail-closed because \"no payload\"\nis represented by omitting params entirely."
+      },
+      "HostRunnableTargetBinding": {
+        "description": "Schedule target that fires a host-registered runnable.\n\nThe runnable is invoked in-process through the schedule runnable host\nseam (`ScheduleRunnableHost`); `params` is a wire-opaque host payload\nhanded to the runnable in canonical JSON text form — meerkat never\ninterprets it. The serde shape is frozen at introduction: it participates\nin the target's stable key and persisted rows must keep deserializing.",
+        "properties": {
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HostRunnableParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Wire-opaque host payload handed to the runnable at invocation time."
+          },
+          "runnable": {
+            "$ref": "#/$defs/HostRunnableName",
+            "description": "Name of the host-registered runnable to invoke."
+          }
+        },
+        "required": [
+          "runnable"
+        ],
         "type": "object"
       },
       "IdentityTargetBinding": {
@@ -36278,6 +36504,19 @@
             "properties": {
               "target_kind": {
                 "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/HostRunnableTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "host_runnable",
                 "type": "string"
               }
             },
@@ -38016,6 +38255,21 @@
         ],
         "type": "string"
       },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
+      },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
@@ -38079,6 +38333,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Sender-declared content taint carried in the signed envelope.\n`None` means the sender made no declaration — a real third state\nthat must never be coalesced into\n[`crate::comms::SenderContentTaint::Clean`]."
               },
               "status": {
                 "type": [
@@ -38538,6 +38803,26 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "TranscriptUserRole": {
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "oneOf": [
+          {
+            "const": "conversational",
+            "description": "Ordinary conversational user input.",
+            "type": "string"
+          },
+          {
+            "const": "compaction_summary",
+            "description": "A runtime-produced compaction summary that opens a rebuilt transcript.",
+            "type": "string"
+          },
+          {
+            "const": "injected_context",
+            "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -39312,6 +39597,10 @@
           "role": {
             "const": "user",
             "type": "string"
+          },
+          "transcript_role": {
+            "$ref": "#/$defs/TranscriptUserRole",
+            "description": "Typed transcript role for the user channel. Hosts may declare\n`conversational` (the omitted default) or `injected_context` so a\nrewrite preserves the typed indexing exemption instead of\nlaundering injected context back to conversation;\n`compaction_summary` is runtime-mintable only and is rejected\nfail-closed by [`TranscriptRewriteMessage::into_core`]."
           }
         },
         "required": [
@@ -50266,6 +50555,21 @@
         "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
+      },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
@@ -50329,6 +50633,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Sender-declared content taint carried in the signed envelope.\n`None` means the sender made no declaration — a real third state\nthat must never be coalesced into\n[`crate::comms::SenderContentTaint::Clean`]."
               },
               "status": {
                 "type": [
@@ -50788,6 +51103,26 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "TranscriptUserRole": {
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "oneOf": [
+          {
+            "const": "conversational",
+            "description": "Ordinary conversational user input.",
+            "type": "string"
+          },
+          {
+            "const": "compaction_summary",
+            "description": "A runtime-produced compaction summary that opens a rebuilt transcript.",
+            "type": "string"
+          },
+          {
+            "const": "injected_context",
+            "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -51494,6 +51829,10 @@
                     "type": "null"
                   }
                 ]
+              },
+              "transcript_role": {
+                "$ref": "#/$defs/TranscriptUserRole",
+                "description": "Typed transcript role for the user channel — projection of the\ncore owner (`UserMessage.transcript_role`). Omitted for ordinary\n`conversational` messages; `compaction_summary` and\n`injected_context` surface so hosts (e.g. transcript curators)\nread the typed fact instead of classifying rendered content."
               }
             },
             "required": [
@@ -52249,6 +52588,21 @@
         "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
+      },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
@@ -52312,6 +52666,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Sender-declared content taint carried in the signed envelope.\n`None` means the sender made no declaration — a real third state\nthat must never be coalesced into\n[`crate::comms::SenderContentTaint::Clean`]."
               },
               "status": {
                 "type": [
@@ -52771,6 +53136,26 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "TranscriptUserRole": {
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "oneOf": [
+          {
+            "const": "conversational",
+            "description": "Ordinary conversational user input.",
+            "type": "string"
+          },
+          {
+            "const": "compaction_summary",
+            "description": "A runtime-produced compaction summary that opens a rebuilt transcript.",
+            "type": "string"
+          },
+          {
+            "const": "injected_context",
+            "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -53558,6 +53943,10 @@
                 "type": "null"
               }
             ]
+          },
+          "transcript_role": {
+            "$ref": "#/$defs/TranscriptUserRole",
+            "description": "Typed transcript role for the user channel — projection of the\ncore owner (`UserMessage.transcript_role`). Omitted for ordinary\n`conversational` messages; `compaction_summary` and\n`injected_context` surface so hosts (e.g. transcript curators)\nread the typed fact instead of classifying rendered content."
           }
         },
         "required": [
@@ -54697,6 +55086,21 @@
         "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
+      },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
@@ -54760,6 +55164,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Sender-declared content taint carried in the signed envelope.\n`None` means the sender made no declaration — a real third state\nthat must never be coalesced into\n[`crate::comms::SenderContentTaint::Clean`]."
               },
               "status": {
                 "type": [
@@ -55219,6 +55634,26 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "TranscriptUserRole": {
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "oneOf": [
+          {
+            "const": "conversational",
+            "description": "Ordinary conversational user input.",
+            "type": "string"
+          },
+          {
+            "const": "compaction_summary",
+            "description": "A runtime-produced compaction summary that opens a rebuilt transcript.",
+            "type": "string"
+          },
+          {
+            "const": "injected_context",
+            "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -55925,6 +56360,10 @@
                     "type": "null"
                   }
                 ]
+              },
+              "transcript_role": {
+                "$ref": "#/$defs/TranscriptUserRole",
+                "description": "Typed transcript role for the user channel — projection of the\ncore owner (`UserMessage.transcript_role`). Omitted for ordinary\n`conversational` messages; `compaction_summary` and\n`injected_context` surface so hosts (e.g. transcript curators)\nread the typed fact instead of classifying rendered content."
               }
             },
             "required": [
@@ -56143,6 +56582,63 @@
       "messages"
     ],
     "title": "WireSessionTranscriptRevision",
+    "type": "object"
+  },
+  "WireSessionTranscriptRevisionList": {
+    "$defs": {
+      "WireSessionTranscriptRevisionEntry": {
+        "description": "One transcript rewrite commit in canonical wire format.",
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "committed_at": {
+            "description": "Commit timestamp as seconds since the Unix epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "parent_revision": {
+            "type": "string"
+          },
+          "reason": {
+            "description": "Display projection of the typed rewrite reason.",
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "parent_revision",
+          "reason",
+          "committed_at"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Ordered (oldest-first) transcript revision commit list in canonical wire\nformat.",
+    "properties": {
+      "entries": {
+        "items": {
+          "$ref": "#/$defs/WireSessionTranscriptRevisionEntry"
+        },
+        "type": "array"
+      },
+      "head_revision": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "head_revision",
+      "entries"
+    ],
+    "title": "WireSessionTranscriptRevisionList",
     "type": "object"
   },
   "WireStopReason": {

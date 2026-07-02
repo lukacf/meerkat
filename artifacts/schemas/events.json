@@ -501,6 +501,24 @@
             "type": "object"
           },
           {
+            "description": "The host-supplied compaction curator failed to produce a summary, so\nthere was nothing to commit (there is no LLM fallback).",
+            "properties": {
+              "kind": {
+                "const": "curator_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the curator error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Token estimation over the history failed before summarization.",
             "properties": {
               "kind": {
@@ -4422,6 +4440,24 @@
             },
             "required": [
               "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The host-supplied compaction curator failed to produce a summary, so\nthere was nothing to commit (there is no LLM fallback).",
+            "properties": {
+              "kind": {
+                "const": "curator_failed",
+                "type": "string"
+              },
+              "message": {
+                "description": "Display projection of the curator error.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
             ],
             "type": "object"
           },

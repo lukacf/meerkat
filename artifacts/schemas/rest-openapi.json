@@ -1802,6 +1802,17 @@
               "body": {
                 "type": "string"
               },
+              "content_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SendTaintOverride"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Per-send tri-state taint override: absent inherits the\nruntime-level outbound declaration."
+              },
               "handling_mode": {
                 "anyOf": [
                   {
@@ -1872,6 +1883,17 @@
                   "null"
                 ]
               },
+              "content_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SendTaintOverride"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Per-send tri-state taint override: absent inherits the\nruntime-level outbound declaration."
+              },
               "handling_mode": {
                 "anyOf": [
                   {
@@ -1929,6 +1951,17 @@
                   "array",
                   "null"
                 ]
+              },
+              "content_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SendTaintOverride"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Per-send tri-state taint override: absent inherits the\nruntime-level outbound declaration."
               },
               "handling_mode": {
                 "anyOf": [
@@ -3346,6 +3379,37 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "HostRunnableName": {
+        "description": "Validated name of a host-registered runnable.\n\nThe name is the durable identity of the runnable inside\n[`HostRunnableTargetBinding`] — it participates in the target's stable\nkey — so it is parsed fail-closed at every ingress (constructor and\nserde).",
+        "type": "string"
+      },
+      "HostRunnableParams": {
+        "description": "Wire-opaque host payload for a host-runnable target, held as canonical\nJSON text.\n\nThe payload participates in the target's durable stable key, and serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form — making the\nstable key independent of the host's original formatting and idempotent\nacross store round-trips. Meerkat never interprets the content beyond\nJSON validity; JSON `null` is rejected fail-closed because \"no payload\"\nis represented by omitting params entirely."
+      },
+      "HostRunnableTargetBinding": {
+        "description": "Schedule target that fires a host-registered runnable.\n\nThe runnable is invoked in-process through the schedule runnable host\nseam (`ScheduleRunnableHost`); `params` is a wire-opaque host payload\nhanded to the runnable in canonical JSON text form — meerkat never\ninterprets it. The serde shape is frozen at introduction: it participates\nin the target's stable key and persisted rows must keep deserializing.",
+        "properties": {
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostRunnableParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Wire-opaque host payload handed to the runnable at invocation time."
+          },
+          "runnable": {
+            "$ref": "#/components/schemas/HostRunnableName",
+            "description": "Name of the host-registered runnable to invoke."
+          }
+        },
+        "required": [
+          "runnable"
+        ],
         "type": "object"
       },
       "HttpRuntimeConfig": {
@@ -5258,6 +5322,16 @@
             ],
             "description": "Optional run-scoped hook overrides."
           },
+          "injected_context": {
+            "description": "Host-attached injected context for this turn. Each entry materializes\nas a separate typed injected-context user-channel message immediately\nbefore the turn's user message, in order. Injected context is\nexcluded from semantic-memory indexing.",
+            "items": {
+              "$ref": "#/components/schemas/ContentInput"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "keep_alive": {
             "description": "Keep session alive after turn completes, listening for comms messages.\nNone = inherit persisted session intent, Some(true) = enable,\nSome(false) = disable.",
             "type": [
@@ -5459,6 +5533,16 @@
               }
             ],
             "description": "Optional run-scoped hook overrides."
+          },
+          "injected_context": {
+            "description": "Host-attached injected context for the first turn. Each entry\nmaterializes as a separate typed injected-context user-channel\nmessage immediately before the first turn's user message, in order.\nInjected context is excluded from semantic-memory indexing.",
+            "items": {
+              "$ref": "#/components/schemas/ContentInput"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "keep_alive": {
             "description": "Keep session alive after turn completes, listening for comms messages.\nNone = inherit persisted session intent, Some(true) = enable,\nSome(false) = disable. Requires comms_name when enabled.",
@@ -6640,6 +6724,44 @@
         ],
         "type": "object"
       },
+      "SendTaintOverride": {
+        "description": "Per-send tri-state override for the outbound content-taint declaration.\n\nCarried as `Option<SendTaintOverride>` on the comms send surfaces: an\nABSENT override (`None`) inherits the runtime-level declaration installed\nvia `set_outbound_content_taint`; `Undeclared` strips the declaration for\nthis send (the envelope carries no taint field); `Declare(taint)` stamps\nexactly `taint`. Inherit, disable, and set are three different facts — a\ntwo-state override would collapse them.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Declare exactly this taint state for this send.",
+            "properties": {
+              "declare": {
+                "$ref": "#/components/schemas/SenderContentTaint"
+              }
+            },
+            "required": [
+              "declare"
+            ],
+            "type": "object"
+          },
+          {
+            "const": "undeclared",
+            "description": "Send no declaration, even when a runtime-level declaration is set.",
+            "type": "string"
+          }
+        ]
+      },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -7432,6 +7554,17 @@
                   "null"
                 ]
               },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Sender-declared content taint carried in the signed envelope.\n`None` means the sender made no declaration — a real third state\nthat must never be coalesced into\n[`crate::comms::SenderContentTaint::Clean`]."
+              },
               "status": {
                 "type": [
                   "string",
@@ -7785,6 +7918,19 @@
               "target_kind"
             ],
             "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/HostRunnableTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "host_runnable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -8019,6 +8165,26 @@
         },
         "type": "array",
         "uniqueItems": true
+      },
+      "TranscriptUserRole": {
+        "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
+        "oneOf": [
+          {
+            "const": "conversational",
+            "description": "Ordinary conversational user input.",
+            "type": "string"
+          },
+          {
+            "const": "compaction_summary",
+            "description": "A runtime-produced compaction summary that opens a rebuilt transcript.",
+            "type": "string"
+          },
+          {
+            "const": "injected_context",
+            "description": "Host-attached ambient context delivered alongside (not inside) the\nuser's message. Excluded from semantic-memory indexing, and it never\nsatisfies the transcript-continuity save-guard\n([`Self::is_compaction_summary`] stays `CompactionSummary`-only).",
+            "type": "string"
+          }
+        ]
       },
       "TriggerSpec": {
         "oneOf": [
@@ -10394,6 +10560,10 @@
                     "type": "null"
                   }
                 ]
+              },
+              "transcript_role": {
+                "$ref": "#/components/schemas/TranscriptUserRole",
+                "description": "Typed transcript role for the user channel — projection of the\ncore owner (`UserMessage.transcript_role`). Omitted for ordinary\n`conversational` messages; `compaction_summary` and\n`injected_context` surface so hosts (e.g. transcript curators)\nread the typed fact instead of classifying rendered content."
               }
             },
             "required": [

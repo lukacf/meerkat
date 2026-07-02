@@ -1063,8 +1063,9 @@ async fn e2e_smoke_wasm_surface_gate() -> Result<(), Box<dyn std::error::Error>>
     let out_dir = project_dir.join("web-out");
     for file in [
         "index.html",
-        "runtime.js",
-        "runtime_bg.wasm",
+        "meerkat-bootstrap.js",
+        "meerkat_web_runtime.js",
+        "meerkat_web_runtime_bg.wasm",
         "mobpack.bin",
         "manifest.web.toml",
     ] {

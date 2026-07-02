@@ -5,8 +5,9 @@
 
 use async_trait::async_trait;
 use meerkat_core::memory::{
-    MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexScope, MemoryMetadata, MemoryResult,
-    MemorySearchScope, MemoryStore, MemoryStoreError,
+    MemoryEnumerationPage, MemoryEnumerationRequest, MemoryIndexBatch, MemoryIndexReceipt,
+    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRecord, MemoryResult,
+    MemoryScopeDropReceipt, MemorySearchScope, MemoryStore, MemoryStoreError,
 };
 use tokio::sync::RwLock;
 
@@ -115,6 +116,57 @@ impl MemoryStore for SimpleMemoryStore {
 
         Ok(results)
     }
+
+    async fn drop_scope(
+        &self,
+        owner: &MemoryOwner,
+    ) -> Result<MemoryScopeDropReceipt, MemoryStoreError> {
+        let mut entries = self.entries.write().await;
+        let before = entries.len();
+        entries.retain(|entry| entry.scope.owner != *owner);
+        Ok(MemoryScopeDropReceipt {
+            owner: owner.clone(),
+            dropped_entries: before - entries.len(),
+        })
+    }
+
+    async fn enumerate_scoped(
+        &self,
+        scope: &MemorySearchScope,
+        request: MemoryEnumerationRequest,
+    ) -> Result<MemoryEnumerationPage, MemoryStoreError> {
+        let entries = self.entries.read().await;
+
+        // Raw scope rows in insertion order; paging counts raw rows while the
+        // typed-metadata filters run afterwards on the selected window
+        // (parity with the durable store's SQL LIMIT/OFFSET semantics).
+        let scoped: Vec<&MemoryEntry> = entries
+            .iter()
+            .filter(|entry| entry.scope.owner == scope.owner && scope.includes(&entry.metadata))
+            .collect();
+        let window_start = request.offset.min(scoped.len());
+        let window_end = request
+            .offset
+            .saturating_add(request.limit)
+            .min(scoped.len());
+        let rows_scanned = window_end - window_start;
+
+        let records = scoped[window_start..window_end]
+            .iter()
+            .filter(|entry| request.admits(&entry.metadata))
+            .map(|entry| MemoryRecord {
+                content: entry.content.clone(),
+                metadata: entry.metadata.clone(),
+            })
+            .collect();
+        let next_offset =
+            (window_end < scoped.len()).then(|| request.offset.saturating_add(rows_scanned));
+
+        Ok(MemoryEnumerationPage {
+            records,
+            next_offset,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +175,7 @@ mod tests {
     use super::*;
     use meerkat_core::memory::{MemoryIndexRequest, MemorySource, MessageRange};
     use meerkat_core::types::SessionId;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn meta(session_id: &SessionId) -> MemoryMetadata {
         MemoryMetadata {
@@ -238,5 +290,204 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, MemoryStoreError::Scope(_)));
+    }
+
+    fn request_with(
+        content: impl Into<String>,
+        session_id: &SessionId,
+        source_range: MessageRange,
+        indexed_at: SystemTime,
+    ) -> MemoryIndexRequest {
+        MemoryIndexRequest::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            meerkat_core::MemoryIndexableContent::Indexable(content.into()),
+            MemoryMetadata {
+                session_id: session_id.clone(),
+                source: MemorySource::Compaction { source_range },
+                indexed_at,
+            },
+        )
+        .unwrap()
+    }
+
+    fn enumeration(limit: usize, offset: usize) -> MemoryEnumerationRequest {
+        MemoryEnumerationRequest {
+            limit,
+            offset,
+            source_overlap: None,
+            indexed_after: None,
+        }
+    }
+
+    /// Parity with HnswMemoryStore: drop removes exactly the owner's entries
+    /// and reports their count; other scopes are untouched.
+    #[tokio::test]
+    async fn test_drop_scope_removes_only_owner_entries() {
+        let store = SimpleMemoryStore::new();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let scope_a = MemorySearchScope::for_session(session_a.clone());
+        let scope_b = MemorySearchScope::for_session(session_b.clone());
+
+        store
+            .index_scoped(request("doomed alpha entry", &session_a))
+            .await
+            .unwrap();
+        store
+            .index_scoped(request("doomed beta entry", &session_a))
+            .await
+            .unwrap();
+        store
+            .index_scoped(request("surviving gamma entry", &session_b))
+            .await
+            .unwrap();
+
+        let receipt = store
+            .drop_scope(&MemoryOwner::canonical_session(session_a.clone()))
+            .await
+            .unwrap();
+        assert_eq!(receipt.dropped_entries, 2);
+        assert_eq!(receipt.owner.session_id(), &session_a);
+
+        let dropped = store.search(&scope_a, "doomed", 10).await.unwrap();
+        assert!(dropped.is_empty());
+        let surviving = store.search(&scope_b, "surviving gamma", 10).await.unwrap();
+        assert_eq!(surviving.len(), 1);
+
+        // Dropping the same scope again is a zero-count no-op.
+        let repeat = store
+            .drop_scope(&MemoryOwner::canonical_session(session_a))
+            .await
+            .unwrap();
+        assert_eq!(repeat.dropped_entries, 0);
+    }
+
+    /// Parity with HnswMemoryStore: enumeration pages raw scope rows in
+    /// insertion order with deterministic raw-offset accounting.
+    #[tokio::test]
+    async fn test_enumerate_scoped_pages_in_insertion_order() {
+        let store = SimpleMemoryStore::new();
+        let session_id = SessionId::new();
+        let other_session = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        let texts = ["entry zero", "entry one", "entry two", "entry three"];
+        for (i, text) in texts.iter().enumerate() {
+            store
+                .index_scoped(request(*text, &session_id))
+                .await
+                .unwrap();
+            store
+                .index_scoped(request(format!("interloper {i}"), &other_session))
+                .await
+                .unwrap();
+        }
+
+        let first = store
+            .enumerate_scoped(&scope, enumeration(3, 0))
+            .await
+            .unwrap();
+        assert_eq!(first.records.len(), 3);
+        assert_eq!(first.records[0].content, "entry zero");
+        assert_eq!(first.records[1].content, "entry one");
+        assert_eq!(first.records[2].content, "entry two");
+        assert_eq!(first.next_offset, Some(3));
+
+        let last = store
+            .enumerate_scoped(&scope, enumeration(3, 3))
+            .await
+            .unwrap();
+        assert_eq!(last.records.len(), 1);
+        assert_eq!(last.records[0].content, "entry three");
+        assert_eq!(last.next_offset, None);
+
+        let beyond = store
+            .enumerate_scoped(&scope, enumeration(3, 9))
+            .await
+            .unwrap();
+        assert!(beyond.records.is_empty());
+        assert_eq!(beyond.next_offset, None);
+    }
+
+    /// Parity with HnswMemoryStore: filters run post-window on typed
+    /// metadata, so a page may return fewer than `limit` records while
+    /// `next_offset` advances by raw rows scanned.
+    #[tokio::test]
+    async fn test_enumerate_scoped_filters_apply_after_raw_paging() {
+        let store = SimpleMemoryStore::new();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let early = UNIX_EPOCH + Duration::from_secs(1_000);
+        let late = UNIX_EPOCH + Duration::from_secs(2_000);
+
+        store
+            .index_scoped(request_with(
+                "covers zero to five early",
+                &session_id,
+                MessageRange::new(0, 5).unwrap(),
+                early,
+            ))
+            .await
+            .unwrap();
+        store
+            .index_scoped(request_with(
+                "covers five to ten late",
+                &session_id,
+                MessageRange::new(5, 10).unwrap(),
+                late,
+            ))
+            .await
+            .unwrap();
+        store
+            .index_scoped(request_with(
+                "covers ten to fifteen late",
+                &session_id,
+                MessageRange::new(10, 15).unwrap(),
+                late,
+            ))
+            .await
+            .unwrap();
+
+        // source_overlap admits only the middle record; all three raw rows
+        // are scanned.
+        let overlap = store
+            .enumerate_scoped(
+                &scope,
+                MemoryEnumerationRequest {
+                    limit: 10,
+                    offset: 0,
+                    source_overlap: Some(MessageRange::new(6, 8).unwrap()),
+                    indexed_after: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(overlap.records.len(), 1);
+        assert_eq!(overlap.records[0].content, "covers five to ten late");
+        assert_eq!(overlap.next_offset, None);
+
+        // indexed_after is strict: the boundary instant is excluded.
+        let after = store
+            .enumerate_scoped(
+                &scope,
+                MemoryEnumerationRequest {
+                    limit: 10,
+                    offset: 0,
+                    source_overlap: None,
+                    indexed_after: Some(early),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.records.len(), 2);
+        assert!(after.records.iter().all(|r| r.content.contains("late")));
+
+        // Zero-limit pages scan nothing but report remaining raw rows.
+        let probe = store
+            .enumerate_scoped(&scope, enumeration(0, 1))
+            .await
+            .unwrap();
+        assert!(probe.records.is_empty());
+        assert_eq!(probe.next_offset, Some(1));
     }
 }

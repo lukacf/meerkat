@@ -125,9 +125,10 @@ pub use compact::{
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 pub use memory::{
-    EmbeddingModel, HnswParams, MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest,
-    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryResult,
-    MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError, MessageRange,
+    EmbeddingModel, HnswParams, MemoryEnumerationPage, MemoryEnumerationRequest, MemoryIndexBatch,
+    MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryOwner,
+    MemoryRankingPolicy, MemoryRecord, MemoryResult, MemoryScopeDropReceipt, MemorySearchScope,
+    MemorySource, MemoryStore, MemoryStoreError, MessageRange,
 };
 pub use model_profile::{ModelCatalog, ModelProfile};
 pub use model_registry::{

@@ -311,6 +311,11 @@ pub struct AgentBuildConfig {
     /// Per-build auto-compaction threshold override (tokens, non-zero).
     /// Wins over the global config knob and model-aware scaling.
     pub auto_compact_threshold_override: Option<std::num::NonZeroU64>,
+    /// Host-supplied compaction summary curator. When set, the agent loop
+    /// asks the curator for the compaction summary instead of running the
+    /// summarization LLM call; the compaction trigger and history rebuild
+    /// stay with the configured compactor.
+    pub compaction_curator_override: Option<Arc<dyn meerkat_core::CompactionCurator>>,
     /// Max tokens per turn. If `None`, uses `Config::max_tokens`.
     pub max_tokens: Option<u32>,
     /// Typed per-request system-prompt policy.
@@ -537,6 +542,10 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "auto_compact_threshold_override",
                 &self.auto_compact_threshold_override,
             )
+            .field(
+                "compaction_curator_override",
+                &self.compaction_curator_override.is_some(),
+            )
             .field("max_tokens", &self.max_tokens)
             .field("system_prompt", &{
                 match &self.system_prompt {
@@ -642,6 +651,7 @@ impl AgentBuildConfig {
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,
+            compaction_curator_override: None,
             max_tokens: None,
             system_prompt: crate::SystemPromptOverride::Inherit,
             output_schema: None,
@@ -5511,6 +5521,11 @@ impl AgentFactory {
                 ),
             ));
             builder = builder.compactor(compactor);
+        }
+        // Host-supplied summary curator: substitutes summary content
+        // production only; the trigger/rebuild stay with the compactor above.
+        if let Some(curator) = build_config.compaction_curator_override {
+            builder = builder.compaction_curator(curator);
         }
 
         // 12d. Wire skill engine for per-turn /skill-ref activation

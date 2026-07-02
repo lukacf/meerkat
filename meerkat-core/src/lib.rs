@@ -121,7 +121,8 @@ pub use comms::{
     SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use compact::{
-    CompactionConfig, CompactionContext, CompactionResult, Compactor,
+    CompactionConfig, CompactionContext, CompactionCurator, CompactionCuratorError,
+    CompactionResult, CompactionWindow, Compactor, CuratedCompactionSummary,
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 pub use memory::{
@@ -271,8 +272,9 @@ pub use service::{
     SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult, SessionHistoryPage,
     SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
-    SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionPage,
-    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
+    SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
+    SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsRequest,
     StageToolResultsResult, StartTurnRequest, TranscriptEditError, TranscriptEditRunningBehavior,
     TranscriptReplacement, TranscriptRewriteCommit, TranscriptRewriteReason,

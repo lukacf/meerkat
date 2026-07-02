@@ -28,9 +28,10 @@ use std::collections::BTreeMap;
 use meerkat_core::{
     AssistantBlock, BlobId, BlockAssistantMessage, ContentBlock, ContentInput, ImageData, Message,
     ProviderMeta, ServerToolKind, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
-    SessionTranscriptRevisionPage, StopReason, SystemMessage, SystemNoticeKind,
-    SystemNoticeMessage, ToolResult, TranscriptEditRunningBehavior, TranscriptReplacement,
-    TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource, UserMessage, VideoData,
+    SessionTranscriptRevisionList, SessionTranscriptRevisionPage, StopReason, SystemMessage,
+    SystemNoticeKind, SystemNoticeMessage, ToolResult, TranscriptEditRunningBehavior,
+    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource,
+    UserMessage, VideoData,
 };
 use meerkat_core::{InteractionId, RunId};
 use std::convert::TryFrom;
@@ -177,6 +178,18 @@ pub struct RestoreSessionTranscriptRevisionParams {
 pub struct ReadSessionTranscriptRevisionParams {
     pub session_id: String,
     pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Request payload for `session/transcript_revisions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ListSessionTranscriptRevisionsParams {
+    pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1444,6 +1457,52 @@ impl From<SessionTranscriptRevisionPage> for WireSessionTranscriptRevision {
     }
 }
 
+/// One transcript rewrite commit in canonical wire format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireSessionTranscriptRevisionEntry {
+    pub revision: String,
+    pub parent_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Display projection of the typed rewrite reason.
+    pub reason: String,
+    /// Commit timestamp as seconds since the Unix epoch.
+    pub committed_at: u64,
+}
+
+/// Ordered (oldest-first) transcript revision commit list in canonical wire
+/// format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireSessionTranscriptRevisionList {
+    pub head_revision: String,
+    pub entries: Vec<WireSessionTranscriptRevisionEntry>,
+}
+
+impl From<SessionTranscriptRevisionList> for WireSessionTranscriptRevisionList {
+    fn from(list: SessionTranscriptRevisionList) -> Self {
+        Self {
+            head_revision: list.head_revision,
+            entries: list
+                .entries
+                .into_iter()
+                .map(|entry| WireSessionTranscriptRevisionEntry {
+                    revision: entry.revision,
+                    parent_revision: entry.parent_revision,
+                    actor: entry.actor,
+                    reason: entry.reason,
+                    committed_at: entry
+                        .committed_at
+                        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1652,6 +1711,52 @@ mod tests {
         assert_eq!(encoded["revision"], "sha256:parent");
         assert_eq!(encoded["head_revision"], "sha256:head");
         assert_eq!(encoded["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn test_list_session_transcript_revisions_params_roundtrip() {
+        let params: ListSessionTranscriptRevisionsParams =
+            serde_json::from_value(serde_json::json!({
+                "session_id": "session_123",
+                "offset": 1,
+                "limit": 2
+            }))
+            .unwrap();
+        assert_eq!(params.session_id, "session_123");
+        assert_eq!(params.offset, Some(1));
+        assert_eq!(params.limit, Some(2));
+
+        let defaulted: ListSessionTranscriptRevisionsParams =
+            serde_json::from_value(serde_json::json!({
+                "session_id": "session_123"
+            }))
+            .unwrap();
+        assert_eq!(defaulted.offset, None);
+        assert_eq!(defaulted.limit, None);
+
+        let committed_at =
+            meerkat_core::time_compat::UNIX_EPOCH + std::time::Duration::from_secs(1234);
+        let list = SessionTranscriptRevisionList {
+            entries: vec![meerkat_core::SessionTranscriptRevisionListEntry {
+                revision: "sha256:child".to_string(),
+                parent_revision: "sha256:parent".to_string(),
+                actor: None,
+                reason: "compaction".to_string(),
+                committed_at,
+            }],
+            head_revision: "sha256:child".to_string(),
+        };
+        let wire: WireSessionTranscriptRevisionList = list.into();
+        let encoded = serde_json::to_value(wire).unwrap();
+        assert_eq!(encoded["head_revision"], "sha256:child");
+        assert_eq!(encoded["entries"][0]["revision"], "sha256:child");
+        assert_eq!(encoded["entries"][0]["parent_revision"], "sha256:parent");
+        assert_eq!(encoded["entries"][0]["reason"], "compaction");
+        assert_eq!(encoded["entries"][0]["committed_at"], 1234);
+        assert!(
+            encoded["entries"][0].get("actor").is_none(),
+            "absent actor must be omitted from the wire encoding"
+        );
     }
 
     #[test]

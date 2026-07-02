@@ -129,6 +129,8 @@ export type {
   SessionMessage,
   SessionOptions,
   SessionTranscriptRevision,
+  SessionTranscriptRevisionEntry,
+  SessionTranscriptRevisionList,
   SessionTranscriptRewriteResult,
   SessionToolResult,
   SkillQuarantineDiagnostic,

@@ -47,9 +47,10 @@ use meerkat_core::service::{
     SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
     SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
-    SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionQuery,
-    SessionTranscriptRewriteRequest, SessionTranscriptRewriteResult, SessionView,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, StartTurnRuntimeSemantics,
+    SessionSummary, SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionListQuery,
+    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    SessionTranscriptRewriteResult, SessionView, StageToolResultsRequest, StageToolResultsResult,
+    StartTurnRequest, StartTurnRuntimeSemantics,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
@@ -7484,6 +7485,30 @@ impl SessionRuntime {
             .realm_id()
             .map(|realm| meerkat_contracts::format_session_ref(&realm, session_id));
         Ok(revision)
+    }
+
+    /// List retained transcript revision commits through the authoritative
+    /// session service.
+    pub async fn list_session_transcript_revisions_rich(
+        &self,
+        session_id: &SessionId,
+        query: SessionTranscriptRevisionListQuery,
+    ) -> Result<meerkat_contracts::WireSessionTranscriptRevisionList, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; transcript revisions are available only for materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        Ok(self
+            .service
+            .list_transcript_revisions(session_id, query)
+            .await
+            .map_err(session_error_to_rpc)?
+            .into())
     }
 
     async fn reject_active_transcript_edit(&self, session_id: &SessionId) -> Result<(), RpcError> {

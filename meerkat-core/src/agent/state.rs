@@ -1253,6 +1253,7 @@ where
                         let outcome = crate::agent::compact::run_compaction(
                             self.client.as_ref(),
                             compactor,
+                            self.compaction_curator.as_ref(),
                             self.session.messages(),
                             self.last_input_tokens,
                             current_boundary_index,
@@ -3438,7 +3439,10 @@ mod tests {
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
-    use crate::compact::{CompactionContext, CompactionResult, Compactor};
+    use crate::compact::{
+        CompactionContext, CompactionCurator, CompactionCuratorError, CompactionResult,
+        CompactionWindow, Compactor, CuratedCompactionSummary,
+    };
     use crate::error::{
         AgentError, LlmFailureReason, LlmProviderError, LlmProviderErrorKind, ToolError,
     };
@@ -4242,6 +4246,68 @@ mod tests {
                 messages: compacted,
                 discarded: messages.iter().take(discarded_len).cloned().collect(),
             }
+        }
+    }
+
+    struct SubstitutingCurator {
+        seen_windows: Mutex<Vec<(usize, u64, u64)>>,
+    }
+
+    impl SubstitutingCurator {
+        fn new() -> Self {
+            Self {
+                seen_windows: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_windows(&self) -> Vec<(usize, u64, u64)> {
+            self.seen_windows.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CompactionCurator for SubstitutingCurator {
+        async fn curate_summary(
+            &self,
+            window: CompactionWindow<'_>,
+        ) -> Result<CuratedCompactionSummary, CompactionCuratorError> {
+            self.seen_windows.lock().unwrap().push((
+                window.messages.len(),
+                window.last_input_tokens,
+                window.session_boundary_index,
+            ));
+            CuratedCompactionSummary::new("curated summary")
+        }
+    }
+
+    struct FailingCurator;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CompactionCurator for FailingCurator {
+        async fn curate_summary(
+            &self,
+            _window: CompactionWindow<'_>,
+        ) -> Result<CuratedCompactionSummary, CompactionCuratorError> {
+            Err(CompactionCuratorError::Failed(
+                "curator offline".to_string(),
+            ))
+        }
+    }
+
+    struct EmptySummaryCurator;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CompactionCurator for EmptySummaryCurator {
+        async fn curate_summary(
+            &self,
+            _window: CompactionWindow<'_>,
+        ) -> Result<CuratedCompactionSummary, CompactionCuratorError> {
+            // Exercises the fallible constructor: whitespace-only text can
+            // never mint a CuratedCompactionSummary.
+            CuratedCompactionSummary::new("   ")
         }
     }
 
@@ -5519,6 +5585,165 @@ mod tests {
                 .iter()
                 .any(|message| message.as_indexable_text().contains("first")),
             "failed indexing must preserve the authoritative source history"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_curator_substitutes_summary_without_llm_call() {
+        // The failing client errors on any summarization call ("COMPACT NOW"),
+        // so a completed compaction proves the curator substituted summary
+        // production and the LLM path was never entered.
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let curator = Arc::new(SubstitutingCurator::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .compaction_curator(curator.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("curated compaction should commit and continue the turn");
+
+        let mut saw_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::CompactionCompleted { summary_tokens, .. } = event {
+                assert_eq!(
+                    summary_tokens, 0,
+                    "curated summaries consume no LLM tokens; summary usage must be zero"
+                );
+                saw_completed = true;
+            }
+        }
+        assert!(
+            saw_completed,
+            "curator-produced compaction should complete via the normal commit path"
+        );
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec!["first".to_string(), "second".to_string()],
+            "the summarization LLM call must be skipped entirely when a curator is configured"
+        );
+        assert_eq!(
+            curator.seen_windows().len(),
+            1,
+            "the curator should be invoked exactly once per compaction"
+        );
+        assert!(
+            agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::User(user)
+                    if user.is_compaction_summary()
+                        && user.text_content().contains("curated summary")
+            )),
+            "the committed history must carry the curated summary as a typed compaction-summary message"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_curator_failure_emits_typed_event_and_preserves_history() {
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .compaction_curator(Arc::new(FailingCurator))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("curator failure should preserve history and continue the turn");
+
+        let mut saw_curator_failure = false;
+        let mut saw_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::CompactionFailed {
+                    reason: crate::event::CompactionFailureReason::CuratorFailed { message },
+                } => {
+                    assert!(
+                        message.contains("curator offline"),
+                        "unexpected curator failure message: {message}"
+                    );
+                    saw_curator_failure = true;
+                }
+                crate::event::AgentEvent::CompactionCompleted { .. } => {
+                    saw_completed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_curator_failure,
+            "curator failure should surface as a typed CuratorFailed compaction failure"
+        );
+        assert!(
+            !saw_completed,
+            "compaction must not complete when the curator fails"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "a failed curator must leave the original history untouched"
+        );
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec!["first".to_string(), "second".to_string()],
+            "a failing curator must never fall back to the summarization LLM call"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_curator_empty_summary_surfaces_typed_error() {
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .compaction_curator(Arc::new(EmptySummaryCurator))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("empty curated summary should preserve history and continue the turn");
+
+        let mut saw_empty_failure = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::CompactionFailed {
+                reason: crate::event::CompactionFailureReason::CuratorFailed { message },
+            } = event
+            {
+                assert!(
+                    message.contains("empty compaction summary"),
+                    "unexpected curator failure message: {message}"
+                );
+                saw_empty_failure = true;
+            }
+        }
+        assert!(
+            saw_empty_failure,
+            "an empty curated summary must surface as a typed CuratorFailed compaction failure"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "an empty curated summary must leave the original history untouched"
         );
     }
 

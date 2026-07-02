@@ -169,8 +169,12 @@ pub use meerkat_core::{
     SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use meerkat_core::{
-    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionPage,
-    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    CompactionCurator, CompactionCuratorError, CompactionWindow, CuratedCompactionSummary,
+};
+pub use meerkat_core::{
+    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
+    SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
+    SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, TranscriptEditRunningBehavior, TranscriptRewriteCommit,
     TranscriptRewriteReason, TranscriptRewriteRecord, TranscriptRewriteSelection,
 };

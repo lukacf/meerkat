@@ -286,6 +286,22 @@ export interface SessionTranscriptRevision {
   readonly messages: readonly SessionMessage[];
 }
 
+/** One transcript rewrite commit in a session's revision graph. */
+export interface SessionTranscriptRevisionEntry {
+  readonly revision: string;
+  readonly parentRevision: string;
+  readonly actor?: string;
+  readonly reason: string;
+  /** Commit timestamp as seconds since the Unix epoch. */
+  readonly committedAt: number;
+}
+
+/** Ordered (oldest-first) transcript revision commit list for a session. */
+export interface SessionTranscriptRevisionList {
+  readonly headRevision: string;
+  readonly entries: readonly SessionTranscriptRevisionEntry[];
+}
+
 /** Behavior for transcript edit requests when the source session has active work. */
 export type TranscriptEditRunningBehavior = "reject";
 

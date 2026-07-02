@@ -1547,6 +1547,46 @@ impl SessionTranscriptRevisionPage {
     }
 }
 
+/// Query parameters for listing retained transcript revision commits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTranscriptRevisionListQuery {
+    /// Maximum number of commit entries to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Number of commit entries to skip from the start of the commit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+}
+
+/// One transcript rewrite commit projected for revision-list reads.
+///
+/// Mirrors the typed [`TranscriptRewriteCommit`] owner: `reason` is the
+/// [`Display`](std::fmt::Display) projection of the typed
+/// [`TranscriptRewriteReason`], never a separately-owned string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTranscriptRevisionListEntry {
+    /// Revision the commit produced.
+    pub revision: String,
+    /// Revision the commit was applied against.
+    pub parent_revision: String,
+    /// Actor recorded on the commit, when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Display projection of the typed rewrite reason.
+    pub reason: String,
+    /// Commit timestamp.
+    pub committed_at: SystemTime,
+}
+
+/// Ordered (oldest-first) transcript revision commit list for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTranscriptRevisionList {
+    /// Revision commits in append order, sliced per the list query.
+    pub entries: Vec<SessionTranscriptRevisionListEntry>,
+    /// Current transcript head revision.
+    pub head_revision: String,
+}
+
 /// Explicit behavior for transcript fork/edit requests when the source
 /// session has active work.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1914,6 +1954,19 @@ pub trait SessionServiceHistoryExt: SessionService {
         let _ = (id, query);
         Err(SessionError::Unsupported(
             "read_transcript_revision".to_string(),
+        ))
+    }
+
+    /// List retained transcript revision commits (oldest first) together with
+    /// the current head revision.
+    async fn list_transcript_revisions(
+        &self,
+        id: &SessionId,
+        query: SessionTranscriptRevisionListQuery,
+    ) -> Result<SessionTranscriptRevisionList, SessionError> {
+        let _ = (id, query);
+        Err(SessionError::Unsupported(
+            "list_transcript_revisions".to_string(),
         ))
     }
 }

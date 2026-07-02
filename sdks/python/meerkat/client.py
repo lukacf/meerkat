@@ -126,6 +126,7 @@ from .generated.types import (
     InjectSystemContextParams as RpcInjectSystemContextParams,
     InjectSystemContextResult as RpcInjectSystemContextResult,
     InterruptParams as RpcInterruptParams,
+    ListSessionTranscriptRevisionsParams as RpcListSessionTranscriptRevisionsParams,
     ListSessionsParams as RpcListSessionsParams,
     ListSessionsResult as RpcListSessionsResult,
     LoginCompleteParams as RpcLoginCompleteParams,
@@ -151,6 +152,7 @@ from .generated.types import (
     WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
     WireRunResult as RpcWireRunResult,
     WireSessionTranscriptRevision as RpcWireSessionTranscriptRevision,
+    WireSessionTranscriptRevisionList as RpcWireSessionTranscriptRevisionList,
 )
 from .mob import (
     Mob,
@@ -206,6 +208,8 @@ from .types import (
     SessionForkResult,
     SessionHistory,
     SessionTranscriptRevision,
+    SessionTranscriptRevisionEntry,
+    SessionTranscriptRevisionList,
     SessionTranscriptRewriteResult,
     SessionSummary,
     SessionMessage,
@@ -1232,6 +1236,26 @@ class MeerkatClient:
             params["limit"] = limit
         raw = await self._request("session/transcript_revision", params)
         return self._parse_session_transcript_revision(raw)
+
+    async def list_session_transcript_revisions(
+        self,
+        session_id: str,
+        *,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> SessionTranscriptRevisionList:
+        """List retained transcript revision commits with the current head."""
+        _rpc_signature: (
+            RpcListSessionTranscriptRevisionsParams
+            | RpcWireSessionTranscriptRevisionList
+        )
+        params: dict[str, Any] = {"session_id": session_id}
+        if offset is not None:
+            params["offset"] = offset
+        if limit is not None:
+            params["limit"] = limit
+        raw = await self._request("session/transcript_revisions", params)
+        return self._parse_session_transcript_revision_list(raw)
 
     async def fork_session_at(
         self,
@@ -4125,6 +4149,45 @@ class MeerkatClient:
                     data, "messages", context
                 )
             ],
+        )
+
+    @staticmethod
+    def _parse_session_transcript_revision_list(
+        data: dict[str, Any],
+    ) -> SessionTranscriptRevisionList:
+        context = "Invalid session transcript revision list"
+        entries: list[SessionTranscriptRevisionEntry] = []
+        for entry in MeerkatClient._require_list_field(data, "entries", context):
+            if not isinstance(entry, dict):
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: entries must be objects"
+                )
+            entries.append(
+                SessionTranscriptRevisionEntry(
+                    revision=MeerkatClient._require_string_field(
+                        entry, "revision", context
+                    ),
+                    parent_revision=MeerkatClient._require_string_field(
+                        entry, "parent_revision", context
+                    ),
+                    actor=MeerkatClient._optional_string_field(
+                        entry, "actor", context
+                    ),
+                    reason=MeerkatClient._require_string_field(
+                        entry, "reason", context
+                    ),
+                    committed_at=int(
+                        MeerkatClient._require_number_field(
+                            entry, "committed_at", context
+                        )
+                    ),
+                )
+            )
+        return SessionTranscriptRevisionList(
+            head_revision=MeerkatClient._require_string_field(
+                data, "head_revision", context
+            ),
+            entries=entries,
         )
 
     @staticmethod

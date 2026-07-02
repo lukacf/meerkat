@@ -32,6 +32,7 @@ import type {
   SessionHistory,
   SessionIngressOptions,
   SessionTranscriptRevision,
+  SessionTranscriptRevisionList,
   SessionTranscriptRewriteResult,
   SkillRef,
   TranscriptEditOptions,
@@ -129,6 +130,12 @@ export class Session {
     options?: { offset?: number; limit?: number },
   ): Promise<SessionTranscriptRevision> {
     return this._client.readSessionTranscriptRevision(this._id, revision, options);
+  }
+
+  async transcriptRevisions(
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevisionList> {
+    return this._client.listSessionTranscriptRevisions(this._id, options);
   }
 
   async forkAt(
@@ -322,6 +329,12 @@ export class DeferredSession {
     options?: { offset?: number; limit?: number },
   ): Promise<SessionTranscriptRevision> {
     return this._client.readSessionTranscriptRevision(this._id, revision, options);
+  }
+
+  async transcriptRevisions(
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevisionList> {
+    return this._client.listSessionTranscriptRevisions(this._id, options);
   }
 
   async forkAt(

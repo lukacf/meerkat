@@ -124,6 +124,7 @@ import type {
   InjectSystemContextParams as RpcInjectSystemContextParams,
   InjectSystemContextResult as RpcInjectSystemContextResult,
   InterruptParams as RpcInterruptParams,
+  ListSessionTranscriptRevisionsParams as RpcListSessionTranscriptRevisionsParams,
   ListSessionsParams as RpcListSessionsParams,
   ListSessionsResult as RpcListSessionsResult,
   LiveCommitInputResult as RpcLiveCommitInputResult,
@@ -153,6 +154,7 @@ import type {
   WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
   WireRunResult as RpcWireRunResult,
   WireSessionTranscriptRevision as RpcWireSessionTranscriptRevision,
+  WireSessionTranscriptRevisionList as RpcWireSessionTranscriptRevisionList,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -221,6 +223,8 @@ import type {
   SessionMessage,
   SessionOptions,
   SessionTranscriptRevision,
+  SessionTranscriptRevisionEntry,
+  SessionTranscriptRevisionList,
   SessionTranscriptRewriteResult,
   SessionToolResult,
   SkillKey,
@@ -1050,6 +1054,24 @@ export class MeerkatClient {
     }
     const raw = await this.request("session/transcript_revision", params);
     return MeerkatClient.parseSessionTranscriptRevision(raw);
+  }
+
+  async listSessionTranscriptRevisions(
+    sessionId: string,
+    options?: { offset?: number; limit?: number },
+  ): Promise<SessionTranscriptRevisionList> {
+    type _RpcSignature = [RpcListSessionTranscriptRevisionsParams, RpcWireSessionTranscriptRevisionList];
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+    };
+    if (options?.offset !== undefined) {
+      params.offset = options.offset;
+    }
+    if (options?.limit !== undefined) {
+      params.limit = options.limit;
+    }
+    const raw = await this.request("session/transcript_revisions", params);
+    return MeerkatClient.parseSessionTranscriptRevisionList(raw);
   }
 
   async forkSessionAt(
@@ -4003,6 +4025,27 @@ export class MeerkatClient {
       limit: data.limit != null ? Number(data.limit) : undefined,
       hasMore: MeerkatClient.requireBooleanField(data, "has_more", context),
       messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
+    };
+  }
+
+  static parseSessionTranscriptRevisionList(
+    data: Record<string, unknown>,
+  ): SessionTranscriptRevisionList {
+    const context = "Invalid session transcript revision list response";
+    if (!Array.isArray(data.entries)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: entries must be a list`);
+    }
+    const rawEntries = data.entries as Array<Record<string, unknown>>;
+    const entries: SessionTranscriptRevisionEntry[] = rawEntries.map((entry) => ({
+      revision: MeerkatClient.requireStringField(entry, "revision", context),
+      parentRevision: MeerkatClient.requireStringField(entry, "parent_revision", context),
+      actor: entry.actor != null ? String(entry.actor) : undefined,
+      reason: MeerkatClient.requireStringField(entry, "reason", context),
+      committedAt: MeerkatClient.requireNumberField(entry, "committed_at", context),
+    }));
+    return {
+      headRevision: MeerkatClient.requireStringField(data, "head_revision", context),
+      entries,
     };
   }
 

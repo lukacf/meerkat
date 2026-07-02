@@ -124,6 +124,17 @@ impl TranscriptRewriteReason {
     }
 }
 
+impl std::fmt::Display for TranscriptRewriteReason {
+    /// Human-facing projection consumed by revision-list reads. The typed
+    /// `{kind, note}` pair stays the owner; this rendering is derived only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.note {
+            Some(note) => write!(f, "{}: {note}", self.kind),
+            None => f.write_str(&self.kind),
+        }
+    }
+}
+
 /// Immutable rewrite commit that advances a session transcript head.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

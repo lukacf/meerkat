@@ -499,6 +499,7 @@ test_suite(
         "//meerkat-runtime:turn_content_shape_contract_test",
         "//meerkat-runtime:turn_metadata_single_construction_site_test",
         "//meerkat-runtime:unregister_drain_contract_test",
+        "//meerkat-schedule:flow_target_serde_test",
         "//meerkat-schedule:meerkat_schedule_unit_test",
         "//meerkat-session:ephemeral_contract_test",
         "//meerkat-session:meerkat_session_unit_test",

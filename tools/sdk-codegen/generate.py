@@ -182,6 +182,10 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
     "PeerTransport",
     "PeerDirectorySource",
     "PeerSendability",
+    # SenderContentTaint must precede SendTaintOverride: the generated Python
+    # aliases evaluate in roster order and the override union references it.
+    "SenderContentTaint",
+    "SendTaintOverride",
 ]
 
 PUBLIC_RPC_CATALOG_OBJECT_TYPES = [

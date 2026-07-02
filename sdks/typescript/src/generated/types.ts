@@ -2428,7 +2428,7 @@ export interface CommsCommandInput {
 export interface CommsCommandPeerMessage {
   blocks?: ContentBlock[];
   body: string;
-  content_taint?: { declare: SenderContentTaint } | "undeclared";
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   kind: "peer_message";
   to: PeerId;
@@ -2443,7 +2443,7 @@ export interface CommsCommandPeerLifecycle {
 
 export interface CommsCommandPeerRequest {
   blocks?: ContentBlock[];
-  content_taint?: { declare: SenderContentTaint } | "undeclared";
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
@@ -2454,7 +2454,7 @@ export interface CommsCommandPeerRequest {
 
 export interface CommsCommandPeerResponse {
   blocks?: ContentBlock[];
-  content_taint?: { declare: SenderContentTaint } | "undeclared";
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
@@ -2700,7 +2700,7 @@ export interface CommsSendParamsInput {
 export interface CommsSendParamsPeerMessage {
   blocks?: ContentBlock[];
   body: string;
-  content_taint?: { declare: SenderContentTaint } | "undeclared";
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   kind: "peer_message";
   session_id: string;
@@ -2717,7 +2717,7 @@ export interface CommsSendParamsPeerLifecycle {
 
 export interface CommsSendParamsPeerRequest {
   blocks?: ContentBlock[];
-  content_taint?: { declare: SenderContentTaint } | "undeclared";
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
@@ -2729,7 +2729,7 @@ export interface CommsSendParamsPeerRequest {
 
 export interface CommsSendParamsPeerResponse {
   blocks?: ContentBlock[];
-  content_taint?: { declare: SenderContentTaint } | "undeclared";
+  content_taint?: SendTaintOverride;
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
@@ -2793,6 +2793,10 @@ export type PeerTransport = "inproc" | "uds" | "tcp";
 export type PeerDirectorySource = "trusted" | "inproc" | "trusted_and_inproc" | "unknown";
 
 export type PeerSendability = "peer_message" | "peer_request" | "peer_response";
+
+export type SenderContentTaint = "clean" | "tainted";
+
+export type SendTaintOverride = { declare: SenderContentTaint } | "undeclared";
 
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";

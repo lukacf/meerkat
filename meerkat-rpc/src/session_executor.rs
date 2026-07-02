@@ -532,6 +532,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             (_, pre_admission) => {
                 drop(pre_admission);
                 let req = meerkat_core::service::StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt,
                     system_prompt: None,
                     event_tx: Some(event_tx),

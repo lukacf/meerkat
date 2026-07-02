@@ -961,6 +961,69 @@ mod tests {
     }
 
     #[test]
+    fn discarded_prior_compaction_summary_is_not_reindexed() {
+        use meerkat_core::types::{MemoryIndexExclusion, MemoryIndexableContent};
+
+        // Ask 3 regression: when a SECOND compaction discards the previous
+        // compaction summary (a projection of already-indexed history), the
+        // typed indexability decision carried to the memory store must be the
+        // CompactionSummary exclusion — never Indexable. Re-indexing the
+        // summary would promote the projection to source content.
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+
+        // Transcript as rebuilt by a prior compaction: summary boundary
+        // followed by later conversation turns.
+        let first_pass = c.rebuild_history(
+            &[
+                Message::User(UserMessage::text("original turn")),
+                Message::User(UserMessage::text("second turn")),
+            ],
+            "summary of original work",
+        );
+        let mut messages = first_pass.messages;
+        messages.push(Message::User(UserMessage::text("post-compaction turn 1")));
+        messages.push(Message::User(UserMessage::text("post-compaction turn 2")));
+
+        let result = c.rebuild_history(&messages, "summary of everything");
+
+        // The prior summary is discarded together with the older turns.
+        let discarded_summary = result
+            .discarded
+            .iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    Message::User(user) if user.transcript_role.is_compaction_summary()
+                )
+            })
+            .expect("prior compaction summary must be in the discard set");
+        assert_eq!(
+            discarded_summary.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::CompactionSummary),
+            "discarded prior summary must carry the typed exclusion, not re-index"
+        );
+
+        // Ordinary discarded conversation stays indexable.
+        let discarded_turn = result
+            .discarded
+            .iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    Message::User(user) if user.transcript_role.is_conversational()
+                )
+            })
+            .expect("a conversational turn is also discarded");
+        assert!(
+            discarded_turn.indexable_content().is_indexable(),
+            "conversational discards remain indexable"
+        );
+    }
+
+    #[test]
     fn prepare_for_summarization_strips_reasoning_blocks() {
         use meerkat_core::types::{ProviderMeta, StopReason};
 

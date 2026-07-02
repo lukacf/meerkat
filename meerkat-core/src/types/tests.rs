@@ -1959,6 +1959,94 @@ mod content_block_tests {
         assert_eq!(user.indexable_content().indexable_text(), Some("hello"));
     }
 
+    /// The user-channel indexability decision consults the typed transcript
+    /// role: a runtime compaction summary is a projection of already-indexed
+    /// history, and host-attached injected context is not user-authored
+    /// conversation — both carry typed exclusion reasons instead of being
+    /// re-indexed as conversation.
+    #[test]
+    fn indexable_content_excludes_typed_user_channel_roles() {
+        let summary = Message::User(UserMessage::compaction_summary(
+            "[Context compacted] summary of prior work",
+        ));
+        assert_eq!(
+            summary.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::CompactionSummary),
+        );
+        assert!(summary.as_indexable_text().is_empty());
+
+        let injected = Message::User(UserMessage::injected_context("ambient host context"));
+        assert_eq!(
+            injected.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::InjectedContext),
+        );
+        assert!(injected.as_indexable_text().is_empty());
+
+        let injected_blocks = Message::User(UserMessage::injected_context_with_blocks(vec![
+            ContentBlock::Text {
+                text: "typed ambient blocks".to_string(),
+            },
+        ]));
+        assert_eq!(
+            injected_blocks.indexable_content(),
+            MemoryIndexableContent::Excluded(MemoryIndexExclusion::InjectedContext),
+        );
+
+        // Ordinary conversation stays indexable.
+        let conversational = Message::User(UserMessage::text("hello"));
+        assert!(conversational.indexable_content().is_indexable());
+    }
+
+    #[test]
+    fn injected_context_constructors_stamp_typed_role() {
+        let text = UserMessage::injected_context("ambient");
+        assert!(text.transcript_role.is_injected_context());
+        assert!(!text.transcript_role.is_compaction_summary());
+        assert!(!text.transcript_role.is_conversational());
+        assert_eq!(text.identity, TranscriptMessageIdentity::default());
+
+        let blocks = UserMessage::injected_context_with_blocks(vec![ContentBlock::Text {
+            text: "ambient".to_string(),
+        }]);
+        assert!(blocks.transcript_role.is_injected_context());
+        assert_eq!(blocks.identity, TranscriptMessageIdentity::default());
+    }
+
+    /// Serde round-trip for the typed transcript role: `injected_context`
+    /// serializes as the snake_case field, an absent field defaults to
+    /// `Conversational`, and a conversational message omits the field.
+    #[test]
+    fn transcript_role_injected_context_serde_round_trip() {
+        let msg = Message::User(UserMessage::injected_context("ambient host context"));
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["transcript_role"], "injected_context");
+
+        let round_tripped: Message = serde_json::from_value(json).unwrap();
+        match round_tripped {
+            Message::User(user) => {
+                assert!(user.transcript_role.is_injected_context());
+                assert_eq!(user.text_content(), "ambient host context");
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+
+        // Absent field defaults to Conversational (durable-format
+        // compatibility: old persisted transcripts carry no role field).
+        let legacy: Message = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": "plain history",
+        }))
+        .unwrap();
+        match legacy {
+            Message::User(user) => assert!(user.transcript_role.is_conversational()),
+            other => panic!("expected user message, got {other:?}"),
+        }
+
+        // Conversational messages omit the field entirely.
+        let conversational = serde_json::to_value(Message::User(UserMessage::text("hi"))).unwrap();
+        assert!(conversational.get("transcript_role").is_none());
+    }
+
     // ContentInput tests
     #[test]
     fn content_input_from_string() {

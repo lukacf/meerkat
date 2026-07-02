@@ -467,6 +467,7 @@ pub fn to_create_session_request(
     let build_options = config.to_session_build_options();
 
     CreateSessionRequest {
+        injected_context: Vec::new(),
         model: config.model.clone(),
         prompt,
         system_prompt: config.system_prompt.clone(),

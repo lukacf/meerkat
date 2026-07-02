@@ -3558,6 +3558,7 @@ impl MobBuilder {
                         .start_turn(
                             &orchestrator_entry.member_ref,
                             meerkat_core::service::StartTurnRequest {
+                                injected_context: Vec::new(),
                                 prompt: resume_message.into(),
                                 system_prompt: None,
                                 event_tx: None,

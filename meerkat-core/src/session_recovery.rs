@@ -244,6 +244,7 @@ impl RecoveredSessionBuild {
         CreateSessionRequest {
             model: self.model,
             prompt: ContentInput::Text(String::new()),
+            injected_context: Vec::new(),
             system_prompt: self.system_prompt,
             max_tokens: self.max_tokens,
             event_tx: None,

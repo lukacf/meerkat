@@ -66,6 +66,12 @@ pub enum InitialTurn {
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionParams {
     pub prompt: ContentInput,
+    /// Host-attached injected context for the first turn. Each entry
+    /// materializes as a separate typed injected-context user-channel
+    /// message immediately before the first turn's user message, in order.
+    /// Injected context is excluded from semantic-memory indexing.
+    #[serde(default)]
+    pub injected_context: Option<Vec<ContentInput>>,
     /// Controls whether the first turn runs immediately or is deferred.
     /// Defaults to `run_immediately` when absent.
     #[serde(default)]
@@ -230,6 +236,20 @@ pub async fn create_session_with_params(
         params.app_context.as_ref(),
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
+    }
+    // session/create routes the first turn through the runtime prompt-input
+    // path, which does not carry the injected-context slot yet. Fail closed
+    // rather than silently dropping host-provided context.
+    if params
+        .injected_context
+        .as_ref()
+        .is_some_and(|entries| !entries.is_empty())
+    {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "injected_context is not supported on the JSON-RPC surface yet",
+        );
     }
 
     let model_was_explicit = params.model.is_some();
@@ -737,6 +757,31 @@ mod tests {
         let json = serde_json::json!({"prompt": "hello"});
         let params: CreateSessionParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.initial_turn, None);
+    }
+
+    #[test]
+    fn create_session_params_accept_injected_context() {
+        use super::CreateSessionParams;
+        use meerkat_core::ContentInput;
+
+        // Optional injected_context parses as a list of content inputs; an
+        // absent field stays None (pre-existing wire shape unchanged).
+        let json = serde_json::json!({
+            "prompt": "hello",
+            "injected_context": [
+                "ambient one",
+                [{"type": "text", "text": "ambient two"}]
+            ]
+        });
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        let entries = params.injected_context.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], ContentInput::Text(text) if text == "ambient one"));
+        assert!(matches!(&entries[1], ContentInput::Blocks(blocks) if blocks.len() == 1));
+
+        let json = serde_json::json!({"prompt": "hello"});
+        let params: CreateSessionParams = serde_json::from_value(json).unwrap();
+        assert!(params.injected_context.is_none());
     }
 
     #[test]

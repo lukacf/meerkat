@@ -9759,6 +9759,7 @@ mod tests {
             .runtime
             .core_session_service()
             .create_session(meerkat_core::service::CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "Hello".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,

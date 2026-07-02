@@ -33,6 +33,12 @@ use super::runtime::PeerResponseTerminalStatusWire;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RestCreateSessionRequest {
     pub prompt: ContentInput,
+    /// Host-attached injected context for the first turn. Each entry
+    /// materializes as a separate typed injected-context user-channel
+    /// message immediately before the first turn's user message, in order.
+    /// Injected context is excluded from semantic-memory indexing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected_context: Option<Vec<ContentInput>>,
     /// Typed per-request system-prompt policy: omit/`null` to inherit, a
     /// string to set an explicit prompt, or `{"action": "disable"}` to
     /// suppress every prompt source.
@@ -127,6 +133,12 @@ pub struct RestCreateSessionRequest {
 pub struct RestContinueSessionRequest {
     pub session_id: String,
     pub prompt: ContentInput,
+    /// Host-attached injected context for this turn. Each entry materializes
+    /// as a separate typed injected-context user-channel message immediately
+    /// before the turn's user message, in order. Injected context is
+    /// excluded from semantic-memory indexing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected_context: Option<Vec<ContentInput>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
@@ -352,6 +364,41 @@ mod tests {
         }))
         .expect("create-session body parses");
         assert_eq!(parsed.enable_web_search, Some(true));
+    }
+
+    #[test]
+    fn create_and_continue_requests_carry_injected_context() {
+        // The optional injected-context carrier follows the `prompt`
+        // treatment (untagged ContentInput entries); absent field stays None
+        // so the pre-existing wire shape is unchanged.
+        let parsed: RestCreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "injected_context": [
+                "ambient one",
+                [{"type": "text", "text": "ambient two"}]
+            ]
+        }))
+        .expect("create-session body parses");
+        let entries = parsed.injected_context.expect("injected_context parses");
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], ContentInput::Text(text) if text == "ambient one"));
+        assert!(matches!(&entries[1], ContentInput::Blocks(blocks) if blocks.len() == 1));
+
+        let parsed: RestCreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+        }))
+        .expect("create-session body parses without injected_context");
+        assert!(parsed.injected_context.is_none());
+
+        let parsed: RestContinueSessionRequest = serde_json::from_value(serde_json::json!({
+            "session_id": "session-1",
+            "prompt": "hello again",
+            "injected_context": ["turn ambient"]
+        }))
+        .expect("continue-session body parses");
+        let entries = parsed.injected_context.expect("injected_context parses");
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0], ContentInput::Text(text) if text == "turn ambient"));
     }
 
     #[test]

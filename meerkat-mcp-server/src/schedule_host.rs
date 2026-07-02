@@ -271,6 +271,7 @@ impl McpScheduleContext {
         };
 
         let request = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: match prompt_system_prompt

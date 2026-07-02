@@ -854,6 +854,7 @@ fn make_service(builder: MockAgentBuilder) -> Arc<EphemeralSessionService<MockAg
 
 fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
+        injected_context: Vec::new(),
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
         system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -869,6 +870,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
 
 fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
+        injected_context: Vec::new(),
         initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Stage,
         ..create_req(prompt)
@@ -877,6 +879,7 @@ fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
 
 fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
+        injected_context: Vec::new(),
         prompt: prompt.to_string().into(),
         system_prompt: None,
         event_tx: None,
@@ -990,6 +993,7 @@ async fn test_recovered_session_does_not_rearm_consumed_first_turn_override_wind
         .start_turn(
             &created.session_id,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 system_prompt: Some("late override".to_string()),
                 ..turn_req("resume turn")
             },
@@ -1377,6 +1381,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
             .start_turn(
                 &sid_clone,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         HandlingMode::Queue,
                         Some(overlay),
@@ -1434,6 +1439,7 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
         .start_turn(
             &session_id,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                     HandlingMode::Queue,
                     Some(TurnToolOverlay {
@@ -1495,6 +1501,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
         .start_turn(
             &session_id,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                     HandlingMode::Queue,
                     Some(TurnToolOverlay {
@@ -2092,6 +2099,7 @@ fn create_req_with_labels(
     labels: std::collections::BTreeMap<String, String>,
 ) -> CreateSessionRequest {
     CreateSessionRequest {
+        injected_context: Vec::new(),
         labels: Some(labels),
         ..create_req(prompt)
     }

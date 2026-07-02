@@ -13526,6 +13526,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
         .start_turn(
             &sid,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "non-flow turn".to_string().into(),
                 system_prompt: None,
                 event_tx: None,
@@ -13955,6 +13956,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
 
     let orphan = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "orphan".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -14298,6 +14300,7 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
 
     let replacement = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "replacement".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -15235,6 +15238,7 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
     let _ = service.enable_runtime_adapter();
     let initial = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Set(
@@ -15383,6 +15387,7 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
     let _ = service.enable_runtime_adapter();
     let initial = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Set(
@@ -22557,6 +22562,7 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
 
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "abort absent cleanup".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -22641,6 +22647,7 @@ async fn cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_s
     let session_id = session.id().clone();
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "idle cleanup ordering".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -22732,6 +22739,7 @@ async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_r
 
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "abort archive failure".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -22849,6 +22857,7 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
 
     service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "retire active runtime turn".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23381,6 +23390,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
     provisioner
         .provision_member(super::provisioner::ProvisionMemberRequest {
             create_session: CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "local binding provision".to_string().into(),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23421,6 +23431,7 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
     let service = Arc::new(MockSessionService::new());
     let session = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter boundary".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23477,6 +23488,7 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
     service.set_cancel_after_boundary_supported(false);
     let session = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter unsupported boundary".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -23529,6 +23541,7 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
     let service = Arc::new(MockSessionService::new());
     let session = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "no-adapter hard cancel".to_string().into(),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,

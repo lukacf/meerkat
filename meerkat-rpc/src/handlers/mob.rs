@@ -2188,6 +2188,7 @@ pub async fn handle_mob_turn_start(
         structured_output_retries: mob_params.structured_output_retries,
         provider_params: lower_turn_metadata_override(mob_params.provider_params),
         auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
+        injected_context: None,
     };
 
     super::turn::start_turn_with_params(
@@ -3128,6 +3129,7 @@ mod tests {
             structured_output_retries: mob_params.structured_output_retries,
             provider_params: lower_turn_metadata_override(mob_params.provider_params),
             auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
+            injected_context: None,
         };
 
         assert_eq!(turn_params.session_id, "resolved-session-123");

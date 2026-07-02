@@ -32,6 +32,7 @@ async fn session_service_accepts_and_runs_gemini_video_uri_prompt()
     let service = meerkat::build_ephemeral_service(factory, Config::default(), 2);
     let result = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: MODEL.to_string(),
             prompt: ContentInput::Blocks(vec![
                 ContentBlock::Video {

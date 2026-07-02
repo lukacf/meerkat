@@ -9237,6 +9237,7 @@ mod tests {
 
     fn create_request(prompt: &str, initial_turn: InitialTurnPolicy) -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "test".to_string(),
             prompt: prompt.to_string().into(),
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
@@ -9329,6 +9330,7 @@ mod tests {
 
     fn start_turn_request(prompt: &str) -> StartTurnRequest {
         StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: prompt.to_string().into(),
             system_prompt: None,
             event_tx: None,
@@ -9453,6 +9455,7 @@ mod tests {
         system_prompt: Option<&str>,
     ) -> StartTurnRequest {
         StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: prompt.to_string().into(),
             system_prompt: system_prompt.map(str::to_string),
             event_tx: None,
@@ -9750,6 +9753,7 @@ mod tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 prompt: image_prompt("create"),
                 ..create_request("ignored", InitialTurnPolicy::RunImmediately)
             })
@@ -9807,6 +9811,7 @@ mod tests {
             .start_turn(
                 &created.session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: image_prompt("turn"),
                     ..start_turn_request("ignored")
                 },
@@ -13625,6 +13630,7 @@ mod tests {
             .start_turn(
                 &session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: image_prompt("post-rewrite"),
                     ..start_turn_request("ignored")
                 },
@@ -15661,6 +15667,7 @@ mod tests {
             .expect("discard live candidate");
 
         let start_req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: "recover".to_string().into(),
             system_prompt: None,
             event_tx: None,

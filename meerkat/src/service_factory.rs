@@ -118,13 +118,17 @@ impl SessionAgent for FactoryAgent {
             ));
         }
         self.agent.set_runtime_execution_kind(input.execution_kind);
-        if input.typed_turn_appends.is_empty() && input.transcript_identity.is_none() {
+        if input.typed_turn_appends.is_empty()
+            && input.transcript_identity.is_none()
+            && input.injected_context.is_empty()
+        {
             self.agent.run_with_events(input.prompt, event_tx).await
         } else {
             self.agent
                 .run_with_events_and_typed_turn_appends(
                     input.prompt,
                     input.typed_turn_appends,
+                    input.injected_context,
                     input.transcript_identity,
                     event_tx,
                 )
@@ -1132,6 +1136,7 @@ mod tests {
         builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
         let (event_tx, _event_rx) = mpsc::channel(8);
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "video-alias".to_string(),
             prompt: "fail closed on stale config".to_string().into(),
             system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
@@ -1168,6 +1173,7 @@ mod tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "video-alias".to_string(),
                 prompt: "defer identity parity".to_string().into(),
                 system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
@@ -1432,6 +1438,7 @@ mod tests {
         let expected_registry = Arc::clone(bindings.ops_lifecycle());
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
             system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
@@ -1524,6 +1531,7 @@ mod tests {
             ..SessionBuildOptions::default()
         };
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "ignored".to_string().into(),
             system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
@@ -1631,6 +1639,7 @@ mod tests {
             .map_err(|err| format!("prepare bindings: {err}"))?;
 
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
             system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
@@ -1656,6 +1665,7 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
+                injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
@@ -1701,6 +1711,7 @@ mod tests {
             .await
             .map_err(|err| format!("prepare bindings: {err}"))?;
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
             system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
@@ -1726,6 +1737,7 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
+                injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
@@ -1898,6 +1910,7 @@ mod tests {
     /// Helper: build a request with the given model (deferred — no initial turn).
     fn make_session_request(model: &str) -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: model.to_string(),
             prompt: "test".to_string().into(),
             system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,

@@ -416,6 +416,13 @@ export interface SessionIngressOptions {
 
 /** Per-turn options for normal turns and deferred first turns. */
 export interface TurnOptions {
+  /**
+   * Host-attached injected context for this turn. Each entry materializes as
+   * a separate typed injected-context user-channel message immediately
+   * before the turn's user message, in order. Injected context is excluded
+   * from semantic-memory indexing.
+   */
+  readonly injectedContext?: readonly ContentInput[];
   readonly skillRefs?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: string[];
@@ -1048,6 +1055,13 @@ export interface WorkGraphItemLookupOptions {
 
 /** Options for creating a new session. */
 export interface SessionOptions {
+  /**
+   * Host-attached injected context for the first turn. Each entry
+   * materializes as a separate typed injected-context user-channel message
+   * immediately before the first turn's user message, in order. Injected
+   * context is excluded from semantic-memory indexing.
+   */
+  injectedContext?: readonly ContentInput[];
   model?: string;
   provider?: string;
   systemPrompt?: string;

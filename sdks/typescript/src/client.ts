@@ -2623,6 +2623,9 @@ export class MeerkatClient {
     options?: TurnOptions,
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
+    if (options?.injectedContext != null) {
+      params.injected_context = options.injectedContext;
+    }
     const wireRefs = skillRefsToWire(options?.skillRefs);
     if (wireRefs) {
       params.skill_refs = wireRefs;
@@ -2669,6 +2672,9 @@ export class MeerkatClient {
 
     const responsePromise = this.registerRequest(requestId);
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
+    if (options?.injectedContext != null) {
+      params.injected_context = options.injectedContext;
+    }
     const wireRefs = skillRefsToWire(options?.skillRefs);
     if (wireRefs) {
       params.skill_refs = wireRefs;
@@ -4375,6 +4381,7 @@ export class MeerkatClient {
     const params: Record<string, unknown> = { prompt };
     if (!options) return params;
 
+    if (options.injectedContext != null) params.injected_context = options.injectedContext;
     if (options.model) params.model = options.model;
     if (options.provider) params.provider = options.provider;
     if (options.systemPrompt) params.system_prompt = options.systemPrompt;

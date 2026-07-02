@@ -99,6 +99,9 @@ pub(crate) struct ActiveTurnBoundaryStagingToken {
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
+        /// Host-attached injected context materialized as typed
+        /// injected-context user messages before the turn's user message.
+        injected_context: Vec<meerkat_core::types::ContentInput>,
         runtime: Box<meerkat_core::service::StartTurnRuntimeSemantics>,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
@@ -489,6 +492,11 @@ pub trait SessionAgentBuilder: Send + Sync {
 /// Trait abstracting over the agent's run/cancel interface.
 pub struct SessionAgentTurnInput {
     pub prompt: meerkat_core::types::ContentInput,
+    /// Host-attached injected context for this turn. Each entry materializes
+    /// as a separate typed injected-context user message immediately before
+    /// the turn's user message. Must be empty when `typed_turn_appends` is
+    /// non-empty (the runtime authored the whole transcript for the turn).
+    pub injected_context: Vec<meerkat_core::types::ContentInput>,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
     pub typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
@@ -541,6 +549,14 @@ pub trait SessionAgent: Send {
         if input.transcript_identity.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "transcript identity requires a runtime-backed surface".to_string(),
+            ));
+        }
+        if !input.injected_context.is_empty() {
+            // The plain run entry cannot materialize typed injected-context
+            // messages; silently folding them into the prompt would launder
+            // the typed role away (§5). Fail closed.
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "injected context is not supported by this session agent".to_string(),
             ));
         }
         self.run_with_events(input.prompt, event_tx).await
@@ -2337,6 +2353,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
             let command = SessionCommand::StartTurn {
                 prompt,
+                injected_context: req.injected_context,
                 runtime: Box::new(req.runtime),
                 event_tx: req.event_tx,
                 result_tx,
@@ -2602,9 +2619,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         reserved_create_admission: Option<RuntimeContextAdmissionGuard>,
     ) -> Result<RunResult, SessionError> {
         let prompt = req.prompt.clone();
+        let injected_context = req.injected_context.clone();
         let caller_event_tx = req.event_tx.clone();
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
+        // Injected context is a first-turn submit-work fact; the deferred
+        // create path has no first turn to attach it to and the deferred-turn
+        // staging slot does not carry it. Fail closed rather than silently
+        // dropping host-provided context.
+        if defer_initial_turn && !injected_context.is_empty() {
+            return Err(SessionError::Unsupported(
+                "injected_context is not supported on a deferred session create; deliver it \
+                 with the first turn's StartTurnRequest"
+                    .to_string(),
+            ));
+        }
         let labels = req.labels.clone().unwrap_or_default();
         let resumed_session = req
             .build
@@ -2871,6 +2900,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
+                injected_context,
                 runtime: Box::new(initial_runtime),
                 event_tx: caller_event_tx,
                 result_tx,
@@ -3883,6 +3913,7 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StartTurn {
                 prompt,
+                injected_context,
                 runtime,
                 event_tx,
                 result_tx,
@@ -4037,6 +4068,21 @@ async fn session_task<A: SessionAgent>(
                                 "generated turn authority emitted terminal {terminal:?} for runnable disposition {disposition:?}"
                             ),
                         )));
+                    continue;
+                }
+                if matches!(disposition, StartTurnDisposition::RunPending)
+                    && !injected_context.is_empty()
+                {
+                    // A pending continuation replays the existing boundary;
+                    // there is no user message to attach injected context to.
+                    // Fail closed rather than silently dropping host-provided
+                    // context.
+                    restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
+                    abort_admitted_turn(&control);
+                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::ConfigError(
+                        "injected_context is not supported on a pending continuation turn"
+                            .to_string(),
+                    )));
                     continue;
                 }
 
@@ -4242,6 +4288,7 @@ async fn session_task<A: SessionAgent>(
                             Box::pin(agent.run_turn_with_events(
                                 SessionAgentTurnInput {
                                     prompt,
+                                    injected_context,
                                     handling_mode,
                                     render_metadata,
                                     typed_turn_appends,
@@ -5228,6 +5275,7 @@ mod runtime_turn_metadata_tests {
         );
         let created = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5322,6 +5370,7 @@ mod runtime_turn_metadata_tests {
         // permit-existence plus handle-existence.
         let created = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5345,6 +5394,7 @@ mod runtime_turn_metadata_tests {
         // second session must fail closed rather than be admitted silently.
         let second = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "phase-probe".to_string(),
                 prompt: ContentInput::Text("again".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5397,6 +5447,7 @@ mod runtime_turn_metadata_tests {
 
         service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5441,6 +5492,7 @@ mod runtime_turn_metadata_tests {
         );
         let created = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5491,6 +5543,7 @@ mod runtime_turn_metadata_tests {
         );
         let created = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("staged".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5549,6 +5602,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5566,6 +5620,7 @@ mod runtime_turn_metadata_tests {
             .start_turn(
                 &result.session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: ContentInput::Text("go".to_string()),
                     system_prompt: None,
                     event_tx: None,
@@ -5611,6 +5666,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5628,6 +5684,7 @@ mod runtime_turn_metadata_tests {
             .start_turn(
                 &result.session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: ContentInput::Text("reaction".to_string()),
                     system_prompt: None,
                     event_tx: None,
@@ -5688,6 +5745,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5762,6 +5820,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5782,6 +5841,7 @@ mod runtime_turn_metadata_tests {
                 .start_turn(
                     &run_session_id,
                     StartTurnRequest {
+                        injected_context: Vec::new(),
                         prompt: ContentInput::Text("hold the turn open".to_string()),
                         system_prompt: None,
                         event_tx: None,
@@ -5873,6 +5933,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -5958,6 +6019,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "boundary-phase-probe".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -6028,6 +6090,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "blocking-boundary-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -6121,6 +6184,7 @@ mod runtime_turn_metadata_tests {
 
         let result = service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
                 system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -6138,6 +6202,7 @@ mod runtime_turn_metadata_tests {
             .start_turn(
                 &result.session_id,
                 StartTurnRequest {
+                    injected_context: Vec::new(),
                     prompt: ContentInput::Text("reaction".to_string()),
                     system_prompt: None,
                     event_tx: None,
@@ -6185,6 +6250,414 @@ mod runtime_turn_metadata_tests {
                 .expect("run context counts lock poisoned")
                 .is_empty(),
             "agent run must not start after setup failure"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod injected_context_turn_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use meerkat_core::service::{
+        DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
+    };
+    use std::sync::{Arc, Mutex};
+
+    fn probe_llm_identity(model: &str) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: model.to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
+    /// Builder for a probe agent that overrides `run_turn_with_events` and
+    /// records each turn's `(prompt, injected_context)` pair, so tests can
+    /// assert the service threads the typed injected-context carrier through
+    /// the session task in delivery order.
+    #[derive(Clone)]
+    struct InjectedContextProbeBuilder {
+        observed_turns: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    }
+
+    struct InjectedContextProbeAgent {
+        session_id: SessionId,
+        session: meerkat_core::Session,
+        identity: SessionLlmIdentity,
+        observed_turns: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+        system_context_state: meerkat_core::SystemContextStateHandle,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for InjectedContextProbeBuilder {
+        type Agent = InjectedContextProbeAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let session_id = session.id().clone();
+            Ok(InjectedContextProbeAgent {
+                session_id,
+                session,
+                identity: probe_llm_identity(&req.model),
+                observed_turns: Arc::clone(&self.observed_turns),
+                system_context_state: meerkat_core::SystemContextStateHandle::new(
+                    Default::default(),
+                )
+                .expect("default system-context state should restore"),
+            })
+        }
+    }
+
+    impl InjectedContextProbeAgent {
+        fn ok_result(&self) -> RunResult {
+            RunResult {
+                text: "ok".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for InjectedContextProbeAgent {
+        async fn run_with_events(
+            &mut self,
+            prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            self.observed_turns
+                .lock()
+                .expect("observed turns lock poisoned")
+                .push((prompt.text_content(), Vec::new()));
+            Ok(self.ok_result())
+        }
+
+        async fn run_turn_with_events(
+            &mut self,
+            input: SessionAgentTurnInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            self.observed_turns
+                .lock()
+                .expect("observed turns lock poisoned")
+                .push((
+                    input.prompt.text_content(),
+                    input
+                        .injected_context
+                        .iter()
+                        .map(ContentInput::text_content)
+                        .collect(),
+                ));
+            Ok(self.ok_result())
+        }
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn cancel(&mut self) {}
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+            Ok(self.session.clone())
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            ObservedSessionTailKind::Empty
+        }
+
+        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+            Some(self.identity.clone())
+        }
+
+        fn apply_runtime_system_context(&mut self, _appends: &[PendingSystemContextAppend]) {}
+
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.system_context_state.clone()
+        }
+    }
+
+    fn create_request(
+        prompt: &str,
+        injected_context: Vec<ContentInput>,
+        initial_turn: InitialTurnPolicy,
+    ) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "injected-context-probe".to_string(),
+            prompt: ContentInput::Text(prompt.to_string()),
+            injected_context,
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        }
+    }
+
+    /// Eager create threads `CreateSessionRequest.injected_context` through
+    /// the session task into the first turn's `SessionAgentTurnInput`, in
+    /// delivery order (prompt-bearing create is submit-work).
+    #[tokio::test]
+    async fn eager_create_threads_injected_context_to_first_turn() {
+        let observed_turns = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            InjectedContextProbeBuilder {
+                observed_turns: Arc::clone(&observed_turns),
+            },
+            1,
+        );
+
+        service
+            .create_session(create_request(
+                "first prompt",
+                vec![
+                    ContentInput::Text("ambient one".to_string()),
+                    ContentInput::Text("ambient two".to_string()),
+                ],
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("eager create with injected context should run");
+
+        assert_eq!(
+            *observed_turns.lock().expect("observed turns lock poisoned"),
+            vec![(
+                "first prompt".to_string(),
+                vec!["ambient one".to_string(), "ambient two".to_string()],
+            )],
+            "create-path injected context must reach the agent turn input in order"
+        );
+    }
+
+    /// `StartTurnRequest.injected_context` threads through the session task
+    /// into `SessionAgentTurnInput` for an ordinary follow-up turn.
+    #[tokio::test]
+    async fn start_turn_threads_injected_context_to_agent() {
+        let observed_turns = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            InjectedContextProbeBuilder {
+                observed_turns: Arc::clone(&observed_turns),
+            },
+            1,
+        );
+
+        let created = service
+            .create_session(create_request(
+                "defer",
+                Vec::new(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("deferred session should create");
+
+        service
+            .start_turn(
+                &created.session_id,
+                StartTurnRequest {
+                    prompt: ContentInput::Text("turn prompt".to_string()),
+                    injected_context: vec![ContentInput::Text("turn ambient".to_string())],
+                    system_prompt: None,
+                    event_tx: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+                },
+            )
+            .await
+            .expect("turn with injected context should run");
+
+        assert_eq!(
+            *observed_turns.lock().expect("observed turns lock poisoned"),
+            vec![("turn prompt".to_string(), vec!["turn ambient".to_string()],)],
+            "turn-path injected context must reach the agent turn input"
+        );
+    }
+
+    /// Deferred create has no first turn to attach injected context to; the
+    /// service fails closed instead of silently dropping host context.
+    #[tokio::test]
+    async fn deferred_create_rejects_injected_context() {
+        let observed_turns = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            InjectedContextProbeBuilder {
+                observed_turns: Arc::clone(&observed_turns),
+            },
+            1,
+        );
+
+        let err = service
+            .create_session(create_request(
+                "defer",
+                vec![ContentInput::Text("dropped ambient".to_string())],
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect_err("deferred create with injected context must fail closed");
+        assert!(
+            matches!(err, SessionError::Unsupported(_)),
+            "expected typed Unsupported rejection, got {err:?}"
+        );
+        assert!(
+            observed_turns
+                .lock()
+                .expect("observed turns lock poisoned")
+                .is_empty(),
+            "no turn may run after the fail-closed rejection"
+        );
+    }
+
+    /// Wrapper that keeps the trait-default `run_turn_with_events`, proving
+    /// the default entry fails closed on injected context instead of folding
+    /// it into the prompt (which would launder the typed role away).
+    struct DefaultGuardAgent(InjectedContextProbeAgent);
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for DefaultGuardAgent {
+        async fn run_with_events(
+            &mut self,
+            prompt: ContentInput,
+            event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            self.0.run_with_events(prompt, event_tx).await
+        }
+
+        fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+            self.0.set_skill_references(refs);
+        }
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            self.0.set_flow_tool_overlay(overlay)
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: SessionLlmIdentity,
+            request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            self.0
+                .hot_swap_llm_identity(client, identity, request_policy)
+        }
+
+        fn cancel(&mut self) {
+            self.0.cancel();
+        }
+
+        fn session_id(&self) -> SessionId {
+            self.0.session_id()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            self.0.snapshot()
+        }
+
+        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
+            self.0.session_clone()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.0.observed_session_tail()
+        }
+
+        fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
+            self.0.apply_runtime_system_context(appends);
+        }
+
+        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+            self.0.system_context_state()
+        }
+    }
+
+    #[tokio::test]
+    async fn default_turn_entry_rejects_injected_context() {
+        let observed_turns = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = DefaultGuardAgent(InjectedContextProbeAgent {
+            session_id: SessionId::new(),
+            session: meerkat_core::Session::new(),
+            identity: probe_llm_identity("default-guard"),
+            observed_turns: Arc::clone(&observed_turns),
+            system_context_state: meerkat_core::SystemContextStateHandle::new(Default::default())
+                .expect("default system-context state should restore"),
+        });
+
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let err = agent
+            .run_turn_with_events(
+                SessionAgentTurnInput {
+                    prompt: ContentInput::Text("prompt".to_string()),
+                    injected_context: vec![ContentInput::Text("ambient".to_string())],
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    render_metadata: None,
+                    typed_turn_appends: Vec::new(),
+                    transcript_identity: None,
+                    execution_kind: None,
+                },
+                event_tx,
+            )
+            .await
+            .expect_err("default turn entry must fail closed on injected context");
+        assert!(
+            matches!(err, AgentError::ConfigError(_)),
+            "expected typed config error, got {err:?}"
+        );
+        assert!(
+            observed_turns
+                .lock()
+                .expect("observed turns lock poisoned")
+                .is_empty(),
+            "the run must not start after the fail-closed rejection"
         );
     }
 }
@@ -6384,6 +6857,7 @@ mod admission_window_tests {
 
     fn create_request() -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "admission-window-test".to_string(),
             prompt: ContentInput::Text("defer".to_string()),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -6398,6 +6872,7 @@ mod admission_window_tests {
 
     fn start_turn_request() -> StartTurnRequest {
         StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: ContentInput::Text("go".to_string()),
             system_prompt: None,
             event_tx: None,
@@ -6828,6 +7303,7 @@ mod archive_shutdown_drain_tests {
 
     fn create_request() -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "archive-drain-test".to_string(),
             prompt: ContentInput::Text("defer".to_string()),
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -6842,6 +7318,7 @@ mod archive_shutdown_drain_tests {
 
     fn start_turn_request() -> StartTurnRequest {
         StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: ContentInput::Text("go".to_string()),
             system_prompt: None,
             event_tx: None,
@@ -7395,6 +7872,7 @@ mod inline_video_admission_tests {
         initial_turn: InitialTurnPolicy,
     ) -> CreateSessionRequest {
         CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "providerless-video-alias".to_string(),
             prompt,
             system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -7409,6 +7887,7 @@ mod inline_video_admission_tests {
 
     fn start_turn_request(prompt: ContentInput) -> StartTurnRequest {
         StartTurnRequest {
+            injected_context: Vec::new(),
             prompt,
             system_prompt: None,
             event_tx: None,

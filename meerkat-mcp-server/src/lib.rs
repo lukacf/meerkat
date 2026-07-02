@@ -3554,6 +3554,7 @@ async fn handle_meerkat_run(
     .await?;
 
     let req = CreateSessionRequest {
+        injected_context: Vec::new(),
         model,
         prompt: input.prompt.into(),
         system_prompt: match input.system_prompt {
@@ -4049,6 +4050,7 @@ async fn handle_meerkat_resume(
         })
         .await?;
         let req = CreateSessionRequest {
+            injected_context: Vec::new(),
             model,
             prompt: prompt.clone().into(),
             system_prompt: match input.system_prompt.clone() {
@@ -4131,6 +4133,7 @@ async fn handle_meerkat_resume(
             ..Default::default()
         };
         let turn_req = StartTurnRequest {
+            injected_context: Vec::new(),
             prompt: prompt.clone().into(),
             system_prompt: None,
             event_tx: event_tx.clone(),
@@ -4257,6 +4260,7 @@ async fn handle_meerkat_resume(
                 })
                 .await?;
                 let req = CreateSessionRequest {
+                    injected_context: Vec::new(),
                     model,
                     prompt: prompt.into(),
                     system_prompt: match input.system_prompt.clone() {
@@ -6413,6 +6417,7 @@ mod tests {
             &state.runtime_adapter,
             &session_id,
             CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -6536,6 +6541,7 @@ mod tests {
             &state.runtime_adapter,
             &session_id,
             CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "claude-opus-4-8".to_string(),
                 prompt: "Initial live turn".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,
@@ -7268,6 +7274,7 @@ mod tests {
         let created = state
             .service
             .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
                 system_prompt: meerkat::SystemPromptOverride::Inherit,

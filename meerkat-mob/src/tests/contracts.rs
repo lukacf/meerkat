@@ -1475,6 +1475,7 @@ impl SessionService for ContractSessionService {
 
 fn keep_alive_req(comms_name: &str) -> CreateSessionRequest {
     CreateSessionRequest {
+        injected_context: Vec::new(),
         model: "contract-mock".to_string(),
         prompt: "hello".to_string().into(),
         system_prompt: meerkat_core::SystemPromptOverride::Inherit,
@@ -1546,6 +1547,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
         .start_turn(
             &sid_a,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "follow up".to_string().into(),
                 system_prompt: None,
                 event_tx: None,
@@ -1617,6 +1619,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
         .start_turn(
             &sid,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "should fail".to_string().into(),
                 system_prompt: None,
                 event_tx: None,

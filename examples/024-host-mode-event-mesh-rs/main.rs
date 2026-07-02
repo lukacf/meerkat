@@ -100,6 +100,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
 
     let result = service
         .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
             model: "claude-sonnet-4-6".to_string(),
             prompt: "An alert just fired: 'CPU usage on prod-web-03 exceeded 95% for \
                      5 minutes.' Acknowledge the alert and describe your initial triage \
@@ -141,6 +142,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
         .start_turn(
             &session_id,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "[MONITORING EVENT] Memory usage on prod-web-03 is now at 89%. \
                          Three other nodes in the cluster show normal metrics. \
                          The deployment log shows a new release was pushed 12 minutes ago."
@@ -174,6 +176,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
         .start_turn(
             &session_id,
             StartTurnRequest {
+                injected_context: Vec::new(),
                 prompt: "[RESOLUTION EVENT] The team rolled back the release on prod-web-03. \
                          CPU is back to 40%, memory at 52%. All health checks passing. \
                          Summarize the full incident timeline and close it out."

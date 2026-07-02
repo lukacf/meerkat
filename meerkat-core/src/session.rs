@@ -4157,6 +4157,17 @@ pub struct SessionTooling {
     /// Meerkat-owned fallback web search.
     #[serde(default)]
     pub web_search: ToolCategoryOverride,
+    /// Effective call-level tool execution policy for this session's builds.
+    ///
+    /// Persisted RESOLVED (never `Inherit`): the factory fails the build
+    /// closed on an unresolved `Inherit` before metadata is written, so this
+    /// field only ever holds `AllowList`/`DenyList`. Absent means
+    /// unrestricted. Spawn/fork resolution reads this field as the parent's
+    /// effective policy when a child requests `Inherit` (transitive
+    /// containment — a restricted parent cannot mint an unrestricted child
+    /// by spawning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillKey>>,
@@ -6312,6 +6323,36 @@ mod tests {
             restored.realm_id.as_ref().map(crate::RealmId::as_str),
             Some("legacy_realm")
         );
+    }
+
+    /// Ask 6: `SessionTooling.tool_access_policy` is additive — a persisted
+    /// row without the field back-reads as `None` (unrestricted), `None` is
+    /// omitted on write (durable shape unchanged for ungated sessions), and a
+    /// resolved policy round-trips intact.
+    #[test]
+    fn session_tooling_tool_access_policy_round_trip_and_absent_default() {
+        // Absent field back-reads as None.
+        let legacy = serde_json::json!({});
+        let restored: SessionTooling = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.tool_access_policy, None);
+
+        // None is omitted on write — ungated sessions keep their prior shape.
+        let value = serde_json::to_value(SessionTooling::default()).unwrap();
+        assert!(
+            value.get("tool_access_policy").is_none(),
+            "None policy must not serialize"
+        );
+
+        // A resolved policy round-trips intact.
+        let tooling = SessionTooling {
+            tool_access_policy: Some(crate::ops::ToolAccessPolicy::AllowList(
+                ["read_file", "send_message"].into_iter().collect(),
+            )),
+            ..SessionTooling::default()
+        };
+        let value = serde_json::to_value(&tooling).unwrap();
+        let restored: SessionTooling = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.tool_access_policy, tooling.tool_access_policy);
     }
 
     #[test]

@@ -1113,6 +1113,7 @@ async fn build_agent_with_resume_preserves_messages() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1190,6 +1191,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             workgraph: ToolCategoryOverride::Enable,
             image_generation: ToolCategoryOverride::Inherit,
             web_search: ToolCategoryOverride::Inherit,
+            tool_access_policy: None,
             active_skills: None,
         },
         keep_alive: false,
@@ -1310,6 +1312,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: true,
@@ -1421,6 +1424,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1480,6 +1484,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
                 workgraph: ToolCategoryOverride::Enable,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1547,6 +1552,7 @@ async fn build_agent_with_resume_carries_explicit_comms_override_and_rehydrates(
                     workgraph: ToolCategoryOverride::Inherit,
                     image_generation: ToolCategoryOverride::Inherit,
                     web_search: ToolCategoryOverride::Inherit,
+                    tool_access_policy: None,
                     active_skills: None,
                 },
                 keep_alive: false,
@@ -1637,6 +1643,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1721,6 +1728,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2061,6 +2069,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("nonexistent-legacy-skill")
                         .expect("valid skill name"),
@@ -2219,6 +2228,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2277,6 +2287,7 @@ async fn resume_with_disable_mob_stays_disabled() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2334,6 +2345,7 @@ async fn resume_with_metadata_mob_enable_becomes_inherit() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2434,6 +2446,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2494,6 +2507,7 @@ async fn resumed_enable_mob_metadata_does_not_mount_mob_surface() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2557,6 +2571,7 @@ async fn recovered_create_request_mob_metadata_enable_does_not_mint_operator_cap
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2715,6 +2730,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2801,6 +2817,7 @@ async fn resumed_explicit_mob_authority_is_not_erased_by_metadata() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2884,6 +2901,7 @@ async fn resumed_persisted_mob_authority_is_not_forwarded_as_behavior_authority(
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: None,
             },
             keep_alive: false,
@@ -3558,5 +3576,233 @@ async fn factory_built_agent_honors_config_tools_timeout() {
     assert!(
         saw_timeout_completion,
         "factory-built agent must apply Config.tools.default_timeout to tool dispatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ask 6: call-level tool access policy (execution gate)
+// ---------------------------------------------------------------------------
+
+/// Dispatcher that records which calls actually reach it and succeeds on all
+/// of them — the probe for asserting the execution gate sits OUTSIDE it.
+struct PolicyProbeDispatcher {
+    tools: Arc<[Arc<ToolDef>]>,
+    dispatched: Arc<Mutex<Vec<String>>>,
+}
+
+impl PolicyProbeDispatcher {
+    fn new(names: &[&str], dispatched: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            tools: names
+                .iter()
+                .map(|name| {
+                    Arc::new(ToolDef::new(
+                        *name,
+                        format!("{name} policy probe tool"),
+                        json!({ "type": "object" }),
+                    ))
+                })
+                .collect(),
+            dispatched,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for PolicyProbeDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tools)
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatched.lock().unwrap().push(call.name.to_string());
+        Ok(ToolDispatchOutcome::from(meerkat_core::ToolResult::new(
+            call.id.to_string(),
+            "ok".to_string(),
+            false,
+        )))
+    }
+}
+
+fn allow_list_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
+    meerkat_core::ops::ToolAccessPolicy::AllowList(names.iter().copied().collect())
+}
+
+/// The factory applies the resolved tool access policy as the OUTERMOST
+/// dispatcher composition: a denied call surfaces as an ordinary
+/// `access_denied` is_error result and never reaches the inner dispatcher,
+/// the LLM-visible tool list is preserved (list-preserving gate), and the
+/// effective policy is persisted into the session metadata tooling section.
+#[tokio::test]
+async fn build_agent_gates_dispatch_and_persists_tool_access_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let policy = allow_list_policy(&["alpha"]);
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        tool_dispatcher_override: Some(Arc::new(PolicyProbeDispatcher::new(
+            &["alpha", "beta"],
+            Arc::clone(&dispatched),
+        ))),
+        tool_access_policy: Some(policy.clone()),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let mut agent = factory
+        .build_agent(build_config, &Config::default())
+        .await
+        .expect("gated build must succeed");
+
+    // The effective policy is persisted for children to inherit.
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session metadata must be set");
+    assert_eq!(metadata.tooling.tool_access_policy, Some(policy));
+
+    // List-preserving: the denied tool stays LLM-visible (the prompt-cache
+    // prefix is unchanged); only execution is gated.
+    let visible: Vec<String> = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        visible.iter().any(|name| name == "alpha"),
+        "saw {visible:?}"
+    );
+    assert!(visible.iter().any(|name| name == "beta"), "saw {visible:?}");
+
+    // Denied call: ordinary is_error result, inner dispatcher never reached.
+    let outcome = agent
+        .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+            "call-denied".to_string(),
+            "beta".to_string(),
+            json!({}),
+        ))
+        .await
+        .expect("policy denial is a tool result, not a dispatch fault");
+    assert!(outcome.result.is_error);
+    assert!(
+        outcome
+            .result
+            .text_content()
+            .contains("\"error\":\"access_denied\""),
+        "denied call must carry the canonical access_denied payload, got: {}",
+        outcome.result.text_content()
+    );
+    assert!(
+        dispatched.lock().unwrap().is_empty(),
+        "denied call must never reach the inner dispatcher"
+    );
+
+    // Allowed call flows through to the inner dispatcher.
+    let outcome = agent
+        .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+            "call-allowed".to_string(),
+            "alpha".to_string(),
+            json!({}),
+        ))
+        .await
+        .expect("allowed call must dispatch");
+    assert!(!outcome.result.is_error);
+    assert_eq!(*dispatched.lock().unwrap(), vec!["alpha".to_string()]);
+}
+
+/// An unresolved `Inherit` reaching the factory is a wiring fault (the spawn
+/// chain owns Inherit resolution) and must fail the build closed with a typed
+/// error — never silently build an ungated agent or persist `Inherit`.
+#[tokio::test]
+async fn build_agent_fails_closed_on_unresolved_inherit_tool_access_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        tool_dispatcher_override: Some(Arc::new(EmptyDispatcher)),
+        tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::Inherit),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let err = factory
+        .build_agent(build_config, &Config::default())
+        .await
+        .err()
+        .expect("unresolved Inherit must fail the build closed");
+    assert!(
+        matches!(&err, BuildAgentError::Config(message) if message.contains("inherit")),
+        "expected typed unresolved-inherit config error, got: {err:?}"
+    );
+}
+
+/// Resume-escape regression: a resumed session with a persisted tool access
+/// policy and no explicit override must rebuild WITH the gate — resuming is
+/// not a policy escape hatch.
+#[tokio::test]
+async fn resumed_session_restores_persisted_tool_access_policy_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let policy = allow_list_policy(&["alpha"]);
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+
+    let agent = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                tool_dispatcher_override: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["alpha", "beta"],
+                    Arc::clone(&dispatched),
+                ))),
+                tool_access_policy: Some(policy.clone()),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("gated build must succeed");
+    let persisted_session = agent.session().clone();
+    drop(agent);
+
+    let mut resumed = temp_factory(&temp)
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                tool_dispatcher_override: Some(Arc::new(PolicyProbeDispatcher::new(
+                    &["alpha", "beta"],
+                    Arc::clone(&dispatched),
+                ))),
+                resume_session: Some(persisted_session),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("resumed gated build must succeed");
+
+    let metadata = resumed
+        .session()
+        .session_metadata()
+        .expect("resumed session metadata must be set");
+    assert_eq!(
+        metadata.tooling.tool_access_policy,
+        Some(policy),
+        "persisted effective policy must survive resume"
+    );
+
+    let outcome = resumed
+        .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+            "call-denied-after-resume".to_string(),
+            "beta".to_string(),
+            json!({}),
+        ))
+        .await
+        .expect("policy denial is a tool result, not a dispatch fault");
+    assert!(
+        outcome.result.is_error,
+        "resumed session must keep denying gated tools"
+    );
+    assert!(
+        dispatched.lock().unwrap().is_empty(),
+        "denied call must never reach the inner dispatcher after resume"
     );
 }

@@ -496,6 +496,9 @@ pub fn resolve_effective_turn_config(
         keep_alive: overrides.keep_alive.is_some(),
         comms_name: overrides.comms_name.is_some(),
         peer_meta: overrides.peer_meta.is_some(),
+        // Recovery carries the persisted policy forward verbatim below;
+        // there is no per-recovery override surface for it.
+        tool_access_policy: false,
     };
 
     let model = overrides
@@ -648,6 +651,10 @@ pub fn resolve_effective_turn_config(
         additional_instructions: build_state.additional_instructions.clone(),
         initial_metadata_entries: std::collections::BTreeMap::new(),
         initial_tool_filter: None,
+        // Effective call-level tool access policy is durable session truth:
+        // carry it forward verbatim so a restricted session cannot escape its
+        // gate by being recovered.
+        tool_access_policy: metadata.tooling.tool_access_policy.clone(),
         shell_env: overrides
             .shell_env
             .clone()
@@ -734,6 +741,7 @@ mod tests {
                     workgraph: ToolCategoryOverride::Enable,
                     image_generation: ToolCategoryOverride::Inherit,
                     web_search: ToolCategoryOverride::Inherit,
+                    tool_access_policy: None,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
                 },
                 keep_alive: false,

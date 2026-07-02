@@ -1932,6 +1932,7 @@ impl SessionService for MockSessionService {
                     web_search: build
                         .map(|b| b.override_web_search)
                         .unwrap_or(ToolCategoryOverride::Inherit),
+                    tool_access_policy: build.and_then(|b| b.tool_access_policy.clone()),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
@@ -12390,6 +12391,98 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
     );
 }
 
+/// Ask 6 spawn-site threading: an explicit `tool_access_policy` on the spawn
+/// spec must ride `SpawnMemberSpec` -> actor -> `BuildAgentConfigParams` ->
+/// `AgentBuildConfig` -> `SessionBuildOptions` and land in the member
+/// session's persisted metadata tooling section (the field children inherit
+/// from). Regression for the spec field previously being destructured and
+/// ignored at the actor spawn sites.
+#[tokio::test]
+async fn test_spawn_spec_tool_access_policy_reaches_session_metadata() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let policy = meerkat_core::ops::ToolAccessPolicy::AllowList(
+        ["send_message", "peers"].into_iter().collect(),
+    );
+    let spec = SpawnMemberSpec::new(
+        ProfileName::from("worker"),
+        AgentIdentity::from("gated-worker"),
+    )
+    .with_tool_access_policy(policy.clone());
+    handle.spawn_spec(spec).await.expect("spawn gated member");
+
+    let session_id = service
+        .session_id_for_comms_name("test-mob/worker/gated-worker")
+        .await
+        .expect("gated member session must exist");
+    let metadata = service
+        .persisted_session_clone(&session_id)
+        .await
+        .expect("persisted session")
+        .session_metadata()
+        .expect("session metadata");
+    assert_eq!(
+        metadata.tooling.tool_access_policy,
+        Some(policy),
+        "spec policy must reach the member's persisted metadata tooling section"
+    );
+}
+
+/// Ask 6: `HelperOptions.tool_access_policy` on `fork_helper` is honored —
+/// the forked helper's session persists the policy in its metadata tooling
+/// section.
+#[tokio::test]
+async fn test_fork_helper_tool_access_policy_reaches_session_metadata() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_id = AgentIdentity::from("fork-gated-source");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            AgentIdentity::from("fork-gated-source"),
+            Some("source context".into()),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn source member");
+
+    let policy = meerkat_core::ops::ToolAccessPolicy::DenyList(["bash"].into_iter().collect());
+    let helper_id = AgentIdentity::from("fork-gated-helper");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle.fork_helper(
+            &source_id,
+            helper_id,
+            "continue gated",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                role_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                tool_access_policy: Some(policy.clone()),
+                ..HelperOptions::default()
+            },
+        ),
+    )
+    .await
+    .expect("fork_helper must not hang")
+    .expect("fork_helper succeeds");
+
+    let session_id = service
+        .session_id_for_comms_name("test-mob/worker/fork-gated-helper")
+        .await
+        .expect("forked helper session must exist");
+    let metadata = service
+        .persisted_session_clone(&session_id)
+        .await
+        .expect("persisted session survives helper retire in the mock")
+        .session_metadata()
+        .expect("session metadata");
+    assert_eq!(
+        metadata.tooling.tool_access_policy,
+        Some(policy),
+        "fork_helper policy must reach the helper's persisted metadata tooling section"
+    );
+}
+
 #[tokio::test]
 async fn test_spawn_helper_defaults_to_turn_driven_even_when_profile_is_autonomous() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -15322,6 +15415,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("mob-communication")
                         .expect("valid skill name"),
@@ -15363,6 +15457,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
+                tool_access_policy: None,
                 inherited_tool_filter: None,
                 system_prompt_override: None,
             },

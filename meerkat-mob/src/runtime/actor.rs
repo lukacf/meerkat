@@ -5043,6 +5043,9 @@ impl MobActor {
                 shell_env: None,
                 mob_tool_authority_context: None,
                 inherited_tool_filter: None,
+                // Revival resumes the persisted session; the effective policy
+                // is restored from durable session metadata by the factory.
+                tool_access_policy: None,
                 system_prompt_override: None,
             },
             expected_session_id: bridge_session_id,
@@ -8847,7 +8850,7 @@ impl MobActor {
             context,
             labels,
             launch_mode,
-            tool_access_policy: _tool_access_policy,
+            tool_access_policy,
             budget_split_policy: _budget_split_policy,
             budget_limits,
             auto_wire_parent,
@@ -9046,6 +9049,7 @@ impl MobActor {
                                 shell_env,
                                 mob_tool_authority_context: None,
                                 inherited_tool_filter: inherited_tool_filter.clone(),
+                                tool_access_policy: tool_access_policy.clone(),
                                 system_prompt_override: system_prompt_override.clone(),
                             },
                             expected_session_id: &resume_id,
@@ -9195,6 +9199,7 @@ impl MobActor {
                 shell_env,
                 mob_tool_authority_context: None,
                 inherited_tool_filter,
+                tool_access_policy,
                 system_prompt_override,
             })
             .await?;
@@ -9759,7 +9764,7 @@ impl MobActor {
             context,
             labels,
             launch_mode: _,
-            tool_access_policy: _tool_access_policy,
+            tool_access_policy,
             budget_split_policy: _budget_split_policy,
             budget_limits,
             auto_wire_parent: _,
@@ -9832,6 +9837,7 @@ impl MobActor {
             shell_env,
             mob_tool_authority_context: None,
             inherited_tool_filter,
+            tool_access_policy,
             system_prompt_override,
         })
         .await?;
@@ -14326,7 +14332,7 @@ impl MobActor {
             context: replacement_context,
             labels: replacement_labels,
             launch_mode: _,
-            tool_access_policy: _tool_access_policy,
+            tool_access_policy: replacement_tool_access_policy,
             budget_split_policy: _budget_split_policy,
             budget_limits: replacement_budget_limits,
             auto_wire_parent: _,
@@ -14541,6 +14547,7 @@ impl MobActor {
             shell_env: replacement_shell_env,
             mob_tool_authority_context: None,
             inherited_tool_filter: replacement_inherited_tool_filter,
+            tool_access_policy: replacement_tool_access_policy,
             system_prompt_override: replacement_system_prompt_override,
         })
         .await?;

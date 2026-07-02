@@ -1148,6 +1148,7 @@ pub enum TargetBinding {
     Session(Box<SessionTargetBinding>),
     Identity(Box<IdentityTargetBinding>),
     Mob(Box<MobTargetBinding>),
+    HostRunnable(Box<HostRunnableTargetBinding>),
 }
 
 impl TargetBinding {
@@ -1159,6 +1160,10 @@ impl TargetBinding {
         Self::Identity(Box::new(binding))
     }
 
+    pub fn host_runnable(binding: HostRunnableTargetBinding) -> Self {
+        Self::HostRunnable(Box::new(binding))
+    }
+
     pub fn stable_key(&self) -> Result<String, String> {
         semantic_json_key("target", self)
     }
@@ -1168,6 +1173,7 @@ impl TargetBinding {
             Self::Session(binding) => binding.bind_materialized_session(session_id),
             Self::Identity(_) => false,
             Self::Mob(_) => false,
+            Self::HostRunnable(_) => false,
         }
     }
 
@@ -1176,6 +1182,7 @@ impl TargetBinding {
             Self::Session(_) => Ok(()),
             Self::Identity(_) => Ok(()),
             Self::Mob(binding) => binding.validate_public_api(),
+            Self::HostRunnable(_) => Ok(()),
         }
     }
 }
@@ -1514,6 +1521,159 @@ impl MobTargetBinding {
             }
             Self::Member { .. } | Self::Flow { .. } => Ok(()),
         }
+    }
+}
+
+/// Typed error for [`HostRunnableName`] validation.
+#[derive(Debug, thiserror::Error)]
+pub enum HostRunnableNameError {
+    #[error("host runnable name cannot be empty")]
+    Empty,
+}
+
+/// Validated name of a host-registered runnable.
+///
+/// The name is the durable identity of the runnable inside
+/// [`HostRunnableTargetBinding`] — it participates in the target's stable
+/// key — so it is parsed fail-closed at every ingress (constructor and
+/// serde).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HostRunnableName(String);
+
+impl HostRunnableName {
+    /// Parse a runnable name, rejecting empty or whitespace-only input.
+    pub fn parse(value: impl Into<String>) -> Result<Self, HostRunnableNameError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(HostRunnableNameError::Empty);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for HostRunnableName {
+    type Error = HostRunnableNameError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<HostRunnableName> for String {
+    fn from(value: HostRunnableName) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for HostRunnableName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Typed error for [`HostRunnableParams`] validation.
+#[derive(Debug, thiserror::Error)]
+pub enum HostRunnableParamsError {
+    #[error("host runnable params must be valid JSON: {detail}")]
+    InvalidJson { detail: String },
+    #[error("host runnable params must not be JSON null; omit params instead")]
+    Null,
+}
+
+/// Wire-opaque host payload for a host-runnable target, held as canonical
+/// JSON text.
+///
+/// The payload participates in the target's durable stable key, and serde's
+/// internally-tagged enum buffering cannot preserve arbitrary raw text
+/// byte-exact, so every ingress (constructor and serde) re-emits the payload
+/// through `serde_json::Value` into one canonical text form — making the
+/// stable key independent of the host's original formatting and idempotent
+/// across store round-trips. Meerkat never interprets the content beyond
+/// JSON validity; JSON `null` is rejected fail-closed because "no payload"
+/// is represented by omitting params entirely.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+pub struct HostRunnableParams(
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))] Box<RawValue>,
+);
+
+impl HostRunnableParams {
+    /// Parse a JSON text payload into canonical form.
+    pub fn parse(text: &str) -> Result<Self, HostRunnableParamsError> {
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|error| HostRunnableParamsError::InvalidJson {
+                detail: error.to_string(),
+            })?;
+        Self::try_from(value)
+    }
+
+    /// Canonical JSON text of the payload.
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+
+    /// Consume into the canonical raw JSON payload.
+    pub fn into_raw(self) -> Box<RawValue> {
+        self.0
+    }
+}
+
+impl TryFrom<serde_json::Value> for HostRunnableParams {
+    type Error = HostRunnableParamsError;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        if value.is_null() {
+            return Err(HostRunnableParamsError::Null);
+        }
+        let canonical = serde_json::to_string(&value).map_err(|error| {
+            HostRunnableParamsError::InvalidJson {
+                detail: error.to_string(),
+            }
+        })?;
+        let raw = RawValue::from_string(canonical).map_err(|error| {
+            HostRunnableParamsError::InvalidJson {
+                detail: error.to_string(),
+            }
+        })?;
+        Ok(Self(raw))
+    }
+}
+
+impl PartialEq for HostRunnableParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
+}
+
+impl Eq for HostRunnableParams {}
+
+/// Schedule target that fires a host-registered runnable.
+///
+/// The runnable is invoked in-process through the schedule runnable host
+/// seam (`ScheduleRunnableHost`); `params` is a wire-opaque host payload
+/// handed to the runnable in canonical JSON text form — meerkat never
+/// interprets it. The serde shape is frozen at introduction: it participates
+/// in the target's stable key and persisted rows must keep deserializing.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRunnableTargetBinding {
+    /// Name of the host-registered runnable to invoke.
+    pub runnable: HostRunnableName,
+    /// Wire-opaque host payload handed to the runnable at invocation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<HostRunnableParams>,
+}
+
+impl HostRunnableTargetBinding {
+    pub fn stable_key(&self) -> Result<String, String> {
+        semantic_json_key("host_runnable_target", self)
     }
 }
 
@@ -3042,5 +3202,201 @@ mod tests {
             serde_json::from_value(value).map_err(|error| error.to_string())?;
         assert_eq!(round_trip, binding);
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // HostRunnable target binding
+    // -----------------------------------------------------------------------
+
+    fn host_runnable_binding(params: Option<&str>) -> HostRunnableTargetBinding {
+        HostRunnableTargetBinding {
+            runnable: HostRunnableName::parse("nightly-report").unwrap(),
+            params: params.map(|raw| HostRunnableParams::parse(raw).unwrap()),
+        }
+    }
+
+    #[test]
+    fn host_runnable_name_rejects_empty_input() {
+        assert!(matches!(
+            HostRunnableName::parse(""),
+            Err(HostRunnableNameError::Empty)
+        ));
+        assert!(matches!(
+            HostRunnableName::parse("   "),
+            Err(HostRunnableNameError::Empty)
+        ));
+        // Fail-closed at the serde ingress too.
+        assert!(serde_json::from_str::<HostRunnableName>("\"\"").is_err());
+        let parsed: HostRunnableName = serde_json::from_str("\"nightly-report\"").unwrap();
+        assert_eq!(parsed.as_str(), "nightly-report");
+    }
+
+    #[test]
+    fn host_runnable_params_canonicalize_at_every_ingress() {
+        // Formatting differences collapse into one canonical text form, so
+        // the durable stable key never depends on how the host formatted the
+        // payload (whitespace normalization; internally-tagged serde
+        // buffering re-emits through `serde_json::Value`).
+        let compact = HostRunnableParams::parse(r#"{"depth":3}"#).unwrap();
+        let spaced = HostRunnableParams::parse(r#"{ "depth" : 3 }"#).unwrap();
+        assert_eq!(compact, spaced);
+        assert_eq!(compact.get(), spaced.get());
+
+        // Canonicalization is idempotent: re-parsing canonical text is a
+        // fixed point, so a persisted payload survives arbitrarily many
+        // store round-trips with an unchanged stable key.
+        let reparsed = HostRunnableParams::parse(compact.get()).unwrap();
+        assert_eq!(reparsed.get(), compact.get());
+
+        // Fail-closed ingress: invalid JSON and JSON null are rejected with
+        // typed errors ("no payload" is represented by omitting params).
+        assert!(matches!(
+            HostRunnableParams::parse("{not json"),
+            Err(HostRunnableParamsError::InvalidJson { .. })
+        ));
+        assert!(matches!(
+            HostRunnableParams::parse("null"),
+            Err(HostRunnableParamsError::Null)
+        ));
+        assert!(matches!(
+            HostRunnableParams::try_from(serde_json::Value::Null),
+            Err(HostRunnableParamsError::Null)
+        ));
+    }
+
+    #[test]
+    fn host_runnable_target_binding_round_trips_as_first_class_target() {
+        let binding = TargetBinding::host_runnable(host_runnable_binding(Some(
+            r#"{"depth":3,"report":"nightly"}"#,
+        )));
+
+        let json = serde_json::to_string(&binding).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["target_kind"], "host_runnable");
+        assert_eq!(value["runnable"], "nightly-report");
+        assert_eq!(value["params"]["report"], "nightly");
+        assert_eq!(value["params"]["depth"], 3);
+
+        // from_str exercises the internally-tagged Content-buffering path the
+        // persisted store rows take; params must survive it.
+        let round_trip: TargetBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip, binding);
+    }
+
+    #[test]
+    fn host_runnable_target_binding_round_trips_without_params() {
+        let binding = TargetBinding::host_runnable(host_runnable_binding(None));
+
+        let value = serde_json::to_value(&binding).unwrap();
+        assert_eq!(value["target_kind"], "host_runnable");
+        assert!(
+            value.get("params").is_none(),
+            "absent params must be omitted from the wire form"
+        );
+
+        let round_trip: TargetBinding = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip, binding);
+    }
+
+    #[test]
+    fn host_runnable_target_binding_parses_from_persisted_row_json() {
+        let raw =
+            r#"{"target_kind":"host_runnable","runnable":"nightly-report","params":{"depth":3}}"#;
+        let parsed: TargetBinding = serde_json::from_str(raw).unwrap();
+        let TargetBinding::HostRunnable(binding) = parsed else {
+            panic!("expected host_runnable target binding");
+        };
+        assert_eq!(binding.runnable.as_str(), "nightly-report");
+        assert_eq!(
+            binding.params.as_ref().map(HostRunnableParams::get),
+            Some(r#"{"depth":3}"#)
+        );
+    }
+
+    #[test]
+    fn existing_session_target_rows_still_parse_alongside_host_runnable() {
+        // A Session-target row exactly as an older binary persisted it — the
+        // new variant must not disturb existing rows.
+        let raw = r#"{"target_kind":"session","type":"exact_session","session_id":"01920000-0000-7000-8000-000000000001","action":{"type":"prompt","prompt":"scheduled hello"}}"#;
+        let parsed: TargetBinding = serde_json::from_str(raw).unwrap();
+        let TargetBinding::Session(binding) = parsed else {
+            panic!("expected session target binding");
+        };
+        let SessionTargetBinding::ExactSession { action, .. } = binding.as_ref() else {
+            panic!("expected exact_session binding");
+        };
+        assert_eq!(
+            action,
+            &ScheduledSessionAction::Prompt {
+                prompt: ContentInput::from("scheduled hello"),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn host_runnable_stable_key_is_deterministic() {
+        let params = r#"{"depth":3,"report":"nightly"}"#;
+        let first = TargetBinding::host_runnable(host_runnable_binding(Some(params)));
+        let second = TargetBinding::host_runnable(host_runnable_binding(Some(params)));
+
+        let first_key = first.stable_key().unwrap();
+        let second_key = second.stable_key().unwrap();
+        assert_eq!(first_key, second_key);
+        assert!(first_key.starts_with("target:"));
+        assert!(first_key.contains("host_runnable"));
+
+        // Host formatting must not leak into the durable machine key: params
+        // canonicalize at construction, so a whitespace-variant payload keys
+        // identically.
+        let spaced = TargetBinding::host_runnable(host_runnable_binding(Some(
+            r#"{ "depth" : 3 , "report" : "nightly" }"#,
+        )));
+        assert_eq!(first_key, spaced.stable_key().unwrap());
+
+        // The stable key survives a store round-trip: deserialization
+        // re-canonicalizes to the same text the machine key was minted from.
+        let round_trip: TargetBinding =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        assert_eq!(first_key, round_trip.stable_key().unwrap());
+
+        let different_params =
+            TargetBinding::host_runnable(host_runnable_binding(Some(r#"{"depth":4}"#)));
+        assert_ne!(first_key, different_params.stable_key().unwrap());
+
+        let no_params = TargetBinding::host_runnable(host_runnable_binding(None));
+        assert_ne!(first_key, no_params.stable_key().unwrap());
+    }
+
+    #[test]
+    fn host_runnable_binding_is_not_materializable_and_passes_public_api() {
+        let mut binding = TargetBinding::host_runnable(host_runnable_binding(None));
+        assert!(!binding.bind_materialized_session(&SessionId::new()));
+        assert_eq!(
+            binding,
+            TargetBinding::host_runnable(host_runnable_binding(None)),
+            "bind_materialized_session must not mutate a host_runnable target"
+        );
+        assert!(binding.validate_public_api().is_ok());
+    }
+
+    #[test]
+    fn host_runnable_params_equality_is_over_canonical_text() {
+        let compact = host_runnable_binding(Some(r#"{"a":1,"b":2}"#));
+        let same = host_runnable_binding(Some(r#"{"a":1,"b":2}"#));
+        let spaced = host_runnable_binding(Some(r#"{ "a" : 1 , "b" : 2 }"#));
+        let different = host_runnable_binding(Some(r#"{"a":1,"b":3}"#));
+        let absent = host_runnable_binding(None);
+
+        assert_eq!(compact, same);
+        assert_eq!(
+            compact, spaced,
+            "formatting variants canonicalize into one text form, so equality is semantic"
+        );
+        assert_ne!(compact, different);
+        assert_ne!(compact, absent);
     }
 }

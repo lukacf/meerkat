@@ -300,10 +300,11 @@ remote peer, start `rkat run` with `--comms-listen-tcp` and usually
 - `initialize`
 - `session/create`, `session/list`, `session/read`, `session/history`, `session/archive`
 - `session/fork_at`, `session/fork_replace`
+- `session/rewrite_transcript`, `session/transcript_revision` (single read; `revision: "current"` reads the head), `session/transcript_revisions` (revision list), `session/restore_transcript_revision`
 - `session/external_event`, `session/peer_response_terminal`, `session/inject_context`
 - `session/stream_open` / `session/stream_close` — event streaming
 - `events/latest_cursor`, `events/list_since`, `events/snapshot` — cursor-based event reads
-- `turn/start` — accepts `model`, `provider`, `provider_params`, `max_tokens` for mid-session hot-swap
+- `turn/start` — accepts `model`, `provider`, `provider_params`, `max_tokens` for mid-session hot-swap; optional `injected_context` (list of content inputs) delivers host-attached ambient context as separate typed messages before the user message (`session/create` accepts the same field)
 - `turn/interrupt`
 - `blob/get` — fetch generated image / artifact payload bytes by blob id
 - `artifact/list`, `artifact/get`, `artifact/download`
@@ -424,6 +425,8 @@ Profiles (when a profile store is present):
 ### Comms (feature-gated)
 
 - `comms/send`, `comms/peers`
+
+`comms/send` accepts an optional tri-state `content_taint` override (`{"declare": "clean"|"tainted"}` or `"undeclared"`; absent = inherit the runtime-level outbound declaration). The declaration rides inside the signed envelope; receivers read it from the typed transcript comms notice (`sender_taint`).
 
 ### CLI parity (config)
 

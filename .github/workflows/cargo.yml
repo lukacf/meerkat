@@ -12,7 +12,8 @@ name: Cargo CI
 #   clippy          — workspace clippy, all features, lib/bin targets
 #                     (--all-targets multiplies build volume several-fold for
 #                     test-only lint yield; it runs nightly)
-#   test (x6)       — unit + integration-fast, nextest hash-partitioned
+#   unit (x6)       — lib unit tests, nextest hash-partitioned
+#   int (x6)        — integration-fast tests, nextest hash-partitioned
 #   e2e-fast        — deterministic end-to-end lane (real binaries)
 #   ratchets        — version/schema/SDK/surface generation ratchets
 #   wasm-check      — wasm32 cargo check (every code change)
@@ -191,8 +192,8 @@ jobs:
       - name: Clippy (lib/bin targets; --all-targets runs nightly)
         run: ./scripts/repo-cargo clippy --workspace --all-features -- -D warnings
 
-  test:
-    name: Tests (shard ${{ matrix.partition }}/6)
+  unit:
+    name: Unit tests (shard ${{ matrix.partition }}/6)
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
     runs-on: ubuntu-latest
@@ -218,7 +219,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test
+          # unit builds only lib-test binaries; int builds only integration
+          # binaries — separate lanes so neither pays the other's link cost.
+          shared-key: ci-unit
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -227,6 +230,40 @@ jobs:
 
       - name: Unit tests (shard)
         run: ./scripts/repo-cargo unit --partition "hash:${{ matrix.partition }}/6"
+
+  int:
+    name: Integration tests (shard ${{ matrix.partition }}/6)
+    needs: changes
+    if: ${{ needs.changes.outputs.code_changed == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6]
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-int
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Integration-fast tests (shard)
         run: ./scripts/repo-cargo int --partition "hash:${{ matrix.partition }}/6"
@@ -426,7 +463,8 @@ jobs:
       - changes
       - fmt-governance
       - clippy
-      - test
+      - unit
+      - int
       - e2e-fast
       - ratchets
       - wasm-check
@@ -441,7 +479,8 @@ jobs:
             ${{ needs.changes.result }}
             ${{ needs.fmt-governance.result }}
             ${{ needs.clippy.result }}
-            ${{ needs.test.result }}
+            ${{ needs.unit.result }}
+            ${{ needs.int.result }}
             ${{ needs.e2e-fast.result }}
             ${{ needs.ratchets.result }}
             ${{ needs.wasm-check.result }}

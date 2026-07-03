@@ -310,7 +310,7 @@ make audit       # Security audit via cargo-deny
 - `changes` — path classification (docs-only changes skip the Rust jobs; SDK-relevant paths enable `sdk-web`)
 - `fmt-governance` — fmt, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
 - `clippy` — workspace clippy, all features, lib/bin targets (`--all-targets` runs nightly)
-- `test` ×6 — `cargo unit` + `cargo int` sharded via nextest `--partition hash:N/6`
+- `unit` ×6 / `int` ×6 — `cargo unit` / `cargo int` sharded via nextest `--partition hash:N/6` (separate lanes so neither pays the other's build cost)
 - `e2e-fast` — deterministic end-to-end lane
 - `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness
 - `wasm-check` — wasm32 cargo check (every code change)

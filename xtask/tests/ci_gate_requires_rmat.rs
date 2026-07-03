@@ -78,9 +78,10 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
             "e2e-fast",
             "fmt-governance",
             "gate",
+            "int",
             "ratchets",
             "sdk-web",
-            "test",
+            "unit",
             "wasm-check",
         ],
     );

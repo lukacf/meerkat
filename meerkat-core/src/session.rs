@@ -178,13 +178,49 @@ struct SchemaSystemTime {
 }
 
 /// Self-contained append-only transcript rewrite record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct TranscriptRewriteRecord {
     pub commit: TranscriptRewriteCommit,
     pub parent_body: TranscriptRevisionBody,
     pub revision_body: TranscriptRevisionBody,
+}
+
+impl<'de> Deserialize<'de> for TranscriptRewriteRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        struct Wire {
+            commit: TranscriptRewriteCommit,
+            parent_body: TranscriptRevisionBody,
+            revision_body: TranscriptRevisionBody,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let mut revisions = vec![wire.parent_body, wire.revision_body];
+        let mut commits = vec![wire.commit];
+        heal_legacy_revision_strings(&mut revisions, &mut commits, None)
+            .map_err(serde::de::Error::custom)?;
+        let mut revisions = revisions.into_iter();
+        let parent_body = revisions
+            .next()
+            .ok_or_else(|| serde::de::Error::custom("rewrite record lost its parent body"))?;
+        let revision_body = revisions
+            .next()
+            .ok_or_else(|| serde::de::Error::custom("rewrite record lost its revision body"))?;
+        let commit = commits
+            .into_iter()
+            .next()
+            .ok_or_else(|| serde::de::Error::custom("rewrite record lost its commit"))?;
+        Ok(Self {
+            commit,
+            parent_body,
+            revision_body,
+        })
+    }
 }
 
 impl TranscriptRewriteRecord {
@@ -203,7 +239,7 @@ impl TranscriptRewriteRecord {
 }
 
 /// Typed session-local transcript revision graph state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct TranscriptHistoryState {
@@ -212,6 +248,154 @@ pub struct TranscriptHistoryState {
     pub commits: Vec<TranscriptRewriteCommit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revisions: Vec<TranscriptRevisionBody>,
+}
+
+impl<'de> Deserialize<'de> for TranscriptHistoryState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        struct Wire {
+            head: String,
+            #[serde(default)]
+            commits: Vec<TranscriptRewriteCommit>,
+            #[serde(default)]
+            revisions: Vec<TranscriptRevisionBody>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let mut state = TranscriptHistoryState {
+            head: wire.head,
+            commits: wire.commits,
+            revisions: wire.revisions,
+        };
+        // Fast path: a graph written by the current digest format has a head
+        // body whose content digest equals the head string; skip the heal.
+        let head_is_current = match state
+            .revisions
+            .iter()
+            .find(|body| body.revision == state.head)
+        {
+            Some(head_body) => {
+                transcript_messages_digest(&head_body.messages).map_err(serde::de::Error::custom)?
+                    == state.head
+            }
+            None => true,
+        };
+        if !head_is_current {
+            let TranscriptHistoryState {
+                head,
+                commits,
+                revisions,
+            } = &mut state;
+            heal_legacy_revision_strings(revisions, commits, Some(head))
+                .map_err(serde::de::Error::custom)?;
+        }
+        Ok(state)
+    }
+}
+
+/// Re-derive pre-0.7.14 (bookkeeping-inclusive) transcript revision strings to
+/// the current content-addressed format at the durable-format parse boundary.
+///
+/// Retained revision bodies carry their full message lists, so every legacy
+/// string can be re-verified against the bytes it was computed from. Only
+/// strings that verify under the legacy digest of their own retained body are
+/// rewritten; anything else is left untouched for the validators to reject
+/// exactly as they would have before.
+fn heal_legacy_revision_strings(
+    revisions: &mut [TranscriptRevisionBody],
+    commits: &mut [TranscriptRewriteCommit],
+    head: Option<&mut String>,
+) -> Result<(), serde_json::Error> {
+    let mut remap: BTreeMap<String, String> = BTreeMap::new();
+    for body in revisions.iter() {
+        let content = transcript_messages_digest(&body.messages)?;
+        if body.revision == content {
+            continue;
+        }
+        if body.revision == legacy_transcript_messages_digest(&body.messages)? {
+            remap.insert(body.revision.clone(), content);
+        }
+    }
+    if remap.is_empty() {
+        return Ok(());
+    }
+    for body in revisions.iter_mut() {
+        if let Some(current) = remap.get(&body.revision) {
+            body.revision = current.clone();
+        }
+        if let Some(parent) = body.parent_revision.as_ref()
+            && let Some(current) = remap.get(parent)
+        {
+            body.parent_revision = Some(current.clone());
+        }
+    }
+    for commit in commits.iter_mut() {
+        if let Some(current) = remap.get(&commit.parent_revision) {
+            commit.parent_revision = current.clone();
+        }
+        if let Some(current) = remap.get(&commit.revision) {
+            commit.revision = current.clone();
+        }
+        heal_legacy_commit_span_digests(commit, revisions)?;
+    }
+    if let Some(head) = head
+        && let Some(current) = remap.get(head.as_str())
+    {
+        *head = current.clone();
+    }
+    Ok(())
+}
+
+/// Re-derive a legacy commit's span digests from its retained bodies.
+///
+/// Span digests are only rewritten when the stored value verifies under the
+/// legacy digest of the same span; malformed commits keep their stored bytes
+/// so [`validate_transcript_rewrite_record`] rejects them unchanged.
+fn heal_legacy_commit_span_digests(
+    commit: &mut TranscriptRewriteCommit,
+    revisions: &[TranscriptRevisionBody],
+) -> Result<(), serde_json::Error> {
+    let Some(parent_body) = revisions
+        .iter()
+        .find(|body| body.revision == commit.parent_revision)
+    else {
+        return Ok(());
+    };
+    let Some(revision_body) = revisions
+        .iter()
+        .find(|body| body.revision == commit.revision)
+    else {
+        return Ok(());
+    };
+    let (start, end) = commit.selection.bounds();
+    if start > end || end > parent_body.messages.len() {
+        return Ok(());
+    }
+    let removed_len = end - start;
+    let Some(retained_len) = commit.messages_before.checked_sub(removed_len) else {
+        return Ok(());
+    };
+    let Some(replacement_len) = commit.messages_after.checked_sub(retained_len) else {
+        return Ok(());
+    };
+    let Some(replacement_end) = start.checked_add(replacement_len) else {
+        return Ok(());
+    };
+    if replacement_end > revision_body.messages.len() {
+        return Ok(());
+    }
+    let original_span = &parent_body.messages[start..end];
+    if commit.original_span_digest == legacy_transcript_messages_digest(original_span)? {
+        commit.original_span_digest = transcript_messages_digest(original_span)?;
+    }
+    let replacement_span = &revision_body.messages[start..replacement_end];
+    if commit.replacement_digest == legacy_transcript_messages_digest(replacement_span)? {
+        commit.replacement_digest = transcript_messages_digest(replacement_span)?;
+    }
+    Ok(())
 }
 
 impl TranscriptHistoryState {
@@ -409,7 +593,7 @@ fn canonicalize_digest_image_blocks(blocks: &mut [crate::types::ContentBlock]) {
 /// session and its durable snapshot would appear "diverged" purely because of
 /// image storage form, and a runtime-backed live session would be discarded as
 /// stale mid-turn.
-fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Message> {
+fn canonicalize_message_images_for_digest(messages: &[Message]) -> Vec<Message> {
     let mut canonical = messages.to_vec();
     for message in &mut canonical {
         match message {
@@ -436,8 +620,70 @@ fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Message> {
     canonical
 }
 
+/// Timestamp sentinel used when erasing construction bookkeeping from the
+/// digest form. `created_at` always serializes, so a fixed value keeps the
+/// canonical bytes deterministic.
+fn digest_timestamp_sentinel() -> crate::types::MessageTimestamp {
+    chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+}
+
+/// Canonicalize messages to their conversational content before hashing so the
+/// transcript revision is a content address, not a construction record.
+///
+/// Two normalizations compose:
+/// - image payloads collapse to their content-addressed blob identity
+///   ([`canonicalize_message_images_for_digest`]);
+/// - per-construction bookkeeping is erased: [`TranscriptMessageIdentity`]
+///   (run/interaction ids are runtime-binding atoms — a re-created authority
+///   re-stamps them) and `created_at` timestamps. A resume that re-projects
+///   the same conversation through a new runtime authority must digest to the
+///   same revision as the persisted row, or the append-only save guard
+///   strands the session on restart (fails closed with
+///   `TranscriptContinuityViolation`).
+///
+/// Typed semantic facts stay in the digest — `transcript_role`,
+/// `mutation_kind`, `render_metadata`, notice kinds and blocks — because
+/// changing them changes the transcript's meaning.
+fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Message> {
+    let mut canonical = canonicalize_message_images_for_digest(messages);
+    for message in &mut canonical {
+        match message {
+            Message::System(system) => {
+                system.created_at = digest_timestamp_sentinel();
+            }
+            Message::SystemNotice(notice) => {
+                notice.created_at = digest_timestamp_sentinel();
+            }
+            Message::User(user) => {
+                user.identity = crate::types::TranscriptMessageIdentity::default();
+                user.created_at = digest_timestamp_sentinel();
+            }
+            Message::BlockAssistant(assistant) => {
+                assistant.identity = crate::types::TranscriptMessageIdentity::default();
+                assistant.created_at = digest_timestamp_sentinel();
+            }
+            Message::ToolResults { created_at, .. } => {
+                *created_at = digest_timestamp_sentinel();
+            }
+        }
+    }
+    canonical
+}
+
 pub fn transcript_messages_digest(messages: &[Message]) -> Result<String, serde_json::Error> {
     sha256_json_digest(&canonicalize_messages_for_digest(messages))
+}
+
+/// Digest format used by pre-0.7.14 transcript revision strings.
+///
+/// The legacy canonicalization only normalized image payloads, so persisted
+/// revision strings from older stores include construction bookkeeping
+/// (`identity`, `created_at`). This is a durable-format decoder: it exists
+/// solely so [`heal_legacy_revision_strings`] can verify a stored string
+/// against its retained body before re-deriving it to the current
+/// content-addressed format. Never mint new revisions with it.
+fn legacy_transcript_messages_digest(messages: &[Message]) -> Result<String, serde_json::Error> {
+    sha256_json_digest(&canonicalize_message_images_for_digest(messages))
 }
 
 fn validate_transcript_rewrite_record(
@@ -775,6 +1021,16 @@ pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_sta
 
 /// Metadata key used to store the typed session lifecycle-terminal fact.
 pub const SESSION_LIFECYCLE_TERMINAL_KEY: &str = "session_lifecycle_terminal";
+
+/// Typed provenance fact for a durable session-store row written by the
+/// intra-turn best-effort checkpointer AHEAD of the runtime boundary commit.
+/// Present on a row iff its last writer was the checkpointer; every
+/// boundary-following persist strips it. The runtime-projection rollback
+/// consults this fact so only tails the system itself checkpointed can be
+/// converged back onto committed truth — out-of-band row divergence keeps
+/// failing closed.
+pub const SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY: &str =
+    "session_runtime_checkpoint_provenance_v1";
 
 /// Canonical tool name gated by `image_tool_results` capability.
 pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
@@ -3394,6 +3650,35 @@ impl Session {
         self.remove_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
     }
 
+    /// Stamp this durable projection copy as written by the intra-turn
+    /// best-effort checkpointer ahead of the runtime boundary commit.
+    ///
+    /// Stamped only on the persisted clone at checkpoint time — never on the
+    /// live session — so the fact identifies the row's last writer.
+    pub fn set_runtime_checkpoint_provenance(&mut self) {
+        self.set_metadata_unchecked(
+            SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY,
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    /// Clear the intra-turn checkpoint provenance fact. Every
+    /// boundary-following persist path clears it so the fact is present on a
+    /// row iff the checkpointer wrote it last.
+    pub fn clear_runtime_checkpoint_provenance(&mut self) {
+        self.remove_metadata_unchecked(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
+    }
+
+    /// Whether this durable projection copy was last written by the
+    /// intra-turn best-effort checkpointer ahead of the runtime boundary
+    /// commit.
+    pub fn has_runtime_checkpoint_provenance(&self) -> bool {
+        self.metadata
+            .get(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Return the retained immutable body for a transcript revision.
     pub fn transcript_revision_body(
         &self,
@@ -4217,6 +4502,214 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn transcript_digest_is_content_addressed() {
+        let base_time = crate::types::message_timestamp_now();
+        let stamped = vec![
+            Message::User(UserMessage::text("turn one".to_string())),
+            Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "answer one".to_string(),
+                    meta: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                identity: crate::types::TranscriptMessageIdentity {
+                    interaction_id: None,
+                    run_id: Some(crate::lifecycle::RunId::new()),
+                },
+                created_at: base_time,
+            }),
+        ];
+        let mut restamped = stamped.clone();
+        for message in &mut restamped {
+            match message {
+                Message::User(user) => {
+                    user.created_at = base_time + chrono::Duration::hours(2);
+                }
+                Message::BlockAssistant(assistant) => {
+                    assistant.identity = crate::types::TranscriptMessageIdentity {
+                        interaction_id: None,
+                        run_id: Some(crate::lifecycle::RunId::new()),
+                    };
+                    assistant.created_at = base_time + chrono::Duration::hours(2);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            transcript_messages_digest(&stamped).expect("digest"),
+            transcript_messages_digest(&restamped).expect("digest"),
+            "bookkeeping variance must not fork the transcript revision"
+        );
+
+        let mut content_changed = stamped.clone();
+        if let Message::User(user) = &mut content_changed[0] {
+            user.content = vec![ContentBlock::Text {
+                text: "a different turn".to_string(),
+            }];
+        }
+        assert_ne!(
+            transcript_messages_digest(&stamped).expect("digest"),
+            transcript_messages_digest(&content_changed).expect("digest"),
+            "content changes must fork the transcript revision"
+        );
+    }
+
+    fn legacy_rewrite_fixture() -> (TranscriptRewriteCommit, Vec<Message>, Vec<Message>) {
+        let parent_messages = vec![
+            Message::User(UserMessage::text("before rewrite".to_string())),
+            Message::User(UserMessage::text("retained tail".to_string())),
+        ];
+        let revision_messages = vec![
+            Message::User(UserMessage::text("after rewrite".to_string())),
+            Message::User(UserMessage::text("retained tail".to_string())),
+        ];
+        // Compute the graph strings the way a pre-0.7.14 writer did:
+        // bookkeeping-inclusive digests.
+        let parent_revision =
+            legacy_transcript_messages_digest(&parent_messages).expect("legacy parent digest");
+        let revision =
+            legacy_transcript_messages_digest(&revision_messages).expect("legacy revision digest");
+        let commit = TranscriptRewriteCommit {
+            parent_revision,
+            revision,
+            selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            original_span_digest: legacy_transcript_messages_digest(&parent_messages[0..1])
+                .expect("legacy span digest"),
+            replacement_digest: legacy_transcript_messages_digest(&revision_messages[0..1])
+                .expect("legacy replacement digest"),
+            messages_before: 2,
+            messages_after: 2,
+            reason: TranscriptRewriteReason::new("compaction"),
+            actor: Some("legacy-test".to_string()),
+            committed_at: SystemTime::now(),
+        };
+        (commit, parent_messages, revision_messages)
+    }
+
+    #[test]
+    fn legacy_transcript_history_state_heals_to_content_addressed_on_parse() {
+        let (commit, parent_messages, revision_messages) = legacy_rewrite_fixture();
+        let state = TranscriptHistoryState {
+            head: commit.revision.clone(),
+            commits: vec![commit.clone()],
+            revisions: vec![
+                TranscriptRevisionBody {
+                    revision: commit.parent_revision.clone(),
+                    parent_revision: None,
+                    messages: parent_messages.clone(),
+                    created_at: SystemTime::now(),
+                },
+                TranscriptRevisionBody {
+                    revision: commit.revision.clone(),
+                    parent_revision: Some(commit.parent_revision.clone()),
+                    messages: revision_messages.clone(),
+                    created_at: SystemTime::now(),
+                },
+            ],
+        };
+        let value = serde_json::to_value(&state).expect("serialize legacy state");
+        let healed: TranscriptHistoryState =
+            serde_json::from_value(value).expect("parse legacy state");
+
+        let content_parent =
+            transcript_messages_digest(&parent_messages).expect("content parent digest");
+        let content_revision =
+            transcript_messages_digest(&revision_messages).expect("content revision digest");
+        assert_eq!(healed.head, content_revision, "head must re-derive");
+        assert_eq!(healed.commits[0].parent_revision, content_parent);
+        assert_eq!(healed.commits[0].revision, content_revision);
+        assert_eq!(healed.revisions[0].revision, content_parent);
+        assert_eq!(healed.revisions[1].revision, content_revision);
+        assert_eq!(
+            healed.revisions[1].parent_revision.as_deref(),
+            Some(content_parent.as_str())
+        );
+        validate_transcript_history_state(&healed).expect("healed graph must validate");
+
+        // A session materialized from the healed graph can extend the chain
+        // with a current-format rewrite.
+        let mut session = Session::new();
+        session
+            .apply_transcript_history_state(healed)
+            .expect("apply healed graph");
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text(
+                    "rewritten again".to_string(),
+                ))],
+                TranscriptRewriteReason::new("unit-test"),
+                None,
+                None,
+            )
+            .expect("extend healed graph with a new rewrite");
+        session
+            .validate_transcript_history_state()
+            .expect("extended graph must validate");
+    }
+
+    #[test]
+    fn legacy_transcript_rewrite_record_heals_on_parse() {
+        let (commit, parent_messages, revision_messages) = legacy_rewrite_fixture();
+        let record_value = serde_json::json!({
+            "commit": commit,
+            "parent_body": TranscriptRevisionBody {
+                revision: commit.parent_revision.clone(),
+                parent_revision: None,
+                messages: parent_messages.clone(),
+                created_at: SystemTime::now(),
+            },
+            "revision_body": TranscriptRevisionBody {
+                revision: commit.revision.clone(),
+                parent_revision: Some(commit.parent_revision.clone()),
+                messages: revision_messages.clone(),
+                created_at: SystemTime::now(),
+            },
+        });
+        let healed: TranscriptRewriteRecord =
+            serde_json::from_value(record_value).expect("parse legacy record");
+        assert_eq!(
+            healed.commit.revision,
+            transcript_messages_digest(&revision_messages).expect("content digest")
+        );
+        // The healed record passes the same validation `new` enforces.
+        TranscriptRewriteRecord::new(
+            healed.commit.clone(),
+            healed.parent_body.clone(),
+            healed.revision_body.clone(),
+        )
+        .expect("healed record must validate");
+    }
+
+    #[test]
+    fn corrupt_transcript_history_strings_stay_untouched_and_fail_validation() {
+        let (commit, parent_messages, _revision_messages) = legacy_rewrite_fixture();
+        let bogus = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let state = TranscriptHistoryState {
+            head: bogus.to_string(),
+            commits: Vec::new(),
+            revisions: vec![TranscriptRevisionBody {
+                revision: bogus.to_string(),
+                parent_revision: None,
+                messages: parent_messages,
+                created_at: SystemTime::now(),
+            }],
+        };
+        let _ = commit;
+        let value = serde_json::to_value(&state).expect("serialize corrupt state");
+        let parsed: TranscriptHistoryState =
+            serde_json::from_value(value).expect("corrupt strings still parse");
+        assert_eq!(
+            parsed.head, bogus,
+            "unverifiable strings must not be rewritten"
+        );
+        assert!(
+            validate_transcript_history_state(&parsed).is_err(),
+            "corrupt graph must keep failing validation"
+        );
     }
 
     /// K4 invariant: synthetic-notice refresh is ONE atomic transcript edit —

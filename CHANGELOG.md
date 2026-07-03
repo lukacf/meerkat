@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Meerkat 0.7.14 makes cold-restart resume survivable (content-addressed
+transcript revisions + machine-owned resume projection authority) and lets
+sqlite stores read legacy TEXT JSON rows carried in from external writers.
+
+### Fixed
+
+- Sqlite stores accept legacy TEXT JSON payload rows (upstream ask A). Meerkat
+  writes JSON payload columns as BLOB, but SQLite affinity keeps whatever type
+  a writer bound, so carried stores written by external hosts could hold the
+  same UTF-8 JSON as TEXT — and one such row failed every
+  `list()`/`get()`/claim with `Invalid column type Text`. All JSON payload
+  reads in `meerkat-store` (schedule store including the claim-due JOIN,
+  session store `session_json`/`metadata_json`, session index `meta_json`) now
+  go through a typed dual-encoding read boundary (`Text | Blob` → UTF-8 JSON
+  bytes). Writes stay canonical BLOB; rewritten rows normalize. Upgrade-carry
+  tests degrade committed rows via `CAST` and assert every read path carries.
+- Cold-restart resume no longer fails closed on re-stamped transcripts
+  (upstream ask B, part 1). The transcript revision digest is now a CONTENT
+  address: construction bookkeeping — `TranscriptMessageIdentity`
+  (run/interaction ids, re-minted by every re-created runtime authority) and
+  `created_at` timestamps — is erased from the digest form, so a resume that
+  re-projects the same conversation digests to the same revision as the
+  persisted row instead of tripping `append_only_save_guard`
+  (`TranscriptContinuityViolation`) and discarding the live session. Typed
+  semantic facts (`transcript_role`, `mutation_kind`, `render_metadata`,
+  notice kinds/blocks) stay in the digest. Persisted rewrite graphs carrying
+  pre-0.7.14 revision strings heal at the durable-format parse boundary:
+  every retained revision body re-verifies under the legacy digest and
+  re-derives to the content-addressed format (`TranscriptHistoryState` /
+  `TranscriptRewriteRecord` deserialization); unverifiable strings are left
+  for the validators to reject exactly as before. Hosts holding revision-id
+  strings from a pre-0.7.14 process should re-list
+  `session/transcript_revisions` after upgrading.
+- Cold-restart resume converges an ahead-of-authority durable row instead of
+  stranding the session (upstream ask B, part 2). Every runtime-backed turn
+  has two non-atomic durable commit points — the intra-turn best-effort
+  checkpointer writes the session-store row, the machine boundary commit
+  writes the runtime-store snapshot — so a host kill between them (or an
+  in-process lifecycle-commit failure that evicted the uncommitted live turn)
+  left the row carrying turn content the machine never acknowledged. Every
+  subsequent runtime-authoritative persist then rejected against the newer
+  row (`MonotonicityViolation`), permanently stranding the session (mob
+  members came back terminally `Broken`; only respawn recovered). The
+  canonical `SessionDocumentMachine` now owns the projection-rollback
+  disposition (`ResolveRuntimeProjectionRollback`): the intra-turn
+  checkpointer stamps its rows with a typed provenance fact
+  (`session_runtime_checkpoint_provenance_v1`, stripped by every
+  boundary-following persist), and when an ahead-of-authority row both
+  carries that stamp AND is a faithful continuation of the authority
+  transcript — judged by the same run-boundary proof the save guard uses —
+  the CAS projection write rebuilds the row onto committed truth. Rows
+  without the system's own provenance stamp (out-of-band writers) and
+  genuine content forks keep failing closed. The runtime authority stays
+  singular — the row is never adopted as truth — and no user input is lost:
+  the discarded tail's durably admitted input (durable-before-ack) is
+  redelivered after restart and re-executes through a fresh
+  machine-committed run. Regression suites cover mob revival after a kill
+  between commit points (including input redelivery), compaction across
+  restarts (flushed, shrink + post-restart compaction, and lagged durable
+  row), stale out-of-band row divergence staying fail-closed, and
+  bookkeeping-divergent persisted rows.
+
 ## [0.7.13] - 2026-07-03
 
 Meerkat 0.7.13 completes the MobKit content-taint story (upstream asks 9+10)

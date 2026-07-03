@@ -2890,4 +2890,95 @@ mod tests {
         let without_marker = SystemMessage::new("brand new context");
         assert_persist_append_matches_machine(None, &without_marker, false);
     }
+
+    fn assistant_with_bookkeeping(
+        text: &str,
+        run_id: Option<crate::lifecycle::RunId>,
+        created_at: crate::types::MessageTimestamp,
+    ) -> Message {
+        Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity {
+                interaction_id: None,
+                run_id,
+            },
+            created_at,
+        })
+    }
+
+    /// Cold-restart resume regression (Ask B): a re-created runtime authority
+    /// re-stamps run identity and timestamps on the transcript copy it
+    /// re-projects. The transcript revision is a content address, so a
+    /// bookkeeping-only difference on the shared prefix must not fail
+    /// continuity.
+    #[test]
+    fn append_only_guard_accepts_rebookkept_prefix_identity_and_timestamps() {
+        let base_time = crate::types::message_timestamp_now();
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("turn one".to_string())));
+        previous.push(assistant_with_bookkeeping(
+            "answer one",
+            Some(crate::lifecycle::RunId::new()),
+            base_time,
+        ));
+
+        let mut incoming = previous.clone();
+        let mut rebookkept = previous.messages().to_vec();
+        for message in &mut rebookkept {
+            match message {
+                Message::User(user) => {
+                    user.created_at = base_time + chrono::Duration::hours(1);
+                }
+                Message::BlockAssistant(assistant) => {
+                    assistant.identity = crate::types::TranscriptMessageIdentity {
+                        interaction_id: None,
+                        run_id: Some(crate::lifecycle::RunId::new()),
+                    };
+                    assistant.created_at = base_time + chrono::Duration::hours(1);
+                }
+                _ => {}
+            }
+        }
+        rebookkept.push(Message::User(UserMessage::text("turn two".to_string())));
+        incoming.messages = std::sync::Arc::new(rebookkept);
+
+        assert!(
+            append_only_save_guard(&incoming, Some(&previous)).is_ok(),
+            "bookkeeping-only prefix divergence must not fail continuity"
+        );
+    }
+
+    #[test]
+    fn append_only_guard_rejects_content_divergence_despite_matching_bookkeeping() {
+        let base_time = crate::types::message_timestamp_now();
+        let run_id = crate::lifecycle::RunId::new();
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("turn one".to_string())));
+        previous.push(assistant_with_bookkeeping(
+            "answer one",
+            Some(run_id),
+            base_time,
+        ));
+
+        let mut incoming = previous.clone();
+        let mut diverged = previous.messages().to_vec();
+        if let Message::BlockAssistant(assistant) = &mut diverged[1] {
+            assistant.blocks = vec![AssistantBlock::Text {
+                text: "a different answer".to_string(),
+                meta: None,
+            }];
+        }
+        diverged.push(Message::User(UserMessage::text("turn two".to_string())));
+        incoming.messages = std::sync::Arc::new(diverged);
+
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
+    }
 }

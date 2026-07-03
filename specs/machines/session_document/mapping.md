@@ -244,6 +244,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverSessionFromStoreUnrecoverable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveRuntimeProjectionRollbackRebuild`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeProjectionRollbackReject`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyPendingToolResults`
   - anchors: `session_document_authority`
   - scenarios: (unclaimed)
@@ -334,6 +340,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SessionStoreRecoverySourceResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeProjectionRollbackResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SessionToolResultsApplied`

@@ -677,6 +677,58 @@ impl std::fmt::Display for ResumeSelfHostedSelection {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeProjectionRollbackDisposition {
+    #[default]
+    #[serde(rename = "RejectDivergent")]
+    RejectDivergent,
+    #[serde(rename = "RebuildToAuthority")]
+    RebuildToAuthority,
+}
+impl RuntimeProjectionRollbackDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RejectDivergent => "RejectDivergent",
+            Self::RebuildToAuthority => "RebuildToAuthority",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeProjectionRollbackDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RejectDivergent" => Ok(Self::RejectDivergent),
+            "RebuildToAuthority" => Ok(Self::RebuildToAuthority),
+            other => Err(format!(
+                "invalid RuntimeProjectionRollbackDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeProjectionRollbackDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeProjectionRollbackDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SessionArchiveDisposition {
     #[default]
     #[serde(rename = "Archive")]
@@ -1394,6 +1446,12 @@ pub mod inputs {
         pub runtime_projection_quarantined: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeProjectionRollback {
+        pub session_id: SessionId,
+        pub row_continues_authority: bool,
+        pub row_is_runtime_checkpoint: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyPendingToolResults {
         pub session_id: SessionId,
         pub result_count: u64,
@@ -1449,6 +1507,7 @@ pub enum Input {
     AuthorizeSessionResumeOverrides(inputs::AuthorizeSessionResumeOverrides),
     ClassifyLiveSessionAuthority(inputs::ClassifyLiveSessionAuthority),
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
+    ResolveRuntimeProjectionRollback(inputs::ResolveRuntimeProjectionRollback),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
     RecoverSessionLifecycleTerminal(inputs::RecoverSessionLifecycleTerminal),
@@ -1507,6 +1566,9 @@ impl Input {
             Self::AuthorizeSessionResumeOverrides(_) => InputKind::AuthorizeSessionResumeOverrides,
             Self::ClassifyLiveSessionAuthority(_) => InputKind::ClassifyLiveSessionAuthority,
             Self::RecoverSessionFromStore(_) => InputKind::RecoverSessionFromStore,
+            Self::ResolveRuntimeProjectionRollback(_) => {
+                InputKind::ResolveRuntimeProjectionRollback
+            }
             Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
             Self::TranscriptEdit(_) => InputKind::TranscriptEdit,
             Self::RecoverSessionLifecycleTerminal(_) => InputKind::RecoverSessionLifecycleTerminal,
@@ -1546,6 +1608,7 @@ pub enum InputKind {
     AuthorizeSessionResumeOverrides,
     ClassifyLiveSessionAuthority,
     RecoverSessionFromStore,
+    ResolveRuntimeProjectionRollback,
     ApplyPendingToolResults,
     TranscriptEdit,
     RecoverSessionLifecycleTerminal,
@@ -1661,6 +1724,10 @@ pub mod effects {
         pub recoverable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeProjectionRollbackResolved {
+        pub disposition: RuntimeProjectionRollbackDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionToolResultsApplied {
         pub session_id: SessionId,
         pub applied_count: u64,
@@ -1710,6 +1777,7 @@ pub enum Effect {
     SessionResumeOverridesRejected(effects::SessionResumeOverridesRejected),
     LiveSessionAuthorityClassified(effects::LiveSessionAuthorityClassified),
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
+    RuntimeProjectionRollbackResolved(effects::RuntimeProjectionRollbackResolved),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
     SessionLifecycleTerminalRecovered(effects::SessionLifecycleTerminalRecovered),
@@ -1741,6 +1809,7 @@ pub enum EffectKind {
     SessionResumeOverridesRejected,
     LiveSessionAuthorityClassified,
     SessionStoreRecoverySourceResolved,
+    RuntimeProjectionRollbackResolved,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
     SessionLifecycleTerminalRecovered,
@@ -1824,6 +1893,8 @@ pub enum TransitionId {
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
+    ResolveRuntimeProjectionRollbackRebuild,
+    ResolveRuntimeProjectionRollbackReject,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,

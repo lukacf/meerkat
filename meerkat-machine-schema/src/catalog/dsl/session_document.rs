@@ -316,6 +316,30 @@ pub enum LiveSessionAuthorityReason {
     StoredTranscriptRevisionDiverged,
 }
 
+/// Disposition for a runtime-authoritative projection save whose durable
+/// session-store row ran AHEAD of the runtime authority. The intra-turn
+/// best-effort checkpointer writes the durable row while the machine boundary
+/// commit writes the runtime-store snapshot; the two commit points are
+/// non-atomic, so a host kill (or an in-process lifecycle-commit failure that
+/// evicted the uncommitted live turn) leaves the row carrying turn content
+/// the machine never committed. The runtime authority is singular: the row is
+/// an explicitly rebuildable projection and must converge back to committed
+/// truth rather than poisoning every subsequent save. The machine — not a
+/// shell comparison — owns the disposition; the shell extracts the pure
+/// continuation observation and mirrors the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeProjectionRollbackDisposition {
+    /// The row does not faithfully continue the authority transcript — a
+    /// genuine content fork. The save fails closed exactly as before.
+    #[default]
+    RejectDivergent,
+    /// The row is a faithful continuation of the authority transcript (its
+    /// tail is turn content whose boundary commit never landed). The
+    /// projection write is authorized to rebuild the row onto the authority
+    /// transcript, discarding the unacknowledged tail.
+    RebuildToAuthority,
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle-terminal region (LUC-524 R004 fold). Archive lifecycle truth was
 // MODE-SPLIT: runtime-backed archived-ness was owned by MeerkatMachine
@@ -665,6 +689,27 @@ machine! {
             },
 
             // -----------------------------------------------------------
+            // Runtime-projection-rollback region. When a runtime-authoritative
+            // projection save finds the durable session-store row AHEAD of the
+            // authority transcript (intra-turn checkpointer row vs a machine
+            // boundary commit that never landed — host kill or in-process
+            // lifecycle-commit eviction), the shell extracts two pure
+            // observations — the row judged as a faithful continuation of the
+            // authority by the same run-boundary proof the save guard uses,
+            // and the row's typed intra-turn checkpoint provenance fact — and
+            // drives this input; THIS machine — not a handwritten shell
+            // comparison — owns whether the projection write may rebuild the
+            // row onto committed truth. A row without the checkpointer's own
+            // provenance stamp is out-of-band divergence and keeps failing
+            // closed. The shell mirrors the disposition and decides nothing.
+            // -----------------------------------------------------------
+            ResolveRuntimeProjectionRollback {
+                session_id: SessionId,
+                row_continues_authority: bool,
+                row_is_runtime_checkpoint: bool,
+            },
+
+            // -----------------------------------------------------------
             // Apply-pending-tool-results region (folded from the
             // meerkat-session ephemeral.rs `agent.apply_pending_tool_results`
             // call site). Staging already consults generated authority for the
@@ -833,6 +878,16 @@ machine! {
             // metadata or build state resolves to `recoverable: false`
             // explicitly rather than silently failing to load.
             SessionStoreRecoverySourceResolved { recoverable: bool },
+
+            // Runtime-projection-rollback disposition. The shell mirrors
+            // `disposition`: RebuildToAuthority authorizes the CAS projection
+            // write that converges the ahead-of-authority row back onto the
+            // committed transcript; RejectDivergent keeps the fail-closed
+            // rejection for genuine content forks. Total over the observation,
+            // so it is emitted on both branches.
+            RuntimeProjectionRollbackResolved {
+                disposition: Enum<RuntimeProjectionRollbackDisposition>,
+            },
 
             // Apply-pending-tool-results verdict. The shell mirrors
             // `applied_count` onto its `agent.apply_pending_tool_results` call:
@@ -1090,6 +1145,7 @@ machine! {
         disposition SessionResumeOverridesRejected => local seam NoOwnerRealization,
         disposition LiveSessionAuthorityClassified => local seam NoOwnerRealization,
         disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
+        disposition RuntimeProjectionRollbackResolved => local seam NoOwnerRealization,
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
         disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
         disposition SessionLifecycleTerminalRecovered => local seam NoOwnerRealization,
@@ -3027,6 +3083,53 @@ machine! {
             update {}
             to Ready
             emit SessionStoreRecoverySourceResolved { recoverable: false }
+        }
+
+        // ===============================================================
+        // Runtime-projection-rollback region. Both transitions read the pure
+        // continuation observation and resolve the disposition of a
+        // runtime-authoritative projection save whose durable row ran ahead
+        // of the authority transcript. Total over the observation: a row
+        // that faithfully continues the authority (its tail is turn content
+        // whose boundary commit never landed) is rebuilt onto committed
+        // truth; anything else keeps the fail-closed rejection. The shell
+        // mirrors the disposition.
+        // ===============================================================
+
+        transition ResolveRuntimeProjectionRollbackRebuild {
+            on input ResolveRuntimeProjectionRollback {
+                session_id,
+                row_continues_authority,
+                row_is_runtime_checkpoint
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && row_continues_authority == true
+                && row_is_runtime_checkpoint == true
+            }
+            update {}
+            to Ready
+            emit RuntimeProjectionRollbackResolved {
+                disposition: RuntimeProjectionRollbackDisposition::RebuildToAuthority
+            }
+        }
+
+        transition ResolveRuntimeProjectionRollbackReject {
+            on input ResolveRuntimeProjectionRollback {
+                session_id,
+                row_continues_authority,
+                row_is_runtime_checkpoint
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (row_continues_authority == false
+                    || row_is_runtime_checkpoint == false)
+            }
+            update {}
+            to Ready
+            emit RuntimeProjectionRollbackResolved {
+                disposition: RuntimeProjectionRollbackDisposition::RejectDivergent
+            }
         }
 
         // ===============================================================

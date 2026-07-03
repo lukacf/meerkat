@@ -645,6 +645,13 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "LiveSessionAuthorityKind",
                 &["LiveAuthoritative", "DurableAuthoritative"],
             ),
+            // Runtime-projection-rollback region typed vocabulary (disposition
+            // for a runtime-authoritative projection save whose durable row
+            // ran ahead of the authority transcript).
+            NamedTypeBinding::string_enum(
+                "RuntimeProjectionRollbackDisposition",
+                &["RejectDivergent", "RebuildToAuthority"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveSessionAuthorityReason",
                 &[

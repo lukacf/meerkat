@@ -1336,12 +1336,24 @@ for (const pkg of localPackages.values()) {
     // peak rustc memory stays bounded. opt-only (fastbuild/dev already split),
     // preserves -O optimization, applied to the main library the release
     // binary links.
+    const windowsOnlyRustcFlags = [];
     if (key === "meerkat-mob" && rule === "rust_library") {
       extraRustcFlags.push("-Ccodegen-units=256");
+      // Even at 256 codegen units, the crate's `-opt` local ThinLTO pass
+      // exhausted the Windows release executor's memory at 0.7.12 (rustc-LLVM
+      // out of memory, deterministic across retries incl. --jobs=1). Disable
+      // the local ThinLTO combine for this crate on Windows only; other
+      // platforms keep full optimization.
+      windowsOnlyRustcFlags.push("-Clto=off");
     }
-    if (extraRustcFlags.length) {
+    if (extraRustcFlags.length || windowsOnlyRustcFlags.length) {
       const editionIndex = attrs.indexOf(`    edition = "2024",`);
-      attrs.splice(editionIndex + 1, 0, `    rustc_flags = ${listExpr(extraRustcFlags)},`);
+      let rustcFlagsExpr = listExpr(extraRustcFlags);
+      if (windowsOnlyRustcFlags.length) {
+        const windowsList = `[${windowsOnlyRustcFlags.map((v) => q(v)).join(", ")}]`;
+        rustcFlagsExpr = `${rustcFlagsExpr} + select({\n        "@platforms//os:windows": ${windowsList},\n        "//conditions:default": [],\n    })`;
+      }
+      attrs.splice(editionIndex + 1, 0, `    rustc_flags = ${rustcFlagsExpr},`);
     }
     if (rule === "rust_binary" || rule === "rust_test") {
       const packageRunfilesDir = relative(root, dir) || ".";

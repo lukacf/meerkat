@@ -306,9 +306,20 @@ make audit       # Security audit via cargo-deny
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch. It dispatches one of two lanes, then `gate` aggregates status:
-- `cargo` (`.github/workflows/cargo.yml`) — GHA Cargo lane (changed-path gate, version parity, schema/SDK codegen freshness, RPC/REST surface alignment, machine-kernel staleness)
-- `gcp-buildbuddy` (`.github/workflows/buildbuddy.yml`) — secret-backed GCP BuildBuddy lane (control-plane/executor spin-up, prebuild/static/native/governance/wasm/minimal-feature/feature/audit submit jobs); restricted to the repo owner
+**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch, entirely on free GitHub-hosted runners with a ~10-minute wall-clock target (sccache + mold + per-job rust-cache keys). It calls `cargo.yml` (the only lane), then `gate` aggregates status. `cargo.yml` runs parallel jobs:
+- `changes` — path classification (docs-only changes skip the Rust jobs; SDK-relevant paths enable `sdk-web`)
+- `fmt-governance` — fmt, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
+- `clippy` — workspace clippy, all features, lib/bin targets (`--all-targets` runs nightly)
+- `test` ×6 — `cargo unit` + `cargo int` sharded via nextest `--partition hash:N/6`
+- `e2e-fast` — deterministic end-to-end lane
+- `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness
+- `wasm-check` — wasm32 cargo check (every code change)
+- `sdk-web` — full Web SDK suite (only when SDK-relevant paths changed)
+- `audit` — cargo-deny
+
+**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint` (clippy `--all-targets`), `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `test-sdk-web` (unconditional), `check-rust-release-packaging`, cargo-deny sweep.
+
+The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io + King Windows executors) is unaffected.
 
 **Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
 

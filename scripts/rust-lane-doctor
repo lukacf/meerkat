@@ -177,12 +177,16 @@ else
   bad "Cargo or BuildBuddy CI can fall back to runner Rust binaries"
 fi
 
-if grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/cargo.yml &&
-  grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/buildbuddy.yml &&
-  grep -Fq '${GITHUB_JOB:-job}' scripts/ci-pin-rust-toolchain-env; then
-  pass "CI and BuildBuddy workflows isolate Cargo home per GitHub job before cache restore"
+# Hosted runners give every job a fresh VM; the Cargo home must be STABLE
+# across runs so rust-cache/sccache can reuse registry sources. (The old
+# per-run /tmp isolation was for the retired shared self-hosted runner and
+# invalidated every dep compile hash on hosted runners.)
+if grep -q 'CARGO_HOME: /home/runner/.cargo' .github/workflows/cargo.yml &&
+  grep -q 'CARGO_HOME: /home/runner/.cargo' .github/workflows/nightly.yml &&
+  ! grep -Fq '${GITHUB_JOB:-job}' scripts/ci-pin-rust-toolchain-env; then
+  pass "CI workflows use a stable per-VM Cargo home (cacheable across runs)"
 else
-  bad "CI or BuildBuddy workflow can share mutable Cargo home across parallel jobs"
+  bad "CI Cargo home is unstable across runs (breaks sccache/rust-cache reuse)"
 fi
 
 selector_selftest_output="$(./scripts/rust-selector-selftest.mjs 2>&1 || true)"

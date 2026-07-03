@@ -1,5 +1,16 @@
 name: CI
 
+# Single-lane CI on GitHub-hosted runners (free for this public repo).
+#
+# The former GCP BuildBuddy lane (control-plane + 12-executor RBE fleet spun
+# up per run) was retired on 2026-07-03 for cost: every push routed ~360
+# vCPUs of STANDARD-provisioned c3d compute plus a 24/7 control plane. The
+# cargo lane below covers the same gate set; the expensive low-yield lanes
+# (feature matrices, e2e-system, per-package no-unification clippy) moved to
+# the nightly workflow. `buildbuddy.yml` is kept unreferenced as a manual
+# fallback during the transition and should be deleted once a few releases
+# have gone through cleanly.
+
 on:
   push:
     branches:
@@ -13,21 +24,7 @@ on:
       - synchronize
       - reopened
       - ready_for_review
-  workflow_dispatch:
-    inputs:
-      lane:
-        description: CI lane to run.
-        required: true
-        default: cargo
-        type: choice
-        options:
-          - cargo
-          - gcp-buildbuddy
-      mode:
-        description: GCP BuildBuddy mode.
-        required: false
-        default: full-fresh
-        type: string
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -35,16 +32,10 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   cargo:
     name: GHA Cargo
-    if: >-
-      ${{
-        (github.event_name == 'workflow_dispatch' && inputs.lane == 'cargo') ||
-        (github.event_name != 'workflow_dispatch' && github.actor != 'lukacf')
-      }}
     uses: ./.github/workflows/cargo.yml
     with:
       base_sha: >-
@@ -54,67 +45,20 @@ jobs:
           ''
         }}
 
-  gcp-buildbuddy:
-    name: GCP BuildBuddy
-    if: >-
-      ${{
-        github.actor == 'lukacf' &&
-        ((github.event_name == 'workflow_dispatch' && inputs.lane == 'gcp-buildbuddy') ||
-         github.event_name == 'push' ||
-         github.event_name == 'pull_request')
-      }}
-    uses: ./.github/workflows/buildbuddy.yml
-    with:
-      mode: ${{ inputs.mode || 'full-fresh' }}
-      machine_authority_base_sha: >-
-        ${{
-          github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
-          github.event_name == 'push' && github.event.before ||
-          ''
-        }}
-      machine_authority_head_sha: ${{ github.sha }}
-    secrets: inherit
-
-  unauthorized-gcp-buildbuddy:
-    name: GCP BuildBuddy authorization
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'gcp-buildbuddy' && github.actor != 'lukacf' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Reject unauthorized GCP BuildBuddy run
-        run: |
-          echo "::error::Only lukacf can run the secret-backed GCP BuildBuddy lane."
-          exit 1
-
   gate:
     name: CI gate
     if: ${{ always() }}
     needs:
       - cargo
-      - gcp-buildbuddy
-      - unauthorized-gcp-buildbuddy
     runs-on: ubuntu-latest
     steps:
-      - name: Check selected CI backend
+      - name: Check CI result
         shell: bash
         env:
           CARGO_RESULT: ${{ needs.cargo.result }}
-          GCP_BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
-          UNAUTHORIZED_GCP_BUILDBUDDY_RESULT: ${{ needs.unauthorized-gcp-buildbuddy.result }}
         run: |
           echo "GHA Cargo result: ${CARGO_RESULT}"
-          echo "GCP BuildBuddy result: ${GCP_BUILDBUDDY_RESULT}"
-          echo "GCP BuildBuddy authorization result: ${UNAUTHORIZED_GCP_BUILDBUDDY_RESULT}"
-
-          for result in "${CARGO_RESULT}" "${GCP_BUILDBUDDY_RESULT}" "${UNAUTHORIZED_GCP_BUILDBUDDY_RESULT}"; do
-            case "${result}" in
-              failure|cancelled)
-                echo "::error::A CI backend failed or was cancelled."
-                exit 1
-                ;;
-            esac
-          done
-
-          if [[ "${CARGO_RESULT}" != "success" && "${GCP_BUILDBUDDY_RESULT}" != "success" ]]; then
-            echo "::error::No CI backend completed successfully."
+          if [[ "${CARGO_RESULT}" != "success" ]]; then
+            echo "::error::CI did not complete successfully."
             exit 1
           fi

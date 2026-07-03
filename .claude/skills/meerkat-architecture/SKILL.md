@@ -45,8 +45,14 @@ Architectural split:
   checked-in lockfile plus vendored generated BUILD bytes after Bazel exits.
   Persistent BUILD regeneration and module-lock updates are explicit maintenance
   steps, not normal local BuildBuddy lane behavior.
-- `.github/workflows/ci.yml` selects exactly one backend. Cargo and BuildBuddy
-  reusable workflows remain separate so CI lanes stay visible and comparable.
+- `.github/workflows/ci.yml` runs a single Cargo lane on free GitHub-hosted
+  runners (`cargo.yml`: change classification, lint+governance, tests,
+  generation ratchets, Web SDK/wasm, cargo-deny — parallel jobs, shared
+  rust-cache). Expensive low-churn lanes (feature matrices, minimal-feature,
+  surface modularity, e2e-system) run in `nightly.yml`. The GCP BuildBuddy CI
+  lane was retired 2026-07-03 (`buildbuddy.yml` is inert, pending deletion);
+  BuildBuddy remains an OPTIONAL local backend (`MEERKAT_BUILDBUDDY=1`) and
+  the hosted RELEASE binary flow is unchanged.
 
 Test lane authority belongs in Rust, not shell glue. The canonical e2e lane
 catalog is `tests/integration/src/e2e_lanes.rs`; scripts and Bazel targets

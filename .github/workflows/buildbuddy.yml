@@ -1,5 +1,13 @@
 name: GCP BuildBuddy CI
 
+# RETIRED FROM CI ROUTING (2026-07-03): ci.yml no longer calls this workflow;
+# CI runs on free GitHub-hosted runners via cargo.yml + nightly.yml. This file
+# is `workflow_call`-only, so with no caller it is inert. It is kept as a
+# manual fallback during the transition (restore by re-adding the ci.yml job
+# or `git revert`). DELETE this file — together with the GCP control-plane /
+# executor-pool scripts it drives — once a few releases have shipped cleanly
+# on the GHA-only lane.
+
 on:
   workflow_call:
     inputs:

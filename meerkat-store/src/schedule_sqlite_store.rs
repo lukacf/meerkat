@@ -1,4 +1,5 @@
 use crate::StoreError;
+use crate::json_column::JsonColumnBytes;
 use crate::sqlite_store::{begin_immediate_transaction, open_connection};
 use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
@@ -108,7 +109,7 @@ impl SqliteScheduleStore {
             conn.query_row(
                 "SELECT schedule_json FROM schedule_schedules WHERE schedule_id = ?1",
                 params![schedule_id],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
             )
             .optional()?
             .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
@@ -129,7 +130,8 @@ impl SqliteScheduleStore {
             let mut stmt = conn.prepare(
                 "SELECT schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
             )?;
-            let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+            let rows =
+                stmt.query_map([], |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()))?;
             let mut schedules = Vec::new();
             for row in rows {
                 let bytes = row?;
@@ -208,7 +210,7 @@ impl SqliteScheduleStore {
             conn.query_row(
                 "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
                 params![occurrence_id],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
             )
             .optional()?
             .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
@@ -229,7 +231,8 @@ impl SqliteScheduleStore {
             let mut stmt = conn.prepare(
                 "SELECT occurrence_json FROM schedule_occurrences ORDER BY due_at_ms ASC, schedule_revision ASC, occurrence_ordinal ASC",
             )?;
-            let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+            let rows =
+                stmt.query_map([], |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()))?;
             let mut occurrences = Vec::new();
             for row in rows {
                 let bytes = row?;
@@ -298,7 +301,9 @@ impl SqliteScheduleStore {
             let mut stmt = conn.prepare(
                 "SELECT receipt_json FROM schedule_receipts WHERE occurrence_id = ?1 ORDER BY recorded_at_ms ASC, receipt_id ASC",
             )?;
-            let rows = stmt.query_map(params![occurrence_id], |row| row.get::<_, Vec<u8>>(0))?;
+            let rows = stmt.query_map(params![occurrence_id], |row| {
+                Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes())
+            })?;
             let mut receipts = Vec::new();
             for row in rows {
                 let bytes = row?;
@@ -334,7 +339,10 @@ impl SqliteScheduleStore {
                     ",
                 )?;
                 let rows = stmt.query_map([], |row| {
-                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    Ok((
+                        row.get::<_, JsonColumnBytes>(0)?.into_bytes(),
+                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                    ))
                 })?;
                 for row in rows {
                     let (occurrence_bytes, schedule_bytes) = row?;
@@ -586,7 +594,7 @@ impl ScheduleStore for SqliteScheduleStore {
                 .query_row(
                     "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
                     params![occurrence_id],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                 )
                 .optional()?
                 .map(|bytes| serde_json::from_slice::<Occurrence>(&bytes))
@@ -704,7 +712,7 @@ fn read_schedule_in_txn(
     tx.query_row(
         "SELECT schedule_json FROM schedule_schedules WHERE schedule_id = ?1",
         params![schedule_id.to_string()],
-        |row| row.get::<_, Vec<u8>>(0),
+        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
     )
     .optional()?
     .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
@@ -718,7 +726,7 @@ fn read_occurrence_in_txn(
     tx.query_row(
         "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
         params![occurrence_id.to_string()],
-        |row| row.get::<_, Vec<u8>>(0),
+        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
     )
     .optional()?
     .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
@@ -910,7 +918,7 @@ fn supersede_outstanding_occurrences_in_txn(
          ORDER BY due_at_ms ASC, schedule_revision ASC, occurrence_ordinal ASC",
     )?;
     let rows = stmt.query_map(params![schedule.schedule_id.to_string()], |row| {
-        row.get::<_, Vec<u8>>(0)
+        Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes())
     })?;
     let mut acks = Vec::new();
     for row in rows {
@@ -955,7 +963,7 @@ fn record_occurrence_receipt_in_txn(
         .query_row(
             "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
             params![&occurrence_id],
-            |row| row.get::<_, Vec<u8>>(0),
+            |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
         )
         .optional()?
     else {

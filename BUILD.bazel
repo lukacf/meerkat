@@ -508,6 +508,7 @@ test_suite(
         "//meerkat-skills:meerkat_skills_unit_test",
         "//meerkat-skills:resolver_precedence_test",
         "//meerkat-skills:transport_sources_test",
+        "//meerkat-store:legacy_text_json_upgrade_carry_test",
         "//meerkat-store:meerkat_store_unit_test",
         "//meerkat-store:rct_contracts_test",
         "//meerkat-store:schedule_atomic_mutation_test",

@@ -310,11 +310,11 @@ make audit       # Security audit via cargo-deny
 - `changes` — path classification (docs-only changes skip the Rust jobs)
 - `lint-governance` — fmt, workspace clippy, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
 - `test` — `test-unit` + `test-int` + `e2e-fast`
-- `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness, release packaging
+- `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness
 - `sdk-wasm` — Web SDK build+tests, wasm32 runtime check
 - `audit` — cargo-deny
 
-**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, cargo-deny sweep.
+**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `check-rust-release-packaging`, cargo-deny sweep.
 
 The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io + King Windows executors) is unaffected.
 

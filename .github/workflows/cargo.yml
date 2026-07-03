@@ -94,7 +94,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
+          # One cache key PER JOB: with a single shared key only the first
+          # job to save wins and every other job stays cold forever.
+          shared-key: ci-lint
 
       - name: Format check
         run: make fmt-check
@@ -141,7 +143,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
+          shared-key: ci-test
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -172,7 +174,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
+          shared-key: ci-ratchets
 
       - name: Docs validation
         run: make docs-check
@@ -200,9 +202,10 @@ jobs:
 
       - name: Verify generated machine kernels are not stale
         run: make machine-check-drift
-
-      - name: Check Rust release packaging
-        run: make check-rust-release-packaging
+      # check-rust-release-packaging dry-run-packages every release crate
+      # (each `cargo package` compiles the crate in isolation) — ~1h on a
+      # 4-core runner. It is release hygiene, re-verified by release_validate
+      # at release time, and runs nightly instead of per push.
 
   sdk-wasm:
     name: Web SDK + wasm32

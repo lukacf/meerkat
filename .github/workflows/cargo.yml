@@ -352,6 +352,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
+      # Dev profile: skips wasm-opt (which dominates the release build — it
+      # chews through the opt-level=0 binary for many minutes) and compiles
+      # fast. This job runs the node unit tests, which never execute the
+      # wasm binary; nightly builds the release profile unconditionally.
+      MEERKAT_WEB_WASM_PROFILE: dev
     steps:
       - name: Checkout
         uses: actions/checkout@v6

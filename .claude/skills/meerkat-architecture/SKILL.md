@@ -120,6 +120,77 @@ Since the PR #759 dogma campaign (and its follow-up lanes), additionally:
   versions are enforced by the generated
   `SessionPersistenceVersionAuthority`.
 
+Since 0.7.12 (PR #821, the MobKit upstream asks):
+
+- **Typed injected context** — `TranscriptUserRole::InjectedContext` marks
+  host-attached ambient context delivered as SEPARATE user-channel messages
+  immediately before the turn's user message. The role is slot-derived: hosts
+  supply `injected_context: Vec<ContentInput>` on `StartTurnRequest` /
+  `CreateSessionRequest`, RPC `turn/start` / `session/create` params, REST
+  continue/create, mob `WorkSpec` (submit-work lane), and
+  `BridgeDeliveryPayload` (remote members) — never a free-form role string.
+  `Message::indexable_content()` now consults `transcript_role`:
+  `CompactionSummary` and `InjectedContext` are typed `MemoryIndexExclusion`
+  variants (discarded summaries and injected memory never re-index). Rewrite
+  ingress accepts only {conversational, injected_context};
+  `compaction_summary` is rejected fail-closed (runtime-mintable only).
+  `ConversationAppendRole::InjectedContext` is the runtime-path append
+  carrier, ordered BEFORE the user append.
+- **MemoryStore lifecycle** — the trait gains `drop_scope(&MemoryOwner)` and
+  paged `enumerate_scoped` (deterministic durable-id order, optional
+  `source_overlap` / `indexed_after` filters), defaulting to typed
+  `MemoryStoreError::Unsupported`. `HnswMemoryStore` loads scope indexes
+  lazily (open() no longer scans/embeds every session in the realm),
+  migrated the shared sqlite to an indexed `session_id` column (race-safe
+  BEGIN IMMEDIATE migration + idempotent NULL-row heal before every scoped
+  op) and allocates point ids from a durable counter table (never reused
+  after drop).
+- **Compaction curator** — `CompactionCurator` (meerkat-core/src/compact.rs)
+  substitutes summary CONTENT production for the compaction LLM call
+  (`Option<Arc<dyn CompactionCurator>>` on Agent/AgentBuilder;
+  `AgentBuildConfig.compaction_curator_override`). Curator failure is the
+  typed `CompactionFailureReason::CuratorFailed` — no silent LLM fallback.
+  Trigger, commit, and the indexing-gates-commit invariant are unchanged.
+- **Transcript revision reads** —
+  `SessionServiceHistoryExt::list_transcript_revisions` + RPC
+  `session/transcript_revisions` (JSON-RPC only, like the rest of the
+  transcript-edit family); restore parses `RevisionSelector` (restoring
+  `current` surfaces the typed NoOpRewrite instead of a stringly lookup).
+- **Comms content taint** — `SenderContentTaint { Clean, Tainted }` is
+  core-owned vocabulary (meerkat-core/src/comms.rs) carried as an optional
+  field INSIDE the signed `MessageKind` region (absent = byte-identical to
+  pre-field envelopes; present fails verification closed on old receivers).
+  Sender side: `CommsRuntime::set_outbound_content_taint` + tri-state
+  `SendTaintOverride` on send params (absent = inherit the runtime
+  declaration). Receiver side: `SystemNoticeBlock::Comms.sender_taint` is
+  the typed transcript carrier. None ≠ Clean — never coalesce. Taint makes
+  no admission/routing decision; it is content-adjacent typed metadata, NOT
+  machine-echoed.
+- **Dispatch-time provenance for hooks** — `HookToolCall` / `HookToolResult`
+  carry `provenance: Option<ToolProvenance>`; `HookLlmResponse` carries
+  `server_tool_content: Vec<ServerToolKind>` — a foreground hook classifies
+  tool-source and provider-native (web-search) ingestion synchronously,
+  before results commit.
+- **Call-level tool authorization** — `ops::ToolAccessPolicy` is now
+  ENFORCED (previously admission-gated then dropped at the actor spawn
+  sites): `ToolExecutionPolicy` (sealed resolved form) +
+  `ExecutionPolicyGatedDispatcher`
+  (meerkat-core/src/tool_execution_policy.rs) gate execution while leaving
+  `tools()`/`tool_catalog()` byte-identical (prompt-cache preserved). Deny
+  surfaces as an ordinary `access_denied` tool error (run continues); hook
+  denials remain the run-fatal channel. The gate wraps OUTERMOST in the
+  factory; the effective policy persists in session metadata
+  (`tooling.tool_access_policy`) and `Inherit` resolves transitively to the
+  parent's effective policy (no escape-by-spawn).
+- **Host-runnable schedule targets** — `TargetBinding::HostRunnable`
+  (`HostRunnableName` + wire-opaque params) + feature-owned
+  `ScheduleRunnableHost` / `HostRunnableRegistry`
+  (meerkat-schedule/src/runnable.rs);
+  `SharedScheduleTargetAdapter::with_runnable_host` routes probe/deliver
+  through the normal occurrence lifecycle. Machines untouched (targets stay
+  opaque `TargetBindingId` keys); failures map onto existing typed reasons
+  (unregistered → TargetMissing, callback error → RuntimeRejected).
+
 ## Runtime Dogma (first review lens)
 
 Canonical doctrine: `docs/architecture/meerkat-dogma.md` (nine rules; mirrored
@@ -355,6 +426,9 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-live/src/host.rs`, `meerkat-live/src/transport.rs` — live channel host and WebSocket transport
 - `meerkat-rpc/src/handlers/live.rs` — `live/*` JSON-RPC handlers
 - `meerkat-core/src/agent.rs`, `meerkat-core/src/agent/*.rs` — agent loop
+- `meerkat-core/src/tool_execution_policy.rs` — `ToolExecutionPolicy`, `ExecutionPolicyGatedDispatcher` (list-preserving call-level tool gate)
+- `meerkat-core/src/compact.rs` — `Compactor`, `CompactionCurator` (host-supplied summary producer)
+- `meerkat-schedule/src/runnable.rs` — `ScheduleRunnableHost`, `HostRunnableRegistry` (host-runnable schedule targets)
 - `meerkat/src/factory.rs` — `AgentFactory::build_agent()` (pipeline)
 - `meerkat-session/src/{ephemeral,persistent}.rs` — session services
 - `meerkat-workgraph/src/{types,store,service,tools}.rs` — WorkGraph domain model, durable stores, service policy, and agent tools

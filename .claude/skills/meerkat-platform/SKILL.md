@@ -169,9 +169,32 @@ surface, not the old live-adapter/docs-refresh snapshot:
   session-bound goal attention bindings; public REST/RPC do not expose those
   mutators.
 - Session transcript rewrite is same-session, append-audited state:
-  `session/rewrite_transcript`, `session/transcript_revision`, and
-  `session/restore_transcript_revision` update the transcript head without
-  changing session identity.
+  `session/rewrite_transcript`, `session/transcript_revision`,
+  `session/transcript_revisions` (revision list), and
+  `session/restore_transcript_revision` update/read the transcript head
+  without changing session identity. Head reads use
+  `revision: "current"` (typed `RevisionSelector`); rewrites may preserve
+  the `injected_context` role but can never mint `compaction_summary`
+  (rejected fail-closed).
+- Hosts can attach ambient context alongside (not inside) the user's message
+  on every submit-work path via `injected_context` (RPC `turn/start` /
+  `session/create`, REST continue/create, SDK `injected_context` /
+  `injectedContext` params, mob work submission). Entries land as separate
+  typed transcript messages excluded from semantic-memory indexing.
+- Spawn/fork tool containment: `tool_access_policy` (AllowList/DenyList/
+  Inherit) on mob spawn specs and `AgentBuildConfig` is enforced at dispatch
+  time without changing the model-visible tool list; denied calls surface as
+  ordinary `access_denied` tool errors. `Inherit` composes transitively from
+  the parent member.
+- Schedules can target host-registered runnables (`TargetBinding::HostRunnable`)
+  in addition to sessions, identities, and mobs.
+- Comms envelopes can carry a signed sender content-taint declaration
+  (`content_taint`); hosts set a runtime-level outbound declaration or a
+  per-send tri-state override, and read the received declaration from the
+  typed transcript comms notice.
+- Semantic memory has host lifecycle APIs: per-scope delete (`drop_scope`)
+  and paged enumeration (`enumerate_scoped`); the Hnsw store loads scope
+  indexes lazily instead of re-embedding every session at agent build.
 - CLI runs default to project-local realms unless `--realm`, `--isolated`,
   `--context-root`, or `--state-root` says otherwise.
 - `rkat run --output html` / `--html` writes standalone HTML artifacts.
@@ -323,9 +346,19 @@ The `meerkat-schedule` crate provides durable, authority-backed scheduling for a
 
 A `Schedule` defines when and how agent sessions are materialized:
 - **Trigger**: `Cron(CalendarTriggerSpec)` or `Interval(IntervalTriggerSpec)`
-- **Target**: `Session(SessionTargetBinding)` or `Mob(MobTargetBinding)`
+- **Target**: `Session(SessionTargetBinding)`, `Identity(IdentityTargetBinding)` (durable mob-member identity), `Mob(MobTargetBinding)`, or `HostRunnable(HostRunnableTargetBinding)` (host-registered callback)
 - **Policies**: `MisfirePolicy` (Execute/Skip/SkipIfOlderThan), `OverlapPolicy` (Allow/Skip/Queue), `MissingTargetPolicy` (Skip/Fail/Create)
 - **Phase**: `Active`, `Paused`, `Completed`, `Cancelled`
+
+**Host runnables**: in-process hosts register named runnables at startup
+(`HostRunnableRegistry` in `meerkat-schedule`, implements
+`ScheduleRunnableHost`) and wire the registry via
+`SharedScheduleTargetAdapter::with_runnable_host`. Occurrences targeting a
+`HostRunnable` flow through the normal occurrence lifecycle (listing,
+history, receipts, failure surfaces unchanged); an unregistered runnable
+probes as Missing (then `MissingTargetPolicy` applies) and a callback error
+maps to the RuntimeRejected failure reason. Use this for host-internal
+periodic work that must not be a mob member.
 
 Each schedule produces `Occurrence` instances (individual fires) projected within a planning horizon.
 
@@ -373,13 +406,34 @@ let schedule = service.create(CreateScheduleRequest {
     trigger: TriggerSpec::Interval(IntervalTriggerSpec {
         every: Duration::from_secs(3600),
     }),
-    target: TargetBinding::Session(SessionTargetBinding {
-        model: "claude-sonnet-4-6".into(),
-        prompt: ContentInput::Text("Generate hourly report".into()),
-        ..Default::default()
-    }),
+    target: TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+        SessionMaterializationSpec {
+            model: "claude-sonnet-4-6".into(),
+            ..Default::default()
+        },
+        ScheduledSessionAction::Prompt {
+            prompt: ContentInput::Text("Generate hourly report".into()),
+            system_prompt: None,
+            render_metadata: None,
+            skill_refs: Vec::new(),
+            additional_instructions: Vec::new(),
+        },
+    )),
     ..Default::default()
 }).await?;
+```
+
+For host-internal periodic work, register a runnable and target it instead:
+
+```rust
+use meerkat_schedule::{HostRunnableName, HostRunnableRegistry, HostRunnableTargetBinding, TargetBinding};
+
+let mut registry = HostRunnableRegistry::new();
+let name = HostRunnableName::parse("memory-dream")?;
+registry.register(name.clone(), my_runnable)?;     // Arc<dyn HostRunnable>; duplicate names are typed errors
+let registry = Arc::new(registry);
+// wire into the schedule host: SharedScheduleTargetAdapter::with_runnable_host(registry)
+// then target it: TargetBinding::host_runnable(HostRunnableTargetBinding { runnable: name, params: None })
 ```
 
 ## Quick start
@@ -696,9 +750,17 @@ Introspection returns typed keys plus source provenance. Shadowing is by full `S
 
 Hook config is realm-aware, with compatibility layering from user/project hook files when available.
 
+Hook payloads carry typed dispatch-time context for synchronous host classification: `HookToolCall` and `HookToolResult` include the tool's `provenance` (`ToolProvenance` — builtin/MCP-with-server-id/etc.), and `HookLlmResponse` lists provider-native `server_tool_content` kinds (e.g. web search) from the response. A foreground PreToolExecution/PostToolExecution/PostLlmResponse hook therefore sees tool-source facts before results commit — no observe-stream race.
+
+### Injected context (host-attached ambient context)
+
+Hosts that inject per-turn ambient context (e.g. memory recall blocks) attach it ALONGSIDE the user's message, not fused into it: the `injected_context` parameter (a list of content inputs) on RPC `turn/start` / `session/create`, REST continue/create, Python `injected_context=` / TypeScript `injectedContext:` session params, and mob work submission. Each entry becomes a separate typed transcript message ordered immediately before the user's message. Injected messages are excluded from semantic-memory indexing at compaction (no echo loop), never satisfy the compaction save-guard, and cannot be forged from message text — the role is derived from the typed delivery slot. Transcript reads expose the role; transcript rewrites may preserve `injected_context` but `compaction_summary` stays runtime-mintable only.
+
 ### Delegated work
 
-Use mobs for all multi-agent orchestration. Mobs support `MemberLaunchMode::Fork` for forking a member's conversation history (via `Session::fork()` CoW), `spawn_helper()`/`fork_helper()` for one-call convenience, `force_cancel_member()` for cancelling in-flight turns, and `member_status()`/`wait_one()`/`wait_all()`/`collect_completed()` for monitoring.
+Use mobs for all multi-agent orchestration. Mobs support `MemberLaunchMode::Fork` for seeding a member from a source member's conversation (the mob fork lane renders source history into the new member's initial prompt; CoW `Session::fork()`/`fork_at` is the library-level primitive), `spawn_helper()`/`fork_helper()` for one-call convenience, `force_cancel_member()` for cancelling in-flight turns, and `member_status()`/`wait_one()`/`wait_all()`/`collect_completed()` for monitoring.
+
+Spawned/forked members can be capability-contained without changing their model-visible tool list: pass `tool_access_policy` (`allow_list` / `deny_list` / `inherit`) on the spawn spec / `HelperOptions` / `AgentBuildConfig`. Enforcement is call-level — a denied call returns an ordinary `access_denied` tool error and the run continues. `inherit` (and omitting the policy) composes the PARENT member's effective policy, so a restricted member cannot shed its restrictions by spawning helpers. Provider-native server tools (e.g. native web search) bypass the dispatcher — disable that capability on gated builds if it matters.
 
 ### Inter-agent comms
 
@@ -709,6 +771,8 @@ Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; M
 **Peer lifecycle typing**: mob lifecycle notices are typed at peer ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle context; `mob.kickoff_failed` and `mob.kickoff_cancelled` are visible lifecycle notices. Do not rely on mob defaults in `silent_comms_intents` for canonical behavior.
 
 **Comms choice**: use `send_message` for ordinary collaboration. Use `send_request` only for structured ask/reply semantics (`intent + params` plus later `send_response`). Peer-side reservation streams were removed.
+
+**Content taint (persistent-prompt-injection defense)**: content-bearing peer envelopes (`Message`/`Request`/`Response`) can carry a signed `content_taint` declaration (`clean` | `tainted`; absent = no declaration — receivers must not treat absent as clean). Sender side: hosts set a runtime-level outbound declaration (`CommsRuntime::set_outbound_content_taint`) stamped into every outbound content envelope, or override per send with a tri-state `content_taint` field on `comms/send` params (`declare` clean/tainted, `undeclared`, or absent = inherit the runtime declaration). Receiver side: the declaration lands typed on the transcript comms notice (`sender_taint`), including for cross-process senders; the model projection marks tainted content only. Envelopes carrying a declaration fail signature verification on pre-0.7.12 receivers (loud, fail-closed under default peer auth).
 
 #### Structured output with comms (autonomous agents)
 
@@ -748,7 +812,18 @@ Surface availability:
 
 ### Memory
 
-Semantic memory (`memory_search`) and compaction integrate through the same session/runtime pipeline.
+Semantic memory (`memory_search`) and compaction integrate through the same session/runtime pipeline. Compaction indexes discarded transcript history into the session's memory scope before committing the rebuilt transcript; compaction summaries and host-injected context carry typed roles that exclude them from indexing (no echo loops).
+
+Host lifecycle APIs on the `MemoryStore` trait (Rust hosts embedding the store):
+
+- `drop_scope(&MemoryOwner)` — delete a session scope's entries (reclaim rows when a host rotates/retires session ids).
+- `enumerate_scoped(scope, request)` — paged, deterministic read-back of a scope's records (`limit`/`offset` over raw rows, optional `source_overlap` message-range filter and `indexed_after` cutoff) — similarity search is no longer the only read surface.
+
+`HnswMemoryStore` loads per-scope indexes lazily: opening the store at agent build no longer scans and re-embeds every session in the realm, so orphaned scopes cost disk only until dropped.
+
+### Compaction curator (hosts)
+
+Rust hosts can supply a `CompactionCurator` via `AgentBuildConfig.compaction_curator_override`: when present it produces the compaction summary content instead of the summary LLM call (zero-LLM-cost compaction for hosts that maintain incremental session notes). Curator failure fails the compaction attempt with a typed `curator_failed` reason — the session is left untouched; there is no silent fallback to the LLM path.
 
 ## Repo test lanes
 

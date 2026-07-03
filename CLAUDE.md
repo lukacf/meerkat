@@ -123,7 +123,8 @@ This is a large workspace (~40 crates). Careless builds waste minutes. Follow th
 
 ```
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
-                     Also: SessionService trait, Compactor trait, MemoryStore trait, SessionError
+                     Also: SessionService trait, Compactor + CompactionCurator traits, MemoryStore trait,
+                     ToolExecutionPolicy/ExecutionPolicyGatedDispatcher (list-preserving call-level tool gate), SessionError
                      Owns the model-catalog vocabulary types + ModelCatalog mechanics (no provider data)
 meerkat-models    → Provider model catalog/capabilities data (core stays provider-free);
                      exposes `canonical()` ModelCatalog injected into core seams
@@ -140,7 +141,8 @@ meerkat-tools     → Tool registry and validation implementing AgentToolDispatc
 meerkat-session   → Session service orchestration (EphemeralSessionService, DefaultCompactor)
                      Features: session-store (PersistentSessionService),
                                session-compaction (DefaultCompactor)
-meerkat-memory    → Semantic memory (HnswMemoryStore via hnsw_rs + SQLite, SimpleMemoryStore for tests)
+meerkat-memory    → Semantic memory (HnswMemoryStore via hnsw_rs + SQLite, SimpleMemoryStore for tests);
+                     lazy per-scope index loading + host lifecycle APIs (drop_scope, enumerate_scoped)
 meerkat-mcp       → MCP protocol client, McpRouter for tool routing
 meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume, meerkat_config, meerkat_capabilities)
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
@@ -153,7 +155,8 @@ meerkat-skills    → Skill loading, resolution, rendering (filesystem, git, HTT
 meerkat-hooks     → Hook infrastructure (in-process, command, HTTP runtimes)
 meerkat-mob       → Multi-agent mob orchestration (spawn, provision, finalize, SQLite storage, flow frames/loops)
 meerkat-mob-pack  → Mobpack archive format, signing, trust policies, validation
-meerkat-schedule  → Scheduler: cron/interval triggers, occurrence lifecycle, delivery, schedule tools
+meerkat-schedule  → Scheduler: cron/interval triggers, occurrence lifecycle, delivery, schedule tools,
+                     host-runnable targets (TargetBinding::HostRunnable + ScheduleRunnableHost registry)
 meerkat-mob-mcp   → Expose mob tools as MCP interface + agent-facing delegation tools (MobMcpState, MobMcpDispatcher, AgentMobToolSurface)
 meerkat-workgraph → Work graph (work items, dependencies) + agent-facing workgraph tools
 meerkat-runtime   → Runtime control plane (MeerkatMachine, ops lifecycle, runtime handles) between surfaces and core
@@ -237,9 +240,10 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-core/src/state.rs` - LoopState state machine
 - `meerkat-core/src/types.rs` - Core types (Message, Session, ToolCall, etc.)
 - `meerkat-core/src/service/mod.rs` - SessionService trait, SessionError
-- `meerkat-core/src/compact.rs` - Compactor trait, CompactionConfig
+- `meerkat-core/src/compact.rs` - Compactor trait, CompactionConfig, CompactionCurator (host-supplied summary producer; substitutes the compaction LLM call)
 - `meerkat-core/src/completion_feed.rs` - CompletionFeed trait, CompletionEntry, CompletionSeq
-- `meerkat-core/src/memory.rs` - MemoryStore trait
+- `meerkat-core/src/memory.rs` - MemoryStore trait (index/search + drop_scope/enumerate_scoped lifecycle APIs)
+- `meerkat-core/src/tool_execution_policy.rs` - ToolExecutionPolicy (sealed resolved form of ops::ToolAccessPolicy) + ExecutionPolicyGatedDispatcher (list-preserving call-level gate; deny = ordinary access_denied tool error)
 - `meerkat-core/src/runtime_epoch.rs` - RuntimeEpochId, SessionRuntimeBindings, RuntimeBuildMode, EpochCursorState
 - `meerkat-anthropic/src/client.rs` - Anthropic streaming implementation (meerkat-client is a re-export shim)
 - `meerkat-session/src/ephemeral.rs` - EphemeralSessionService (in-memory session lifecycle)
@@ -276,7 +280,8 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-schedule/src/machines/` - Schedule and occurrence lifecycle machines (schedule_lifecycle.rs, occurrence_lifecycle.rs)
 - `meerkat-schedule/src/store.rs` - ScheduleStore trait + MemoryScheduleStore
 - `meerkat-schedule/src/tools.rs` - Agent-facing schedule tools
-- `meerkat/src/surface/schedule_host.rs` - Runtime-backed schedule delivery surface
+- `meerkat-schedule/src/runnable.rs` - Host-runnable targets (ScheduleRunnableHost trait, HostRunnableRegistry, HostRunnableInvocation)
+- `meerkat/src/surface/schedule_host.rs` - Runtime-backed schedule delivery surface (SharedScheduleTargetAdapter::with_runnable_host wires host runnables)
 - `meerkat-web-runtime/src/lib.rs` - WASM browser deployment (wasm_bindgen exports)
 - `sdks/web/src/runtime.ts` - @rkat/web MeerkatRuntime class (browser SDK entry point)
 - `sdks/web/src/mob.ts` - @rkat/web Mob class (mob lifecycle wrapper)
@@ -295,7 +300,7 @@ make fmt         # Auto-fix formatting
 make audit       # Security audit via cargo-deny
 ```
 
-**`make ci` runs** (in order): `docs-check` → `fmt-check` → `legacy-surface-gate` → `session-control-gate` → `deprecated-backend-gate` → `bridge-no-responsestatus-gate` → `sync-meerkat-dogma-skill-docs` → `verify-version-parity` → `verify-schema-freshness` → `verify-sdk-codegen-freshness` → `verify-sdk-event-inventory` → `verify-rpc-surface-alignment` → `verify-rest-surface-alignment` → `verify-sdk-wrapper-freshness` → `verify-machine-poster-coverage` → `check-rust-release-packaging` → `machine-check-drift` → `lint` → `lint-feature-matrix` → `test-unit` → `test-int` → `e2e-fast` → `e2e-system` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `seam-inventory` → `rmat-audit` → `audit-generated-headers` → `audit`
+**`make ci` runs** (in order): `docs-check` → `fmt-check` → `legacy-surface-gate` → `session-control-gate` → `deprecated-backend-gate` → `bridge-no-responsestatus-gate` → `sync-meerkat-dogma-skill-docs` → `verify-version-parity` → `verify-schema-freshness` → `verify-sdk-codegen-freshness` → `verify-sdk-event-inventory` → `verify-rpc-surface-alignment` → `verify-rest-surface-alignment` → `verify-sdk-wrapper-freshness` → `verify-machine-poster-coverage` → `check-rust-release-packaging` → `machine-check-drift` → `machine-authority-docs-gate` → `runtime-authority-bypass` → `lint` → `lint-feature-matrix` → `test-unit` → `test-int` → `e2e-fast` → `e2e-system` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `seam-inventory` → `rmat-audit` → `audit-generated-headers` → `audit`
 
 `rmat-audit` runs the typed governance gates: `xtask effect-authority`, `xtask ownership-ledger --check-drift`, and `xtask rmat-audit --strict` (RMAT read-seam enforcement is the `ForbiddenShellAuthorityReads` AST rule). The bridge gate is `xtask bridge-classifier` (`scripts/pre-push-bridge-no-responsestatus.sh` is a thin wrapper). The old `scripts/audit-effect-authority.sh` is deleted.
 

@@ -70,7 +70,8 @@ There are no separate public reduced-surface binaries. Reduced-surface distribut
 | `HookEngine` | Hook execution | `DefaultHookEngine` (meerkat-hooks) |
 | `SkillEngine` | Skill resolution + rendering | `DefaultSkillEngine` (meerkat-skills) |
 | `Compactor` | Context compaction | `DefaultCompactor` (meerkat-session) |
-| `MemoryStore` | Semantic memory | `HnswMemoryStore`, `SimpleMemoryStore` (meerkat-memory) |
+| `CompactionCurator` | Host-supplied compaction summary producer (substitutes the summary LLM call; failure is typed `CuratorFailed`, no LLM fallback) | host-provided via `AgentBuildConfig.compaction_curator_override` |
+| `MemoryStore` | Semantic memory: index/search + lifecycle (`drop_scope`, paged `enumerate_scoped`; defaults are typed `Unsupported`) | `HnswMemoryStore` (lazy per-scope loading), `SimpleMemoryStore` (meerkat-memory) |
 | `OpsLifecycleRegistry` | Async operation tracking (wait_all, collect_completed, bounded retention, timestamps, concurrency, detached wake) | `RuntimeOpsLifecycleRegistry` (meerkat-runtime) |
 | `MobToolsFactory` | Late-binding session-scoped mob tool construction | `AgentMobToolSurfaceFactory` (meerkat-mob-mcp) |
 | `WorkGraphStore` | Durable realm-scoped work item, edge, claim, event, and snapshot storage | `MemoryWorkGraphStore`, `SqliteWorkGraphStore` (meerkat-workgraph) |
@@ -135,6 +136,21 @@ There are no separate public reduced-surface binaries. Reduced-surface distribut
 | `RuntimeBindingsError` | Error type for `prepare_bindings()` — meerkat-runtime |
 | `CompletionFeed` | Trait for monotonic completion event log — meerkat-core |
 | `CompletionEntry` | Single completion event in the feed — meerkat-core |
+
+### 0.7.12 additions (PR #821, MobKit upstream asks)
+
+| Type | Purpose |
+|------|---------|
+| `TranscriptUserRole::InjectedContext` | Slot-derived typed role for host-attached ambient context (separate user-channel messages; excluded from memory indexing; save-guard remains CompactionSummary-only) |
+| `MemoryIndexExclusion::{CompactionSummary, InjectedContext}` | Typed indexing exclusions consulted by `Message::indexable_content()` via `transcript_role` |
+| `StartTurnRequest.injected_context` / `CreateSessionRequest.injected_context` / `WorkSpec.injected_context` | Typed delivery slots for injected context on the submit-work paths (service, RPC/REST params, mob work lane, `BridgeDeliveryPayload` for remote members) |
+| `CompactionWindow` / `CuratedCompactionSummary` | Curator inputs (same as the LLM path) and validated non-empty summary newtype — meerkat-core/src/compact.rs |
+| `MemoryOwner`-scoped `drop_scope` / `MemoryEnumerationRequest` / `MemoryEnumerationPage` / `MemoryRecord` | MemoryStore lifecycle + enumeration vocabulary (raw-row offset paging; `source_overlap` + `indexed_after` filters) |
+| `SenderContentTaint` / `SendTaintOverride` | Core-owned comms content-taint vocabulary; envelope field is inside the signed `MessageKind` region; per-send override is tri-state (absent = inherit runtime declaration); `SystemNoticeBlock::Comms.sender_taint` is the transcript carrier |
+| `ToolExecutionPolicy` / `ExecutionPolicyGatedDispatcher` | Sealed resolved form of `ops::ToolAccessPolicy` + list-preserving call-level execution gate (deny = ordinary `access_denied` tool error; wraps outermost in the factory; `Inherit` resolves to the parent's effective policy) |
+| `TargetBinding::HostRunnable` / `ScheduleRunnableHost` / `HostRunnableRegistry` | Host-registered schedule runnables delivered through the normal occurrence lifecycle (meerkat-schedule/src/runnable.rs) |
+| `SessionTranscriptRevisionListQuery` / `SessionServiceHistoryExt::list_transcript_revisions` | Revision-list read (RPC `session/transcript_revisions`); head reads remain `read_transcript_revision` + `RevisionSelector::Current` |
+| `HookToolCall.provenance` / `HookLlmResponse.server_tool_content` | Synchronous dispatch-time projections of `ToolProvenance` / `ServerToolKind` for foreground hook classification |
 
 ## Agent Loop State Machine
 

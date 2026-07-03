@@ -94,6 +94,8 @@ export type BudgetType = "tokens" | "time" | "tool_calls";
 
 export type CapabilityId = string;
 
+export type CommsNoticeKind = string;
+
 export type CompactionFailureReason = {
   error_class: AgentErrorClass;
   kind: "llm_failed";
@@ -221,6 +223,8 @@ export type OpenAiImageMetadata = {
   target_model: string;
 };
 
+export type PeerId = string;
+
 export interface PromptText {
   content: string;
 }
@@ -257,6 +261,8 @@ export interface SchemaWarning {
   path: string;
   provider: Provider;
 }
+
+export type SenderContentTaint = "clean" | "tainted";
 
 export type ServerToolKind = {
   kind: "web_search";
@@ -333,6 +339,11 @@ export type StreamTruncationReason = {
 } | {
   dropped: number;
   kind: "output_audio_degraded";
+};
+
+export type SystemNoticePeer = {
+  display_name?: string | null;
+  id: PeerId;
 };
 
 export interface SystemTime {
@@ -660,6 +671,14 @@ export interface TranscriptRewriteCommittedEvent {
   type: "transcript_rewrite_committed";
 }
 
+export interface PeerContentIngestedEvent {
+  kind: CommsNoticeKind;
+  peer?: SystemNoticePeer | null;
+  request_id?: string | null;
+  sender_taint?: SenderContentTaint | null;
+  type: "peer_content_ingested";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -695,7 +714,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "stream_truncated",
   "tool_config_changed",
   "background_job_completed",
-  "transcript_rewrite_committed"
+  "transcript_rewrite_committed",
+  "peer_content_ingested"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -736,4 +756,5 @@ export type AgentEvent =
   StreamTruncatedEvent |
   ToolConfigChangedEvent |
   BackgroundJobCompletedEvent |
-  TranscriptRewriteCommittedEvent;
+  TranscriptRewriteCommittedEvent |
+  PeerContentIngestedEvent;

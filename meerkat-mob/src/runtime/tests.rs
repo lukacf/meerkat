@@ -574,6 +574,7 @@ struct MockCommsRuntime {
     peer_lifecycle_max_in_flight: AtomicU64,
     inbox_notify: Arc<tokio::sync::Notify>,
     mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
+    outbound_content_taint: std::sync::RwLock<Option<meerkat_core::comms::SenderContentTaint>>,
 }
 
 impl MockCommsRuntime {
@@ -618,6 +619,7 @@ impl MockCommsRuntime {
             peer_lifecycle_max_in_flight: AtomicU64::new(0),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
             mob_machine_trust_owner: std::sync::RwLock::new(None),
+            outbound_content_taint: std::sync::RwLock::new(None),
         }
     }
 
@@ -765,6 +767,17 @@ impl MockCommsRuntime {
 
 #[async_trait]
 impl CoreCommsRuntime for MockCommsRuntime {
+    fn set_outbound_content_taint(
+        &self,
+        taint: Option<meerkat_core::comms::SenderContentTaint>,
+    ) -> Result<(), meerkat_core::comms::SendError> {
+        *self
+            .outbound_content_taint
+            .write()
+            .expect("poisoned taint lock in mock runtime") = taint;
+        Ok(())
+    }
+
     fn peer_id(&self) -> Option<PeerId> {
         let behavior = self
             .behavior
@@ -1731,6 +1744,22 @@ impl MockSessionService {
                 .cloned()
                 .unwrap_or_default(),
         }
+    }
+
+    async fn outbound_content_taint(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat_core::comms::SenderContentTaint> {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        runtime.and_then(|runtime| {
+            *runtime
+                .outbound_content_taint
+                .read()
+                .expect("poisoned taint lock in mock runtime")
+        })
     }
 
     async fn max_concurrent_peer_lifecycle_sends(&self, session_id: &SessionId) -> u64 {
@@ -30236,6 +30265,54 @@ async fn test_peer_message_delivery_backpressure_does_not_block_actor_mailbox() 
         .expect("peer message should succeed");
     assert_eq!(receipt.from, AgentIdentity::from("l-backpressure"));
     assert_eq!(receipt.to, AgentIdentity::from("w-backpressure"));
+}
+
+/// The host's outbound content-taint declaration reaches the MEMBER's own
+/// comms runtime (where every outbound envelope is stamped), addressed by
+/// stable AgentIdentity — the host never touches the runtime directly.
+#[tokio::test]
+async fn declare_member_outbound_taint_installs_on_member_comms_runtime() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("l-taint");
+    let sid = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .declare_member_outbound_taint(
+            identity.clone(),
+            Some(meerkat_core::comms::SenderContentTaint::Tainted),
+        )
+        .await
+        .expect("declare tainted");
+    assert_eq!(
+        service.outbound_content_taint(&sid).await,
+        Some(meerkat_core::comms::SenderContentTaint::Tainted),
+        "the declaration must land on the member's comms runtime"
+    );
+
+    // Clearing goes through the per-member wrapper.
+    handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .declare_outbound_taint(None)
+        .await
+        .expect("clear declaration");
+    assert_eq!(service.outbound_content_taint(&sid).await, None);
+
+    let err = handle
+        .declare_member_outbound_taint(AgentIdentity::from("ghost"), None)
+        .await
+        .expect_err("unknown member must fail typed");
+    assert!(
+        matches!(err, MobError::MemberNotFound(_)),
+        "expected MemberNotFound, got {err:?}"
+    );
 }
 
 #[tokio::test]

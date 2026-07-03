@@ -1275,6 +1275,53 @@
               "record"
             ],
             "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/CommsNoticeKind",
+                "description": "Typed comms notice kind (message, request, response progress or\nterminal, lifecycle)."
+              },
+              "peer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SystemNoticePeer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Canonical peer identity of the sender, when classification\nresolved one (`None` for carriers that hold no peer fact, e.g.\nmachine-echoed terminal intents)."
+              },
+              "request_id": {
+                "description": "Correlation id for request/response conventions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The sender's signed content-taint declaration, verbatim from the\nenvelope. `None` means the sender made no declaration — a real\nthird state that consumers must never coalesce into `Clean`."
+              },
+              "type": {
+                "const": "peer_content_ingested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1363,6 +1410,9 @@
       },
       "CapabilityId": {
         "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
+        "type": "string"
+      },
+      "CommsNoticeKind": {
         "type": "string"
       },
       "CompactionFailureReason": {
@@ -2131,6 +2181,10 @@
         ],
         "type": "object"
       },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -2316,6 +2370,21 @@
           "message"
         ],
         "type": "object"
+      },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
       },
       "ServerToolKind": {
         "description": "Typed semantic kind of a provider-executed (server-side) tool.\n\nThis is the single typed owner of the server-tool identity. Each provider\nadapter parses its native discriminator into this enum once at the streaming\nboundary, so downstream consumers never re-classify by matching a\n`name: String`. Provider-native sub-event detail (e.g. OpenAI's\n`web_search_call` vs `web_search_result`) is preserved in the accompanying\n`content` JSON, not in this kind.\n\n`ProviderNative` is the verbatim escape hatch for dynamic provider tool\nnames (Anthropic `server_tool_use` carries an arbitrary tool name that must\nround-trip exactly on replay). It is the only variant carrying a string,\nand that string IS the typed fact — not a re-derivable label.",
@@ -2705,6 +2774,24 @@
             "type": "object"
           }
         ]
+      },
+      "SystemNoticePeer": {
+        "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/$defs/PeerId"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
       },
       "SystemTime": {
         "properties": {
@@ -6840,6 +6927,21 @@
         ],
         "type": "string"
       },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
+      },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
@@ -7237,6 +7339,44 @@
           "epoch",
           "protocol_version",
           "peer_spec"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Declare (or clear) the member's host-owned outbound content-taint\ndeclaration.\n\nThe supervisor relays the HOST's declaration — the host owns the\n\"this member's session content is tainted\" fact; the member runtime is\nthe authenticated carrier, stamping the declaration inside the signed\nregion of every outbound content-bearing envelope until changed.\n`taint: None` clears the declaration (subsequent envelopes carry no\nclaim, which receivers must never coalesce into `Clean`).",
+        "properties": {
+          "command": {
+            "const": "declare_member_outbound_taint",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "taint": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SenderContentTaint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version"
         ],
         "type": "object"
       }
@@ -9736,6 +9876,44 @@
               "peer_spec"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Declare (or clear) the member's host-owned outbound content-taint\ndeclaration.\n\nThe supervisor relays the HOST's declaration — the host owns the\n\"this member's session content is tainted\" fact; the member runtime is\nthe authenticated carrier, stamping the declaration inside the signed\nregion of every outbound content-bearing envelope until changed.\n`taint: None` clears the declaration (subsequent envelopes carry no\nclaim, which receivers must never coalesce into `Clean`).",
+            "properties": {
+              "command": {
+                "const": "declare_member_outbound_taint",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -11455,6 +11633,44 @@
               "peer_spec"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Declare (or clear) the member's host-owned outbound content-taint\ndeclaration.\n\nThe supervisor relays the HOST's declaration — the host owns the\n\"this member's session content is tainted\" fact; the member runtime is\nthe authenticated carrier, stamping the declaration inside the signed\nregion of every outbound content-bearing envelope until changed.\n`taint: None` clears the declaration (subsequent envelopes carry no\nclaim, which receivers must never coalesce into `Clean`).",
+            "properties": {
+              "command": {
+                "const": "declare_member_outbound_taint",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -11769,6 +11985,21 @@
           "steer"
         ],
         "type": "string"
+      },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -14708,6 +14939,53 @@
               "record"
             ],
             "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/CommsNoticeKind",
+                "description": "Typed comms notice kind (message, request, response progress or\nterminal, lifecycle)."
+              },
+              "peer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SystemNoticePeer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Canonical peer identity of the sender, when classification\nresolved one (`None` for carriers that hold no peer fact, e.g.\nmachine-echoed terminal intents)."
+              },
+              "request_id": {
+                "description": "Correlation id for request/response conventions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The sender's signed content-taint declaration, verbatim from the\nenvelope. `None` means the sender made no declaration — a real\nthird state that consumers must never coalesce into `Clean`."
+              },
+              "type": {
+                "const": "peer_content_ingested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -14796,6 +15074,9 @@
       },
       "CapabilityId": {
         "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
+        "type": "string"
+      },
+      "CommsNoticeKind": {
         "type": "string"
       },
       "CompactionFailureReason": {
@@ -15628,6 +15909,10 @@
         ],
         "type": "object"
       },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -15822,6 +16107,21 @@
           "message"
         ],
         "type": "object"
+      },
+      "SenderContentTaint": {
+        "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
+        "oneOf": [
+          {
+            "const": "clean",
+            "description": "The sender affirmatively declares this content clean.",
+            "type": "string"
+          },
+          {
+            "const": "tainted",
+            "description": "The sender declares this content tainted (e.g. it embeds unvetted\nthird-party material such as web content or tool output).",
+            "type": "string"
+          }
+        ]
       },
       "ServerToolKind": {
         "description": "Typed semantic kind of a provider-executed (server-side) tool.\n\nThis is the single typed owner of the server-tool identity. Each provider\nadapter parses its native discriminator into this enum once at the streaming\nboundary, so downstream consumers never re-classify by matching a\n`name: String`. Provider-native sub-event detail (e.g. OpenAI's\n`web_search_call` vs `web_search_result`) is preserved in the accompanying\n`content` JSON, not in this kind.\n\n`ProviderNative` is the verbatim escape hatch for dynamic provider tool\nnames (Anthropic `server_tool_use` carries an arbitrary tool name that must\nround-trip exactly on replay). It is the only variant carrying a string,\nand that string IS the typed fact — not a re-derivable label.",
@@ -16226,6 +16526,24 @@
             "type": "object"
           }
         },
+        "type": "object"
+      },
+      "SystemNoticePeer": {
+        "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/$defs/PeerId"
+          }
+        },
+        "required": [
+          "id"
+        ],
         "type": "object"
       },
       "SystemTime": {

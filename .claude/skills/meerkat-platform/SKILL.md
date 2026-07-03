@@ -358,7 +358,9 @@ A `Schedule` defines when and how agent sessions are materialized:
 history, receipts, failure surfaces unchanged); an unregistered runnable
 probes as Missing (then `MissingTargetPolicy` applies) and a callback error
 maps to the RuntimeRejected failure reason. Use this for host-internal
-periodic work that must not be a mob member.
+periodic work that must not be a mob member. Runtime-backed hosts pass the
+registry to `spawn_runtime_backed_schedule_host` / `_with_mobs` via the
+optional `runnable_host` parameter.
 
 Each schedule produces `Occurrence` instances (individual fires) projected within a planning horizon.
 
@@ -773,6 +775,8 @@ Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; M
 **Comms choice**: use `send_message` for ordinary collaboration. Use `send_request` only for structured ask/reply semantics (`intent + params` plus later `send_response`). Peer-side reservation streams were removed.
 
 **Content taint (persistent-prompt-injection defense)**: content-bearing peer envelopes (`Message`/`Request`/`Response`) can carry a signed `content_taint` declaration (`clean` | `tainted`; absent = no declaration — receivers must not treat absent as clean). Sender side: hosts set a runtime-level outbound declaration (`CommsRuntime::set_outbound_content_taint`) stamped into every outbound content envelope, or override per send with a tri-state `content_taint` field on `comms/send` params (`declare` clean/tainted, `undeclared`, or absent = inherit the runtime declaration). Receiver side: the declaration lands typed on the transcript comms notice (`sender_taint`), including for cross-process senders; the model projection marks tainted content only. Envelopes carrying a declaration fail signature verification on pre-0.7.12 receivers (loud, fail-closed under default peer auth).
+
+Host-consumable surfaces: inbound peer content emits a typed `peer_content_ingested` agent event at delivery-commit time (queued and steered), carrying the canonical peer identity, comms kind, request id, and the sender's `sender_taint` — taint trackers consume this instead of parsing rendered projection text. Mob hosts declare a member's outbound taint by stable identity via `MobHandle::declare_member_outbound_taint(identity, taint)` (or `member(identity).declare_outbound_taint(taint)`); the declaration installs on the member's own comms runtime (external members receive it over the supervisor bridge) and resets on respawn/reset — re-declare when your tracker re-marks the fresh context.
 
 #### Structured output with comms (autonomous agents)
 

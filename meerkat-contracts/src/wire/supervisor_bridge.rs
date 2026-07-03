@@ -160,6 +160,13 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   the V3 overlay, no receiver-side semantic fold depends on the field
 ///   being understood to keep the rest of the payload sound, so the
 ///   version-gated typed rejection the V3 bump bought is not demanded here.
+/// - `3` (additive, no bump): `DeclareMemberOutboundTaint` relays the host's
+///   outbound content-taint declaration to a remote member runtime. A new
+///   command VARIANT (not a field): a pre-variant receiver fails loud at the
+///   tagged-enum serde boundary and the supervisor sees a typed decode
+///   rejection — no silent drop, and no receiver-side semantic fold depends
+///   on partial understanding, so the V3-overlay-style version bump is not
+///   demanded (pre-1.0 posture, same reasoning as `injected_context`).
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -240,6 +247,7 @@ pub enum BridgeCommand {
     DestroyMember(BridgeSupervisorPayload),
     WireMember(BridgePeerWiringPayload),
     UnwireMember(BridgePeerWiringPayload),
+    DeclareMemberOutboundTaint(BridgeOutboundTaintPayload),
 }
 
 impl BridgeCommand {
@@ -256,8 +264,29 @@ impl BridgeCommand {
             Self::HardCancelMember(payload) => payload.protocol_version,
             Self::DeliverMemberInput(payload) => payload.protocol_version,
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
+            Self::DeclareMemberOutboundTaint(payload) => payload.protocol_version,
         }
     }
+}
+
+/// Declare (or clear) the member's host-owned outbound content-taint
+/// declaration.
+///
+/// The supervisor relays the HOST's declaration — the host owns the
+/// "this member's session content is tainted" fact; the member runtime is
+/// the authenticated carrier, stamping the declaration inside the signed
+/// region of every outbound content-bearing envelope until changed.
+/// `taint: None` clears the declaration (subsequent envelopes carry no
+/// claim, which receivers must never coalesce into `Clean`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeOutboundTaintPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint: Option<meerkat_core::comms::SenderContentTaint>,
 }
 
 /// Decode failure for a supervisor bridge command.
@@ -1345,6 +1374,44 @@ mod tests {
             injected_context: Vec::new(),
         });
         assert_command_round_trip(&cmd);
+    }
+
+    #[test]
+    fn bridge_command_declare_member_outbound_taint_round_trip() {
+        for taint in [
+            None,
+            Some(meerkat_core::comms::SenderContentTaint::Clean),
+            Some(meerkat_core::comms::SenderContentTaint::Tainted),
+        ] {
+            let cmd = BridgeCommand::DeclareMemberOutboundTaint(BridgeOutboundTaintPayload {
+                supervisor: sample_peer_spec(),
+                epoch: 4,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                taint,
+            });
+            assert_command_round_trip(&cmd);
+            assert_eq!(cmd.protocol_version(), SUPERVISOR_BRIDGE_PROTOCOL_VERSION);
+        }
+    }
+
+    #[test]
+    fn bridge_outbound_taint_payload_rejects_unknown_fields() {
+        let mut value = serde_json::to_value(BridgeOutboundTaintPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 4,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            taint: Some(meerkat_core::comms::SenderContentTaint::Tainted),
+        })
+        .expect("serialize payload");
+        value
+            .as_object_mut()
+            .expect("payload object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        let result: Result<BridgeOutboundTaintPayload, _> = serde_json::from_value(value);
+        assert!(
+            result.is_err(),
+            "unknown fields must fail loud at the wire boundary"
+        );
     }
 
     #[test]

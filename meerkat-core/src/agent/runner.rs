@@ -1358,9 +1358,17 @@ where
             self.session.push(Message::User(user_message));
         } else {
             for append in typed_turn_appends {
+                // Project the peer-ingestion observe fact BEFORE the append is
+                // consumed: one PeerContentIngested event per incoming comms
+                // block the transcript commit carries (queued peer deliveries).
+                let ingested_events = crate::event::peer_content_ingested_events(&append.content);
                 if let Err(err) = self.push_transcript_append(append) {
                     self.clear_runtime_execution_kind();
                     return Err(err);
+                }
+                for event in ingested_events {
+                    let _ =
+                        crate::event_tap::tap_emit(&self.event_tap, event_tx.as_ref(), event).await;
                 }
             }
         }

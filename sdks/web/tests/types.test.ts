@@ -393,6 +393,10 @@ function handleEvent(event: AgentEvent): string {
       return event.type;
     case 'transcript_rewrite_committed':
       return event.type;
+    case 'peer_content_ingested':
+      // sender_taint is tri-state: absent means "no declaration", which
+      // consumers must never coalesce into "clean".
+      return `${event.type}:${event.sender_taint ?? 'undeclared'}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

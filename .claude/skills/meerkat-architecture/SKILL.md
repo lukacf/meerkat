@@ -191,6 +191,28 @@ Since 0.7.12 (PR #821, the MobKit upstream asks):
   opaque `TargetBindingId` keys); failures map onto existing typed reasons
   (unregistered → TargetMissing, callback error → RuntimeRejected).
 
+Since the Ask 9/10 follow-ups (post-0.7.12):
+
+- **Host-consumable taint surfaces** — `AgentEvent::PeerContentIngested`
+  projects the committed incoming `SystemNoticeBlock::Comms` (canonical peer
+  identity, comms kind, request id, `sender_taint`) onto the observe stream
+  at BOTH commit sites (queued transcript appends and steer boundary
+  context), via the single projection owner
+  `event::peer_content_ingested_events` — hosts classify peer ingestion from
+  typed facts, never projection text. Outbound: the core `CommsRuntime`
+  trait gains `set_outbound_content_taint` (default typed
+  `SendError::Unsupported` — never a silent no-op), reachable per mob member
+  via `MobHandle::declare_member_outbound_taint` /
+  `MemberHandle::declare_outbound_taint` (local members: the member's own
+  session comms runtime; external members:
+  `BridgeCommand::DeclareMemberOutboundTaint` over the supervisor bridge).
+  The declaration is host-owned carrier config — it does not survive
+  respawn (fresh-context semantics; hosts re-declare).
+- **Runtime schedule host runnables** — `spawn_runtime_backed_schedule_host`
+  and `_with_mobs` accept `Option<Arc<dyn ScheduleRunnableHost>>`, wiring
+  the host's `HostRunnableRegistry` into the runtime-backed occurrence
+  driver (Ask 7's primitives were previously unreachable from this spawner).
+
 ## Runtime Dogma (first review lens)
 
 Canonical doctrine: `docs/architecture/meerkat-dogma.md` (nine rules; mirrored

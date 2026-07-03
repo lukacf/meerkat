@@ -585,6 +585,25 @@ interface TranscriptRewriteCommittedEvent {
 }
 ```
 
+### Peer content ingestion events
+
+```typescript
+interface PeerContentIngestedEvent {
+  type: "peer_content_ingested";
+  kind: CommsNoticeKind;                       // message | request | response_* | lifecycle
+  peer?: SystemNoticePeer | null;              // canonical peer id + display name, when resolved
+  request_id?: string | null;                  // correlation id for request/response conventions
+  sender_taint?: SenderContentTaint | null;    // "clean" | "tainted"; absent = no declaration
+}
+```
+
+Emitted when inbound peer content is committed into the session's context
+(both queued deliveries and steered mid-turn context). `sender_taint` is the
+sender's own signed content-taint declaration; an absent value means the
+sender made no declaration and must never be treated as `"clean"`. Host
+taint trackers should consume this event instead of parsing rendered peer
+message text.
+
 ### Type guard utilities
 
 The SDK exports type guards for the most commonly used events:

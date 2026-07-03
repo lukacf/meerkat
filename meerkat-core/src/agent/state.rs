@@ -2248,6 +2248,20 @@ where
                     let boundary_system_context = self
                         .take_pending_system_context_boundary()
                         .map_err(|e| AgentError::InternalError(e.to_string()))?;
+                    // Steer-delivered peer content commits here (applied as
+                    // runtime system context at the model boundary): project
+                    // the peer-ingestion observe fact from the same typed
+                    // renderable the boundary application consumes.
+                    for append in &boundary_system_context {
+                        for event in crate::event::peer_content_ingested_events(&append.content) {
+                            let _ = crate::event_tap::tap_emit(
+                                &self.event_tap,
+                                event_tx.as_ref(),
+                                event,
+                            )
+                            .await;
+                        }
+                    }
                     let request_messages =
                         self.llm_messages_with_runtime_system_context(&boundary_system_context);
                     let result = match self
@@ -5316,6 +5330,187 @@ mod tests {
                 .skip(1)
                 .any(|system| system.contains("STEER_MARKER_visible_after_tool")),
             "active-turn staged context must be present on the model request after the tool boundary; seen={seen:?}"
+        );
+    }
+
+    fn incoming_peer_comms_renderable(
+        sender_taint: Option<crate::comms::SenderContentTaint>,
+    ) -> crate::lifecycle::run_primitive::CoreRenderable {
+        crate::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+            kind: SystemNoticeKind::Comms,
+            body: Some("Peer message from mob/roles/worker".to_string()),
+            blocks: vec![crate::types::SystemNoticeBlock::Comms {
+                kind: crate::types::CommsNoticeKind::Message,
+                direction: crate::types::SystemNoticeDirection::Incoming,
+                peer: Some(crate::types::SystemNoticePeer {
+                    id: crate::comms::PeerId::new(),
+                    display_name: Some("mob/roles/worker".to_string()),
+                }),
+                sender_taint,
+                request_id: None,
+                intent: None,
+                status: None,
+                summary: None,
+                payload: None,
+                content: Vec::new(),
+            }],
+        }
+    }
+
+    /// Queued peer deliveries (runtime typed appends) emit the typed
+    /// PeerContentIngested observe fact — with the sender's declaration and
+    /// BEFORE RunStarted — so a host taint tracker never parses projection
+    /// text to classify inbound peer content.
+    #[tokio::test]
+    async fn queued_peer_append_emits_peer_content_ingested_before_run_started() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        let appends = vec![
+            crate::lifecycle::run_primitive::ConversationAppend {
+                role: crate::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
+                content: incoming_peer_comms_renderable(Some(
+                    crate::comms::SenderContentTaint::Tainted,
+                )),
+            },
+            crate::lifecycle::run_primitive::ConversationAppend {
+                role: crate::lifecycle::run_primitive::ConversationAppendRole::User,
+                content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                    "reply to the peer".to_string(),
+                ),
+            },
+        ];
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "reply to the peer".into(),
+                appends,
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await
+            .expect("run should succeed");
+
+        let mut ordered = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            ordered.push(event);
+        }
+        let ingested_at = ordered.iter().position(|event| {
+            matches!(
+                event,
+                crate::event::AgentEvent::PeerContentIngested {
+                    sender_taint: Some(crate::comms::SenderContentTaint::Tainted),
+                    ..
+                }
+            )
+        });
+        let run_started_at = ordered
+            .iter()
+            .position(|event| matches!(event, crate::event::AgentEvent::RunStarted { .. }));
+        let ingested_at = ingested_at.expect("queued peer append must emit PeerContentIngested");
+        let run_started_at = run_started_at.expect("run must emit RunStarted");
+        assert!(
+            ingested_at < run_started_at,
+            "the ingestion fact arrives with the delivery, before RunStarted"
+        );
+    }
+
+    /// Steer-delivered peer content (runtime system context applied at the
+    /// model boundary) emits the same typed observe fact through the same
+    /// projection owner.
+    #[tokio::test]
+    async fn steer_peer_context_emits_peer_content_ingested_at_boundary() {
+        let client = Arc::new(BoundaryContextRecordingClient::new());
+        let tool_started = Arc::new(Notify::new());
+        let release_tool = Arc::new(Notify::new());
+        let tools = Arc::new(BlockingToolDispatcher {
+            tools: Arc::from([Arc::new(ToolDef::new(
+                "slow_tool",
+                "blocks until the test releases it",
+                serde_json::json!({ "type": "object" }),
+            ))]),
+            started: Arc::clone(&tool_started),
+            release: Arc::clone(&release_tool),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .system_prompt("base system prompt")
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        let state = agent.system_context_state();
+
+        let (tx, mut rx) = mpsc::channel(128);
+        let run = tokio::spawn(async move {
+            agent
+                .run_with_events("start with a tool".to_string().into(), tx)
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), tool_started.notified())
+            .await
+            .expect("tool should start");
+
+        state
+            .stage_active_turn_append(
+                &crate::service::AppendSystemContextRequest {
+                    content: incoming_peer_comms_renderable(Some(
+                        crate::comms::SenderContentTaint::Tainted,
+                    )),
+                    source: Some("test:peer-steer".to_string()),
+                    idempotency_key: Some("test:peer-steer".to_string()),
+                    source_kind: crate::session::SystemContextSource::RuntimeSteer,
+                    peer_response_terminal: None,
+                },
+                crate::time_compat::SystemTime::now(),
+            )
+            .expect("active-turn append should stage");
+
+        release_tool.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("run should complete")
+            .expect("run task should join")
+            .expect("agent run should succeed");
+
+        let mut saw_ingested = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(
+                event,
+                crate::event::AgentEvent::PeerContentIngested {
+                    sender_taint: Some(crate::comms::SenderContentTaint::Tainted),
+                    ..
+                }
+            ) {
+                saw_ingested = true;
+            }
+        }
+        assert!(
+            saw_ingested,
+            "steer-applied peer context must emit PeerContentIngested at the boundary"
+        );
+    }
+
+    /// The core trait default fails typed — a runtime that cannot carry the
+    /// declaration must never silently drop it.
+    #[test]
+    fn comms_runtime_taint_setter_defaults_to_typed_unsupported() {
+        struct InboxOnlyRuntime;
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::agent::CommsRuntime for InboxOnlyRuntime {
+            async fn drain_messages(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn inbox_notify(&self) -> Arc<Notify> {
+                Arc::new(Notify::new())
+            }
+        }
+        let runtime = InboxOnlyRuntime;
+        let result = crate::agent::CommsRuntime::set_outbound_content_taint(
+            &runtime,
+            Some(crate::comms::SenderContentTaint::Tainted),
+        );
+        assert!(
+            matches!(result, Err(crate::comms::SendError::Unsupported(_))),
+            "default must fail typed, not silently no-op: {result:?}"
         );
     }
 

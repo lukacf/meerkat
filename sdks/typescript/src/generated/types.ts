@@ -2558,7 +2558,15 @@ export interface BridgeCommandUnwireMember {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember;
+export interface BridgeCommandDeclareMemberOutboundTaint {
+  command: "declare_member_outbound_taint";
+  epoch: number;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  taint?: SenderContentTaint;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";

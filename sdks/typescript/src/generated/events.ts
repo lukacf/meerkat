@@ -40,7 +40,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "stream_truncated",
   "tool_config_changed",
   "background_job_completed",
-  "transcript_rewrite_committed"
+  "transcript_rewrite_committed",
+  "peer_content_ingested"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];

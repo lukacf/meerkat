@@ -1005,6 +1005,32 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Install the host-owned outbound content-taint declaration.
+    ///
+    /// The declaration is host-set carrier config, not machine state: the
+    /// host owns the "this session's content is tainted" fact and this
+    /// runtime stamps it (inside the signed envelope region) on every
+    /// outbound content-bearing send until changed. `None` clears the
+    /// declaration (subsequent envelopes carry no claim — which receivers
+    /// must never coalesce into `Clean`).
+    ///
+    /// The declaration is in-memory runtime state: a rebuilt runtime (e.g.
+    /// a respawned mob member) starts with no declaration, which aligns
+    /// with fresh-context taint semantics — hosts re-declare when their
+    /// tracker re-marks the new context.
+    ///
+    /// Fails typed (never a silent no-op — silently dropping a security
+    /// declaration would let tainted content ship with a clean-looking
+    /// envelope) for runtimes that do not carry outbound comms.
+    fn set_outbound_content_taint(
+        &self,
+        _taint: Option<crate::comms::SenderContentTaint>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "outbound content-taint declaration not supported by this CommsRuntime".to_string(),
+        ))
+    }
+
     /// Dispatch a canonical comms command.
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         Err(SendError::Unsupported(

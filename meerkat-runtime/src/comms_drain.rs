@@ -3265,6 +3265,51 @@ async fn try_handle_supervisor_bridge_command(
             }
             true
         }
+        BridgeCommand::DeclareMemberOutboundTaint(payload) => {
+            let sup_payload = BridgeSupervisorPayload {
+                supervisor: payload.supervisor.clone(),
+                epoch: payload.epoch,
+                protocol_version: payload.protocol_version,
+            };
+            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &sup_payload,
+                "declare member outbound taint failed",
+            )
+            .await
+            {
+                send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                return true;
+            }
+            // The host's declaration, relayed by the supervisor, installs on
+            // THIS member runtime's outbound carrier config. Fail-closed: an
+            // unsupported runtime rejects rather than silently dropping a
+            // security declaration.
+            match comms_runtime.set_outbound_content_taint(payload.taint) {
+                Ok(()) => {
+                    send_bridge_response(
+                        comms_runtime,
+                        candidate,
+                        meerkat_core::interaction::ResponseStatus::Completed,
+                        BridgeReply::Ack(BridgeAck { ok: true }),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!("declare member outbound taint failed: {error}"),
+                    )
+                    .await;
+                }
+            }
+            true
+        }
         _ => {
             send_bridge_failure(
                 comms_runtime,
@@ -3344,7 +3389,9 @@ mod tests {
         supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
         supervisor_bridge_supported_protocol_versions,
     };
-    use meerkat_contracts::{BridgeMobPeerOverlayHandoff, BridgePeerWiringPayload};
+    use meerkat_contracts::{
+        BridgeMobPeerOverlayHandoff, BridgeOutboundTaintPayload, BridgePeerWiringPayload,
+    };
     use meerkat_core::InteractionId;
     use meerkat_core::SendError;
     use meerkat_core::interaction::InboxInteraction;
@@ -8687,6 +8734,145 @@ mod tests {
         assert!(
             peers.iter().all(|entry| entry.peer_id != peer_spec.peer_id),
             "a V2 wiring payload without the overlay must not materialize peer trust"
+        );
+    }
+
+    #[tokio::test]
+    async fn declare_member_outbound_taint_from_bound_supervisor_installs_declaration() {
+        let runtime =
+            Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-taint-install").unwrap());
+        // The peer request/response authority is load-bearing for supervisor
+        // command authorization (response-route resolution), not just acks.
+        install_test_peer_request_response_authority(
+            &runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
+        let supervisor_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("mob/__mob_supervisor_taint__").unwrap(),
+        );
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        let supervisor =
+            trusted_peer_from_runtime("mob/__mob_supervisor_taint__", &supervisor_runtime);
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                supervisor.name.to_string(),
+                supervisor.peer_id.as_str(),
+                supervisor.address.to_string(),
+                signing_public_key_for_descriptor(&supervisor),
+                1,
+            )
+            .await
+            .expect("pre-bind supervisor");
+        // The supervisor response route comes from the handler's bound-
+        // supervisor route repair (no member-side projection trust needed).
+        adapter
+            .test_install_session_peer_comms_handle_on_runtime(&session_id, runtime.as_ref())
+            .await
+            .expect("install adapter session peer-comms handle on member runtime");
+
+        let command = BridgeCommand::DeclareMemberOutboundTaint(BridgeOutboundTaintPayload {
+            supervisor: supervisor.clone().into(),
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            taint: Some(meerkat_core::comms::SenderContentTaint::Tainted),
+        });
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let ingress = PeerIngressFact::peer(
+            interaction_id,
+            PeerInputClass::ActionableRequest,
+            meerkat_core::PeerIngressKind::Request,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                supervisor.peer_id,
+                supervisor.name.as_str(),
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id: interaction_id.to_string(),
+                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                },
+            )
+            .with_signing_pubkey(supervisor.pubkey),
+        );
+        let candidate = bridge_candidate_with_ingress(supervisor.name.as_str(), &command, ingress);
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "declare-outbound-taint bridge command should be handled"
+        );
+        assert_eq!(
+            runtime.outbound_content_taint(),
+            Some(meerkat_core::comms::SenderContentTaint::Tainted),
+            "the relayed host declaration must install on the member runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn declare_member_outbound_taint_from_unauthorized_sender_installs_nothing() {
+        let runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("receiver-taint-unauthorized").unwrap(),
+        );
+        let supervisor_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("mob/__mob_supervisor_taint_real__").unwrap(),
+        );
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        let supervisor =
+            trusted_peer_from_runtime("mob/__mob_supervisor_taint_real__", &supervisor_runtime);
+        add_test_projection_trust(runtime.as_ref(), supervisor.clone(), "trust supervisor").await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                supervisor.name.to_string(),
+                supervisor.peer_id.as_str(),
+                supervisor.address.to_string(),
+                signing_public_key_for_descriptor(&supervisor),
+                1,
+            )
+            .await
+            .expect("pre-bind supervisor");
+        // The sender is NOT the bound supervisor: the machine-owned
+        // supervisor admission must reject the command and the declaration
+        // must not install.
+        let impostor_peer_id = PeerId::new();
+        let candidate = bridge_candidate(
+            &impostor_peer_id.as_str(),
+            &BridgeCommand::DeclareMemberOutboundTaint(BridgeOutboundTaintPayload {
+                supervisor: supervisor.clone().into(),
+                epoch: 1,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                taint: Some(meerkat_core::comms::SenderContentTaint::Tainted),
+            }),
+        );
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "unauthorized declare must still be handled (and rejected)"
+        );
+        assert_eq!(
+            runtime.outbound_content_taint(),
+            None,
+            "an unauthorized sender must not install an outbound taint declaration"
         );
     }
 

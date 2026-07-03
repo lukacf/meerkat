@@ -7525,6 +7525,15 @@ impl MobActor {
                         }
                     }
                 }
+                MobCommand::DeclareMemberOutboundTaint {
+                    identity,
+                    taint,
+                    reply_tx,
+                } => {
+                    let result =
+                        Box::pin(self.declare_member_outbound_taint(identity, taint)).await;
+                    let _ = reply_tx.send(result);
+                }
                 #[cfg(feature = "runtime-adapter")]
                 MobCommand::KickoffOutcomeResolved {
                     agent_identity,
@@ -11998,6 +12007,84 @@ impl MobActor {
             already_wired,
             wired,
         })
+    }
+
+    /// Install (or clear) the host-owned outbound content-taint declaration
+    /// on a member's comms runtime.
+    ///
+    /// Carrier config, not machine state: the HOST owns the "this member's
+    /// session ingested untrusted content" fact (its content-trust tracker);
+    /// this operation makes the member's runtime the authenticated carrier of
+    /// that declaration — stamped inside the signed region of every outbound
+    /// content-bearing envelope until changed. The declaration is in-memory
+    /// runtime state: respawn/reset mint a fresh runtime with no declaration,
+    /// which aligns with fresh-context taint semantics (hosts re-declare when
+    /// their tracker re-marks the new context).
+    ///
+    /// Local members install directly on their session comms runtime (typed
+    /// failure when the runtime does not support the declaration — never a
+    /// silent no-op). External members relay the declaration to the remote
+    /// runtime over the supervisor bridge.
+    async fn declare_member_outbound_taint(
+        &mut self,
+        identity: AgentIdentity,
+        taint: Option<meerkat_core::comms::SenderContentTaint>,
+    ) -> Result<(), MobError> {
+        self.require_member_operation_eligible()?;
+        self.ensure_member_not_broken(&identity).await?;
+        let entry = {
+            let roster = self.roster.read().await;
+            roster
+                .get(&identity)
+                .cloned()
+                .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?
+        };
+
+        if let Some(comms) = self.provisioner_comms(&entry.member_ref).await {
+            return comms.set_outbound_content_taint(taint).map_err(|error| {
+                // "This runtime cannot carry the declaration" is the SAME
+                // semantic condition as the no-runtime/no-binding branch
+                // below — one typed terminal class, regardless of which
+                // mechanical branch detected it. Other send faults keep
+                // their typed comms error.
+                match error {
+                    meerkat_core::comms::SendError::Unsupported(_) => {
+                        MobError::MissingMemberCapability {
+                            member_id: identity.clone(),
+                            capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                            context: "declare member outbound taint",
+                        }
+                    }
+                    other => MobError::CommsError(other),
+                }
+            });
+        }
+
+        // External-bound member: the outbound comms runtime lives in the
+        // remote process — relay the declaration over the supervisor bridge.
+        let Some(binding) = Self::runtime_binding_for_entry(&entry) else {
+            return Err(MobError::MissingMemberCapability {
+                member_id: identity.clone(),
+                capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                context: "declare member outbound taint",
+            });
+        };
+        let peer = Self::peer_only_spec_for_binding(&binding, "declare_member_outbound_taint")?;
+        let peer = self
+            .ensure_supervisor_authorized(&peer, Some(&binding))
+            .await?;
+        let sup_payload = self.bridge_supervisor_payload_for_recipient(&peer).await?;
+        let payload = super::bridge_protocol::BridgeOutboundTaintPayload {
+            supervisor: sup_payload.supervisor,
+            epoch: sup_payload.epoch,
+            protocol_version: sup_payload.protocol_version,
+            taint,
+        };
+        let command = super::bridge_protocol::BridgeCommand::DeclareMemberOutboundTaint(payload);
+        let _ack: super::bridge_protocol::BridgeAck = self
+            .send_bridge_command_typed(&peer, &command, std::time::Duration::from_secs(10))
+            .await?;
+        Ok(())
     }
 
     async fn prepare_send_peer_message(

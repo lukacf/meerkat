@@ -45,6 +45,7 @@ KNOWN_AGENT_EVENT_TYPES: frozenset[str] = frozenset({
     "tool_config_changed",
     "background_job_completed",
     "transcript_rewrite_committed",
+    "peer_content_ingested",
 })
 
 

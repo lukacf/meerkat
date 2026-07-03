@@ -1004,6 +1004,44 @@
               "peer_spec"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Declare (or clear) the member's host-owned outbound content-taint\ndeclaration.\n\nThe supervisor relays the HOST's declaration — the host owns the\n\"this member's session content is tainted\" fact; the member runtime is\nthe authenticated carrier, stamping the declaration inside the signed\nregion of every outbound content-bearing envelope until changed.\n`taint: None` clears the declaration (subsequent envelopes carry no\nclaim, which receivers must never coalesce into `Clean`).",
+            "properties": {
+              "command": {
+                "const": "declare_member_outbound_taint",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
           }
         ]
       },

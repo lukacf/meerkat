@@ -11,16 +11,16 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeCommand, BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,
     BridgeDeliveryRejectionCause, BridgeDeliveryResponse, BridgeDestroyResponse,
     BridgeHardCancelPayload, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
-    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload,
-    BridgeProtocolVersion, BridgeRejectionCause, BridgeRejectionReply, BridgeReply,
-    BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM,
-    SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION,
-    SUPERVISOR_BRIDGE_INTENT, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-    SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS, UnsupportedBridgeProtocolVersion,
-    canonicalize_bridge_address, decode_bridge_command, decode_bridge_rejection_reply,
-    decode_legacy_v1_raw_string_rejection, supervisor_bridge_current_protocol_version,
-    supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
-    supervisor_bridge_supported_protocol_versions,
+    BridgeObservationResponse, BridgeOutboundTaintPayload, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerWiringPayload, BridgeProtocolVersion, BridgeRejectionCause, BridgeRejectionReply,
+    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION,
+    SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_INTENT,
+    SUPERVISOR_BRIDGE_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS,
+    UnsupportedBridgeProtocolVersion, canonicalize_bridge_address, decode_bridge_command,
+    decode_bridge_rejection_reply, decode_legacy_v1_raw_string_rejection,
+    supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
+    supervisor_bridge_protocol_version_supported, supervisor_bridge_supported_protocol_versions,
 };
 
 /// Decode a wire `Value` into a typed [`BridgeReply`], validating that the
@@ -161,7 +161,8 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         | BridgeCommand::InterruptMember(_)
         | BridgeCommand::HardCancelMember(_)
         | BridgeCommand::WireMember(_)
-        | BridgeCommand::UnwireMember(_) => ExpectedBridgeReply::Ack,
+        | BridgeCommand::UnwireMember(_)
+        | BridgeCommand::DeclareMemberOutboundTaint(_) => ExpectedBridgeReply::Ack,
         BridgeCommand::DeliverMemberInput(_) => ExpectedBridgeReply::Delivery,
         BridgeCommand::ObserveMember(_) => ExpectedBridgeReply::Observation,
         BridgeCommand::RetireMember(_) => ExpectedBridgeReply::Retire,

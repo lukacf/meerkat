@@ -989,7 +989,45 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
         AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
         AgentEvent::TranscriptRewriteCommitted { .. } => "transcript_rewrite_committed",
+        AgentEvent::PeerContentIngested { .. } => "peer_content_ingested",
     }
+}
+
+/// Project a committed renderable into [`AgentEvent::PeerContentIngested`]
+/// events — one per incoming comms block.
+///
+/// This is the single projection owner for the peer-ingestion observe fact:
+/// both transcript-append (queued delivery) and boundary system-context
+/// (steer delivery) commit sites call it on the typed renderable they commit,
+/// so the event is structurally incapable of diverging from the transcript
+/// carrier. Outgoing-direction blocks project nothing — the observe fact is
+/// inbound ingestion only.
+pub fn peer_content_ingested_events(
+    content: &crate::lifecycle::run_primitive::CoreRenderable,
+) -> Vec<AgentEvent> {
+    let crate::lifecycle::run_primitive::CoreRenderable::SystemNotice { blocks, .. } = content
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            crate::types::SystemNoticeBlock::Comms {
+                kind,
+                direction: crate::types::SystemNoticeDirection::Incoming,
+                peer,
+                request_id,
+                sender_taint,
+                ..
+            } => Some(AgentEvent::PeerContentIngested {
+                kind: kind.clone(),
+                peer: peer.clone(),
+                request_id: request_id.clone(),
+                sender_taint: *sender_taint,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Typed public event payload for a canonical assistant image block appended to history.
@@ -1814,6 +1852,38 @@ pub enum AgentEvent {
         session_id: SessionId,
         record: TranscriptRewriteRecord,
     },
+
+    /// Inbound peer content was committed into this session's context.
+    ///
+    /// Emitted as a pure projection of the typed transcript carrier
+    /// ([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)
+    /// at the moment the agent commits it — a queued delivery appended to the
+    /// transcript at run assembly, or a steer delivery applied as runtime
+    /// system context at the model boundary. One event per committed comms
+    /// block, so a host taint tracker classifies peer ingestion from typed
+    /// facts (canonical peer identity + the sender's signed content-taint
+    /// declaration) instead of parsing rendered projection text.
+    ///
+    /// The event stream is best-effort observability (see `event_tap`); the
+    /// transcript block remains the durable owner of these facts.
+    PeerContentIngested {
+        /// Typed comms notice kind (message, request, response progress or
+        /// terminal, lifecycle).
+        kind: crate::types::CommsNoticeKind,
+        /// Canonical peer identity of the sender, when classification
+        /// resolved one (`None` for carriers that hold no peer fact, e.g.
+        /// machine-echoed terminal intents).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer: Option<crate::types::SystemNoticePeer>,
+        /// Correlation id for request/response conventions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// The sender's signed content-taint declaration, verbatim from the
+        /// envelope. `None` means the sender made no declaration — a real
+        /// third state that consumers must never coalesce into `Clean`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_taint: Option<crate::comms::SenderContentTaint>,
+    },
 }
 
 impl AgentEvent {
@@ -2084,6 +2154,133 @@ mod tests {
     use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
     use crate::skills::SkillName;
     use crate::types::ContentBlock;
+
+    mod peer_content_ingested_projection {
+        use super::super::{AgentEvent, peer_content_ingested_events};
+        use crate::comms::SenderContentTaint;
+        use crate::lifecycle::run_primitive::CoreRenderable;
+        use crate::types::{
+            CommsNoticeKind, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind,
+            SystemNoticePeer,
+        };
+
+        fn comms_block(
+            direction: SystemNoticeDirection,
+            sender_taint: Option<SenderContentTaint>,
+        ) -> SystemNoticeBlock {
+            SystemNoticeBlock::Comms {
+                kind: CommsNoticeKind::Message,
+                direction,
+                peer: Some(SystemNoticePeer {
+                    id: crate::comms::PeerId::new(),
+                    display_name: Some("mob/roles/worker".to_string()),
+                }),
+                sender_taint,
+                request_id: Some("req-1".to_string()),
+                intent: None,
+                status: None,
+                summary: None,
+                payload: None,
+                content: Vec::new(),
+            }
+        }
+
+        fn notice(blocks: Vec<SystemNoticeBlock>) -> CoreRenderable {
+            CoreRenderable::SystemNotice {
+                kind: SystemNoticeKind::Comms,
+                body: None,
+                blocks,
+            }
+        }
+
+        #[test]
+        fn incoming_comms_block_projects_taint_peer_and_kind() {
+            let events = peer_content_ingested_events(&notice(vec![comms_block(
+                SystemNoticeDirection::Incoming,
+                Some(SenderContentTaint::Tainted),
+            )]));
+            assert_eq!(events.len(), 1);
+            match &events[0] {
+                AgentEvent::PeerContentIngested {
+                    kind,
+                    peer,
+                    request_id,
+                    sender_taint,
+                } => {
+                    assert_eq!(*kind, CommsNoticeKind::Message);
+                    assert!(peer.is_some(), "peer identity must project");
+                    assert_eq!(request_id.as_deref(), Some("req-1"));
+                    assert_eq!(*sender_taint, Some(SenderContentTaint::Tainted));
+                }
+                other => panic!("expected PeerContentIngested, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn absent_declaration_projects_as_none_not_clean() {
+            let events = peer_content_ingested_events(&notice(vec![comms_block(
+                SystemNoticeDirection::Incoming,
+                None,
+            )]));
+            match &events[0] {
+                AgentEvent::PeerContentIngested { sender_taint, .. } => {
+                    assert_eq!(
+                        *sender_taint, None,
+                        "no declaration must stay None — never coalesced into Clean"
+                    );
+                }
+                other => panic!("expected PeerContentIngested, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn outgoing_comms_blocks_project_nothing() {
+            let events = peer_content_ingested_events(&notice(vec![comms_block(
+                SystemNoticeDirection::Outgoing,
+                Some(SenderContentTaint::Tainted),
+            )]));
+            assert!(events.is_empty(), "outbound blocks are not ingestion");
+        }
+
+        #[test]
+        fn non_comms_blocks_and_non_notice_renderables_project_nothing() {
+            let runtime_notice = notice(vec![SystemNoticeBlock::RuntimeNotice {
+                category: "flow_step".to_string(),
+                detail: None,
+                payload: None,
+            }]);
+            assert!(peer_content_ingested_events(&runtime_notice).is_empty());
+            assert!(
+                peer_content_ingested_events(&CoreRenderable::text("plain".to_string())).is_empty()
+            );
+        }
+
+        #[test]
+        fn one_event_per_incoming_block() {
+            let events = peer_content_ingested_events(&notice(vec![
+                comms_block(
+                    SystemNoticeDirection::Incoming,
+                    Some(SenderContentTaint::Clean),
+                ),
+                comms_block(SystemNoticeDirection::Outgoing, None),
+                comms_block(SystemNoticeDirection::Incoming, None),
+            ]));
+            assert_eq!(events.len(), 2);
+        }
+
+        #[test]
+        fn wire_discriminator_is_catalogued() {
+            let event = peer_content_ingested_events(&notice(vec![comms_block(
+                SystemNoticeDirection::Incoming,
+                None,
+            )]))
+            .remove(0);
+            assert_eq!(
+                super::super::agent_event_type(&event),
+                "peer_content_ingested"
+            );
+        }
+    }
 
     fn text_block(text: &str) -> ContentBlock {
         ContentBlock::Text {

@@ -19,7 +19,7 @@ use crate::{
 use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::MeerkatMachine;
-use meerkat_schedule::{DeliveryFailureReason, IdentityTargetBinding};
+use meerkat_schedule::{DeliveryFailureReason, IdentityTargetBinding, ScheduleRunnableHost};
 
 pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
     service: Arc<PersistentSessionService<B>>,
@@ -27,6 +27,7 @@ pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
     config: Config,
     schedule_service: ScheduleService,
     build_template: SessionBuildOptions,
+    runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
     owner_id: impl Into<String>,
 ) -> Option<super::ScheduleHostHandle> {
     let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
@@ -39,6 +40,7 @@ pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
         schedule_service,
         build_template,
         mob_host,
+        runnable_host,
         owner_id,
     )
 }
@@ -49,6 +51,13 @@ pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
 /// [`SurfaceScheduleMobHost`] here, for example the `meerkat-mob-mcp`
 /// schedule host adapter. The default [`spawn_runtime_backed_schedule_host`]
 /// remains session-only and reports explicit mob target failures.
+///
+/// `runnable_host` attaches the host's [`ScheduleRunnableHost`] (typically a
+/// `HostRunnableRegistry`) so `HostRunnable` schedule targets dispatch
+/// through this host's occurrence driver; `None` leaves host-runnable
+/// targets probing as missing (the schedule's `MissingTargetPolicy` then
+/// applies).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_runtime_backed_schedule_host_with_mobs<B: SessionAgentBuilder + 'static>(
     service: Arc<PersistentSessionService<B>>,
     runtime_adapter: Arc<MeerkatMachine>,
@@ -56,6 +65,7 @@ pub fn spawn_runtime_backed_schedule_host_with_mobs<B: SessionAgentBuilder + 'st
     schedule_service: ScheduleService,
     build_template: SessionBuildOptions,
     mob_host: Arc<dyn SurfaceScheduleMobHost>,
+    runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
     owner_id: impl Into<String>,
 ) -> Option<super::ScheduleHostHandle> {
     if !schedule_host_supported(schedule_service.store().kind()) {
@@ -65,12 +75,17 @@ pub fn spawn_runtime_backed_schedule_host_with_mobs<B: SessionAgentBuilder + 'st
     let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(
         RuntimeBackedScheduleSessionHost::new(service, runtime_adapter, build_template),
     );
-    let adapter = Arc::new(SharedScheduleTargetAdapter::new(
-        schedule_service.clone(),
-        session_host,
-        mob_host,
-    ));
-    Some(spawn_schedule_host(schedule_service, adapter, owner_id))
+    let adapter =
+        SharedScheduleTargetAdapter::new(schedule_service.clone(), session_host, mob_host);
+    let adapter = match runnable_host {
+        Some(runnable_host) => adapter.with_runnable_host(runnable_host),
+        None => adapter,
+    };
+    Some(spawn_schedule_host(
+        schedule_service,
+        Arc::new(adapter),
+        owner_id,
+    ))
 }
 
 struct RuntimeBackedScheduleSessionHost<B: SessionAgentBuilder> {

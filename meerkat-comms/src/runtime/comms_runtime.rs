@@ -414,6 +414,17 @@ impl Drop for InteractionStream {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreCommsRuntime for CommsRuntime {
+    fn set_outbound_content_taint(
+        &self,
+        taint: Option<meerkat_core::comms::SenderContentTaint>,
+    ) -> Result<(), meerkat_core::comms::SendError> {
+        // Inherent method (host-set carrier config on the router); the dyn
+        // trait surface is how mob/runtime layers holding
+        // `Arc<dyn CoreCommsRuntime>` reach it per member.
+        CommsRuntime::set_outbound_content_taint(self, taint);
+        Ok(())
+    }
+
     async fn drain_messages(&self) -> Vec<String> {
         // Delegate through classified drain so messages from the classified
         // inbox (the sole consumer since 0.4.10) are returned.
@@ -3491,6 +3502,29 @@ async fn spawn_plain_uds_listener(
 mod tests {
     use super::*;
     use crate::classify::test_support;
+
+    /// The dyn core-trait surface is how mob/runtime layers holding
+    /// `Arc<dyn CoreCommsRuntime>` install the host's declaration per member;
+    /// it must delegate to the concrete router config, not the typed default.
+    #[tokio::test]
+    async fn dyn_trait_taint_setter_delegates_to_router_declaration() {
+        let runtime =
+            Arc::new(CommsRuntime::inproc_only("dyn-taint-setter").expect("inproc runtime"));
+        let dyn_runtime: Arc<dyn CoreCommsRuntime> = runtime.clone();
+
+        dyn_runtime
+            .set_outbound_content_taint(Some(meerkat_core::comms::SenderContentTaint::Tainted))
+            .expect("concrete runtime must accept the declaration");
+        assert_eq!(
+            runtime.outbound_content_taint(),
+            Some(meerkat_core::comms::SenderContentTaint::Tainted)
+        );
+
+        dyn_runtime
+            .set_outbound_content_taint(None)
+            .expect("clearing the declaration must succeed");
+        assert_eq!(runtime.outbound_content_taint(), None);
+    }
     use crate::event_injector::CommsEventInjector;
     use crate::identity::Signature;
     use crate::types::{Envelope, InboxItem, MessageKind, Status};

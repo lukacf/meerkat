@@ -316,6 +316,20 @@ pub(super) enum MobCommand {
         handling_mode: meerkat_core::types::HandlingMode,
         reply_tx: oneshot::Sender<Result<meerkat_core::comms::SendReceipt, MobError>>,
     },
+    /// Install (or clear) the host-owned outbound content-taint declaration
+    /// on a member's comms runtime.
+    ///
+    /// Host-set carrier config, not machine state: the HOST owns the
+    /// "this member's session content is tainted" fact; the member runtime
+    /// stamps the declaration inside the signed region of every outbound
+    /// content-bearing envelope until changed. Local members install on
+    /// their session comms runtime; external members relay over the
+    /// supervisor bridge.
+    DeclareMemberOutboundTaint {
+        identity: AgentIdentity,
+        taint: Option<meerkat_core::comms::SenderContentTaint>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Unified work-lane cancellation: the MobMachine DSL owns live-runtime
     /// membership, fence-token freshness, and phase legality via the
     /// `CancelAllWork` transition. The actor feeds the machine, then
@@ -551,6 +565,7 @@ impl MobCommand {
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",
             Self::SendPeerMessage { .. } => "SendPeerMessage",
+            Self::DeclareMemberOutboundTaint { .. } => "DeclareMemberOutboundTaint",
             Self::CancelAllWork { .. } => "CancelAllWork",
             #[cfg(feature = "runtime-adapter")]
             Self::KickoffOutcomeResolved { .. } => "KickoffOutcomeResolved",

@@ -4824,6 +4824,34 @@ impl MobHandle {
         }
     }
 
+    /// Install (or clear) the host-owned outbound content-taint declaration
+    /// for a member.
+    ///
+    /// The HOST owns the "this member's session content is tainted" fact
+    /// (e.g. its content-trust tracker); this call makes the member's comms
+    /// runtime the authenticated carrier — the declaration is stamped inside
+    /// the signed region of every outbound content-bearing peer envelope
+    /// until changed, so receivers get the sender's own claim instead of
+    /// reconstructing taint from host-side joins. `None` clears the
+    /// declaration (envelopes carry no claim — never coalesced into clean).
+    ///
+    /// The declaration does not survive respawn/reset: a fresh runtime
+    /// starts with no declaration, matching fresh-context taint semantics —
+    /// re-declare when your tracker re-marks the new context. External-bound
+    /// members receive the declaration over the supervisor bridge.
+    pub async fn declare_member_outbound_taint(
+        &self,
+        identity: AgentIdentity,
+        taint: Option<meerkat_core::comms::SenderContentTaint>,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::DeclareMemberOutboundTaint {
+            identity: identity.clone(),
+            taint,
+            reply_tx,
+        })
+        .await?
+    }
+
     /// Unwire a local member from either another local member or an external peer.
     pub async fn unwire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
@@ -6875,6 +6903,17 @@ impl MemberHandle {
     /// Target member identity.
     pub fn identity(&self) -> AgentIdentity {
         AgentIdentity::from(self.agent_identity.as_str())
+    }
+
+    /// Install (or clear) the host-owned outbound content-taint declaration
+    /// for this member. See [`MobHandle::declare_member_outbound_taint`].
+    pub async fn declare_outbound_taint(
+        &self,
+        taint: Option<meerkat_core::comms::SenderContentTaint>,
+    ) -> Result<(), MobError> {
+        self.mob
+            .declare_member_outbound_taint(self.identity(), taint)
+            .await
     }
 
     /// Submit external work to this member through the canonical runtime path.

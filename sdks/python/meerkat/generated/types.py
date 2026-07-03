@@ -4936,7 +4936,14 @@ class BridgeCommandUnwireMember(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember
+class BridgeCommandDeclareMemberOutboundTaint(TypedDict, total=False):
+    command: Required[Literal['declare_member_outbound_taint']]
+    epoch: Required[int]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+    taint: NotRequired[SenderContentTaint]
+
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):

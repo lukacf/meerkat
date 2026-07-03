@@ -12,6 +12,10 @@ use meerkat_contracts::wire::supervisor_bridge::{BridgeRejectionCause, BridgeRej
 pub enum MobMemberCapability {
     /// Interaction-scoped injection used for autonomous console/RPC/flow turns.
     InteractionEventInjector,
+    /// An outbound comms runtime the host's content-taint declaration can
+    /// install on (session-backed members hold one; external members relay
+    /// over the supervisor bridge instead).
+    OutboundCommsRuntime,
 }
 
 /// Mob-owned classification of why a mob operation failed.
@@ -47,6 +51,7 @@ impl std::fmt::Display for MobMemberCapability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InteractionEventInjector => f.write_str("interaction_event_injector"),
+            Self::OutboundCommsRuntime => f.write_str("outbound_comms_runtime"),
         }
     }
 }

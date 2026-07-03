@@ -529,6 +529,7 @@ test_suite(
         "//meerkat:agent_builder_policy_canary_test",
         "//meerkat:agent_factory_auth_binding_test",
         "//meerkat:catalog_control_agent_boundary_test",
+        "//meerkat:cold_restart_resume_test",
         "//meerkat:embedded_skill_registration_test",
         "//meerkat:factory_build_agent_test",
         "//meerkat:meerkat_unit_test",

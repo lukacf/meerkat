@@ -306,9 +306,17 @@ make audit       # Security audit via cargo-deny
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch. It dispatches one of two lanes, then `gate` aggregates status:
-- `cargo` (`.github/workflows/cargo.yml`) — GHA Cargo lane (changed-path gate, version parity, schema/SDK codegen freshness, RPC/REST surface alignment, machine-kernel staleness)
-- `gcp-buildbuddy` (`.github/workflows/buildbuddy.yml`) — secret-backed GCP BuildBuddy lane (control-plane/executor spin-up, prebuild/static/native/governance/wasm/minimal-feature/feature/audit submit jobs); restricted to the repo owner
+**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch, entirely on free GitHub-hosted runners. It calls `cargo.yml` (the only lane), then `gate` aggregates status. `cargo.yml` runs parallel jobs sharing one rust-cache key:
+- `changes` — path classification (docs-only changes skip the Rust jobs)
+- `lint-governance` — fmt, workspace clippy, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
+- `test` — `test-unit` + `test-int` + `e2e-fast`
+- `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness, release packaging
+- `sdk-wasm` — Web SDK build+tests, wasm32 runtime check
+- `audit` — cargo-deny
+
+**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, cargo-deny sweep.
+
+The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io + King Windows executors) is unaffected.
 
 **Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
 

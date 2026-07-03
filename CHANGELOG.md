@@ -7,8 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-07-03
+
+Meerkat 0.7.13 completes the MobKit content-taint story (upstream asks 9+10)
+and ships provider prompt-cache hints and Gemini video-by-URI support.
+
 ### Added
 
+- Host-consumable content-taint surfaces (upstream ask 9, completing ask 5):
+  - New `peer_content_ingested` agent event — a typed projection of committed
+    inbound peer content (canonical peer identity, comms kind, request id, and
+    the sender's signed `sender_taint` declaration), emitted for both queued
+    and steered deliveries. Host taint trackers consume typed facts instead of
+    parsing rendered peer-message text; covers peer requests and cross-process
+    senders. Joins the wire event inventory across all three SDKs.
+  - Per-member outbound taint declaration: the core `CommsRuntime` trait gains
+    `set_outbound_content_taint` (typed `Unsupported` default), reachable per
+    mob member via `MobHandle::declare_member_outbound_taint` /
+    `MemberHandle::declare_outbound_taint`. The declaration installs on the
+    member's own comms runtime, so every outbound content-bearing envelope
+    carries it inside the signed region; external-bound members receive it
+    over the supervisor bridge via the new
+    `BridgeCommand::DeclareMemberOutboundTaint`. Declarations reset on
+    respawn/reset (fresh-context taint semantics).
+- Runtime-backed schedule hosts can register host runnables (upstream ask 10):
+  `spawn_runtime_backed_schedule_host` / `_with_mobs` accept an optional
+  `ScheduleRunnableHost`, so `HostRunnable` schedule targets dispatch through
+  the runtime host's occurrence driver.
 - Provider params now expose typed prompt-cache hints for OpenAI, Anthropic,
   and Gemini. OpenAI Responses requests still default to `store: false`, with
   explicit overrides for `store`, `prompt_cache_key`, and

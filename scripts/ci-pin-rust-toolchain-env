@@ -20,10 +20,12 @@ if ! command -v rustup >/dev/null 2>&1; then
 fi
 
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-  cargo_home="${CARGO_HOME:-/tmp/meerkat-cargo-home}"
-  if [[ "${cargo_home}" == "/tmp/meerkat-cargo-home" ]]; then
-    cargo_home="/tmp/meerkat-cargo-home/${GITHUB_RUN_ID:-run}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}"
-  fi
+  # Hosted runners give every job a fresh VM, so a STABLE Cargo home is
+  # required: rust-cache/sccache reuse depends on registry source paths that
+  # do not change between runs. (The retired self-hosted runner needed a
+  # per-run path here for isolation; that inverted into a cache-killer on
+  # hosted runners — every dep compile hash embedded the run id.)
+  cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
   mkdir -p "${cargo_home}"
 else
   cargo_home="${CARGO_HOME:-}"

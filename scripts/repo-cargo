@@ -104,9 +104,6 @@ if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   target_dir_was_set=true
 fi
 cargo_home="${CARGO_HOME:-${cache_root}/${repo_key}/cargo-home}"
-if [[ "${GITHUB_ACTIONS:-}" == "true" && "${cargo_home}" == "/tmp/meerkat-cargo-home" ]]; then
-  cargo_home="${cargo_home}/${lane_key}"
-fi
 export CARGO_HOME="${cargo_home}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${cache_root}/${repo_key}/targets/${target_cache_schema}/${toolchain_key}/${lane_key}}"
 

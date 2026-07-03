@@ -46,7 +46,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_HOME: /tmp/meerkat-cargo-home
+  # Stable per-VM Cargo home: hosted runners are fresh per job, and cache
+  # reuse (rust-cache + sccache) requires registry source paths that do not
+  # change between runs.
+  CARGO_HOME: /home/runner/.cargo
   RUSTUP_TOOLCHAIN: 1.94.0
   # Keep repo-cargo's per-worktree redirection out of CI: pin the target dir
   # where Swatinem/rust-cache caches it (scripts/repo-cargo respects a

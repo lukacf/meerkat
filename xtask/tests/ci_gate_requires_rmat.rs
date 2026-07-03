@@ -74,11 +74,14 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
         vec![
             "audit",
             "changes",
+            "clippy",
+            "e2e-fast",
+            "fmt-governance",
             "gate",
-            "lint-governance",
             "ratchets",
-            "sdk-wasm",
+            "sdk-web",
             "test",
+            "wasm-check",
         ],
     );
 
@@ -99,10 +102,13 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
 
     // Full-workspace verification (the changed-crates-only gate missed
     // dependent-crate breakage; do not reintroduce it as the only test gate).
+    // Unit/int run as sharded nextest partitions of the same workspace-wide
+    // lanes the `unit`/`int` cargo aliases define; clippy covers the whole
+    // workspace with all features (test-target lints run nightly).
     for lane in [
-        "make lint",
-        "make test-unit",
-        "make test-int",
+        "clippy --workspace --all-features",
+        "repo-cargo unit --partition",
+        "repo-cargo int --partition",
         "make e2e-fast",
         "make verify-schema-freshness",
         "make verify-sdk-codegen-freshness",
@@ -138,11 +144,14 @@ fn nightly_covers_the_deferred_heavy_lanes() {
     // `make ci` target set — these are the targets deliberately moved off
     // the hot path, not dropped.
     for lane in [
+        "make lint",
         "make lint-feature-matrix",
         "make test-feature-matrix",
         "make test-minimal",
         "make test-surface-modularity",
         "make e2e-system",
+        "make test-sdk-web",
+        "make check-rust-release-packaging",
     ] {
         assert!(nightly.contains(lane), "nightly must run `{lane}`");
     }

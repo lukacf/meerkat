@@ -1,15 +1,19 @@
 name: Nightly
 
-# Expensive, low-churn lanes that used to run on every push via the GCP
-# BuildBuddy fleet. They rarely fail independently of the per-push lane, so
-# they run once a day on free hosted runners instead (plus on demand).
+# Expensive, low-churn lanes that used to run on every push (first on the GCP
+# BuildBuddy fleet, then in the per-push cargo lane). They rarely fail
+# independently of the per-push lane, so they run once a day on free hosted
+# runners instead (plus on demand).
 #
 # Coverage rationale:
+#   clippy-full       — clippy --all-targets --all-features (per push runs
+#                       lib/bin targets only; test-target lints land here)
 #   feature-matrix    — feature-unification bugs the all-features lane hides
 #   minimal/modular   — minimal-feature builds + surface modularity contracts
-#   per-crate clippy  — no-feature-unification lint fidelity (the Bazel
-#                       per-crate clippy equivalent; has caught real bugs)
 #   e2e-system        — real-binary/local-resource lane
+#   sdk-web           — full Web SDK suite (per push it is path-gated to
+#                       SDK-relevant changes)
+#   release-packaging — per-crate `cargo package` dry-run (release hygiene)
 #   audit             — daily cargo-deny advisory sweep
 
 on:
@@ -28,11 +32,15 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
 
 jobs:
-  feature-matrix:
-    name: Feature matrix (lint + test)
+  clippy-full:
+    name: Clippy (all targets, all features)
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -40,10 +48,42 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: nightly
+          shared-key: nightly-clippy-full
+
+      - name: Clippy (workspace, all features, all targets)
+        run: make lint
+
+  feature-matrix:
+    name: Feature matrix (lint + test)
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-matrix
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -59,12 +99,20 @@ jobs:
   minimal-and-modularity:
     name: Minimal features + surface modularity
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -85,6 +133,8 @@ jobs:
   e2e-system:
     name: System e2e lane
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -92,10 +142,16 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: nightly
+          shared-key: nightly-e2e-system
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -105,15 +161,67 @@ jobs:
       - name: Real-binary system lane
         run: make e2e-system
 
-  release-packaging:
-    name: Release packaging dry-run
+  sdk-web:
+    name: Web SDK build + tests
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install wasm-pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="0.13.1"
+          archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+            --output "/tmp/${archive}"
+          tar -xzf "/tmp/${archive}" -C /tmp
+          install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
+          wasm-pack --version
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-sdk-web
+
+      - name: Web SDK build and tests
+        run: make test-sdk-web
+
+  release-packaging:
+    name: Release packaging dry-run
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

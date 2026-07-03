@@ -306,15 +306,18 @@ make audit       # Security audit via cargo-deny
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch, entirely on free GitHub-hosted runners. It calls `cargo.yml` (the only lane), then `gate` aggregates status. `cargo.yml` runs parallel jobs sharing one rust-cache key:
-- `changes` — path classification (docs-only changes skip the Rust jobs)
-- `lint-governance` — fmt, workspace clippy, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
-- `test` — `test-unit` + `test-int` + `e2e-fast`
+**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch, entirely on free GitHub-hosted runners with a ~10-minute wall-clock target (sccache + mold + per-job rust-cache keys). It calls `cargo.yml` (the only lane), then `gate` aggregates status. `cargo.yml` runs parallel jobs:
+- `changes` — path classification (docs-only changes skip the Rust jobs; SDK-relevant paths enable `sdk-web`)
+- `fmt-governance` — fmt, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
+- `clippy` — workspace clippy, all features, lib/bin targets (`--all-targets` runs nightly)
+- `test` ×3 — `cargo unit` + `cargo int` sharded via nextest `--partition hash:N/3`
+- `e2e-fast` — deterministic end-to-end lane
 - `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness
-- `sdk-wasm` — Web SDK build+tests, wasm32 runtime check
+- `wasm-check` — wasm32 cargo check (every code change)
+- `sdk-web` — full Web SDK suite (only when SDK-relevant paths changed)
 - `audit` — cargo-deny
 
-**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `check-rust-release-packaging`, cargo-deny sweep.
+**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint` (clippy `--all-targets`), `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `test-sdk-web` (unconditional), `check-rust-release-packaging`, cargo-deny sweep.
 
 The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io + King Windows executors) is unaffected.
 

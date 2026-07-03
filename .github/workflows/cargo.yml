@@ -12,7 +12,7 @@ name: Cargo CI
 #   clippy          — workspace clippy, all features, lib/bin targets
 #                     (--all-targets multiplies build volume several-fold for
 #                     test-only lint yield; it runs nightly)
-#   test (x3)       — unit + integration-fast, nextest hash-partitioned
+#   test (x6)       — unit + integration-fast, nextest hash-partitioned
 #   e2e-fast        — deterministic end-to-end lane (real binaries)
 #   ratchets        — version/schema/SDK/surface generation ratchets
 #   wasm-check      — wasm32 cargo check (every code change)
@@ -189,14 +189,14 @@ jobs:
         run: ./scripts/repo-cargo clippy --workspace --all-features -- -D warnings
 
   test:
-    name: Tests (shard ${{ matrix.partition }}/3)
+    name: Tests (shard ${{ matrix.partition }}/6)
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3]
+        partition: [1, 2, 3, 4, 5, 6]
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -223,10 +223,10 @@ jobs:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Unit tests (shard)
-        run: ./scripts/repo-cargo unit --partition "hash:${{ matrix.partition }}/3"
+        run: ./scripts/repo-cargo unit --partition "hash:${{ matrix.partition }}/6"
 
       - name: Integration-fast tests (shard)
-        run: ./scripts/repo-cargo int --partition "hash:${{ matrix.partition }}/3"
+        run: ./scripts/repo-cargo int --partition "hash:${{ matrix.partition }}/6"
 
   e2e-fast:
     name: Deterministic e2e lane

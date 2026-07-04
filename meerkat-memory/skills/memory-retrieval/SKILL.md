@@ -11,8 +11,11 @@ not live work state, not a scheduler, and not a commitment graph.
 
 ## Operating Rules
 
-- Search memory when compacted context, previous sessions, or domain knowledge
-  would materially improve the current answer.
+- Memory is scoped to the current session: it recalls turns compacted away
+  earlier in this session, including turns compacted before a restart or
+  resume of the same session.
+- Search memory when compacted context from earlier in this session would
+  materially improve the current answer.
 - Treat matches as recalled evidence with similarity scores, not as current
   truth. Verify against live stores, files, APIs, or WorkGraph when correctness
   matters.

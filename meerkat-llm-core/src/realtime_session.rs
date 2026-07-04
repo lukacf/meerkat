@@ -333,9 +333,16 @@ pub trait RealtimeSessionFactory: Send + Sync {
     ) -> Result<Box<dyn RealtimeSession>, LlmError>;
 
     /// Attach to an existing provider-managed realtime session.
+    ///
+    /// `identity` is the owning Meerkat session's LLM identity. Attach is a
+    /// credential-bearing open: factories that resolve credentials per open
+    /// must resolve the attach socket under the same session `auth_binding`
+    /// as [`Self::open_session`], so the identity is required in the contract
+    /// instead of being re-derived (or silently defaulted) by the provider.
     async fn attach_external_session(
         &self,
         target: &RealtimeExternalSessionTarget,
+        identity: &SessionLlmIdentity,
         turning_mode: RealtimeTurningMode,
     ) -> Result<Box<dyn RealtimeSession>, LlmError>;
 

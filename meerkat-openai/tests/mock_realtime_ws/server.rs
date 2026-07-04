@@ -297,6 +297,7 @@ impl RealtimeSessionFactory for RealtimeMockSessionFactory {
     async fn attach_external_session(
         &self,
         _target: &RealtimeExternalSessionTarget,
+        _identity: &meerkat_core::SessionLlmIdentity,
         _turning_mode: RealtimeTurningMode,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
         Err(LlmError::InvalidRequest {
@@ -477,8 +478,15 @@ mod tests {
         let server = RealtimeMockServer::new();
         let factory = server.factory();
         let target = RealtimeExternalSessionTarget::new("sess_1").unwrap();
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "mock-realtime".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
         match factory
-            .attach_external_session(&target, RealtimeTurningMode::ProviderManaged)
+            .attach_external_session(&target, &identity, RealtimeTurningMode::ProviderManaged)
             .await
         {
             Ok(_) => panic!("expected InvalidRequest, got a session"),

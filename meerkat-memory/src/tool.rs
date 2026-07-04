@@ -73,9 +73,10 @@ impl MemorySearchDispatcher {
         let tool_def = Arc::new(ToolDef {
             name: TOOL_NAME.into(),
             description: "Search semantic memory for past conversation content. \
-                Memory contains text from earlier conversation turns that were \
-                compacted away to save context space. Use this to recall \
-                information from earlier in the conversation or from previous sessions."
+                Memory contains text from earlier turns in this session that \
+                were compacted away to save context space. Use this to recall \
+                information from earlier in this session, including turns \
+                compacted away before a resume."
                 .to_string(),
             input_schema: input_schema(),
             provenance: Some(ToolProvenance {
@@ -97,14 +98,6 @@ impl MemorySearchDispatcher {
         session_id: meerkat_core::types::SessionId,
     ) -> Self {
         Self::new(store, MemorySearchScope::for_session(session_id))
-    }
-
-    /// Usage instructions for the system prompt.
-    pub fn usage_instructions() -> &'static str {
-        "# Semantic Memory\n\n\
-         You have access to a semantic memory store that contains text from earlier \
-         conversation turns that were compacted away. Use the `memory_search` tool \
-         to recall information that is no longer in your visible context."
     }
 }
 
@@ -499,10 +492,33 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_instructions_not_empty() {
-        let instructions = MemorySearchDispatcher::usage_instructions();
-        assert!(!instructions.is_empty());
-        assert!(instructions.contains("memory_search"));
+    fn test_advertised_contract_is_session_scoped() {
+        let store: Arc<dyn MemoryStore> = Arc::new(crate::SimpleMemoryStore::new());
+        let session_id = SessionId::new();
+        let dispatcher = dispatcher(store, &session_id);
+        let tools = dispatcher.tools();
+        let description = tools[0].description.to_lowercase();
+        let skill_body = include_str!("../skills/memory-retrieval/SKILL.md").to_lowercase();
+
+        for (surface, text) in [
+            ("tool description", &description),
+            ("memory-retrieval skill", &skill_body),
+        ] {
+            for claim in ["previous session", "past session", "cross-session"] {
+                assert!(
+                    !text.contains(claim),
+                    "{surface} must not advertise '{claim}' recall: memory is session-scoped"
+                );
+            }
+        }
+        assert!(
+            description.contains("earlier in this session"),
+            "tool description must state the session-scoped contract"
+        );
+        assert!(
+            skill_body.contains("scoped to the current session"),
+            "memory-retrieval skill must state the session-scoped contract"
+        );
     }
 
     #[test]

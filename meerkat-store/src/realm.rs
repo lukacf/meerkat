@@ -96,6 +96,7 @@ pub struct RealmPaths {
     pub config_path: PathBuf,
     pub sessions_sqlite_path: PathBuf,
     pub sessions_jsonl_dir: PathBuf,
+    pub runtime_sqlite_path: PathBuf,
 }
 
 pub const REALM_LEASE_HEARTBEAT_SECS: u64 = 5;
@@ -284,6 +285,7 @@ pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
         config_path: root.join("config.toml"),
         sessions_sqlite_path: root.join("sessions.sqlite3"),
         sessions_jsonl_dir: root.join("sessions_jsonl"),
+        runtime_sqlite_path: root.join("runtime.sqlite3"),
         root,
     }
 }

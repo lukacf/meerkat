@@ -2004,23 +2004,60 @@ impl AgentFactory {
         )
     }
 
+    /// Build the facade-owned OpenAI realtime session factory.
+    ///
+    /// The returned factory holds NO credential material: on every
+    /// `open_session` / `open_live_adapter` / `attach_external_session` it
+    /// reads the CURRENT config from `config_source`, resolves the owning
+    /// session's `SessionLlmIdentity.auth_binding` through the same
+    /// owning-realm resolver seam as the text path
+    /// ([`Self::build_llm_client_for_identity_with_auth_lease`]), and mints
+    /// the provider adapter via the registry-owned
+    /// `ProviderRuntime::build_realtime_session_factory` seam. Resolution or
+    /// gating failures fail the open closed with a typed error — there is no
+    /// fallback to a process-default credential.
     #[cfg(all(
         feature = "openai",
         feature = "openai-realtime",
         not(target_arch = "wasm32")
     ))]
-    pub async fn build_openai_realtime_session_factory(
+    pub fn build_openai_realtime_session_factory(
+        &self,
+        config_source: Arc<
+            dyn crate::session_runtime::realtime_credentials::RealtimeCurrentConfigSource,
+        >,
+    ) -> Arc<dyn meerkat_client::RealtimeSessionFactory> {
+        Arc::new(
+            crate::session_runtime::realtime_credentials::PerOpenCredentialRealtimeSessionFactory::new(
+                self.clone(),
+                config_source,
+            ),
+        )
+    }
+
+    /// Resolve the provider-owned realtime session factory for `identity`
+    /// against the CURRENT `config`, honoring the identity's `auth_binding`
+    /// through the owning resolver seam — the realtime mirror of
+    /// [`Self::build_llm_client_for_identity_with_auth_lease`].
+    ///
+    /// Credential material never surfaces here: the provider runtime applies
+    /// its realtime backend/auth gating and constructs the concrete adapter
+    /// behind `ProviderRuntimeRegistry::build_realtime_session_factory`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn resolve_realtime_session_factory_for_identity(
         &self,
         config: &Config,
-    ) -> Result<Arc<dyn meerkat_client::RealtimeSessionFactory>, BuildAgentError> {
-        let (realm, _binding_id, auth_binding) =
-            Self::resolve_realm_binding_for_provider(config, Provider::OpenAI, None, None)
-                .map_err(|e| BuildAgentError::LlmClient(FactoryError::ConnectionTarget(e)))?;
+        identity: &SessionLlmIdentity,
+    ) -> Result<Arc<dyn meerkat_client::RealtimeSessionFactory>, FactoryError> {
+        let (realm, _binding_id, auth_binding) = Self::resolve_realm_binding_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            None,
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-        if let Some(store) = self
-            .resolution_token_store()
-            .map_err(BuildAgentError::LlmClient)?
-        {
+        if let Some(store) = self.resolution_token_store()? {
             env = env.with_token_store(store);
         }
         if let Some(coord) = self.refresh_coord.clone() {
@@ -2033,21 +2070,10 @@ impl AgentFactory {
             .provider_registry
             .resolve(&realm, &auth_binding, &env)
             .await
-            .map_err(|e| BuildAgentError::LlmClient(FactoryError::ProviderAuth(e)))?;
+            .map_err(FactoryError::ProviderAuth)?;
         self.provider_registry
-            .build_realtime_text_client(connection.clone())
-            .map_err(|e| BuildAgentError::LlmClient(FactoryError::ClientBuild(e)))?;
-        let secret = connection
-            .resolved_secret()
-            .ok_or(BuildAgentError::LlmClient(FactoryError::ClientBuild(
-                meerkat_llm_core::provider_runtime::ProviderClientError::NoCredentialMaterial,
-            )))?;
-        let live = Arc::new(meerkat_client::OpenAiLiveClient::new(secret))
-            as Arc<dyn meerkat_client::OpenAiLiveSessionFactory>;
-        Ok(
-            Arc::new(meerkat_client::OpenAiRealtimeSessionFactory::new(live))
-                as Arc<dyn meerkat_client::RealtimeSessionFactory>,
-        )
+            .build_realtime_session_factory(connection)
+            .map_err(FactoryError::ClientBuild)
     }
 
     /// Build a fallback web-search executor for a provider whose active model
@@ -6588,6 +6614,423 @@ mod tests {
             );
         }
         section
+    }
+
+    #[cfg(all(
+        feature = "openai",
+        feature = "openai-realtime",
+        not(target_arch = "wasm32")
+    ))]
+    mod realtime_per_open_credentials {
+        use super::*;
+        use crate::session_runtime::realtime_credentials::{
+            PerOpenCredentialRealtimeSessionFactory, RealtimeCurrentConfigSource,
+        };
+        use meerkat_contracts::RealtimeTurningMode;
+        use meerkat_llm_core::LlmError;
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+        use meerkat_llm_core::realtime_session::{
+            RealtimeExternalSessionTarget, RealtimeSession, RealtimeSessionFactory,
+            RealtimeSessionOpenConfig,
+        };
+
+        #[derive(Debug, Clone, PartialEq)]
+        struct RecordedRealtimeOpen {
+            secret: String,
+            identity: SessionLlmIdentity,
+            via: &'static str,
+        }
+
+        type OpenRecorder = Arc<std::sync::Mutex<Vec<RecordedRealtimeOpen>>>;
+
+        /// Provider-runtime double that resolves the binding's inline secret
+        /// and mints a mock realtime factory carrying that secret, so tests
+        /// can observe which credential each open would authenticate with.
+        struct RealtimeRecordingOpenAiRuntime {
+            opens: OpenRecorder,
+        }
+
+        #[async_trait]
+        impl ProviderRuntime for RealtimeRecordingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                let secret = match &binding.auth_profile().source {
+                    CredentialSourceSpec::InlineSecret { secret } => secret.clone(),
+                    other => {
+                        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                            "test runtime only resolves inline secrets, got {other:?}"
+                        )));
+                    }
+                };
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        secret,
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test-realtime",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn meerkat_llm_core::LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+
+            fn build_realtime_session_factory(
+                &self,
+                connection: ResolvedConnection,
+            ) -> Result<Arc<dyn RealtimeSessionFactory>, ProviderClientError> {
+                let secret = connection
+                    .resolved_secret()
+                    .ok_or(ProviderClientError::NoCredentialMaterial)?;
+                Ok(Arc::new(RecordingProviderRealtimeFactory {
+                    secret,
+                    opens: Arc::clone(&self.opens),
+                }))
+            }
+        }
+
+        /// Minted-per-open mock: records the credential it was minted with
+        /// plus the identity of every open, then fails with a sentinel so no
+        /// real socket is attempted.
+        struct RecordingProviderRealtimeFactory {
+            secret: String,
+            opens: OpenRecorder,
+        }
+
+        impl RecordingProviderRealtimeFactory {
+            fn record(&self, identity: &SessionLlmIdentity, via: &'static str) {
+                self.opens.lock().unwrap().push(RecordedRealtimeOpen {
+                    secret: self.secret.clone(),
+                    identity: identity.clone(),
+                    via,
+                });
+            }
+        }
+
+        #[async_trait]
+        impl RealtimeSessionFactory for RecordingProviderRealtimeFactory {
+            fn capabilities(&self) -> meerkat_contracts::RealtimeCapabilities {
+                meerkat_contracts::RealtimeCapabilities::default()
+            }
+
+            fn supports_provider(&self, provider: Provider) -> bool {
+                provider == Provider::OpenAI
+            }
+
+            async fn open_session(
+                &self,
+                open_config: &RealtimeSessionOpenConfig,
+            ) -> Result<Box<dyn RealtimeSession>, LlmError> {
+                self.record(&open_config.llm_identity, "open_session");
+                Err(LlmError::ConnectionReset)
+            }
+
+            async fn attach_external_session(
+                &self,
+                _target: &RealtimeExternalSessionTarget,
+                identity: &SessionLlmIdentity,
+                _turning_mode: RealtimeTurningMode,
+            ) -> Result<Box<dyn RealtimeSession>, LlmError> {
+                self.record(identity, "attach_external_session");
+                Err(LlmError::ConnectionReset)
+            }
+
+            async fn open_live_adapter(
+                &self,
+                open_config: &RealtimeSessionOpenConfig,
+            ) -> Result<Arc<dyn meerkat_core::live_adapter::LiveAdapter>, LlmError> {
+                self.record(&open_config.llm_identity, "open_live_adapter");
+                Err(LlmError::ConnectionReset)
+            }
+        }
+
+        struct FixedRealtimeConfigSource(Config);
+
+        #[async_trait]
+        impl RealtimeCurrentConfigSource for FixedRealtimeConfigSource {
+            async fn current_config(&self) -> Result<Config, meerkat_core::ConfigError> {
+                Ok(self.0.clone())
+            }
+        }
+
+        struct FailingRealtimeConfigSource;
+
+        #[async_trait]
+        impl RealtimeCurrentConfigSource for FailingRealtimeConfigSource {
+            async fn current_config(&self) -> Result<Config, meerkat_core::ConfigError> {
+                Err(meerkat_core::ConfigError::MissingField(
+                    "injected current-config failure".to_string(),
+                ))
+            }
+        }
+
+        fn realtime_identity(auth_binding: Option<AuthBindingRef>) -> SessionLlmIdentity {
+            SessionLlmIdentity {
+                model: "gpt-realtime-2".to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding,
+            }
+        }
+
+        fn open_config(identity: SessionLlmIdentity) -> RealtimeSessionOpenConfig {
+            RealtimeSessionOpenConfig::new(
+                RealtimeTurningMode::ProviderManaged,
+                identity,
+                Vec::new(),
+                Vec::new(),
+            )
+        }
+
+        fn recording_wrapper(
+            config: Config,
+        ) -> (PerOpenCredentialRealtimeSessionFactory, OpenRecorder) {
+            let temp = std::env::temp_dir().join("meerkat-realtime-per-open-tests");
+            let opens: OpenRecorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut factory = AgentFactory::new(temp).without_token_store();
+            factory.provider_registry = Arc::new(ProviderRuntimeRegistry::empty().with_runtime(
+                Arc::new(RealtimeRecordingOpenAiRuntime {
+                    opens: Arc::clone(&opens),
+                }),
+            ));
+            let wrapper = PerOpenCredentialRealtimeSessionFactory::new(
+                factory,
+                Arc::new(FixedRealtimeConfigSource(config)),
+            );
+            (wrapper, opens)
+        }
+
+        #[tokio::test]
+        async fn open_session_resolves_the_session_auth_binding_secret() {
+            let mut config = Config::default();
+            config.realm.insert(
+                "dev".to_string(),
+                openai_realm_with_bindings(&[
+                    ("primary_openai", "sk-primary"),
+                    ("secondary_openai", "sk-secondary"),
+                ]),
+            );
+            let (wrapper, opens) = recording_wrapper(config);
+            let identity =
+                realtime_identity(Some(configured_auth_binding("dev", "secondary_openai")));
+
+            let result = wrapper.open_session(&open_config(identity.clone())).await;
+
+            assert!(
+                matches!(result, Err(LlmError::ConnectionReset)),
+                "mock provider factory should have been reached"
+            );
+            let opens = opens.lock().unwrap();
+            assert_eq!(
+                *opens,
+                vec![RecordedRealtimeOpen {
+                    secret: "sk-secondary".to_string(),
+                    identity,
+                    via: "open_session",
+                }],
+                "the socket must authenticate with the SESSION binding's secret, not a default"
+            );
+        }
+
+        #[tokio::test]
+        async fn open_live_adapter_and_attach_resolve_per_open_under_the_session_binding() {
+            let mut config = Config::default();
+            config.realm.insert(
+                "dev".to_string(),
+                openai_realm_with_bindings(&[
+                    ("primary_openai", "sk-primary"),
+                    ("secondary_openai", "sk-secondary"),
+                ]),
+            );
+            let (wrapper, opens) = recording_wrapper(config);
+            let identity =
+                realtime_identity(Some(configured_auth_binding("dev", "primary_openai")));
+
+            let adapter = wrapper
+                .open_live_adapter(&open_config(identity.clone()))
+                .await;
+            assert!(matches!(adapter, Err(LlmError::ConnectionReset)));
+
+            let attached = wrapper
+                .attach_external_session(
+                    &RealtimeExternalSessionTarget::new("call_1").expect("target"),
+                    &identity,
+                    RealtimeTurningMode::ProviderManaged,
+                )
+                .await;
+            assert!(matches!(attached, Err(LlmError::ConnectionReset)));
+
+            let opens = opens.lock().unwrap();
+            assert_eq!(
+                *opens,
+                vec![
+                    RecordedRealtimeOpen {
+                        secret: "sk-primary".to_string(),
+                        identity: identity.clone(),
+                        via: "open_live_adapter",
+                    },
+                    RecordedRealtimeOpen {
+                        secret: "sk-primary".to_string(),
+                        identity,
+                        via: "attach_external_session",
+                    },
+                ],
+                "every open path must re-resolve under the session binding"
+            );
+        }
+
+        #[tokio::test]
+        async fn open_session_without_binding_resolves_the_default_binding() {
+            let mut config = Config::default();
+            config.realm.insert(
+                "global".to_string(),
+                openai_realm_with_bindings(&[("default_openai", "sk-default")]),
+            );
+            let (wrapper, opens) = recording_wrapper(config);
+            let identity = realtime_identity(None);
+
+            let result = wrapper.open_session(&open_config(identity.clone())).await;
+
+            assert!(matches!(result, Err(LlmError::ConnectionReset)));
+            let opens = opens.lock().unwrap();
+            assert_eq!(
+                *opens,
+                vec![RecordedRealtimeOpen {
+                    secret: "sk-default".to_string(),
+                    identity,
+                    via: "open_session",
+                }],
+                "a binding-less session identity resolves the configured default binding"
+            );
+        }
+
+        #[tokio::test]
+        async fn open_fails_closed_on_unresolvable_binding() {
+            let mut config = Config::default();
+            config.realm.insert(
+                "dev".to_string(),
+                openai_realm_with_bindings(&[("primary_openai", "sk-primary")]),
+            );
+            let (wrapper, opens) = recording_wrapper(config);
+            let identity =
+                realtime_identity(Some(configured_auth_binding("dev", "missing_binding")));
+
+            let error = wrapper
+                .open_session(&open_config(identity))
+                .await
+                .err()
+                .expect("unresolvable binding must fail the open closed");
+
+            assert!(
+                matches!(error, LlmError::InvalidConfig { .. }),
+                "expected a typed channel-terminal error, got {error:?}"
+            );
+            assert!(
+                opens.lock().unwrap().is_empty(),
+                "no provider factory may be minted for an unresolvable binding"
+            );
+        }
+
+        #[tokio::test]
+        async fn open_fails_closed_when_current_config_cannot_be_read() {
+            let temp = std::env::temp_dir().join("meerkat-realtime-per-open-tests");
+            let factory = AgentFactory::new(temp).without_token_store();
+            let wrapper = PerOpenCredentialRealtimeSessionFactory::new(
+                factory,
+                Arc::new(FailingRealtimeConfigSource),
+            );
+
+            let error = wrapper
+                .open_session(&open_config(realtime_identity(None)))
+                .await
+                .err()
+                .expect("a config-source fault must fail the open closed");
+
+            assert!(matches!(error, LlmError::InvalidConfig { .. }));
+        }
+
+        /// End-to-end through the REAL OpenAI provider runtime: a session
+        /// bound to an Azure OpenAI binding is admitted nowhere near a
+        /// realtime socket — the provider runtime's mint-time gate rejects
+        /// the backend with its typed error instead of falling back to a
+        /// process-default credential.
+        #[tokio::test]
+        async fn open_fails_closed_on_realtime_unsupported_backend_binding() {
+            let mut section = RealmConfigSection::default();
+            section.backend.insert(
+                "azure".to_string(),
+                BackendProfileConfig {
+                    provider: "openai".to_string(),
+                    backend_kind: "azure_openai".to_string(),
+                    base_url: Some("https://example.openai.azure.com".to_string()),
+                    options: serde_json::Value::Null,
+                },
+            );
+            section.auth.insert(
+                "azure_auth".to_string(),
+                meerkat_core::AuthProfileConfig {
+                    provider: "openai".to_string(),
+                    auth_method: "azure_api_key".to_string(),
+                    source: CredentialSourceSpec::InlineSecret {
+                        secret: "azure-key".to_string(),
+                    },
+                    constraints: Default::default(),
+                    metadata_defaults: Default::default(),
+                },
+            );
+            section.binding.insert(
+                "azure_openai".to_string(),
+                ProviderBindingConfig {
+                    backend_profile: "azure".to_string(),
+                    auth_profile: "azure_auth".to_string(),
+                    default_model: None,
+                    policy: Default::default(),
+                    provider_default: false,
+                },
+            );
+            let mut config = Config::default();
+            config.realm.insert("dev".to_string(), section);
+
+            let temp = std::env::temp_dir().join("meerkat-realtime-per-open-tests");
+            let factory = AgentFactory::new(temp).without_token_store();
+            let wrapper = PerOpenCredentialRealtimeSessionFactory::new(
+                factory,
+                Arc::new(FixedRealtimeConfigSource(config)),
+            );
+            let identity = realtime_identity(Some(configured_auth_binding("dev", "azure_openai")));
+
+            let error = wrapper
+                .open_session(&open_config(identity))
+                .await
+                .err()
+                .expect("realtime-unsupported backend binding must fail the open closed");
+
+            match error {
+                LlmError::InvalidConfig { message } => assert!(
+                    message.contains("openai-realtime-azure-openai"),
+                    "rejection must carry the provider runtime's typed gate: {message}"
+                ),
+                other => panic!("expected InvalidConfig, got {other:?}"),
+            }
+        }
     }
 
     #[test]

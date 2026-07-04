@@ -49,7 +49,7 @@ fn spawn_test_server(
         10,
         meerkat::PersistenceBundle::new(
             store as Arc<dyn meerkat::SessionStore>,
-            Some(runtime_store),
+            runtime_store,
             blob_store,
         ),
         meerkat_rpc::router::NotificationSink::noop(),
@@ -1249,7 +1249,7 @@ async fn e2e_scenario_22_transport_backpressure() {
         10,
         meerkat::PersistenceBundle::new(
             store as Arc<dyn meerkat::SessionStore>,
-            Some(runtime_store),
+            runtime_store,
             blob_store,
         ),
         meerkat_rpc::router::NotificationSink::noop(),

@@ -126,8 +126,6 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("py", "mob/list_members_matching", "result"),
     ("py", "mob/member_send", "params"),
     ("py", "mob/member_send", "result"),
-    ("py", "mob/member_status", "params"),
-    ("py", "mob/member_status", "result"),
     ("py", "mob/members", "params"),
     ("py", "mob/members", "result"),
     ("py", "mob/profile/create", "params"),
@@ -239,8 +237,6 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("ts", "mob/list_members_matching", "result"),
     ("ts", "mob/member_send", "params"),
     ("ts", "mob/member_send", "result"),
-    ("ts", "mob/member_status", "params"),
-    ("ts", "mob/member_status", "result"),
     ("ts", "mob/members", "params"),
     ("ts", "mob/members", "result"),
     ("ts", "mob/profile/create", "params"),
@@ -313,7 +309,7 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
 # unless renewed with an explicit owner decision.
 BASELINE_HAND_ROLLED_OWNER = "sdk-contracts"
 BASELINE_HAND_ROLLED_EXPIRES = "2026-07-31"
-BASELINE_HAND_ROLLED_MAX_ENTRIES = 247
+BASELINE_HAND_ROLLED_MAX_ENTRIES = 243
 
 
 def split_type_refs(type_ref: str | None) -> list[str]:

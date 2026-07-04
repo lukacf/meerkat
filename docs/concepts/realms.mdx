@@ -75,7 +75,7 @@ After pinning, all surfaces use the manifest backend for that realm.
 When SQLite support is compiled in, new persistent realms default to `sqlite`.
 
 - `sqlite` is the recommended backend for the normal Meerkat operating mode where multiple processes share one realm.
-- `jsonl` remains explicitly selectable for inspectable file-based persistence.
+- `jsonl` remains explicitly selectable for inspectable file-based persistence. Session documents live as JSONL files; runtime authority (queued inputs, run-boundary receipts, ops snapshots) is durable in a `runtime.sqlite3` companion under the realm root.
 - `memory` uses in-process session/blob/artifact stores and is useful for throwaway runs that should not persist conversation state.
 
 Existing realms stay pinned to the backend recorded in their manifest. Changing the default does not migrate old realms.

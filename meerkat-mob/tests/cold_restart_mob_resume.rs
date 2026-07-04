@@ -97,7 +97,7 @@ fn persistent_service(
         builder,
         32,
         store_dyn,
-        Some(runtime_store),
+        runtime_store,
         blob_store,
     ));
     (service, store)

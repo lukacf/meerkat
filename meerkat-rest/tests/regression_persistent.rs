@@ -65,7 +65,7 @@ fn build_state(
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence = PersistenceBundle::new(
         store,
-        Some(runtime_store),
+        runtime_store,
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     );
     let runtime_adapter = persistence.runtime_adapter();

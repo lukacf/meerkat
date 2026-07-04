@@ -72,7 +72,7 @@ pub struct PersistenceBundle {
     schedule_store: Arc<dyn ScheduleStore>,
     workgraph_store: Arc<dyn WorkGraphStore>,
     #[cfg(feature = "session-store")]
-    runtime_store: Option<Arc<dyn RuntimeStore>>,
+    runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
     artifact_store: Arc<dyn ArtifactStore>,
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -86,7 +86,7 @@ pub struct PersistenceBundle {
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 struct RealmSubsystemStores {
     session_store: Arc<dyn SessionStore>,
-    runtime_store: Option<Arc<dyn RuntimeStore>>,
+    runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
     schedule_store: Arc<dyn ScheduleStore>,
     workgraph_store: Arc<dyn WorkGraphStore>,
@@ -96,7 +96,7 @@ impl PersistenceBundle {
     #[cfg(feature = "session-store")]
     pub fn new(
         session_store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         Self::new_with_schedule_store(
@@ -110,7 +110,7 @@ impl PersistenceBundle {
     #[cfg(feature = "session-store")]
     pub fn new_with_schedule_store(
         session_store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
         schedule_store: Arc<dyn ScheduleStore>,
     ) -> Self {
@@ -126,18 +126,15 @@ impl PersistenceBundle {
     #[cfg(feature = "session-store")]
     pub fn new_with_subsystem_stores(
         session_store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
         schedule_store: Arc<dyn ScheduleStore>,
         workgraph_store: Arc<dyn WorkGraphStore>,
     ) -> Self {
-        let runtime_adapter = match &runtime_store {
-            Some(store) => Arc::new(MeerkatMachine::persistent(
-                store.clone(),
-                blob_store.clone(),
-            )),
-            None => Arc::new(MeerkatMachine::ephemeral()),
-        };
+        let runtime_adapter = Arc::new(MeerkatMachine::persistent(
+            runtime_store.clone(),
+            blob_store.clone(),
+        ));
         Self {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             manifest: None,
@@ -257,7 +254,7 @@ impl PersistenceBundle {
     }
 
     #[cfg(feature = "session-store")]
-    pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
+    pub fn runtime_store(&self) -> Arc<dyn RuntimeStore> {
         self.runtime_store.clone()
     }
 
@@ -277,7 +274,7 @@ impl PersistenceBundle {
         self,
     ) -> (
         Arc<dyn SessionStore>,
-        Option<Arc<dyn RuntimeStore>>,
+        Arc<dyn RuntimeStore>,
         Arc<dyn BlobStore>,
     ) {
         (self.session_store, self.runtime_store, self.blob_store)
@@ -315,13 +312,16 @@ pub async fn open_realm_persistence_in(
             let workgraph_store: Arc<dyn WorkGraphStore> = Arc::new(SqliteWorkGraphStore::open(
                 paths.root.join("workgraph.sqlite3"),
             )?);
+            let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
+                paths.runtime_sqlite_path.clone(),
+            )?) as Arc<dyn RuntimeStore>;
             let mut bundle = PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path,
                 paths.root,
                 RealmSubsystemStores {
                     session_store,
-                    runtime_store: None,
+                    runtime_store,
                     blob_store,
                     schedule_store,
                     workgraph_store,
@@ -342,7 +342,7 @@ pub async fn open_realm_persistence_in(
                 as Arc<dyn RuntimeStore>;
             let mut bundle = PersistenceBundle::new_with_subsystem_stores(
                 session_store,
-                Some(runtime_store),
+                runtime_store,
                 blob_store,
                 schedule_store,
                 workgraph_store,
@@ -375,7 +375,7 @@ pub async fn open_realm_persistence_in(
                 paths.root,
                 RealmSubsystemStores {
                     session_store: sqlite_store as Arc<dyn SessionStore>,
-                    runtime_store: Some(runtime_store),
+                    runtime_store,
                     blob_store,
                     schedule_store,
                     workgraph_store,
@@ -467,15 +467,12 @@ mod tests {
             sqlite_store.path().to_path_buf(),
         )?) as Arc<dyn RuntimeStore>;
 
-        let bundle = PersistenceBundle::new(
-            wrapped,
-            Some(runtime_store),
-            Arc::new(MemoryBlobStore::new()),
-        );
+        let bundle =
+            PersistenceBundle::new(wrapped, runtime_store, Arc::new(MemoryBlobStore::new()));
 
-        assert!(bundle.runtime_store().is_some());
         assert!(!bundle.blob_store().is_persistent());
         assert!(!bundle.artifact_store().is_persistent());
+        let _ = bundle.runtime_store();
         let _ = bundle.runtime_adapter();
         Ok(())
     }
@@ -493,7 +490,6 @@ mod tests {
         )
         .await?;
 
-        assert!(bundle.runtime_store().is_some());
         assert!(bundle.blob_store().is_persistent());
         assert!(bundle.artifact_store().is_persistent());
         let (event_store, projector) = bundle
@@ -533,7 +529,7 @@ mod tests {
 
     #[cfg(feature = "jsonl-store")]
     #[tokio::test]
-    async fn open_realm_persistence_jsonl_has_no_runtime_companion()
+    async fn open_realm_persistence_jsonl_builds_durable_runtime_companion()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
 
@@ -545,11 +541,49 @@ mod tests {
         )
         .await?;
 
-        assert!(bundle.runtime_store().is_none());
         assert!(bundle.blob_store().is_persistent());
         assert!(
             bundle.event_projection().is_some(),
             "jsonl realms still need the append-only event projection bridge"
+        );
+
+        let expected_paths = realm_paths_in(temp.path(), "jsonl-realm");
+        assert!(
+            expected_paths.runtime_sqlite_path.exists(),
+            "jsonl realms must mount the sqlite runtime companion at the realm root"
+        );
+
+        let session = meerkat_core::Session::new();
+        let session_id = session.id().clone();
+        let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session_id);
+        bundle
+            .runtime_store()
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session)?,
+                },
+            )
+            .await?;
+        drop(bundle);
+
+        let (_manifest, reopened) = open_realm_persistence_in(
+            temp.path(),
+            "jsonl-realm",
+            Some(RealmBackend::Jsonl),
+            Some(RealmOrigin::Explicit),
+        )
+        .await?;
+        let recovered = reopened
+            .runtime_store()
+            .load_session_snapshot(&runtime_id)
+            .await?
+            .expect("jsonl runtime companion must recover runtime authority across reopen");
+        let recovered_session: meerkat_core::Session = serde_json::from_slice(&recovered)?;
+        assert_eq!(
+            recovered_session.id(),
+            &session_id,
+            "jsonl runtime companion must recover the committed session snapshot"
         );
         Ok(())
     }
@@ -569,7 +603,6 @@ mod tests {
         .await?;
 
         assert_eq!(manifest.backend, RealmBackend::Memory);
-        assert!(bundle.runtime_store().is_some());
         assert!(!bundle.blob_store().is_persistent());
         assert!(!bundle.artifact_store().is_persistent());
         assert_eq!(
@@ -610,14 +643,16 @@ mod tests {
 
     #[cfg(feature = "memory-store")]
     #[test]
-    fn memory_bundle_keeps_existing_session_store_behavior_without_runtime_companion()
+    fn memory_bundle_keeps_existing_session_store_behavior_with_in_memory_runtime_companion()
     -> Result<(), Box<dyn std::error::Error>> {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> =
+            Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
 
-        let bundle = PersistenceBundle::new(store, None, Arc::new(MemoryBlobStore::new()));
+        let bundle = PersistenceBundle::new(store, runtime_store, Arc::new(MemoryBlobStore::new()));
 
-        assert!(bundle.runtime_store().is_none());
         assert!(!bundle.blob_store().is_persistent());
+        let _ = bundle.runtime_store();
         let _ = bundle.runtime_adapter();
         Ok(())
     }

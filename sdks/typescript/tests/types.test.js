@@ -2906,6 +2906,30 @@ describe("Parity wrappers", () => {
         String(error.message).includes("missing agent_identity"),
     );
   });
+
+  it("rejects helper receipts missing tokens_used instead of fabricating 0", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      output: "ok",
+      agent_identity: "helper-1",
+      member_ref: makeMemberRef("mob-1", "helper-1"),
+    });
+
+    await assert.rejects(
+      () => client.spawnMobHelper("mob-1", "help"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /tokens_used must be number/.test(String(error.message)),
+    );
+    await assert.rejects(
+      () => client.forkMobHelper("mob-1", "source", "help"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /tokens_used must be number/.test(String(error.message)),
+    );
+  });
 });
 
 describe("Mob kickoff wait wrappers", () => {
@@ -2995,6 +3019,77 @@ describe("Mob decoder strictness", () => {
     await assert.rejects(
       () => client.waitMobReady("mob-1"),
       /is_final must be boolean/,
+    );
+  });
+
+  it("parses tri-state peer_connectivity in wait member snapshots", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      members: [
+        {
+          agent_identity: "lead",
+          status: "active",
+          tokens_used: 42,
+          is_final: false,
+          peer_connectivity: {
+            status: "known",
+            snapshot: {
+              reachable_peer_count: 1,
+              unknown_peer_count: 0,
+              unreachable_peers: [],
+            },
+          },
+        },
+        {
+          agent_identity: "writer",
+          status: "active",
+          tokens_used: 7,
+          is_final: false,
+          peer_connectivity: { status: "probe_timed_out" },
+        },
+      ],
+    });
+
+    for (const wait of [
+      () => client.waitMobKickoff("mob-1"),
+      () => client.waitMobReady("mob-1"),
+    ]) {
+      const members = await wait();
+      assert.deepEqual(members[0].peerConnectivity, {
+        status: "known",
+        snapshot: {
+          reachablePeerCount: 1,
+          unknownPeerCount: 0,
+          unreachablePeers: [],
+        },
+      });
+      assert.deepEqual(members[1].peerConnectivity, {
+        status: "probe_timed_out",
+      });
+    }
+  });
+
+  it("rejects unknown peer_connectivity tags in wait member snapshots", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      members: [
+        {
+          agent_identity: "lead",
+          status: "active",
+          tokens_used: 42,
+          is_final: false,
+          peer_connectivity: { status: "half-open" },
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.waitMobKickoff("mob-1"),
+      /unknown peer_connectivity status/,
+    );
+    await assert.rejects(
+      () => client.waitMobReady("mob-1"),
+      /unknown peer_connectivity status/,
     );
   });
 });
@@ -3281,28 +3376,39 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
   });
 
   // SITE 5 — mobMemberStatus: member status is enum-validated; "unknown" is a
-  // valid runtime variant but must NOT be fabricated on absence.
+  // valid runtime variant but must NOT be fabricated on absence. All wire-
+  // required fields (member_ref, tokens_used, is_final) fail closed.
   describe("mobMemberStatus", () => {
+    const memberRef = makeMemberRef("mob-1", "worker-1");
+
     function memberStatusClient(response) {
       const client = new MeerkatClient();
       client.request = async () => response;
       return client;
     }
 
+    function validResponse(overrides = {}) {
+      return {
+        status: "active",
+        member_ref: memberRef,
+        tokens_used: 0,
+        is_final: false,
+        ...overrides,
+      };
+    }
+
     for (const variant of ["active", "retiring", "broken", "completed", "unknown"]) {
       it(`accepts the valid member status variant '${variant}'`, async () => {
-        const client = memberStatusClient({
-          status: variant,
-          tokens_used: 0,
-          is_final: false,
-        });
+        const client = memberStatusClient(validResponse({ status: variant }));
         const result = await client.mobMemberStatus("mob-1", "worker-1");
         assert.equal(result.status, variant);
       });
     }
 
     it("rejects an absent status instead of fabricating 'unknown'", async () => {
-      const client = memberStatusClient({ tokens_used: 0, is_final: false });
+      const response = validResponse();
+      delete response.status;
+      const client = memberStatusClient(response);
       await assert.rejects(
         () => client.mobMemberStatus("mob-1", "worker-1"),
         (error) =>
@@ -3311,16 +3417,152 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
     });
 
     it("rejects a non-variant status string", async () => {
-      const client = memberStatusClient({
-        status: "halfbaked",
-        tokens_used: 0,
-        is_final: false,
-      });
+      const client = memberStatusClient(validResponse({ status: "halfbaked" }));
       await assert.rejects(
         () => client.mobMemberStatus("mob-1", "worker-1"),
         (error) =>
           error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
       );
+    });
+
+    it("surfaces the runtime-owned member_ref round-trip", async () => {
+      const client = memberStatusClient(validResponse());
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.equal(result.memberRef, memberRef);
+    });
+
+    it("rejects an absent member_ref instead of synthesizing the handle", async () => {
+      const response = validResponse();
+      delete response.member_ref;
+      const client = memberStatusClient(response);
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing member_ref/.test(String(error.message)),
+      );
+    });
+
+    it("rejects an empty member_ref", async () => {
+      const client = memberStatusClient(validResponse({ member_ref: "" }));
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing member_ref/.test(String(error.message)),
+      );
+    });
+
+    it("rejects an absent tokens_used instead of fabricating 0", async () => {
+      const response = validResponse();
+      delete response.tokens_used;
+      const client = memberStatusClient(response);
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /tokens_used must be number/.test(String(error.message)),
+      );
+    });
+
+    it("rejects an absent is_final instead of fabricating false", async () => {
+      const response = validResponse();
+      delete response.is_final;
+      const client = memberStatusClient(response);
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /is_final must be boolean/.test(String(error.message)),
+      );
+    });
+
+    it("parses the tri-state peer_connectivity 'known' variant", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          peer_connectivity: {
+            status: "known",
+            snapshot: {
+              reachable_peer_count: 2,
+              unknown_peer_count: 1,
+              unreachable_peers: [{ peer: "worker-2", reason: "timeout" }],
+            },
+          },
+        }),
+      );
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.deepEqual(result.peerConnectivity, {
+        status: "known",
+        snapshot: {
+          reachablePeerCount: 2,
+          unknownPeerCount: 1,
+          unreachablePeers: [{ peer: "worker-2", reason: "timeout" }],
+        },
+      });
+    });
+
+    for (const variant of ["not_applicable", "probe_timed_out"]) {
+      it(`parses the tri-state peer_connectivity '${variant}' variant`, async () => {
+        const client = memberStatusClient(
+          validResponse({ peer_connectivity: { status: variant } }),
+        );
+        const result = await client.mobMemberStatus("mob-1", "worker-1");
+        assert.deepEqual(result.peerConnectivity, { status: variant });
+      });
+    }
+
+    it("omits peer_connectivity when the wire omits it", async () => {
+      const client = memberStatusClient(validResponse());
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.equal(result.peerConnectivity, undefined);
+    });
+
+    it("rejects an unknown peer_connectivity tag instead of coalescing", async () => {
+      const client = memberStatusClient(
+        validResponse({ peer_connectivity: { status: "half-open" } }),
+      );
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /unknown peer_connectivity status/.test(String(error.message)),
+      );
+    });
+
+    it("rejects the legacy flat peer_connectivity shape (no status tag)", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          peer_connectivity: {
+            reachable_peer_count: 2,
+            unknown_peer_count: 0,
+            unreachable_peers: [],
+          },
+        }),
+      );
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /unknown peer_connectivity status/.test(String(error.message)),
+      );
+    });
+
+    it("carries kickoff and external_member per the generated field set", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          kickoff: { state: "completed" },
+          external_member: { name: "remote" },
+        }),
+      );
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.deepEqual(result.kickoff, { state: "completed" });
+      assert.deepEqual(result.externalMember, { name: "remote" });
     });
   });
 

@@ -32,10 +32,20 @@ mod tests {
         Arc<PersistentSessionService<FactoryAgentBuilder>>,
         Arc<MeerkatMachine>,
     ) {
+        build_service_with_backend(root, meerkat_store::RealmBackend::Sqlite).await
+    }
+
+    async fn build_service_with_backend(
+        root: &std::path::Path,
+        backend: meerkat_store::RealmBackend,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+    ) {
         let (_manifest, persistence) = meerkat::open_realm_persistence_in(
             root,
             "restart-realm",
-            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(backend),
             Some(meerkat_store::RealmOrigin::Explicit),
         )
         .await
@@ -409,6 +419,103 @@ mod tests {
                 .iter()
                 .map(|commit| &commit.reason.kind)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// JSONL-realm parity with the sqlite cold-restart contract: the realm's
+    /// sqlite runtime companion (`runtime.sqlite3`) must recover queued-input
+    /// bookkeeping, run-boundary receipts, and the runtime session snapshot
+    /// across a simulated host restart, and resumed turns must continue the
+    /// persisted history.
+    #[cfg(feature = "jsonl-store")]
+    #[tokio::test]
+    async fn cold_restart_resume_jsonl_realm_recovers_runtime_authority() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // First host lifetime: create the session and run one turn.
+        let session_id = {
+            let (service, adapter) =
+                build_service_with_backend(temp.path(), meerkat_store::RealmBackend::Jsonl).await;
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, "first turn before restart").await;
+            // Cold stop: the host dies without archiving or retiring anything.
+            session_id
+        };
+
+        let realm_paths = meerkat_store::realm_paths_in(temp.path(), "restart-realm");
+        assert!(
+            realm_paths.runtime_sqlite_path.exists(),
+            "jsonl realms must persist runtime authority in the sqlite runtime companion"
+        );
+
+        // Second host lifetime: fresh service + runtime authority over the
+        // same durable stores.
+        let (service, adapter) =
+            build_service_with_backend(temp.path(), meerkat_store::RealmBackend::Jsonl).await;
+        let runtime_store = service.runtime_store();
+        let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session_id);
+        let recovered_inputs = runtime_store
+            .load_input_states(&runtime_id)
+            .await
+            .expect("input states must load from the reopened runtime companion");
+        assert!(
+            !recovered_inputs.is_empty(),
+            "the first lifetime's run inputs must survive the jsonl-realm restart"
+        );
+        let (recovered_run_id, recovered_sequence) = recovered_inputs
+            .iter()
+            .find_map(|stored| {
+                stored
+                    .seed
+                    .last_run_id
+                    .clone()
+                    .zip(stored.seed.last_boundary_sequence)
+            })
+            .expect("restart must recover a consumed input with its run-boundary bookkeeping");
+        let receipt = runtime_store
+            .load_boundary_receipt(&runtime_id, &recovered_run_id, recovered_sequence)
+            .await
+            .expect("boundary receipt must load from the reopened runtime companion")
+            .expect("the first lifetime's run-boundary receipt must survive the restart");
+        assert_eq!(
+            receipt.run_id, recovered_run_id,
+            "recovered receipt must belong to the consumed input's run"
+        );
+
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after restart")
+            .expect("session should survive restart");
+        assert!(
+            user_texts(&resume_source)
+                .iter()
+                .any(|text| text.contains("first turn before restart")),
+            "authoritative session must carry pre-restart history"
+        );
+
+        materialize(&service, &adapter, resume_source).await;
+        run_prompt(&adapter, &session_id, "second turn after restart").await;
+
+        let final_session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after resumed turn")
+            .expect("session should still exist");
+        let texts = user_texts(&final_session);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("first turn before restart")),
+            "history from before the restart must survive: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("second turn after restart")),
+            "the post-restart turn must be recorded: {texts:?}"
         );
     }
 

@@ -2097,7 +2097,11 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None, blob_store),
+            meerkat::PersistenceBundle::new(
+                store,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                blob_store,
+            ),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
@@ -2124,7 +2128,11 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None, blob_store),
+            meerkat::PersistenceBundle::new(
+                store,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                blob_store,
+            ),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(

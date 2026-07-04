@@ -4060,7 +4060,7 @@ mod tests {
     ) -> meerkat::PersistenceBundle {
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        meerkat::PersistenceBundle::new(store, Some(runtime_store), memory_blob_store())
+        meerkat::PersistenceBundle::new(store, runtime_store, memory_blob_store())
     }
 
     /// Config store whose `get()` always returns a typed fault, used to prove
@@ -5676,6 +5676,7 @@ mod tests {
         async fn attach_external_session(
             &self,
             _target: &meerkat_client::realtime_session::RealtimeExternalSessionTarget,
+            _identity: &meerkat_core::SessionLlmIdentity,
             _turning_mode: meerkat_contracts::RealtimeTurningMode,
         ) -> Result<
             Box<dyn meerkat_client::realtime_session::RealtimeSession>,

@@ -131,8 +131,8 @@ test-sdk-web:
 wasm-check:
 	@echo "$(GREEN)Running WASM runtime check...$(NC)"
 	@rustup target add wasm32-unknown-unknown
-	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) check -p meerkat-web-runtime --target wasm32-unknown-unknown
-	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings
+	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) check -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets
+	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
 
 # Combined SDK test suites
 test-sdk-suites: test-sdk-python test-sdk-typescript test-sdk-web

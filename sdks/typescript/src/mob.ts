@@ -18,7 +18,11 @@ import type {
   SpawnManySpec,
   SpawnSpec,
 } from "./types.js";
-import type { MobSpawnManyResultEntry, WireAuthBindingRef } from "./generated/types.js";
+import type {
+  MobSpawnManyResultEntry,
+  WireAuthBindingRef,
+  WireMobMemberStatus,
+} from "./generated/types.js";
 import type { MeerkatClient } from "./client.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -62,23 +66,42 @@ export interface MobRespawnResult {
   failedPeerIds?: string[];
 }
 
+export interface MobUnreachablePeer {
+  peer: string;
+  reason?: string;
+}
+
+export interface MobPeerConnectivitySnapshot {
+  reachablePeerCount: number;
+  unknownPeerCount: number;
+  unreachablePeers: MobUnreachablePeer[];
+}
+
+/**
+ * Tri-state peer-connectivity projection for a mob member snapshot.
+ *
+ * Distinguishes a member with no bridge session (`not_applicable`) from a
+ * transiently-unresolved live probe (`probe_timed_out`) from a resolved
+ * connectivity snapshot (`known`).
+ */
+export type MobPeerConnectivity =
+  | { status: "not_applicable" }
+  | { status: "probe_timed_out" }
+  | { status: "known"; snapshot: MobPeerConnectivitySnapshot };
+
 export interface MobMemberSnapshot {
-  status: string;
+  status: WireMobMemberStatus;
+  /** Server-resolved opaque handle for subsequent member-targeted calls. */
+  memberRef: MobMemberRef;
   outputPreview?: string;
   error?: string;
   tokensUsed: number;
   isFinal: boolean;
   currentSessionId?: string;
-  liveAttachmentStatus?: "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
   resolvedCapabilities?: ResolvedModelCapabilities;
-  peerConnectivity?: {
-    reachablePeerCount: number;
-    unknownPeerCount: number;
-    unreachablePeers: Array<{
-      peer: string;
-      reason?: string;
-    }>;
-  };
+  kickoff?: Record<string, unknown>;
+  externalMember?: unknown;
+  peerConnectivity?: MobPeerConnectivity;
 }
 
 export interface MobKickoffWaitOptions {
@@ -86,8 +109,19 @@ export interface MobKickoffWaitOptions {
   timeoutMs?: number;
 }
 
-export interface MobKickoffMemberSnapshot extends MobMemberSnapshot {
+/**
+ * Member snapshot carried by the `mob/wait_kickoff` / `mob/wait_ready`
+ * member lists. The wait wire carries no `member_ref`, so this is its own
+ * shape rather than an extension of {@link MobMemberSnapshot}.
+ */
+export interface MobKickoffMemberSnapshot {
   agentIdentity: string;
+  status: string;
+  outputPreview?: string;
+  error?: string;
+  tokensUsed: number;
+  isFinal: boolean;
+  peerConnectivity?: MobPeerConnectivity;
 }
 
 export type MobReadyWaitOptions = MobKickoffWaitOptions;

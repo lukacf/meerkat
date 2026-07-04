@@ -252,6 +252,24 @@ impl ProviderRuntimeRegistry {
         runtime.build_realtime_text_client(connection)
     }
 
+    /// Build a provider-neutral realtime session factory through the owning
+    /// provider runtime. Keeps realtime socket credential minting behind the
+    /// same provider/auth seam as ordinary clients: the runtime applies its
+    /// backend/auth realtime gating and constructs the concrete adapter, so
+    /// callers never extract credential material from the connection.
+    pub fn build_realtime_session_factory(
+        &self,
+        connection: ResolvedConnection,
+    ) -> Result<Arc<dyn crate::realtime_session::RealtimeSessionFactory>, ProviderClientError> {
+        let runtime =
+            self.runtimes
+                .get(&connection.provider)
+                .ok_or(ProviderClientError::MissingFeature(
+                    "runtime-not-registered",
+                ))?;
+        runtime.build_realtime_session_factory(connection)
+    }
+
     /// Build the optional image-generation executor owned by the same
     /// provider runtime and resolved connection.
     pub fn build_image_generation_executor(

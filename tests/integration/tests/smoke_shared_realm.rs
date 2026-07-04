@@ -5210,13 +5210,16 @@ async fn e2e_m68_live_open_without_live_ws_returns_method_not_found()
 }
 
 /// M69: with `--live-ws` set but no resolvable OpenAI credential, `rkat-rpc`
-/// must fail at startup (B15) rather than expose `live/*` with a `None`
-/// factory. This is observed via the child process exiting non-zero before
-/// it can answer an `initialize` request.
+/// must BOOT and register `live/*`. Realtime credentials are resolved
+/// per-open from the session's own LLM identity (owning-realm binding), so a
+/// startup default-binding requirement would wrongly block
+/// explicit-binding-only configs. The per-open resolver failing closed
+/// without credential material is pinned at the facade seam; this lane pins
+/// the boot contract.
 #[tokio::test]
 #[ignore = "lane:e2e-system"]
-async fn e2e_m69_live_ws_without_credential_fails_startup() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn e2e_m69_live_ws_without_credential_boots_and_registers_live()
+-> Result<(), Box<dyn std::error::Error>> {
     let rkat_rpc = binary_path("rkat-rpc");
     if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
         return Ok(());
@@ -5235,11 +5238,9 @@ async fn e2e_m69_live_ws_without_credential_fails_startup() -> Result<(), Box<dy
         l.local_addr()?.port()
     };
 
-    // --live-ws set, but spawn the child WITHOUT any OpenAI credential. The
-    // factory build resolves the realm/binding from `meerkat-providers`,
-    // which requires resolved credential material; with no env keys the
-    // resolver fails and `async_main` returns Err with the B15 startup
-    // diagnostic.
+    // --live-ws set, but spawn the child WITHOUT any OpenAI credential.
+    // Startup performs only a wiring/feature preflight; credential
+    // resolution is deferred to each live/open under the session's binding.
     let mut rpc = spawn_stdio_process_without_openai(
         &rkat_rpc,
         &project_dir,
@@ -5257,29 +5258,34 @@ async fn e2e_m69_live_ws_without_credential_fails_startup() -> Result<(), Box<dy
     )
     .await?;
 
-    // The child should exit before it ever answers an `initialize` call. We
-    // give it a short window — a healthy server would normally answer
-    // within milliseconds. A handshake success here is a regression: it
-    // means rkat-rpc kept running with `live/*` exposed but no provider
-    // factory wired, which is exactly the B15 invariant violation.
     let mut pump = RpcEventPump::default();
     let init_result = pump
         .call(
             &mut rpc,
             "initialize",
             json!({"client_info": {"name": "m69", "version": "0.0.1"}}),
-            5,
+            10,
         )
         .await;
     let stderr_dump = read_available_stderr(&mut rpc, 500).await;
-
-    // Either: (a) the child died and the call errored (broken pipe / child
-    // exit) — that is the correct B15 behavior; or (b) startup logged a
-    // build failure to stderr. We accept either signal; what we DON'T
-    // accept is `init_result.is_ok()`.
     assert!(
-        init_result.is_err(),
-        "rkat-rpc with --live-ws and no OpenAI credential must fail startup, but initialize succeeded; stderr: {stderr_dump}"
+        init_result.is_ok(),
+        "rkat-rpc with --live-ws and no OpenAI credential must boot (credentials resolve per-open, not at startup); stderr: {stderr_dump}"
+    );
+
+    // live/* must be registered: a status probe on a fabricated channel is
+    // routed to the handler (typed error), not -32601 method-not-found.
+    let (code, _message) = pump
+        .call_expect_error(
+            &mut rpc,
+            "live/status",
+            json!({"channel_id": "live-nonexistent"}),
+            10,
+        )
+        .await?;
+    assert_ne!(
+        code, -32601,
+        "live/status must be registered when --live-ws is set even without startup credentials"
     );
 
     shutdown_child(rpc.child).await?;

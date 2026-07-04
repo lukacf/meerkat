@@ -543,7 +543,7 @@ Cancel a running background shell job.
 The memory search tool lives in the `meerkat-memory` crate and is composed into the tool dispatcher as a separate `MemorySearchDispatcher` (implementing `AgentToolDispatcher`). It is NOT part of `CompositeDispatcher` -- it is wired via `ToolGateway` when the `memory-store-session` feature is enabled and `enable_memory` is `true`.
 
 <Accordion title="memory_search">
-Search semantic memory for past conversation content. Memory contains text from earlier conversation turns that were compacted away to save context space.
+Search semantic memory for past conversation content. Memory contains text from earlier turns in the current session that were compacted away to save context space.
 
 <ParamField body="query" type="String" required>
   Natural language search query describing what you want to recall.

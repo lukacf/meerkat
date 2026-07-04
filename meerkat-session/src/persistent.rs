@@ -23,7 +23,6 @@
 //!   they do not drop the live handle that owns mechanical capabilities such as
 //!   comms runtimes.
 //!
-//! Runtime-less compatibility mode still persists directly to `SessionStore`.
 //! Event-log file projection is separate best-effort derived state.
 
 #![cfg_attr(test, allow(dead_code))]
@@ -372,18 +371,6 @@ fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError
 /// and `archive()` sets `cancelled = true` under the lock before deleting.
 struct CheckpointerGate {
     cancelled: Mutex<bool>,
-}
-
-#[derive(Clone, Copy)]
-enum StoreOnlyArchiveMode {
-    Reject,
-    MachineAuthority,
-}
-
-#[derive(Clone, Copy)]
-enum DirectStartTurnPersistence<'a> {
-    RuntimelessImmediate,
-    MachineCommitted(MachineServiceTurnCommitProtocol<'a>),
 }
 
 /// Checkpointer that saves sessions to a [`SessionStore`].
@@ -1354,7 +1341,7 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
 pub struct PersistentSessionService<B: SessionAgentBuilder> {
     inner: EphemeralSessionService<B>,
     store: Arc<dyn SessionStore>,
-    runtime_store: Option<Arc<dyn RuntimeStore>>,
+    runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
@@ -1636,25 +1623,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Whether the session is archived, read as a projection of the canonical
     /// SessionDocumentMachine `session_lifecycle_terminal` fact.
     ///
-    /// Both branches read machine-realized projections of the same archive
-    /// verdict: store-only mode reads the durable document's typed
-    /// lifecycle-terminal fact; runtime-backed mode reads the runtime
-    /// `Retired` realization. The fail-closed archive realization order
-    /// (durable document commit first, runtime retire second) guarantees
-    /// `Retired` implies the document is Archived, so the two projections are
-    /// convergent; the only reachable partial state (document Archived,
-    /// runtime live) reads as not-archived here and converges on a retried
-    /// archive.
+    /// Reads the runtime `Retired` realization as primary. The fail-closed
+    /// archive realization order (durable document commit first, runtime
+    /// retire second) guarantees `Retired` implies the document is Archived;
+    /// the only reachable partial state (document Archived, runtime live)
+    /// reads as not-archived here and converges on a retried archive.
     pub async fn session_archived_by_authority(
         &self,
         id: &SessionId,
         session: &Session,
     ) -> Result<bool, SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(session_marks_archived(session));
-        };
-
-        match Self::load_runtime_state_for_session(runtime_store, id).await? {
+        match Self::load_runtime_state_for_session(&self.runtime_store, id).await? {
             Some(RuntimeState::Retired) => Ok(true),
             Some(_) => Ok(false),
             None if session_marks_archived(session) => {
@@ -1678,11 +1657,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         sequence: u64,
         contributing_input_ids: &[InputId],
     ) -> Result<Vec<StoredInputState>, SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(Vec::new());
-        };
         let runtime_id = Self::runtime_id_for_session(id);
-        let stored_states = runtime_store
+        let stored_states = self
+            .runtime_store
             .load_input_states(&runtime_id)
             .await
             .map_err(|err| {
@@ -1711,27 +1688,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 Some(bundle)
             })
             .collect())
-    }
-
-    async fn commit_runtime_apply(
-        &self,
-        _id: &SessionId,
-        run_id: RunId,
-        boundary: RunApplyBoundary,
-        session: &Session,
-        contributing_input_ids: &[InputId],
-    ) -> Result<RunBoundaryReceiptDraft, SessionError> {
-        if self.runtime_store.is_none() {
-            let persisted = self.save_normalized_session(session.clone()).await?;
-            return Self::build_runtime_receipt(
-                run_id,
-                boundary,
-                contributing_input_ids.to_vec(),
-                &persisted,
-            );
-        }
-
-        Self::build_runtime_receipt(run_id, boundary, contributing_input_ids.to_vec(), session)
     }
 
     async fn export_session_with_labels(&self, id: &SessionId) -> Result<Session, SessionError> {
@@ -1811,62 +1767,55 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<(Option<Session>, bool), SessionError> {
-        let session = if let Some(runtime_store) = self.runtime_store.as_ref() {
-            // Once the machine has retired the runtime, the durable archived
-            // projection is the authoritative read source. The runtime session
-            // snapshot is frozen at the pre-retirement revision (retire commits
-            // only the lifecycle transition, never clearing the snapshot) and
-            // never carries the archived lifecycle mirror, so returning it here
-            // would mask the retired projection. The durable projection already
-            // carries the post-retirement transcript revision and the archived
-            // metadata written by the archive flow.
-            if matches!(
-                Self::load_runtime_state_for_session(runtime_store, id).await?,
-                Some(RuntimeState::Retired)
-            ) {
-                self.store
-                    .load(id)
-                    .await
-                    .map_err(|e| SessionError::Store(Box::new(e)))?
-            } else {
-                match Self::load_runtime_session_snapshot_for_session(runtime_store, id).await? {
-                    Some(session) => Some(session),
-                    None => {
-                        let store_projection = self
-                            .store
-                            .load(id)
-                            .await
-                            .map_err(|e| SessionError::Store(Box::new(e)))?;
-                        // Recovery-source eligibility (whether a store-only
-                        // projection may stand in as authoritative when the
-                        // runtime snapshot is absent) is owned by the canonical
-                        // SessionDocumentMachine. The shell extracts only typed
-                        // store/runtime observations and mirrors the verdict.
-                        // Fails closed: a machine drive error makes the
-                        // projection ineligible.
-                        match store_projection {
-                            Some(session) => {
-                                let runtime_projection_quarantined =
-                                    self.runtime_projection_fallback_quarantined(id).await;
-                                match self.store_projection_recovery_source_resolved(
-                                    id,
-                                    &session,
-                                    runtime_projection_quarantined,
-                                ) {
-                                    Ok(true) => Some(session),
-                                    Ok(false) | Err(_) => None,
-                                }
-                            }
-                            None => None,
-                        }
-                    }
-                }
-            }
-        } else {
+        // Once the machine has retired the runtime, the durable archived
+        // projection is the authoritative read source. The runtime session
+        // snapshot is frozen at the pre-retirement revision (retire commits
+        // only the lifecycle transition, never clearing the snapshot) and
+        // never carries the archived lifecycle mirror, so returning it here
+        // would mask the retired projection. The durable projection already
+        // carries the post-retirement transcript revision and the archived
+        // metadata written by the archive flow.
+        let session = if matches!(
+            Self::load_runtime_state_for_session(&self.runtime_store, id).await?,
+            Some(RuntimeState::Retired)
+        ) {
             self.store
                 .load(id)
                 .await
                 .map_err(|e| SessionError::Store(Box::new(e)))?
+        } else {
+            match Self::load_runtime_session_snapshot_for_session(&self.runtime_store, id).await? {
+                Some(session) => Some(session),
+                None => {
+                    let store_projection = self
+                        .store
+                        .load(id)
+                        .await
+                        .map_err(|e| SessionError::Store(Box::new(e)))?;
+                    // Recovery-source eligibility (whether a store-only
+                    // projection may stand in as authoritative when the
+                    // runtime snapshot is absent) is owned by the canonical
+                    // SessionDocumentMachine. The shell extracts only typed
+                    // store/runtime observations and mirrors the verdict.
+                    // Fails closed: a machine drive error makes the
+                    // projection ineligible.
+                    match store_projection {
+                        Some(session) => {
+                            let runtime_projection_quarantined =
+                                self.runtime_projection_fallback_quarantined(id).await;
+                            match self.store_projection_recovery_source_resolved(
+                                id,
+                                &session,
+                                runtime_projection_quarantined,
+                            ) {
+                                Ok(true) => Some(session),
+                                Ok(false) | Err(_) => None,
+                            }
+                        }
+                        None => None,
+                    }
+                }
+            }
         };
         self.apply_transcript_rewrite_replay(id, session).await
     }
@@ -2258,12 +2207,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         operation: &str,
     ) -> Result<Option<Session>, SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(None);
-        };
-
         if let Some(runtime) =
-            Self::load_runtime_session_snapshot_for_session(runtime_store, id).await?
+            Self::load_runtime_session_snapshot_for_session(&self.runtime_store, id).await?
         {
             return Ok(Some(runtime));
         }
@@ -2293,42 +2238,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         operation: &str,
     ) -> Result<Option<Session>, SessionError> {
-        if self.runtime_store.is_some() {
-            return self
-                .load_runtime_authority_session_for_control(id, operation)
-                .await;
-        }
-
-        // A pure store-only session (no runtime authority) is a compatibility
-        // projection: control mutations require an authoritative runtime/session
-        // machine snapshot, so they resolve the store-only Unsupported mechanism
-        // error regardless of the row's self-declared lifecycle terminal. The
-        // authoritative-archive → typed-NotFound contract is owned by the
-        // runtime-authority branch above (and `reject_if_archived_session`),
-        // which only fires for sessions that carry an authoritative snapshot.
-        if self
-            .store
-            .exists(id)
+        self.load_runtime_authority_session_for_control(id, operation)
             .await
-            .map_err(|e| SessionError::Store(Box::new(e)))?
-        {
-            return Err(Self::store_only_control_mutation_error(id, operation));
-        }
-
-        Ok(None)
-    }
-
-    async fn load_machine_authority_session_for_control(
-        &self,
-        id: &SessionId,
-    ) -> Result<Option<Session>, SessionError> {
-        if self.runtime_store.is_some() {
-            return self
-                .load_runtime_authority_session_for_control(id, "archive")
-                .await;
-        }
-
-        self.load_persisted_session_for_control(id, "archive").await
     }
 
     async fn live_session_authority(
@@ -2341,24 +2252,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(err) => return Err(err),
         };
 
-        let using_runtime_store = self.runtime_store.is_some();
-        let stored = if let Some(runtime_store) = self.runtime_store.as_ref() {
-            let Some(runtime) =
-                Self::load_runtime_session_snapshot_for_session(runtime_store, id).await?
-            else {
-                return Ok(LiveSessionAuthority::LiveAuthoritative);
-            };
-            runtime
-        } else {
-            let Some(stored) = self
-                .store
-                .load(id)
-                .await
-                .map_err(|e| SessionError::Store(Box::new(e)))?
-            else {
-                return Ok(LiveSessionAuthority::LiveAuthoritative);
-            };
-            stored
+        let Some(stored) =
+            Self::load_runtime_session_snapshot_for_session(&self.runtime_store, id).await?
+        else {
+            return Ok(LiveSessionAuthority::LiveAuthoritative);
         };
 
         let stored_revision = stored.transcript_revision().map_err(|err| {
@@ -2372,11 +2269,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )))
         })?;
         let stored_transcript_diverged = stored_revision != live_revision;
-        let live_has_uncommitted_transcript =
-            using_runtime_store && live.messages().len() > stored.messages().len();
-        let runtime_system_context_diverged = using_runtime_store
-            && stored.system_context_state().unwrap_or_default()
-                != live.system_context_state().unwrap_or_default();
+        let live_has_uncommitted_transcript = live.messages().len() > stored.messages().len();
+        let runtime_system_context_diverged = stored.system_context_state().unwrap_or_default()
+            != live.system_context_state().unwrap_or_default();
         let stored_is_archived = self.session_archived_by_authority(id, &stored).await?;
 
         // A durable snapshot timestamp is a projection witness, not live-session
@@ -2520,10 +2415,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         durable: &Session,
         reason: LiveSessionSyncCause,
     ) -> Result<(), SessionError> {
-        if self.runtime_store.is_none() {
-            return Ok(());
-        }
-
         let durable_state = durable.system_context_state().unwrap_or_default();
         let state_handle = self.inner.system_context_state(id).await.ok_or_else(|| {
             SessionError::Agent(AgentError::InternalError(format!(
@@ -2578,9 +2469,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(false);
         }
 
-        if self.runtime_store.is_some()
-            && reason == LiveSessionAuthorityReason::RuntimeSystemContextDiverged
-        {
+        if reason == LiveSessionAuthorityReason::RuntimeSystemContextDiverged {
             self.synchronize_live_runtime_context_state_from_durable(
                 id,
                 durable,
@@ -2719,48 +2608,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(meerkat_core::session_store::session_projection_cas_token)
             .transpose()
             .map_err(|err| SessionError::Store(Box::new(err)))?;
-        let runtime_session_snapshot = if self.runtime_store.is_some() {
-            Some(serde_json::to_vec(session).map_err(|err| {
+        let runtime_session_snapshot = serde_json::to_vec(session).map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to serialize replay-recovered session snapshot: {err}"
+            )))
+        })?;
+        self.runtime_store
+            .commit_session_snapshot(
+                &Self::runtime_id_for_session(session.id()),
+                SessionDelta {
+                    session_snapshot: runtime_session_snapshot.clone(),
+                },
+            )
+            .await
+            .map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to serialize replay-recovered session snapshot: {err}"
+                    "runtime replay projection persistence failed: {err}"
                 )))
-            })?)
-        } else {
-            None
-        };
-        if let (Some(runtime_store), Some(session_snapshot)) = (
-            self.runtime_store.as_ref(),
-            runtime_session_snapshot.as_ref(),
-        ) {
-            runtime_store
-                .commit_session_snapshot(
-                    &Self::runtime_id_for_session(session.id()),
-                    SessionDelta {
-                        session_snapshot: session_snapshot.clone(),
-                    },
-                )
-                .await
-                .map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "runtime replay projection persistence failed: {err}"
-                    )))
-                })?;
-        }
+            })?;
         if let Err(error) = self
             .store
             .save_authoritative_projection_if_current_revision(session, expected_current_revision)
             .await
         {
-            if self.runtime_store.is_some() {
-                return Err(self
-                    .fail_closed_runtime_projection_update(
-                        session.id(),
-                        error,
-                        runtime_session_snapshot.as_deref(),
-                    )
-                    .await);
-            }
-            return Err(SessionError::Store(Box::new(error)));
+            return Err(self
+                .fail_closed_runtime_projection_update(
+                    session.id(),
+                    error,
+                    Some(runtime_session_snapshot.as_slice()),
+                )
+                .await);
         }
         Ok(())
     }
@@ -2890,15 +2767,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if commits.is_empty() {
             return Ok(session);
         }
-        let previous = if let Some(runtime_store) = self.runtime_store.as_ref() {
-            Self::load_runtime_session_snapshot_for_session(runtime_store, session.id()).await?
-        } else {
-            self.store
-                .load(session.id())
-                .await
-                .map_err(|err| SessionError::Store(Box::new(err)))?
-        };
-        if let Some(runtime_store) = self.runtime_store.as_ref() {
+        let previous =
+            Self::load_runtime_session_snapshot_for_session(&self.runtime_store, session.id())
+                .await?;
+        {
+            let runtime_store = &self.runtime_store;
             if let Err(error) = verify_authoritative_projection_persisted_continuity(
                 self.store.as_ref(),
                 self.blob_store.as_ref(),
@@ -2985,7 +2858,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     let mut rollback_failure = None;
                     if let Some(rollback_target) = last_audited_projection.as_ref() {
-                        if let Some(runtime_store) = self.runtime_store.as_ref() {
+                        {
                             match serde_json::to_vec(rollback_target) {
                                 Ok(rollback_snapshot) => {
                                     match runtime_store
@@ -3116,113 +2989,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         Some(latest_session_snapshot.as_slice()),
                     )
                     .await);
-            }
-        } else {
-            let incoming_revision = meerkat_core::transcript_messages_digest(session.messages())
-                .map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to digest incoming transcript rewrite snapshot: {err}"
-                    )))
-                })?;
-            let mut last_audited_projection = previous.clone();
-            let mut persisted_revision = previous
-                .as_ref()
-                .map(meerkat_core::Session::transcript_revision)
-                .transpose()
-                .map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to read previous transcript revision for rewrite persistence: {err}"
-                    )))
-                })?;
-            for commit in commits {
-                if persisted_revision.as_deref() != Some(commit.parent_revision.as_str()) {
-                    let bridge = session_materialized_at_transcript_revision(
-                        &session,
-                        &commit.parent_revision,
-                    )?;
-                    save_session_projection_with_storage_normalization_bridge(
-                        self.store.as_ref(),
-                        self.blob_store.as_ref(),
-                        &bridge,
-                    )
-                    .await
-                    .map_err(|err| SessionError::Store(Box::new(err)))?;
-                }
-                let rewritten =
-                    session_materialized_at_transcript_revision(&session, &commit.revision)?;
-                self.store
-                    .save_transcript_rewrite(&rewritten, commit)
-                    .await
-                    .map_err(transcript_rewrite_store_error_to_session_error)?;
-                let rewritten_projection_token =
-                    meerkat_core::session_store::session_projection_cas_token(&rewritten)
-                        .map_err(|err| SessionError::Store(Box::new(err)))?;
-                if let Err(error) = append_transcript_rewrite_commit_events(
-                    self.event_store.as_ref(),
-                    self.projector.as_ref(),
-                    &session,
-                    std::slice::from_ref(commit),
-                )
-                .await
-                {
-                    if let Some(rollback_target) = last_audited_projection.as_ref()
-                        && let Err(rollback_error) = self
-                            .store
-                            .save_authoritative_projection_if_current_revision(
-                                rollback_target,
-                                Some(rewritten_projection_token.clone()),
-                            )
-                            .await
-                    {
-                        tracing::error!(
-                            session_id = %rollback_target.id(),
-                            error = %rollback_error,
-                            "failed to roll back transcript rewrite projection after audit append failure"
-                        );
-                        match self
-                            .store
-                            .delete_if_current_revision(session.id(), &rewritten_projection_token)
-                            .await
-                        {
-                            Ok(true) => {
-                                return Err(SessionError::Agent(
-                                    meerkat_core::error::AgentError::InternalError(format!(
-                                        "transcript rewrite audit append failed ({error}); projection rollback also failed: {rollback_error}; unaudited projection was quarantined"
-                                    )),
-                                ));
-                            }
-                            Ok(false) => {
-                                return Err(SessionError::Agent(
-                                    meerkat_core::error::AgentError::InternalError(format!(
-                                        "transcript rewrite audit append failed ({error}); projection rollback also failed: {rollback_error}; projection changed before unaudited quarantine"
-                                    )),
-                                ));
-                            }
-                            Err(quarantine_error) => {
-                                return Err(SessionError::Agent(
-                                    meerkat_core::error::AgentError::InternalError(format!(
-                                        "transcript rewrite audit append failed ({error}); projection rollback also failed: {rollback_error}; unaudited projection quarantine also failed: {quarantine_error}"
-                                    )),
-                                ));
-                            }
-                        }
-                    }
-                    return Err(error);
-                }
-                last_audited_projection = Some(rewritten);
-                persisted_revision = Some(commit.revision.clone());
-            }
-            if commits.last().map(|commit| commit.revision.as_str())
-                != Some(incoming_revision.as_str())
-            {
-                save_session_projection_after_verified_rewrite_chain(
-                    self.store.as_ref(),
-                    self.blob_store.as_ref(),
-                    &session,
-                    &incoming_revision,
-                )
-                .await
-                .map_err(|err| SessionError::Store(Box::new(err)))?;
             }
         }
         if converge_live {
@@ -3451,7 +3217,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         builder: B,
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         Self::new_with_capacities(builder, max_sessions, 0, store, runtime_store, blob_store)
@@ -3467,7 +3233,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         max_sessions: usize,
         _archived_history_capacity: usize,
         store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         Self::new_with_capacities(builder, max_sessions, 0, store, runtime_store, blob_store)
@@ -3481,7 +3247,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         active_session_capacity: usize,
         _archived_history_capacity: usize,
         store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         Self {
@@ -3516,7 +3282,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self
     }
 
-    pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
+    pub fn runtime_store(&self) -> Arc<dyn RuntimeStore> {
         self.runtime_store.clone()
     }
 
@@ -3524,10 +3290,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<Option<RuntimeState>, SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(None);
-        };
-        Self::load_runtime_state_for_session(runtime_store, id).await
+        Self::load_runtime_state_for_session(&self.runtime_store, id).await
     }
 
     pub fn has_event_projection(&self) -> bool {
@@ -3604,42 +3367,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         .await
     }
 
-    pub async fn start_turn_with_reserved_admission(
-        &self,
-        id: &SessionId,
-        req: StartTurnRequest,
-        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
-    ) -> Result<RunResult, SessionError> {
-        self.reject_runtime_backed_direct_start_turn()?;
-        self.start_turn_with_recoverable_reserved_admission(id, req, admission)
-            .await
-            .map_err(|(error, _admission)| error)
-    }
-
-    pub async fn start_turn_with_recoverable_reserved_admission(
-        &self,
-        id: &SessionId,
-        req: StartTurnRequest,
-        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
-    ) -> Result<
-        RunResult,
-        (
-            SessionError,
-            Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
-        ),
-    > {
-        if let Err(error) = self.reject_runtime_backed_direct_start_turn() {
-            return Err((error, Some(admission)));
-        }
-        self.start_turn_inner_with_admission(
-            id,
-            req,
-            Some(admission),
-            DirectStartTurnPersistence::RuntimelessImmediate,
-        )
-        .await
-    }
-
     pub async fn run_machine_committed_live_turn(
         &self,
         protocol: MachineServiceTurnCommitProtocol<'_>,
@@ -3658,12 +3385,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         let result = self
-            .start_turn_inner_with_admission(
-                id,
-                req,
-                Some(admission),
-                DirectStartTurnPersistence::MachineCommitted(protocol),
-            )
+            .start_turn_inner_with_admission(id, req, Some(admission), protocol)
             .await;
         match result {
             Ok(result) => Ok(result),
@@ -3687,25 +3409,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         protocol: MachineServiceTurnCommitProtocol<'_>,
     ) -> Result<(), SessionError> {
-        match self.runtime_store.as_ref() {
-            Some(runtime_store) => {
-                if protocol
-                    .runtime_adapter
-                    .shares_runtime_store_authority(runtime_store)
-                {
-                    return Ok(());
-                }
-                Err(SessionError::Unsupported(
-                    "machine service-turn commit protocol runtime authority does not match the session service runtime store"
-                        .to_string(),
-                ))
-            }
-            None if !protocol.runtime_adapter.has_runtime_persistence() => Ok(()),
-            None => Err(SessionError::Unsupported(
-                "persistent machine service-turn commit protocol requires a runtime-backed session service"
-                    .to_string(),
-            )),
+        if protocol
+            .runtime_adapter
+            .shares_runtime_store_authority(&self.runtime_store)
+        {
+            return Ok(());
         }
+        Err(SessionError::Unsupported(
+            "machine service-turn commit protocol runtime authority does not match the session service runtime store"
+                .to_string(),
+        ))
     }
 
     pub async fn service_turn_error_requires_machine_terminal_receipt(
@@ -3723,28 +3436,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .is_some_and(|snapshot| snapshot.turn_terminal)
     }
 
-    fn reject_runtime_backed_direct_start_turn(&self) -> Result<(), SessionError> {
-        if self.runtime_store.is_some() {
-            return Err(SessionError::Unsupported(
-                "runtime-backed direct start_turn must route through the MeerkatMachine service-turn commit protocol"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     fn reject_runtime_backed_eager_create_session(
         &self,
         req: &CreateSessionRequest,
     ) -> Result<(), SessionError> {
-        let runtime_backed = self.runtime_store.is_some()
-            || req.build.as_ref().is_some_and(|build| {
-                matches!(
-                    &build.runtime_build_mode,
-                    meerkat_core::RuntimeBuildMode::SessionOwned(_)
-                )
-            });
-        if runtime_backed && req.initial_turn == InitialTurnPolicy::RunImmediately {
+        if req.initial_turn == InitialTurnPolicy::RunImmediately {
             return Err(SessionError::Unsupported(
                 "runtime-backed eager create_session must route through the MeerkatMachine service-turn commit protocol"
                     .to_string(),
@@ -3758,7 +3454,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         req: StartTurnRequest,
         mut admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
-        persistence: DirectStartTurnPersistence<'_>,
+        protocol: MachineServiceTurnCommitProtocol<'_>,
     ) -> Result<
         RunResult,
         (
@@ -3793,18 +3489,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let result = match result {
             Ok(result) => result,
             Err((error, admission)) => {
-                if matches!(
-                    persistence,
-                    DirectStartTurnPersistence::RuntimelessImmediate
-                ) && Self::callback_pending_terminal(&error).is_some()
-                    && let Err(persist_error) = self.persist_full_session_or_discard_live(id).await
-                {
-                    return Err((persist_error, admission));
-                }
-                if let DirectStartTurnPersistence::MachineCommitted(protocol) = persistence
-                    && self
-                        .service_turn_error_requires_machine_terminal_receipt(id, &error)
-                        .await
+                if self
+                    .service_turn_error_requires_machine_terminal_receipt(id, &error)
+                    .await
                 {
                     if let Err(commit_error) = protocol
                         .runtime_adapter
@@ -3826,50 +3513,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             }
         };
 
-        match persistence {
-            DirectStartTurnPersistence::RuntimelessImmediate => {
-                let _ = self
-                    .persist_full_session_or_discard_live(id)
-                    .await
-                    .map_err(|error| (error, None))?;
-            }
-            DirectStartTurnPersistence::MachineCommitted(protocol) => {
-                if let Err(error) = protocol
-                    .runtime_adapter
-                    .commit_service_turn_terminal_receipt(id)
-                    .await
-                {
-                    let _ = self.discard_live_session(id).await;
-                    return Err((runtime_driver_error_to_session_error(error), None));
-                }
-                self.persist_full_session_or_discard_live(id)
-                    .await
-                    .map_err(|error| (error, None))?;
-            }
+        if let Err(error) = protocol
+            .runtime_adapter
+            .commit_service_turn_terminal_receipt(id)
+            .await
+        {
+            let _ = self.discard_live_session(id).await;
+            return Err((runtime_driver_error_to_session_error(error), None));
         }
+        self.persist_full_session_or_discard_live(id)
+            .await
+            .map_err(|error| (error, None))?;
 
         Ok(result)
-    }
-
-    async fn legacy_start_turn_inner_with_admission(
-        &self,
-        id: &SessionId,
-        req: StartTurnRequest,
-        admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
-    ) -> Result<
-        RunResult,
-        (
-            SessionError,
-            Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
-        ),
-    > {
-        self.start_turn_inner_with_admission(
-            id,
-            req,
-            admission,
-            DirectStartTurnPersistence::RuntimelessImmediate,
-        )
-        .await
     }
 
     pub async fn event_log_latest_seq(&self, id: &SessionId) -> Result<Option<u64>, SessionError> {
@@ -4035,7 +3691,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .persist_normalized_transcript_rewrite_chain(session, &commits, false)
                 .await;
         }
-        if let Some(runtime_store) = self.runtime_store.as_ref() {
+        {
+            let runtime_store = &self.runtime_store;
             // The preflight validates continuity against the durable projection
             // head using the rewrite-aware `run_boundary_snapshot_save_guard`, so
             // a core-owned shrink (e.g. compaction) whose `TranscriptRewriteCommit`
@@ -4096,14 +3753,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await);
             }
-        } else {
-            save_session_projection_with_storage_normalization_bridge(
-                self.store.as_ref(),
-                self.blob_store.as_ref(),
-                &session,
-            )
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))?;
         }
         Ok(session)
     }
@@ -4119,7 +3768,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// claims archived but the machine lifecycle state is absent, so a stale or
     /// partially-written projection can never silently flip archival truth.
     ///
-    /// Ordering invariant: callers (`archive_with_store_only_mode`) invoke this
+    /// Ordering invariant: callers (`archive_with_machine_protocol`) invoke this
     /// only AFTER `protocol.retire_session` has committed the canonical
     /// `Retire` transition — the projection write trails the machine, never
     /// leads it.
@@ -4148,14 +3797,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session: &Session,
     ) -> Result<Vec<meerkat_core::TranscriptRewriteCommit>, SessionError> {
-        let previous = if let Some(runtime_store) = self.runtime_store.as_ref() {
-            Self::load_runtime_session_snapshot_for_session(runtime_store, session.id()).await?
-        } else {
-            self.store
-                .load(session.id())
-                .await
-                .map_err(|e| SessionError::Store(Box::new(e)))?
-        };
+        let previous =
+            Self::load_runtime_session_snapshot_for_session(&self.runtime_store, session.id())
+                .await?;
         let Some(previous) = previous else {
             return Ok(Vec::new());
         };
@@ -4259,10 +3903,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         session_snapshot: &[u8],
     ) -> Result<(), SessionError> {
-        if self.runtime_store.is_none() {
-            return Ok(());
-        }
-
         let session: Session = serde_json::from_slice(session_snapshot).map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to deserialize committed runtime session snapshot: {err}"
@@ -4515,14 +4155,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         rejected_snapshot: &[u8],
     ) -> Result<(), SessionError> {
-        let Some(runtime_store) = self.runtime_store.as_ref() else {
-            return Ok(());
-        };
         // The runtime store records the durable quarantine marker atomically
         // inside `clear_session_snapshot_if_current` (in the same transaction
         // that deletes the rejected snapshot), so the fact survives a process
         // restart without a process-local mirror here.
-        let cleared = runtime_store
+        let cleared = self
+            .runtime_store
             .clear_session_snapshot_if_current(&Self::runtime_id_for_session(id), rejected_snapshot)
             .await
             .map_err(|error| {
@@ -4541,21 +4179,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     async fn runtime_projection_fallback_quarantined(&self, id: &SessionId) -> bool {
         let rid = Self::runtime_id_for_session(id);
-        match self.runtime_store.as_ref() {
-            Some(store) => match store.is_runtime_projection_quarantined(&rid).await {
-                Ok(quarantined) => quarantined,
-                Err(error) => {
-                    // Fail closed: an unreadable quarantine marker leaves the
-                    // store projection ineligible for recovery fallback.
-                    tracing::error!(
-                        session_id = %id,
-                        error = %error,
-                        "failed to read durable runtime-projection quarantine marker; treating as not quarantined (recovery stays fail-closed)"
-                    );
-                    false
-                }
-            },
-            None => false,
+        match self
+            .runtime_store
+            .is_runtime_projection_quarantined(&rid)
+            .await
+        {
+            Ok(quarantined) => quarantined,
+            Err(error) => {
+                // Fail closed: an unreadable quarantine marker leaves the
+                // store projection ineligible for recovery fallback.
+                tracing::error!(
+                    session_id = %id,
+                    error = %error,
+                    "failed to read durable runtime-projection quarantine marker; treating as not quarantined (recovery stays fail-closed)"
+                );
+                false
+            }
         }
     }
 
@@ -4729,15 +4368,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )))
         })?;
 
-        let receipt = self
-            .commit_runtime_apply(
-                id,
-                run_id,
-                boundary,
-                &persisted_session,
-                &contributing_input_ids,
-            )
-            .await?;
+        let receipt = Self::build_runtime_receipt(
+            run_id,
+            boundary,
+            contributing_input_ids,
+            &persisted_session,
+        )?;
 
         if !committed_context_events.is_empty()
             && let Err(error) = self
@@ -4827,15 +4463,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )))
         })?;
 
-        let receipt = self
-            .commit_runtime_apply(
-                id,
-                run_id,
-                boundary,
-                &persisted_session,
-                &contributing_input_ids,
-            )
-            .await?;
+        let receipt = Self::build_runtime_receipt(
+            run_id,
+            boundary,
+            contributing_input_ids,
+            &persisted_session,
+        )?;
 
         if !committed_context_events.is_empty()
             && let Err(error) = self
@@ -5402,45 +5035,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(result)
     }
 
-    async fn archive_with_store_only_mode(
+    /// Archive with a concrete machine protocol. Runtime-backed surfaces must
+    /// use this path so the canonical SessionDocumentMachine archive verdict
+    /// is realized on BOTH sides: the durable session-document lifecycle
+    /// commit lands first, then the runtime `MeerkatMachine::Retire`
+    /// transition. A failure anywhere fails the archive operation
+    /// (fail-closed) — there is no warn-continue split-truth window.
+    pub async fn archive_with_machine_protocol(
         &self,
         id: &SessionId,
-        store_only_mode: StoreOnlyArchiveMode,
-        machine_archive: Option<MachineSessionArchiveProtocol<'_>>,
+        machine_archive: MachineSessionArchiveProtocol<'_>,
     ) -> Result<(), SessionError> {
-        if let Some(protocol) = machine_archive.as_ref()
-            && let Some(runtime_store) = self.runtime_store.as_ref()
-        {
-            protocol.require_shared_runtime_store(id, runtime_store)?;
-        }
+        machine_archive.require_shared_runtime_store(id, &self.runtime_store)?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _recovery_guard = recovery_gate.lock().await;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
 
         let archived_snapshot = match self.export_session_with_labels(id).await {
             Ok(session) => Some(session),
-            Err(SessionError::NotFound { .. }) => match store_only_mode {
-                StoreOnlyArchiveMode::Reject if self.runtime_store.is_none() => self
-                    .store
-                    .load(id)
-                    .await
-                    .map_err(|e| SessionError::Store(Box::new(e)))?,
-                StoreOnlyArchiveMode::Reject => {
-                    self.load_persisted_session_for_control(id, "archive")
-                        .await?
-                }
-                StoreOnlyArchiveMode::MachineAuthority => {
-                    self.load_machine_authority_session_for_control(id).await?
-                }
-            },
+            Err(SessionError::NotFound { .. }) => {
+                self.load_persisted_session_for_control(id, "archive")
+                    .await?
+            }
             Err(err) => return Err(err),
         };
         // Drive the canonical SessionDocumentMachine archive decision. The
         // machine owns the session-document lifecycle-terminal fact for ALL
         // profiles (LUC-524 R004 fold): this shell extracts only pure
-        // observations — the canonical current archived-ness (runtime mode:
-        // the Retire realization; store-only mode: the durable document's
-        // typed fact), the mode, the durable-snapshot presence, and the
+        // observations — the canonical current archived-ness (the runtime
+        // Retire realization), the durable-snapshot presence, and the
         // runtime registration — seeds the machine registry, and mirrors the
         // emitted disposition + realization action vector. It decides nothing.
         let currently_archived = if let Some(ref session) = archived_snapshot {
@@ -5448,11 +5071,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         } else {
             false
         };
-        let runtime_session_registered = if let Some(ref protocol) = machine_archive {
-            protocol.session_registered(id).await
-        } else {
-            false
-        };
+        let runtime_session_registered = machine_archive.session_registered(id).await;
         let mut authority = SessionDocumentMachineAuthority::new();
         let document_key = SessionDocumentKey::new(id.to_string());
         let seed = if currently_archived {
@@ -5471,7 +5090,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let effects = authority
             .archive_session_document(
                 document_key,
-                machine_archive.is_some(),
+                true,
                 archived_snapshot.is_some(),
                 runtime_session_registered,
             )
@@ -5553,27 +5172,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 return Err(err);
             }
         }
-        if retire_runtime {
-            let Some(protocol) = machine_archive else {
-                if let Some(ref mut guard) = gate_guard {
-                    **guard = false;
-                }
-                return Err(SessionError::Agent(AgentError::InternalError(format!(
-                    "machine archive verdict for session {id} requested a runtime retire \
-                     without a machine archive protocol"
-                ))));
-            };
-            if let Err(err) = protocol.retire_session(id).await {
-                // Fail closed: the archive operation fails. The committed
-                // document write (if any) is convergent-by-retry — the runtime
-                // authority still reads the session as live, and a retried
-                // archive re-drives the machine, re-commits the idempotent
-                // document write, and retires the runtime.
-                if let Some(ref mut guard) = gate_guard {
-                    **guard = false;
-                }
-                return Err(err);
+        if retire_runtime && let Err(err) = machine_archive.retire_session(id).await {
+            // Fail closed: the archive operation fails. The committed
+            // document write (if any) is convergent-by-retry — the runtime
+            // authority still reads the session as live, and a retried
+            // archive re-drives the machine, re-commits the idempotent
+            // document write, and retires the runtime.
+            if let Some(ref mut guard) = gate_guard {
+                **guard = false;
             }
+            return Err(err);
         }
 
         let live_result = self.inner.archive(id).await;
@@ -5591,25 +5199,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // Neither side had it - propagate NotFound from the live service.
             _ => live_result,
         }
-    }
-
-    /// Archive with a concrete machine protocol. Runtime-backed surfaces must
-    /// use this path so the canonical SessionDocumentMachine archive verdict
-    /// is realized on BOTH sides: the durable session-document lifecycle
-    /// commit lands first, then the runtime `MeerkatMachine::Retire`
-    /// transition. A failure anywhere fails the archive operation
-    /// (fail-closed) — there is no warn-continue split-truth window.
-    pub async fn archive_with_machine_protocol(
-        &self,
-        id: &SessionId,
-        protocol: MachineSessionArchiveProtocol<'_>,
-    ) -> Result<(), SessionError> {
-        self.archive_with_store_only_mode(
-            id,
-            StoreOnlyArchiveMode::MachineAuthority,
-            Some(protocol),
-        )
-        .await
     }
 
     /// Apply a live hard cancel from a `MeerkatMachine` executor handle.
@@ -5645,13 +5234,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
     async fn start_turn(
         &self,
-        id: &SessionId,
-        req: StartTurnRequest,
+        _id: &SessionId,
+        _req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
-        self.reject_runtime_backed_direct_start_turn()?;
-        self.legacy_start_turn_inner_with_admission(id, req, None)
-            .await
-            .map_err(|(error, _admission)| error)
+        Err(SessionError::Unsupported(
+            "runtime-backed direct start_turn must route through the MeerkatMachine service-turn commit protocol"
+                .to_string(),
+        ))
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -5668,16 +5257,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
     async fn set_session_client(
         &self,
-        id: &SessionId,
-        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _id: &SessionId,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
     ) -> Result<(), SessionError> {
-        if self.runtime_store.is_some() {
-            return Err(SessionError::Unsupported(
-                "set_session_client is disabled for runtime-backed sessions; use runtime turn metadata reconfiguration".to_string(),
-            ));
-        }
-
-        self.inner.set_session_client(id, client).await
+        Err(SessionError::Unsupported(
+            "set_session_client is disabled for runtime-backed sessions; use runtime turn metadata reconfiguration".to_string(),
+        ))
     }
 
     async fn hot_swap_session_llm_identity(
@@ -5859,13 +5444,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        if self.runtime_store.is_some() {
-            return Err(SessionError::Unsupported(format!(
-                "runtime-backed archive for session {id} requires MachineSessionArchiveProtocol"
-            )));
-        }
-        self.archive_with_store_only_mode(id, StoreOnlyArchiveMode::Reject, None)
-            .await
+        Err(SessionError::Unsupported(format!(
+            "runtime-backed archive for session {id} requires MachineSessionArchiveProtocol"
+        )))
     }
 
     async fn update_session_mob_authority_context(
@@ -6248,30 +5829,18 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 .map_err(|err| err.into_control_error(id))?;
 
             let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-            let mut session = if self.runtime_store.is_some() {
-                match self.load_authoritative_session_base(id).await? {
-                    Some(session) => session,
-                    None => {
-                        if created_gate {
-                            self.checkpointer_gates.lock().await.remove(id);
-                        }
-                        return Err(SessionControlError::Session(SessionError::Agent(
-                            meerkat_core::error::AgentError::InternalError(
-                                "runtime-backed live session is missing its last committed snapshot"
-                                    .to_string(),
-                            ),
-                        )));
+            let mut session = match self.load_authoritative_session_base(id).await? {
+                Some(session) => session,
+                None => {
+                    if created_gate {
+                        self.checkpointer_gates.lock().await.remove(id);
                     }
-                }
-            } else {
-                match self.export_session_with_labels(id).await {
-                    Ok(session) => session,
-                    Err(err) => {
-                        if created_gate && matches!(err, SessionError::NotFound { .. }) {
-                            self.checkpointer_gates.lock().await.remove(id);
-                        }
-                        return Err(SessionControlError::Session(err));
-                    }
+                    return Err(SessionControlError::Session(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(
+                            "runtime-backed live session is missing its last committed snapshot"
+                                .to_string(),
+                        ),
+                    )));
                 }
             };
 
@@ -6324,19 +5893,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
 
             let reconciled_state = state_handle.snapshot();
             if reconciled_state != persisted_state {
-                let mut session = if self.runtime_store.is_some() {
-                    match self.load_authoritative_session_base(id).await? {
-                        Some(session) => session,
-                        None => {
-                            drop(gate_guard);
-                            let _ = self.discard_live_session(id).await;
-                            return Ok(AppendSystemContextResult { status });
-                        }
+                let mut session = match self.load_authoritative_session_base(id).await? {
+                    Some(session) => session,
+                    None => {
+                        drop(gate_guard);
+                        let _ = self.discard_live_session(id).await;
+                        return Ok(AppendSystemContextResult { status });
                     }
-                } else {
-                    self.export_session_with_labels(id)
-                        .await
-                        .map_err(SessionControlError::Session)?
                 };
                 self.reject_if_archived_session(id, &session).await?;
                 write_system_context_state(&mut session, reconciled_state)?;
@@ -6433,32 +5996,19 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                 }
 
                 let _projection_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
-                let mut session = if self.runtime_store.is_some() {
-                    match self.load_authoritative_session_base(id).await? {
-                        Some(session) => session,
-                        None => {
-                            if created_gate {
-                                drop(gate_guard);
-                                self.checkpointer_gates.lock().await.remove(id);
-                            }
-                            return Err(SessionError::Agent(
-                                meerkat_core::error::AgentError::InternalError(
-                                    "runtime-backed live session is missing its last committed snapshot"
-                                        .to_string(),
-                                ),
-                            ));
+                let mut session = match self.load_authoritative_session_base(id).await? {
+                    Some(session) => session,
+                    None => {
+                        if created_gate {
+                            drop(gate_guard);
+                            self.checkpointer_gates.lock().await.remove(id);
                         }
-                    }
-                } else {
-                    match self.export_session_with_labels(id).await {
-                        Ok(session) => session,
-                        Err(err) => {
-                            if created_gate && matches!(err, SessionError::NotFound { .. }) {
-                                drop(gate_guard);
-                                self.checkpointer_gates.lock().await.remove(id);
-                            }
-                            return Err(err);
-                        }
+                        return Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(
+                                "runtime-backed live session is missing its last committed snapshot"
+                                    .to_string(),
+                            ),
+                        ));
                     }
                 };
 
@@ -6698,15 +6248,14 @@ mod tests {
     use meerkat_core::checkpoint::SessionCheckpointer;
     use meerkat_core::event::AgentEvent;
     use meerkat_core::service::{
-        DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionForkAtRequest,
-        SessionForkReplaceRequest, SessionService, SessionServiceControlExt,
-        SessionServiceTranscriptEditExt, StageToolResultsRequest, TranscriptEditRunningBehavior,
-        TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection,
+        DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
+        SessionServiceControlExt, StageToolResultsRequest, TranscriptRewriteReason,
+        TranscriptRewriteSelection,
     };
     use meerkat_core::session::SESSION_METADATA_KEY;
     use meerkat_core::types::{
-        AssistantBlock, ContentBlock, ContentInput, ImageData, Message, StopReason, ToolCall,
-        ToolResult, Usage, UserMessage,
+        ContentBlock, ContentInput, ImageData, Message, StopReason, ToolCall, ToolResult,
+        UserMessage,
     };
     use meerkat_core::{
         RunId, SystemContextStateError, lifecycle::run_primitive::RunApplyBoundary,
@@ -6805,7 +6354,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         )
         .with_event_projection(event_store_trait.clone(), Arc::clone(&projector));
@@ -6890,7 +6439,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         )
         .with_event_projection(restarted_event_store, projector);
@@ -9793,63 +9342,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_service_installed_store_checkpointer_saves_with_and_without_runtime_store() {
-        for runtime_backed in [false, true] {
-            let mode = if runtime_backed {
-                "runtime-backed"
-            } else {
-                "runtime-less"
-            };
-            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-            let runtime_store = runtime_backed.then(|| Arc::new(InMemoryRuntimeStore::new()));
-            let service_runtime_store = runtime_store
-                .as_ref()
-                .map(|store| Arc::clone(store) as Arc<dyn RuntimeStore>);
-            let builder = CapturingCheckpointerBuilder::new();
-            let captured = Arc::clone(&builder.captured);
-            let service = PersistentSessionService::new(
-                builder,
-                4,
-                Arc::clone(&store),
-                service_runtime_store,
-                memory_blob_store(),
-            );
+    async fn test_service_installed_store_checkpointer_saves_with_runtime_store() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let builder = CapturingCheckpointerBuilder::new();
+        let captured = Arc::clone(&builder.captured);
+        let service = PersistentSessionService::new(
+            builder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
 
-            let result = service
-                .create_session(create_request(
-                    &format!("{mode} deferred create"),
-                    InitialTurnPolicy::Defer,
-                ))
-                .await
-                .unwrap_or_else(|err| panic!("{mode} deferred create should succeed: {err:?}"));
-            let checkpointer = captured
-                .lock()
-                .await
-                .clone()
-                .unwrap_or_else(|| panic!("{mode} create should install a checkpointer"));
-            let mut session = store
-                .load(&result.session_id)
-                .await
-                .expect("store load should succeed")
-                .unwrap_or_else(|| panic!("{mode} create should persist an initial projection"));
-            let baseline_len = session.messages().len();
-            session.push(Message::User(UserMessage::text(format!(
-                "{mode} checkpointed turn"
-            ))));
+        let result = service
+            .create_session(create_request("deferred create", InitialTurnPolicy::Defer))
+            .await
+            .expect("deferred create should succeed");
+        let checkpointer = captured
+            .lock()
+            .await
+            .clone()
+            .expect("create should install a checkpointer");
+        let mut session = store
+            .load(&result.session_id)
+            .await
+            .expect("store load should succeed")
+            .expect("create should persist an initial projection");
+        let baseline_len = session.messages().len();
+        session.push(Message::User(UserMessage::text(
+            "checkpointed turn".to_string(),
+        )));
 
-            checkpointer.checkpoint(&session).await;
+        checkpointer.checkpoint(&session).await;
 
-            let persisted = store
-                .load(&result.session_id)
-                .await
-                .expect("store load should succeed")
-                .unwrap_or_else(|| panic!("{mode} checkpoint should persist projection"));
-            assert_eq!(
-                persisted.messages().len(),
-                baseline_len + 1,
-                "{mode} installed checkpointer should save changed sessions"
-            );
-        }
+        let persisted = store
+            .load(&result.session_id)
+            .await
+            .expect("store load should succeed")
+            .expect("checkpoint should persist projection");
+        assert_eq!(
+            persisted.messages().len(),
+            baseline_len + 1,
+            "installed checkpointer should save changed sessions"
+        );
     }
 
     #[tokio::test]
@@ -9862,7 +9398,7 @@ mod tests {
             builder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -9902,309 +9438,6 @@ mod tests {
             baseline_len,
             "cancelled runtime-backed checkpointer must not write a later projection"
         );
-    }
-
-    #[tokio::test]
-    async fn test_create_session_externalizes_inline_images_in_persisted_snapshot() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let blob_store = memory_blob_store();
-        let service = PersistentSessionService::new(
-            ImagePreservingBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            blob_store.clone(),
-        );
-
-        let result = service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                prompt: image_prompt("create"),
-                ..create_request("ignored", InitialTurnPolicy::RunImmediately)
-            })
-            .await
-            .expect("create_session should succeed");
-
-        let persisted = store
-            .load(&result.session_id)
-            .await
-            .expect("load should succeed")
-            .expect("persisted session should exist");
-
-        assert_no_inline_images_in_session(&persisted);
-        let blob_id = persisted
-            .messages()
-            .iter()
-            .find_map(|message| match message {
-                Message::User(user) => user.content.iter().find_map(|block| match block {
-                    ContentBlock::Image {
-                        data: ImageData::Blob { blob_id },
-                        ..
-                    } => Some(blob_id.clone()),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .expect("persisted image should be externalized");
-        assert!(
-            blob_store
-                .get(&blob_id)
-                .await
-                .expect("blob should be persisted")
-                .data
-                .contains("base64-create")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_start_turn_externalizes_new_inline_images_in_persisted_snapshot() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            ImagePreservingBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-
-        service
-            .start_turn(
-                &created.session_id,
-                StartTurnRequest {
-                    injected_context: Vec::new(),
-                    prompt: image_prompt("turn"),
-                    ..start_turn_request("ignored")
-                },
-            )
-            .await
-            .expect("start_turn should succeed");
-
-        let persisted = store
-            .load(&created.session_id)
-            .await
-            .expect("load should succeed")
-            .expect("persisted session should exist");
-        assert_no_inline_images_in_session(&persisted);
-    }
-
-    #[tokio::test]
-    async fn test_save_normalized_session_bridges_previous_inline_media_projection() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            ImagePreservingBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-        let mut previous = store
-            .load(&created.session_id)
-            .await
-            .expect("load should succeed")
-            .expect("created session should exist");
-        previous.push(Message::User(UserMessage::with_blocks(vec![
-            ContentBlock::Text {
-                text: "inline image from legacy projection".to_string(),
-            },
-            inline_image_block("legacy-projection"),
-        ])));
-        store
-            .save_authoritative_projection(&previous)
-            .await
-            .expect("test setup should install legacy inline projection");
-
-        let mut incoming = previous.clone();
-        incoming.push(Message::BlockAssistant(
-            meerkat_core::BlockAssistantMessage {
-                blocks: vec![meerkat_core::AssistantBlock::Text {
-                    text: "after image".to_string(),
-                    meta: None,
-                }],
-                stop_reason: StopReason::EndTurn,
-                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            },
-        ));
-
-        service
-            .save_normalized_session(incoming)
-            .await
-            .expect("media-normalized append should bridge the previous projection");
-        let saved = store
-            .load(&created.session_id)
-            .await
-            .expect("load should succeed")
-            .expect("saved session should exist");
-        assert_no_inline_images_in_session(&saved);
-        assert_eq!(saved.messages().len(), previous.messages().len() + 1);
-    }
-
-    #[tokio::test]
-    async fn test_save_normalized_session_bridges_compaction_after_uncheckpointed_append() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-        let previous = store
-            .load(&created.session_id)
-            .await
-            .expect("load should succeed")
-            .expect("created session should exist");
-
-        let mut parent = previous.clone();
-        parent.set_system_prompt("refreshed runtime system projection".to_string());
-        parent.push(Message::User(UserMessage::text(
-            "runtime-only prompt".to_string(),
-        )));
-        parent.push(Message::BlockAssistant(
-            meerkat_core::BlockAssistantMessage {
-                blocks: vec![meerkat_core::AssistantBlock::Text {
-                    text: "runtime-only answer".to_string(),
-                    meta: None,
-                }],
-                stop_reason: StopReason::EndTurn,
-                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            },
-        ));
-        let parent_revision = parent.transcript_revision().expect("parent revision");
-
-        let mut incoming = parent.clone();
-        let mut replacement = vec![
-            parent.messages()[0].clone(),
-            Message::User(UserMessage::text(
-                "[Context compacted] fast regression summary".to_string(),
-            )),
-        ];
-        replacement.extend_from_slice(&parent.messages()[1..]);
-        incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange {
-                    start: 0,
-                    end: parent.messages().len(),
-                },
-                replacement,
-                TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(parent_revision),
-            )
-            .expect("compaction rewrite should commit");
-        let incoming_revision = incoming.transcript_revision().expect("incoming revision");
-
-        service
-            .save_normalized_session(incoming)
-            .await
-            .expect("compaction after uncheckpointed append should persist through a bridge");
-        let saved = store
-            .load(&created.session_id)
-            .await
-            .expect("load should succeed")
-            .expect("saved session should exist");
-        assert_eq!(
-            saved.transcript_revision().expect("saved revision"),
-            incoming_revision
-        );
-    }
-
-    #[tokio::test]
-    async fn test_projection_continuity_save_normalized_session_bridges_inline_media_compaction_history()
-    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let blob_store = memory_blob_store();
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir()?;
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            Arc::clone(&blob_store),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await?;
-        let mut previous = store
-            .load(&created.session_id)
-            .await?
-            .ok_or_else(|| std::io::Error::other("created session should exist"))?;
-        previous.push(Message::User(UserMessage::with_blocks(vec![
-            ContentBlock::Text {
-                text: "inline image from legacy projection".to_string(),
-            },
-            inline_image_block("legacy-compaction-parent"),
-        ])));
-        store.save_authoritative_projection(&previous).await?;
-
-        let mut normalized_parent = previous.clone();
-        normalized_parent
-            .externalize_media(blob_store.as_ref(), 0)
-            .await?;
-        let normalized_parent_revision = normalized_parent.transcript_revision()?;
-
-        let mut incoming = normalized_parent.clone();
-        incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange {
-                    start: 0,
-                    end: normalized_parent.messages().len(),
-                },
-                vec![Message::User(UserMessage::text(
-                    "[Context compacted] normalized legacy image prompt".to_string(),
-                ))],
-                TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(normalized_parent_revision.clone()),
-            )
-            .map_err(|err| std::io::Error::other(format!("rewrite should commit: {err}")))?;
-        let incoming_revision = incoming.transcript_revision()?;
-
-        service.save_normalized_session(incoming).await?;
-
-        let saved = store
-            .load(&created.session_id)
-            .await?
-            .ok_or_else(|| std::io::Error::other("saved session should exist"))?;
-        assert_eq!(saved.transcript_revision()?, incoming_revision);
-        assert_no_inline_images_in_session(&saved);
-        let events = service
-            .event_log_read_from(&created.session_id, 1)
-            .await?
-            .ok_or_else(|| std::io::Error::other("event projection should be installed"))?;
-        let audit = events
-            .iter()
-            .find_map(|stored| match &stored.event {
-                AgentEvent::TranscriptRewriteCommitted { record, .. } => Some(record),
-                _ => None,
-            })
-            .ok_or_else(|| std::io::Error::other("rewrite audit event should be appended"))?;
-        assert_eq!(audit.commit.parent_revision, normalized_parent_revision);
-        assert_eq!(audit.commit.revision, incoming_revision);
-        Ok(())
     }
 
     #[tokio::test]
@@ -10292,7 +9525,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             Arc::clone(&blob_store),
         )
         .with_event_projection(
@@ -10384,7 +9617,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             Arc::clone(&blob_store),
         );
 
@@ -10482,7 +9715,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -10604,7 +9837,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -10686,7 +9919,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store_trait),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         )
         .with_event_projection(
@@ -10767,7 +10000,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -10834,7 +10067,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -10905,7 +10138,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         )
         .with_event_projection(
@@ -11005,7 +10238,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         )
         .with_event_projection(
@@ -11102,7 +10335,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -11203,7 +10436,7 @@ mod tests {
             ImagePreservingBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -11248,7 +10481,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -11296,7 +10529,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -11334,7 +10567,7 @@ mod tests {
             FailingRunBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -11414,58 +10647,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_runtime_turn_output_commit_discards_live_session() {
-        let store = Arc::new(FailSaveStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-
-        store.set_fail_save(true);
-        let error = service
-            .apply_runtime_turn(
-                &created.session_id,
-                RunId::new(),
-                runtime_content_turn_request("runtime turn with failed commit"),
-                RunApplyBoundary::RunStart,
-                vec![meerkat_core::lifecycle::InputId::new()],
-            )
-            .await
-            .expect_err("runtime output commit failure should propagate");
-
-        assert!(
-            matches!(error, SessionError::Store(_)),
-            "expected store error after runtime output commit failure, got {error:?}"
-        );
-        assert!(
-            !service
-                .has_live_session(&created.session_id)
-                .await
-                .expect("live-session status should succeed"),
-            "failed runtime output commit must discard the mutated live session"
-        );
-
-        store.set_fail_save(false);
-        let persisted = store
-            .load(&created.session_id)
-            .await
-            .expect("load should succeed")
-            .expect("deferred session row should remain durable");
-        assert!(
-            persisted.messages().is_empty(),
-            "failed runtime output commit must not persist the mutated turn"
-        );
-    }
-
-    #[tokio::test]
     async fn test_context_only_runtime_apply_defers_runtime_store_commit_to_machine() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
@@ -11473,7 +10654,7 @@ mod tests {
             DummyBuilder,
             1,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -11568,7 +10749,7 @@ mod tests {
             DummyBuilder,
             1,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -11633,7 +10814,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -11699,7 +10880,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -11744,7 +10925,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -11804,7 +10985,7 @@ mod tests {
             CapabilityBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -11885,7 +11066,7 @@ mod tests {
             CapabilityBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -11973,7 +11154,7 @@ mod tests {
             CapabilityBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -12045,7 +11226,7 @@ mod tests {
             CapabilityBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -12117,7 +11298,7 @@ mod tests {
             CapabilityBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -12186,7 +11367,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
         let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
@@ -12363,7 +11544,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
         let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
@@ -12481,119 +11662,21 @@ mod tests {
             "archived session must not report a live session"
         );
 
-        // Resurrection regression: a standalone (store-only) reopen over the
-        // same durable store must see the machine-realized archived document
-        // and reject the session — the pre-fold warn-continue window let this
-        // reopen resurrect a machine-retired session.
-        let standalone = PersistentSessionService::new(
+        // Resurrection regression: a reopened service over the same durable
+        // stores must see the machine-realized archived document and reject
+        // the session — the pre-fold warn-continue window let this reopen
+        // resurrect a machine-retired session.
+        let reopened_service = PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
-        let reopened = standalone.read(&id).await;
+        let reopened = reopened_service.read(&id).await;
         assert!(
             matches!(reopened, Err(SessionError::NotFound { .. })),
-            "standalone reopen must not resurrect the archived session, got: {reopened:?}"
-        );
-    }
-
-    /// Store-only archive drives the same canonical SessionDocumentMachine
-    /// input as the runtime-backed path: the durable document lifecycle
-    /// commit is the machine-realized projection, and re-archive resolves
-    /// the machine's explicit AlreadyArchived verdict (surfaced as the
-    /// existing NotFound public contract).
-    #[tokio::test]
-    async fn test_store_only_archive_routes_through_session_document_machine() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-        let id = created.session_id.clone();
-
-        service
-            .archive(&id)
-            .await
-            .expect("store-only archive should succeed");
-        let archived = store
-            .load(&id)
-            .await
-            .expect("durable load should succeed")
-            .expect("archived projection should be present");
-        assert!(
-            session_marks_archived(&archived),
-            "store-only archive must realize the machine-owned lifecycle terminal"
-        );
-
-        let err = service
-            .archive(&id)
-            .await
-            .expect_err("re-archive must resolve the machine AlreadyArchived verdict");
-        assert!(
-            matches!(err, SessionError::NotFound { .. }),
-            "AlreadyArchived verdict must surface as NotFound, got: {err:?}"
-        );
-    }
-
-    /// 0.7.2 disciplined shell inputs, entry 16 pin (persistent.rs:5068
-    /// seam): a runtime context application that arrives after archive
-    /// committed must resolve with the typed archived-session contract
-    /// (NotFound) — never an internal error and never a hung waiter.
-    #[tokio::test]
-    async fn test_runtime_context_appends_after_archive_resolve_typed_not_found() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-        let id = created.session_id.clone();
-
-        // The racing producer acquired its admission BEFORE archive committed.
-        let admission = service
-            .inner
-            .acquire_runtime_context_admission(&id)
-            .await
-            .expect("live session should admit runtime context");
-
-        service.archive(&id).await.expect("archive should succeed");
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            service.apply_runtime_context_appends_with_recoverable_reserved_admission(
-                &id,
-                RunId::new(),
-                Vec::new(),
-                RunApplyBoundary::RunStart,
-                Vec::new(),
-                admission,
-            ),
-        )
-        .await
-        .expect("post-archive context application must settle, not hang");
-        let (error, _recovered_admission) =
-            result.expect_err("post-archive context application must not fabricate success");
-        assert!(
-            matches!(error, SessionError::NotFound { .. }),
-            "post-archive context application must resolve the typed archived contract \
-             (NotFound), got: {error:?}"
+            "reopened service must not resurrect the archived session, got: {reopened:?}"
         );
     }
 
@@ -12723,7 +11806,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -12839,7 +11922,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
         let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
@@ -12960,7 +12043,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -12998,7 +12081,7 @@ mod tests {
             builder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -13054,7 +12137,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -13110,3266 +12193,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_append_system_context_does_not_mutate_archived_store_row() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        let mut archived = Session::new();
-        let id = archived.id().clone();
-        archived
-            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
-            .expect("seed typed archived lifecycle-terminal fact");
-        store
-            .save(&archived)
-            .await
-            .expect("test should seed an archived compatibility row");
-
-        let err = service
-            .append_system_context(
-                &id,
-                AppendSystemContextRequest {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "runtime notice".to_string(),
-                    ),
-                    source: Some("mob".to_string()),
-                    idempotency_key: Some("ctx-persistent-archive".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-            )
-            .await
-            .expect_err("archived session must not be recreated by append");
-        assert_eq!(err.code(), "SESSION_UNSUPPORTED");
-        let persisted = store
-            .load(&id)
-            .await
-            .unwrap()
-            .expect("append after archive must preserve the archived store row");
-        assert_eq!(persisted.metadata(), archived.metadata());
-        assert_eq!(persisted.messages().len(), archived.messages().len());
-    }
-
-    #[tokio::test]
-    async fn test_persistent_read_history_returns_messages_for_live_and_archived_sessions() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let id = created.session_id;
-
-        service
-            .start_turn(&id, start_turn_request("follow up"))
-            .await
-            .expect("second turn should succeed");
-
-        let page = service
-            .read_history(
-                &id,
-                SessionHistoryQuery {
-                    offset: 1,
-                    limit: Some(2),
-                },
-            )
-            .await
-            .expect("live history should be readable");
-        assert_eq!(page.session_id, id);
-        assert_eq!(page.message_count, 4);
-        assert_eq!(page.offset, 1);
-        assert_eq!(page.limit, Some(2));
-        assert!(page.has_more);
-        assert_eq!(page.messages.len(), 2);
-
-        let mut archived_projection = store
-            .load(&id)
-            .await
-            .expect("raw store load should succeed")
-            .expect("session-store projection should exist");
-        archived_projection
-            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
-            .expect("seed typed archived lifecycle-terminal fact");
-        store
-            .save(&archived_projection)
-            .await
-            .expect("test should seed archived compatibility projection");
-
-        let archived = service
-            .read_history(
-                &id,
-                SessionHistoryQuery {
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("archived history should remain readable");
-        assert_eq!(archived.session_id, id);
-        assert_eq!(archived.message_count, 4);
-        assert!(!archived.has_more);
-        assert_eq!(archived.messages.len(), 4);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_fork_at_creates_new_idle_session_without_shrinking_parent() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let parent_id = created.session_id;
-        service
-            .start_turn(&parent_id, start_turn_request("follow up"))
-            .await
-            .expect("second turn should succeed");
-
-        let forked = service
-            .fork_session_at(
-                &parent_id,
-                SessionForkAtRequest {
-                    message_index: 2,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("fork_at should create a branch session");
-
-        assert_ne!(forked.session_id, parent_id);
-        assert_eq!(forked.message_count, 2);
-
-        let parent_history = service
-            .read_history(&parent_id, SessionHistoryQuery::default())
-            .await
-            .expect("parent history should remain readable");
-        assert_eq!(parent_history.message_count, 4);
-
-        let fork_history = service
-            .read_history(&forked.session_id, SessionHistoryQuery::default())
-            .await
-            .expect("fork history should be persisted");
-        assert_eq!(fork_history.message_count, 2);
-        assert_eq!(fork_history.messages.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_fork_replace_message_creates_changed_branch() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let parent_id = created.session_id;
-        service
-            .start_turn(&parent_id, start_turn_request("follow up"))
-            .await
-            .expect("second turn should succeed");
-
-        let forked = service
-            .fork_session_replace(
-                &parent_id,
-                SessionForkReplaceRequest {
-                    message_index: 2,
-                    replacement: TranscriptReplacement::Message {
-                        message: Message::User(UserMessage::text("edited follow up")),
-                    },
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("fork_replace should create a branch session");
-
-        assert_ne!(forked.session_id, parent_id);
-        assert_eq!(forked.message_count, 3);
-
-        let fork_history = service
-            .read_history(&forked.session_id, SessionHistoryQuery::default())
-            .await
-            .expect("fork history should be persisted");
-        assert_eq!(fork_history.message_count, 3);
-        assert!(matches!(
-            &fork_history.messages[2],
-            Message::User(user) if user.text_content() == "edited follow up"
-        ));
-
-        let parent_history = service
-            .read_history(&parent_id, SessionHistoryQuery::default())
-            .await
-            .expect("parent history should remain unchanged");
-        assert!(matches!(
-            &parent_history.messages[2],
-            Message::User(user) if user.text_content() == "follow up"
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_advances_same_session_head() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        service
-            .start_turn(&session_id, start_turn_request("follow up"))
-            .await
-            .expect("second turn should succeed");
-
-        let before = service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("history before rewrite");
-        assert_eq!(before.message_count, 4);
-
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        let result = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 4 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "compacted assistant trace".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("test".to_string()),
-                    expected_parent_revision: Some(parent_revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit");
-
-        assert_eq!(result.session_id, session_id);
-        assert_eq!(result.parent_revision, parent_revision);
-        assert_ne!(result.revision, result.parent_revision);
-        assert_eq!(result.message_count, 2);
-
-        let after = service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("history after rewrite");
-        assert_eq!(after.session_id, session_id);
-        assert_eq!(after.message_count, 2);
-        assert!(matches!(
-            &after.messages[1],
-            Message::BlockAssistant(assistant)
-                if assistant.to_string() == "compacted assistant trace"
-        ));
-
-        let saved = store
-            .load(&session_id)
-            .await
-            .expect("load after rewrite")
-            .expect("session exists");
-        let state = saved
-            .transcript_history_state()
-            .expect("history state should decode")
-            .expect("history state should exist");
-        assert_eq!(state.head, result.revision);
-        assert_eq!(state.commits.len(), 1);
-        assert_eq!(state.commits[0].parent_revision, parent_revision);
-        assert_eq!(state.revisions.len(), 2);
-        let parent_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == parent_revision)
-            .expect("parent revision body retained");
-        assert_eq!(
-            serde_json::to_value(&parent_body.messages).expect("parent body serializes"),
-            serde_json::to_value(&before.messages).expect("before history serializes")
-        );
-        let rewritten_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == result.revision)
-            .expect("rewritten revision body retained");
-        assert_eq!(
-            serde_json::to_value(&rewritten_body.messages).expect("rewritten body serializes"),
-            serde_json::to_value(&after.messages).expect("after history serializes")
-        );
-
-        let parent_page = service
-            .read_transcript_revision(
-                &session_id,
-                SessionTranscriptRevisionQuery {
-                    revision: parent_revision,
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("parent revision should be recoverable");
-        assert_eq!(parent_page.message_count, 4);
-        assert_eq!(
-            serde_json::to_value(&parent_page.messages).expect("parent page serializes"),
-            serde_json::to_value(&before.messages).expect("before history serializes")
-        );
-
-        let restored = service
-            .restore_session_transcript_revision(
-                &session_id,
-                SessionTranscriptRestoreRevisionRequest {
-                    revision: result.parent_revision.clone(),
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: Some("test".to_string()),
-                    expected_parent_revision: Some(result.revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("restore should commit");
-        assert_eq!(restored.session_id, session_id);
-        assert_eq!(restored.parent_revision, result.revision);
-        assert_eq!(restored.revision, result.parent_revision);
-        assert_eq!(restored.message_count, before.message_count);
-
-        let restored_history = service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("history after restore");
-        assert_eq!(
-            serde_json::to_value(&restored_history.messages).expect("restored history serializes"),
-            serde_json::to_value(&before.messages).expect("before history serializes")
-        );
-
-        let restored_saved = store
-            .load(&session_id)
-            .await
-            .expect("load after restore")
-            .expect("session exists");
-        let restored_state = restored_saved
-            .transcript_history_state()
-            .expect("history state should decode")
-            .expect("history state should exist");
-        assert_eq!(restored_state.head, restored.revision);
-        assert_eq!(restored_state.commits.len(), 2);
-        assert_eq!(
-            restored_state.commits[1].replacement_digest,
-            meerkat_core::transcript_messages_digest(&before.messages)
-                .expect("before history digest should compute")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_rejects_stale_parent_revision() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-
-        let err = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "replacement".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason::new("correction"),
-                    actor: None,
-                    expected_parent_revision: Some("sha256:not-the-head".to_string()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect_err("stale parent revision must fail");
-
-        assert!(
-            err.to_string().contains("parent revision mismatch"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_maps_store_cas_conflict_to_revision_conflict() {
-        let store: Arc<dyn SessionStore> = Arc::new(ConflictOnTranscriptRewriteStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load source")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        let err = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "replacement".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason::new("correction"),
-                    actor: None,
-                    expected_parent_revision: Some(parent_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect_err("store CAS conflict must fail");
-
-        assert!(
-            matches!(
-                err,
-                SessionError::Agent(meerkat_core::AgentError::ConfigError(_))
-            ),
-            "store CAS conflict should surface as typed revision conflict, not store/internal: {err:?}"
-        );
-        assert!(
-            err.to_string().contains("parent revision mismatch"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_list_transcript_revisions_pages_and_reports_head() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrites")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("original revision");
-
-        let first = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "first rewrite".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason::new("correction"),
-                    actor: None,
-                    expected_parent_revision: None,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("first rewrite should commit");
-        let second = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "second rewrite".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason {
-                        kind: "polish".to_string(),
-                        note: Some("fix tone".to_string()),
-                    },
-                    actor: Some("editor".to_string()),
-                    expected_parent_revision: None,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("second rewrite should commit");
-
-        let list = service
-            .list_transcript_revisions(
-                &session_id,
-                meerkat_core::SessionTranscriptRevisionListQuery::default(),
-            )
-            .await
-            .expect("list should succeed");
-        assert_eq!(list.head_revision, second.revision);
-        assert_eq!(list.entries.len(), 2);
-        assert_eq!(list.entries[0].revision, first.revision);
-        assert_eq!(list.entries[0].parent_revision, original_revision);
-        assert_eq!(list.entries[0].actor, None);
-        assert_eq!(list.entries[0].reason, "correction");
-        assert_eq!(list.entries[1].revision, second.revision);
-        assert_eq!(list.entries[1].parent_revision, first.revision);
-        assert_eq!(list.entries[1].actor.as_deref(), Some("editor"));
-        assert_eq!(
-            list.entries[1].reason, "polish: fix tone",
-            "reason must be the Display projection of the typed rewrite reason"
-        );
-
-        let first_page = service
-            .list_transcript_revisions(
-                &session_id,
-                meerkat_core::SessionTranscriptRevisionListQuery {
-                    limit: Some(1),
-                    offset: None,
-                },
-            )
-            .await
-            .expect("limited list should succeed");
-        assert_eq!(first_page.head_revision, second.revision);
-        assert_eq!(first_page.entries.len(), 1);
-        assert_eq!(first_page.entries[0].revision, first.revision);
-
-        let second_page = service
-            .list_transcript_revisions(
-                &session_id,
-                meerkat_core::SessionTranscriptRevisionListQuery {
-                    limit: Some(1),
-                    offset: Some(1),
-                },
-            )
-            .await
-            .expect("offset list should succeed");
-        assert_eq!(second_page.entries.len(), 1);
-        assert_eq!(second_page.entries[0].revision, second.revision);
-
-        let beyond = service
-            .list_transcript_revisions(
-                &session_id,
-                meerkat_core::SessionTranscriptRevisionListQuery {
-                    limit: None,
-                    offset: Some(5),
-                },
-            )
-            .await
-            .expect("out-of-range offset should succeed");
-        assert!(beyond.entries.is_empty());
-        assert_eq!(
-            beyond.head_revision, second.revision,
-            "the head revision is reported even when the requested page is empty"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_list_transcript_revisions_empty_before_first_rewrite() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let head_revision = store
-            .load(&session_id)
-            .await
-            .expect("load session")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("head revision");
-
-        let list = service
-            .list_transcript_revisions(
-                &session_id,
-                meerkat_core::SessionTranscriptRevisionListQuery::default(),
-            )
-            .await
-            .expect("list should succeed for a pre-revision session");
-        assert!(
-            list.entries.is_empty(),
-            "a session without rewrite commits has a legitimately empty commit log"
-        );
-        assert_eq!(
-            list.head_revision, head_revision,
-            "the implicit digest head must still be reported"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_restore_current_revision_surfaces_noop_rewrite() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let rewritten = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "rewritten".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason::new("correction"),
-                    actor: None,
-                    expected_parent_revision: None,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit");
-
-        let err = service
-            .restore_session_transcript_revision(
-                &session_id,
-                SessionTranscriptRestoreRevisionRequest {
-                    revision: "current".to_string(),
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: None,
-                    expected_parent_revision: None,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect_err("restoring the current head must surface the typed no-op rewrite");
-        assert!(
-            err.to_string()
-                .contains("does not change transcript revision"),
-            "unexpected error: {err}"
-        );
-
-        let state = store
-            .load(&session_id)
-            .await
-            .expect("load after failed restore")
-            .expect("session exists")
-            .transcript_history_state()
-            .expect("history state should decode")
-            .expect("history state should exist");
-        assert_eq!(
-            state.head, rewritten.revision,
-            "a no-op restore must not advance the transcript head"
-        );
-        assert_eq!(
-            state.commits.len(),
-            1,
-            "a no-op restore must not append a rewrite commit"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_restore_current_on_pre_revision_session_surfaces_noop_rewrite() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-
-        // Pre-revision sessions have no retained body for the implicit digest
-        // head; the live messages ARE the head body, so restoring `current`
-        // still resolves through the selector and surfaces the typed no-op.
-        let err = service
-            .restore_session_transcript_revision(
-                &session_id,
-                SessionTranscriptRestoreRevisionRequest {
-                    revision: "current".to_string(),
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: None,
-                    expected_parent_revision: None,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect_err("restoring the digest head must surface the typed no-op rewrite");
-        assert!(
-            err.to_string()
-                .contains("does not change transcript revision"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_restore_unknown_revision_fails_closed() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-
-        let err = service
-            .restore_session_transcript_revision(
-                &session_id,
-                SessionTranscriptRestoreRevisionRequest {
-                    revision: "sha256:absent".to_string(),
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: None,
-                    expected_parent_revision: None,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect_err("an unknown concrete revision id must fail closed");
-        assert!(
-            err.to_string().contains("not found"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_excludes_runtime_turn_admission_until_commit_finishes()
-     {
-        let pausing_store = Arc::new(PausingTranscriptRewriteStore::new());
-        let store: Arc<dyn SessionStore> = pausing_store.clone();
-        let service = Arc::new(PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        ));
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        pausing_store.pause_rewrite_saves();
-        let rewrite_service = Arc::clone(&service);
-        let rewrite_session_id = session_id.clone();
-        let rewrite = tokio::spawn(async move {
-            rewrite_service
-                .rewrite_session_transcript(
-                    &rewrite_session_id,
-                    meerkat_core::SessionTranscriptRewriteRequest {
-                        selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                        replacement: vec![Message::BlockAssistant(
-                            meerkat_core::BlockAssistantMessage {
-                                blocks: vec![meerkat_core::AssistantBlock::Text {
-                                    text: "compact answer".to_string(),
-                                    meta: None,
-                                }],
-                                stop_reason: StopReason::EndTurn,
-                                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                                created_at: meerkat_core::types::message_timestamp_now(),
-                            },
-                        )],
-                        reason: TranscriptRewriteReason::new("compaction"),
-                        actor: Some("test".to_string()),
-                        expected_parent_revision: Some(parent_revision),
-                        running_behavior: TranscriptEditRunningBehavior::Reject,
-                    },
-                )
-                .await
-        });
-
-        pausing_store.wait_for_rewrite_save().await;
-        let blocked_admission = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            service.reserve_runtime_turn_admission(&session_id),
-        )
-        .await;
-        assert!(
-            blocked_admission.is_err(),
-            "runtime turn admission must wait while transcript rewrite is committing"
-        );
-
-        pausing_store.release_rewrite_save();
-        rewrite
-            .await
-            .expect("rewrite task should join")
-            .expect("rewrite should commit");
-
-        let admission = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            service.reserve_runtime_turn_admission(&session_id),
-        )
-        .await
-        .expect("runtime turn admission should resume after rewrite")
-        .expect("runtime turn admission should succeed");
-        drop(admission);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_externalizes_media_before_digesting_commit() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            ImagePreservingBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        let result = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::User(UserMessage::with_blocks(
-                        image_prompt("rewrite").into_blocks(),
-                    ))],
-                    reason: TranscriptRewriteReason::new("media rewrite"),
-                    actor: Some("test".to_string()),
-                    expected_parent_revision: Some(parent_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite with inline media replacement should commit");
-
-        let saved = store
-            .load(&session_id)
-            .await
-            .expect("load after rewrite")
-            .expect("session exists");
-        assert_no_inline_images_in_session(&saved);
-        let saved_digest = meerkat_core::transcript_messages_digest(saved.messages())
-            .expect("saved messages should digest");
-        assert_eq!(
-            saved.transcript_revision().expect("saved revision"),
-            saved_digest
-        );
-        assert_eq!(result.revision, saved_digest);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_post_rewrite_media_externalization_refreshes_transcript_head() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            ImagePreservingBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "compact answer".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("test".to_string()),
-                    expected_parent_revision: Some(parent_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit");
-
-        service
-            .start_turn(
-                &session_id,
-                StartTurnRequest {
-                    injected_context: Vec::new(),
-                    prompt: image_prompt("post-rewrite"),
-                    ..start_turn_request("ignored")
-                },
-            )
-            .await
-            .expect("post-rewrite media turn should persist");
-
-        let saved = store
-            .load(&session_id)
-            .await
-            .expect("load after media turn")
-            .expect("session exists");
-        assert_no_inline_images_in_session(&saved);
-        let saved_digest = meerkat_core::transcript_messages_digest(saved.messages())
-            .expect("saved messages should digest");
-        assert_eq!(
-            saved.transcript_revision().expect("saved revision"),
-            saved_digest
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_appends_audit_event() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        let rewrite = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "audit compacted trace".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("audit-test".to_string()),
-                    expected_parent_revision: Some(parent_revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit");
-
-        let events = service
-            .event_log_read_from(&session_id, 1)
-            .await
-            .expect("event log should read")
-            .expect("event projection installed");
-        let audit = events
-            .iter()
-            .find_map(|stored| match &stored.event {
-                AgentEvent::TranscriptRewriteCommitted { session_id, record } => {
-                    Some((session_id, record))
-                }
-                _ => None,
-            })
-            .expect("rewrite audit event should be appended");
-        assert_eq!(audit.0, &session_id);
-        assert_eq!(audit.1.commit.parent_revision, parent_revision);
-        assert_eq!(audit.1.commit.revision, rewrite.revision);
-        assert_eq!(audit.1.commit.reason.kind, "compaction");
-        let rebuilt = meerkat_core::TranscriptHistoryState::from_rewrite_records(
-            events.iter().filter_map(|stored| match &stored.event {
-                AgentEvent::TranscriptRewriteCommitted { record, .. } => Some(record.clone()),
-                _ => None,
-            }),
-        )
-        .expect("rewrite records should replay")
-        .expect("rewrite records should exist");
-        assert_eq!(rebuilt.head, rewrite.revision);
-        assert_eq!(rebuilt.commits.len(), 1);
-        assert_eq!(rebuilt.revisions.len(), 2);
-        let replayed_head = rebuilt
-            .revisions
-            .iter()
-            .find(|body| body.revision == rebuilt.head)
-            .expect("replayed head body should exist");
-        assert_eq!(
-            serde_json::to_value(&replayed_head.messages).expect("head serializes"),
-            serde_json::to_value(
-                &service
-                    .read_history(&session_id, SessionHistoryQuery::default())
-                    .await
-                    .expect("history after rewrite")
-                    .messages
-            )
-            .expect("history serializes")
-        );
-
-        let events_path = dir
-            .path()
-            .join(".rkat")
-            .join("sessions")
-            .join(session_id.to_string())
-            .join("events.jsonl");
-        let projected =
-            read_projected_events_after(&events_path, "transcript_rewrite_committed").await;
-        assert!(projected.contains(&rewrite.revision));
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_audit_append_failure_does_not_mutate_projection() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        event_store.fail_appends();
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        let rewrite_err = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "compact answer despite audit outage".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("audit-failure-test".to_string()),
-                    expected_parent_revision: Some(parent_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect_err(
-                "rewrite must fail closed when the canonical audit event cannot be appended",
-            );
-        assert!(
-            rewrite_err
-                .to_string()
-                .contains("synthetic transcript rewrite audit append failure"),
-            "unexpected error: {rewrite_err}"
-        );
-
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 0);
-        let raw_saved = store
-            .load(&session_id)
-            .await
-            .expect("raw load after failed audit append")
-            .expect("session projection remains present");
-        assert!(!matches!(
-            &raw_saved.messages()[1],
-            Message::BlockAssistant(assistant)
-                if assistant.to_string() == "compact answer despite audit outage"
-        ));
-        service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("failed audit append must leave the previous projection readable");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_save_normalized_quarantines_unaudited_projection_when_rollback_fails()
-    {
-        let fail_store = Arc::new(FailAuthoritativeProjectionStore::new());
-        let store: Arc<dyn SessionStore> = fail_store.clone();
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session should exist");
-        let parent_revision = original
-            .transcript_revision()
-            .expect("parent revision should digest");
-
-        let mut incoming = original.clone();
-        let commit = incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange {
-                    start: 0,
-                    end: original.messages().len(),
-                },
-                vec![Message::User(UserMessage::text(
-                    "[Context compacted] unaudited no-runtime save".to_string(),
-                ))],
-                TranscriptRewriteReason::new("compaction"),
-                Some("test".to_string()),
-                Some(parent_revision),
-            )
-            .expect("rewrite should commit");
-
-        event_store.fail_appends();
-        fail_store.fail_authoritative_projection_cas();
-        let err = service
-            .save_normalized_session(incoming)
-            .await
-            .expect_err("audit append plus rollback failure must fail closed");
-        assert!(
-            err.to_string()
-                .contains("unaudited projection was quarantined"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            store
-                .load(&session_id)
-                .await
-                .expect("load after quarantine")
-                .is_none(),
-            "failed rollback must not leave unaudited rewrite as store fallback"
-        );
-        assert_ne!(
-            original
-                .transcript_revision()
-                .expect("original revision should digest"),
-            commit.revision
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_rewrite_transcript_recovers_missing_audit_event_from_graph() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        let rewrite = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "compact answer before audit projection existed".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("audit-repair-test".to_string()),
-                    expected_parent_revision: Some(parent_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit without event projection");
-
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        recovery_service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("missing audit event should be repaired from retained graph");
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 1);
-        let events = event_store
-            .read_from(&session_id, 1)
-            .await
-            .expect("audit event should read back");
-        let AgentEvent::TranscriptRewriteCommitted { record, .. } = &events[0].event else {
-            panic!("repaired event should be a transcript rewrite commit");
-        };
-        assert_eq!(record.commit.revision, rewrite.revision);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_internal_rewrite_then_append_persists_bridged_head() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original = store
-            .load(&session_id)
-            .await
-            .expect("load original")
-            .expect("session exists");
-        let parent_revision = original.transcript_revision().expect("parent revision");
-
-        let mut incoming = original.clone();
-        incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::BlockAssistant(
-                    meerkat_core::BlockAssistantMessage {
-                        blocks: vec![meerkat_core::AssistantBlock::Text {
-                            text: "internal compact answer".to_string(),
-                            meta: None,
-                        }],
-                        stop_reason: StopReason::EndTurn,
-                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    },
-                )],
-                TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(parent_revision),
-            )
-            .expect("internal rewrite should commit");
-        incoming.push(Message::User(UserMessage::text("follow-up".to_string())));
-        incoming.push(Message::BlockAssistant(
-            meerkat_core::BlockAssistantMessage {
-                blocks: vec![meerkat_core::AssistantBlock::Text {
-                    text: "follow-up answer".to_string(),
-                    meta: None,
-                }],
-                stop_reason: StopReason::EndTurn,
-                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            },
-        ));
-        let incoming_revision =
-            meerkat_core::transcript_messages_digest(incoming.messages()).expect("digest");
-
-        let persisted = service
-            .save_normalized_session(incoming)
-            .await
-            .expect("bridged internal rewrite plus append should persist");
-        assert_eq!(
-            meerkat_core::transcript_messages_digest(persisted.messages()).expect("digest"),
-            incoming_revision
-        );
-        let saved = store
-            .load(&session_id)
-            .await
-            .expect("load saved")
-            .expect("saved session exists");
-        assert_eq!(
-            meerkat_core::transcript_messages_digest(saved.messages()).expect("digest"),
-            incoming_revision
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_internal_rewrite_chain_appends_all_audit_events() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original = store
-            .load(&session_id)
-            .await
-            .expect("load original")
-            .expect("session exists");
-        let parent_revision = original.transcript_revision().expect("parent revision");
-
-        let mut incoming = original.clone();
-        let first = incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::BlockAssistant(
-                    meerkat_core::BlockAssistantMessage {
-                        blocks: vec![meerkat_core::AssistantBlock::Text {
-                            text: "first compact answer".to_string(),
-                            meta: None,
-                        }],
-                        stop_reason: StopReason::EndTurn,
-                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    },
-                )],
-                TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(parent_revision),
-            )
-            .expect("first internal rewrite should commit");
-        incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::BlockAssistant(
-                    meerkat_core::BlockAssistantMessage {
-                        blocks: vec![meerkat_core::AssistantBlock::Text {
-                            text: "second compact answer".to_string(),
-                            meta: None,
-                        }],
-                        stop_reason: StopReason::EndTurn,
-                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    },
-                )],
-                TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                Some("meerkat-core".to_string()),
-                Some(first.revision),
-            )
-            .expect("second internal rewrite should commit");
-
-        let persisted = service
-            .save_normalized_session(incoming)
-            .await
-            .expect("internal rewrite chain should persist");
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);
-        let history = service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("audited internal rewrite chain should remain readable");
-        assert_eq!(
-            serde_json::to_value(&history.messages).expect("history serializes"),
-            serde_json::to_value(persisted.messages()).expect("persisted serializes")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_internal_rewrite_chain_persists_normal_append_bridge() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original = store
-            .load(&session_id)
-            .await
-            .expect("load original")
-            .expect("session exists");
-        let parent_revision = original.transcript_revision().expect("parent revision");
-
-        let mut incoming = original.clone();
-        incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::BlockAssistant(
-                    meerkat_core::BlockAssistantMessage {
-                        blocks: vec![meerkat_core::AssistantBlock::Text {
-                            text: "first compact answer".to_string(),
-                            meta: None,
-                        }],
-                        stop_reason: StopReason::EndTurn,
-                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    },
-                )],
-                TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(parent_revision),
-            )
-            .expect("first internal rewrite should commit");
-        incoming.push(Message::User(UserMessage::text("second".to_string())));
-        incoming.push(Message::BlockAssistant(
-            meerkat_core::BlockAssistantMessage {
-                blocks: vec![meerkat_core::AssistantBlock::Text {
-                    text: "verbose second answer".to_string(),
-                    meta: None,
-                }],
-                stop_reason: StopReason::EndTurn,
-                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
-            },
-        ));
-        let bridge_revision = incoming.transcript_revision().expect("bridge revision");
-        incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
-                vec![Message::BlockAssistant(
-                    meerkat_core::BlockAssistantMessage {
-                        blocks: vec![meerkat_core::AssistantBlock::Text {
-                            text: "second compact answer".to_string(),
-                            meta: None,
-                        }],
-                        stop_reason: StopReason::EndTurn,
-                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    },
-                )],
-                TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(bridge_revision),
-            )
-            .expect("second internal rewrite should commit after normal append");
-
-        let persisted = service
-            .save_normalized_session(incoming)
-            .await
-            .expect("bridged internal rewrite chain should persist");
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);
-        let history = service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("audited bridged rewrite chain should remain readable");
-        assert_eq!(
-            serde_json::to_value(&history.messages).expect("history serializes"),
-            serde_json::to_value(persisted.messages()).expect("persisted serializes")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_internal_rewrite_chain_audit_failure_keeps_last_audited_projection() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        event_store.fail_rewrite_append_call(2);
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original = store
-            .load(&session_id)
-            .await
-            .expect("load original")
-            .expect("session exists");
-        let parent_revision = original.transcript_revision().expect("parent revision");
-
-        let mut incoming = original.clone();
-        let first = incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::BlockAssistant(
-                    meerkat_core::BlockAssistantMessage {
-                        blocks: vec![meerkat_core::AssistantBlock::Text {
-                            text: "first compact answer".to_string(),
-                            meta: None,
-                        }],
-                        stop_reason: StopReason::EndTurn,
-                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    },
-                )],
-                TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(parent_revision),
-            )
-            .expect("first internal rewrite should commit");
-        incoming
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                vec![Message::BlockAssistant(
-                    meerkat_core::BlockAssistantMessage {
-                        blocks: vec![meerkat_core::AssistantBlock::Text {
-                            text: "second compact answer".to_string(),
-                            meta: None,
-                        }],
-                        stop_reason: StopReason::EndTurn,
-                        identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                        created_at: meerkat_core::types::message_timestamp_now(),
-                    },
-                )],
-                TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-                Some("meerkat-core".to_string()),
-                Some(first.revision.clone()),
-            )
-            .expect("second internal rewrite should commit");
-
-        service
-            .save_normalized_session(incoming)
-            .await
-            .expect_err("second audit append failure should surface");
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 1);
-        let raw_saved = store
-            .load(&session_id)
-            .await
-            .expect("raw load after failed second audit append")
-            .expect("session exists");
-        assert_eq!(
-            raw_saved.transcript_revision().expect("raw saved revision"),
-            first.revision
-        );
-        let history = service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("last audited projection should remain readable");
-        assert!(matches!(
-            &history.messages[1],
-            Message::BlockAssistant(assistant) if assistant.to_string() == "first compact answer"
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_updates_stale_same_length_live_session() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let parent_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("parent revision");
-
-        service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "same length durable rewrite".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("stale-live-test".to_string()),
-                    expected_parent_revision: Some(parent_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit");
-
-        let view = service.read(&session_id).await.expect("read after rewrite");
-        assert_eq!(
-            view.state.last_assistant_text.as_deref(),
-            Some("same length durable rewrite")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_event_replay_uses_event_sequence_not_commit_clock() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let stale_projection = store
-            .load(&session_id)
-            .await
-            .expect("load original")
-            .expect("session exists");
-        let original_revision = stale_projection
-            .transcript_revision()
-            .expect("original revision");
-        let original_messages = stale_projection.messages().to_vec();
-
-        let compact = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "clock skew compact".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("clock-skew-test".to_string()),
-                    expected_parent_revision: Some(original_revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("compact rewrite should commit");
-        let restore = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange {
-                        start: 0,
-                        end: compact.message_count,
-                    },
-                    replacement: original_messages.clone(),
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: Some("clock-skew-test".to_string()),
-                    expected_parent_revision: Some(compact.revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("restore rewrite should commit");
-        assert_eq!(restore.revision, original_revision);
-
-        {
-            let mut events_by_session = event_store.events.lock().await;
-            let events = events_by_session
-                .get_mut(&session_id)
-                .expect("rewrite events should exist");
-            assert_eq!(events.len(), 2);
-            let (first, rest) = events.split_at_mut(1);
-            let second = &mut rest[0];
-            let AgentEvent::TranscriptRewriteCommitted {
-                record: first_record,
-                ..
-            } = &mut first[0].event
-            else {
-                panic!("first event should be rewrite commit");
-            };
-            let AgentEvent::TranscriptRewriteCommitted {
-                record: second_record,
-                ..
-            } = &mut second.event
-            else {
-                panic!("second event should be rewrite commit");
-            };
-            std::mem::swap(
-                &mut first_record.commit.committed_at,
-                &mut second_record.commit.committed_at,
-            );
-        }
-
-        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        recovery_store
-            .save(&stale_projection)
-            .await
-            .expect("seed stale projection");
-        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&recovery_store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store,
-            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
-        );
-
-        let recovered = recovery_service
-            .read_transcript_revision(
-                &session_id,
-                SessionTranscriptRevisionQuery {
-                    revision: "current".to_string(),
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("current revision should recover from event sequence");
-        assert_eq!(recovered.revision, original_revision);
-        assert_eq!(
-            serde_json::to_value(&recovered.messages).expect("recovered serializes"),
-            serde_json::to_value(&original_messages).expect("original serializes")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_events_recover_stale_session_projection() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let stale_projection = store
-            .load(&session_id)
-            .await
-            .expect("load stale projection")
-            .expect("session exists before rewrite");
-        let parent_revision = stale_projection
-            .transcript_revision()
-            .expect("parent revision should digest");
-
-        let rewrite = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage::new(
-                            vec![AssistantBlock::Text {
-                                text: "event replay compacted trace".to_string(),
-                                meta: None,
-                            }],
-                            StopReason::EndTurn,
-                        ),
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("replay-test".to_string()),
-                    expected_parent_revision: Some(parent_revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit");
-
-        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        recovery_store
-            .save(&stale_projection)
-            .await
-            .expect("seed stale projection");
-        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&recovery_store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store.clone(),
-            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
-        );
-
-        let recovered = recovery_service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("history should recover from rewrite event replay");
-        assert_eq!(recovered.session_id, session_id);
-        assert!(matches!(
-            &recovered.messages[1],
-            Message::BlockAssistant(assistant)
-                if assistant.to_string() == "event replay compacted trace"
-        ));
-
-        let retained_parent = recovery_service
-            .read_transcript_revision(
-                &session_id,
-                SessionTranscriptRevisionQuery {
-                    revision: parent_revision.clone(),
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("event replay should recover the retained parent revision");
-        assert_eq!(retained_parent.head_revision, rewrite.revision);
-        assert_eq!(retained_parent.revision, parent_revision);
-        assert_eq!(
-            serde_json::to_value(&retained_parent.messages).expect("parent serializes"),
-            serde_json::to_value(stale_projection.messages()).expect("stale serializes")
-        );
-
-        let current_revision = recovery_service
-            .read_transcript_revision(
-                &session_id,
-                SessionTranscriptRevisionQuery {
-                    revision: "current".to_string(),
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("current alias should resolve to the active transcript revision");
-        assert_eq!(current_revision.revision, rewrite.revision);
-        assert_eq!(current_revision.head_revision, rewrite.revision);
-        let still_stale = recovery_store
-            .load(&session_id)
-            .await
-            .expect("load recovery store")
-            .expect("recovery projection remains present");
-        assert_eq!(
-            serde_json::to_value(still_stale.messages()).expect("stale projection serializes"),
-            serde_json::to_value(stale_projection.messages()).expect("original stale serializes"),
-            "read-side replay recovery must not overwrite the durable projection"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_replay_materializes_projection_before_followup_rewrite() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let stale_projection = store
-            .load(&session_id)
-            .await
-            .expect("load stale projection")
-            .expect("session exists before rewrite");
-        let parent_revision = stale_projection
-            .transcript_revision()
-            .expect("parent revision should digest");
-
-        let first = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "event replay first compacted trace".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("replay-followup-test".to_string()),
-                    expected_parent_revision: Some(parent_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("first rewrite should commit");
-
-        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        recovery_store
-            .save(&stale_projection)
-            .await
-            .expect("seed stale projection");
-        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&recovery_store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store.clone(),
-            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
-        );
-
-        let second = recovery_service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "event replay second compacted trace".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("replay-followup-test".to_string()),
-                    expected_parent_revision: Some(first.revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("replay-recovered projection should be a valid parent for follow-up rewrite");
-
-        let saved = recovery_store
-            .load(&session_id)
-            .await
-            .expect("load recovered store")
-            .expect("recovered session exists");
-        assert_eq!(
-            saved.transcript_revision().expect("saved revision"),
-            second.revision
-        );
-        assert!(matches!(
-            &saved.messages()[1],
-            Message::BlockAssistant(assistant)
-                if assistant.to_string() == "event replay second compacted trace"
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_replay_materializes_projection_before_restore() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let stale_projection = store
-            .load(&session_id)
-            .await
-            .expect("load stale projection")
-            .expect("session exists before rewrite");
-        let parent_revision = stale_projection
-            .transcript_revision()
-            .expect("parent revision should digest");
-
-        let first = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "event replay compacted trace".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("replay-restore-test".to_string()),
-                    expected_parent_revision: Some(parent_revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("first rewrite should commit");
-
-        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        recovery_store
-            .save(&stale_projection)
-            .await
-            .expect("seed stale projection");
-        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&recovery_store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store.clone(),
-            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
-        );
-
-        let restored = recovery_service
-            .restore_session_transcript_revision(
-                &session_id,
-                SessionTranscriptRestoreRevisionRequest {
-                    revision: parent_revision.clone(),
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: Some("replay-restore-test".to_string()),
-                    expected_parent_revision: Some(first.revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("replay-recovered projection should be a valid parent for restore");
-
-        assert_eq!(restored.revision, parent_revision);
-        let saved = recovery_store
-            .load(&session_id)
-            .await
-            .expect("load recovered store")
-            .expect("recovered session exists");
-        assert_eq!(
-            saved.transcript_revision().expect("saved revision"),
-            restored.revision
-        );
-        assert_eq!(
-            serde_json::to_value(saved.messages()).expect("saved messages serialize"),
-            serde_json::to_value(stale_projection.messages()).expect("stale messages serialize")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_replay_materializes_partial_graph_before_restore() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original_revision = store
-            .load(&session_id)
-            .await
-            .expect("load original projection")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("original revision");
-
-        let first = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "first compacted trace".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("partial-graph-replay-test".to_string()),
-                    expected_parent_revision: Some(original_revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("first rewrite should commit");
-        let stale_partial_graph = store
-            .load(&session_id)
-            .await
-            .expect("load partial graph")
-            .expect("session exists after first rewrite");
-
-        let second = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "second compacted trace".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("partial-graph-replay-test".to_string()),
-                    expected_parent_revision: Some(first.revision),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("second rewrite should commit");
-
-        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        recovery_store
-            .save_authoritative_projection_if_current_revision(&stale_partial_graph, None)
-            .await
-            .expect("seed stale partial graph projection");
-        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&recovery_store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store.clone(),
-            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
-        );
-
-        recovery_service
-            .restore_session_transcript_revision(
-                &session_id,
-                SessionTranscriptRestoreRevisionRequest {
-                    revision: stale_partial_graph
-                        .transcript_revision()
-                        .expect("stale revision"),
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: Some("partial-graph-replay-test".to_string()),
-                    expected_parent_revision: Some(second.revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("replay-merged partial graph should be materialized before restore");
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_replay_recovers_graph_lost_after_normal_turn() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let original = store
-            .load(&session_id)
-            .await
-            .expect("load original")
-            .expect("session exists");
-        let original_revision = original.transcript_revision().expect("original revision");
-
-        let rewrite = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "compacted trace before normal turn".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("graph-loss-replay-test".to_string()),
-                    expected_parent_revision: Some(original_revision.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("rewrite should commit");
-
-        let mut graphless_post_turn = store
-            .load(&session_id)
-            .await
-            .expect("load rewritten")
-            .expect("session exists after rewrite");
-        graphless_post_turn.push(Message::User(UserMessage::text(
-            "normal turn after rewrite".to_string(),
-        )));
-        graphless_post_turn.clear_transcript_history_state();
-
-        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        recovery_store
-            .save(&graphless_post_turn)
-            .await
-            .expect("seed graphless post-turn projection");
-        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&recovery_store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store,
-            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
-        );
-
-        let retained_original = recovery_service
-            .read_transcript_revision(
-                &session_id,
-                SessionTranscriptRevisionQuery {
-                    revision: original_revision.clone(),
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("replay should restore retained graph before serving revision");
-        assert_eq!(retained_original.revision, original_revision);
-        assert_ne!(retained_original.head_revision, rewrite.parent_revision);
-    }
-
-    #[tokio::test]
-    async fn test_read_current_transcript_revision_works_without_rewrite_graph() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let session = store
-            .load(&session_id)
-            .await
-            .expect("load saved session")
-            .expect("session exists");
-        assert!(
-            session
-                .transcript_history_state()
-                .expect("history state should decode")
-                .is_none()
-        );
-        let head_revision = session.transcript_revision().expect("implicit head digest");
-
-        let current = service
-            .read_transcript_revision(
-                &session_id,
-                SessionTranscriptRevisionQuery {
-                    revision: "current".to_string(),
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("current alias should page over current messages without rewrite metadata");
-
-        assert_eq!(current.revision, head_revision);
-        assert_eq!(current.head_revision, head_revision);
-        assert_eq!(current.message_count, session.messages().len());
-        assert_eq!(
-            serde_json::to_value(&current.messages).expect("current messages serialize"),
-            serde_json::to_value(session.messages()).expect("session messages serialize")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_transcript_rewrite_event_replay_accepts_normal_turn_between_rewrites() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create_session should succeed");
-        let session_id = created.session_id;
-        let initial_projection = store
-            .load(&session_id)
-            .await
-            .expect("load initial projection")
-            .expect("session exists before rewrite");
-        let initial_parent = initial_projection
-            .transcript_revision()
-            .expect("initial parent revision");
-
-        service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "first compact answer".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("replay-test".to_string()),
-                    expected_parent_revision: Some(initial_parent),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("first rewrite should commit");
-        service
-            .start_turn(&session_id, start_turn_request("normal follow up"))
-            .await
-            .expect("normal turn should commit between rewrites");
-        let stale_projection = store
-            .load(&session_id)
-            .await
-            .expect("load projection after normal turn")
-            .expect("session exists after normal turn");
-        let bridge_parent = stale_projection
-            .transcript_revision()
-            .expect("normal turn should advance transcript head");
-
-        let second = service
-            .rewrite_session_transcript(
-                &session_id,
-                meerkat_core::SessionTranscriptRewriteRequest {
-                    selection: TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
-                    replacement: vec![Message::BlockAssistant(
-                        meerkat_core::BlockAssistantMessage {
-                            blocks: vec![meerkat_core::AssistantBlock::Text {
-                                text: "second compact answer".to_string(),
-                                meta: None,
-                            }],
-                            stop_reason: StopReason::EndTurn,
-                            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                            created_at: meerkat_core::types::message_timestamp_now(),
-                        },
-                    )],
-                    reason: TranscriptRewriteReason::new("compaction"),
-                    actor: Some("replay-test".to_string()),
-                    expected_parent_revision: Some(bridge_parent.clone()),
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await
-            .expect("second rewrite should commit after normal turn");
-
-        let recovery_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        recovery_store
-            .save_authoritative_projection_if_current_revision(&stale_projection, None)
-            .await
-            .expect("seed stale projection before second rewrite");
-        let recovery_dir = tempfile::tempdir().expect("recovery tempdir");
-        let recovery_service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&recovery_store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store,
-            Arc::new(SessionProjector::new(recovery_dir.path().join(".rkat"))),
-        );
-
-        let recovered = recovery_service
-            .read_history(&session_id, SessionHistoryQuery::default())
-            .await
-            .expect("history should recover across rewrite-normal-turn-rewrite replay");
-        assert_eq!(recovered.session_id, session_id);
-        assert!(matches!(
-            &recovered.messages[3],
-            Message::BlockAssistant(assistant) if assistant.to_string() == "second compact answer"
-        ));
-        let retained_bridge = recovery_service
-            .read_transcript_revision(
-                &session_id,
-                SessionTranscriptRevisionQuery {
-                    revision: bridge_parent,
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("bridge parent revision should be retained from second rewrite record");
-        assert_eq!(retained_bridge.head_revision, second.revision);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_fork_at_rejects_running_session() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let builder = BlockingRunBuilder::new();
-        let service = Arc::new(PersistentSessionService::new(
-            builder.clone(),
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        ));
-
-        let service_for_create = Arc::clone(&service);
-        let initial_turn = tokio::spawn(async move {
-            service_for_create
-                .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-                .await
-        });
-        builder.wait_for_entered_runs(1).await;
-        builder.release_notify.add_permits(1);
-        let created = initial_turn
-            .await
-            .expect("initial turn task should join")
-            .expect("initial turn should create a session");
-        let parent_id = created.session_id;
-
-        let service_for_turn = Arc::clone(&service);
-        let session_for_turn = parent_id.clone();
-        let active_turn = tokio::spawn(async move {
-            service_for_turn
-                .start_turn(&session_for_turn, start_turn_request("slow follow up"))
-                .await
-        });
-        builder.wait_for_entered_runs(2).await;
-
-        let rejected = service
-            .fork_session_at(
-                &parent_id,
-                SessionForkAtRequest {
-                    message_index: 1,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await;
-        assert!(
-            matches!(rejected, Err(SessionError::Busy { ref id }) if id == &parent_id),
-            "fork_at should reject a running session: {rejected:?}"
-        );
-
-        builder.release_notify.add_permits(1);
-        active_turn
-            .await
-            .expect("active turn task should join")
-            .expect("active turn should complete after fork rejection");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_restore_transcript_revision_rejects_running_session() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let builder = BlockingRunBuilder::new();
-        let service = Arc::new(PersistentSessionService::new(
-            builder.clone(),
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        ));
-
-        let service_for_create = Arc::clone(&service);
-        let initial_turn = tokio::spawn(async move {
-            service_for_create
-                .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
-                .await
-        });
-        builder.wait_for_entered_runs(1).await;
-        builder.release_notify.add_permits(1);
-        let created = initial_turn
-            .await
-            .expect("initial turn task should join")
-            .expect("initial turn should create a session");
-        let session_id = created.session_id;
-        let original_revision = store
-            .load(&session_id)
-            .await
-            .expect("load before rewrite")
-            .expect("session exists")
-            .transcript_revision()
-            .expect("original revision");
-        let service_for_turn = Arc::clone(&service);
-        let session_for_turn = session_id.clone();
-        let active_turn = tokio::spawn(async move {
-            service_for_turn
-                .start_turn(&session_for_turn, start_turn_request("slow follow up"))
-                .await
-        });
-        builder.wait_for_entered_runs(2).await;
-
-        let rejected = service
-            .restore_session_transcript_revision(
-                &session_id,
-                SessionTranscriptRestoreRevisionRequest {
-                    revision: original_revision,
-                    reason: TranscriptRewriteReason::new("restore"),
-                    actor: Some("restore-active-test".to_string()),
-                    expected_parent_revision: None,
-                    running_behavior: TranscriptEditRunningBehavior::Reject,
-                },
-            )
-            .await;
-        assert!(
-            matches!(rejected, Err(SessionError::Busy { ref id }) if id == &session_id),
-            "restore should reject a running session: {rejected:?}"
-        );
-
-        builder.release_notify.add_permits(1);
-        active_turn
-            .await
-            .expect("active turn task should join")
-            .expect("active turn should complete after restore rejection");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_archived_history_survives_restart_and_cache_eviction() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new_with_archived_history_capacity(
-            DummyBuilder,
-            1,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let first = service
-            .create_session(create_request("first", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create first session");
-        service
-            .archive(&first.session_id)
-            .await
-            .expect("archive first session");
-
-        let second = service
-            .create_session(create_request("second", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create second session");
-        service
-            .archive(&second.session_id)
-            .await
-            .expect("archive second session");
-
-        let restarted = PersistentSessionService::new_with_archived_history_capacity(
-            DummyBuilder,
-            1,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        let archived = restarted
-            .read_history(
-                &first.session_id,
-                SessionHistoryQuery {
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-            .expect("archived history should survive restart and cache eviction");
-        assert_eq!(archived.session_id, first.session_id);
-        assert_eq!(archived.message_count, 2);
-        assert_eq!(archived.messages.len(), 2);
-
-        let listed = restarted
-            .list(SessionQuery::default())
-            .await
-            .expect("list sessions");
-        assert!(
-            listed.is_empty(),
-            "archived sessions should remain hidden from list even when stored durably"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_completed_sessions_do_not_consume_active_capacity() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        for index in 0..3 {
-            service
-                .create_session(create_request(
-                    &format!("completed {index}"),
-                    InitialTurnPolicy::RunImmediately,
-                ))
-                .await
-                .unwrap_or_else(|err| {
-                    panic!("completed session {index} should release active capacity: {err}")
-                });
-        }
-
-        let sessions = service
-            .list(SessionQuery::default())
-            .await
-            .expect("list sessions");
-        assert_eq!(
-            sessions.len(),
-            3,
-            "completed live sessions should remain readable without holding active capacity"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_deferred_sessions_consume_capacity_until_archived() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let staged = service
-            .create_session(create_request("staged", InitialTurnPolicy::Defer))
-            .await
-            .expect("first deferred session should be staged");
-        let blocked = service
-            .create_session(create_request("blocked", InitialTurnPolicy::Defer))
-            .await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "second deferred session should be rejected while first is staged: {blocked:?}"
-        );
-
-        service
-            .archive(&staged.session_id)
-            .await
-            .expect("archiving staged session should release capacity");
-        service
-            .create_session(create_request("after archive", InitialTurnPolicy::Defer))
-            .await
-            .expect("deferred capacity should be reusable after archive");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_context_only_runtime_apply_respects_active_capacity() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let candidate = service
-            .create_session(create_request(
-                "candidate",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("candidate session should complete and release capacity");
-        let blocker = service
-            .create_session(create_request("blocker", InitialTurnPolicy::Defer))
-            .await
-            .expect("deferred blocker should hold active capacity");
-
-        let blocked = service
-            .apply_runtime_context_appends(
-                &candidate.session_id,
-                RunId::new(),
-                vec![PendingSystemContextAppend {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "capacity-bounded context append".to_string(),
-                    ),
-                    source: Some("test".to_string()),
-                    idempotency_key: Some("ctx-capacity".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                    peer_response_terminal: None,
-                }],
-                vec![InputId::new()],
-            )
-            .await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "context-only runtime apply should respect active capacity: {blocked:?}"
-        );
-
-        service
-            .archive(&blocker.session_id)
-            .await
-            .expect("archive should release deferred blocker capacity");
-        service
-            .apply_runtime_context_appends(
-                &candidate.session_id,
-                RunId::new(),
-                vec![PendingSystemContextAppend {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "capacity-bounded context append after archive".to_string(),
-                    ),
-                    source: Some("test".to_string()),
-                    idempotency_key: Some("ctx-capacity-after-archive".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                    peer_response_terminal: None,
-                }],
-                vec![InputId::new()],
-            )
-            .await
-            .expect("context-only runtime apply should proceed after capacity is released");
-    }
-
-    #[tokio::test]
-    async fn test_reserved_start_turn_preserves_admission_for_not_found_recovery() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let candidate = service
-            .create_session(create_request(
-                "candidate",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("candidate session should complete and release capacity");
-        let persisted = store
-            .load(&candidate.session_id)
-            .await
-            .expect("load candidate")
-            .expect("candidate should be persisted");
-        let admission = service
-            .reserve_runtime_turn_admission(&candidate.session_id)
-            .await
-            .expect("candidate admission should reserve active capacity");
-
-        store
-            .delete(&candidate.session_id)
-            .await
-            .expect("delete persisted candidate");
-        service
-            .discard_live_session(&candidate.session_id)
-            .await
-            .expect("discard live candidate");
-
-        let start_req = StartTurnRequest {
-            injected_context: Vec::new(),
-            prompt: "recover".to_string().into(),
-            system_prompt: None,
-            event_tx: None,
-            runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
-        };
-        let (error, recovered_admission) = service
-            .start_turn_with_recoverable_reserved_admission(
-                &candidate.session_id,
-                start_req,
-                admission,
-            )
-            .await
-            .expect_err("missing live and persisted session should return NotFound");
-        assert!(
-            matches!(error, SessionError::NotFound { .. }),
-            "expected recoverable NotFound, got {error:?}"
-        );
-        let recovered_admission =
-            recovered_admission.expect("NotFound must return the reserved admission");
-
-        let blocker = Session::new();
-        store.save(&blocker).await.expect("persist blocker");
-        let blocked = service.reserve_runtime_turn_admission(blocker.id()).await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "recovered admission should still hold active capacity"
-        );
-
-        service
-            .create_session_with_reserved_admission(resume_request(persisted), recovered_admission)
-            .await
-            .expect("fallback materialization should reuse recovered admission");
-    }
-
-    #[tokio::test]
-    async fn test_runtime_turn_admission_joins_existing_live_session_capacity() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("joiner", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create live session");
-        let first = service
-            .reserve_runtime_turn_admission(&created.session_id)
-            .await
-            .expect("first active admission should reserve capacity");
-        let second = service
-            .reserve_runtime_turn_admission(&created.session_id)
-            .await
-            .expect("second same-session admission should join existing capacity");
-
-        let blocker = Session::new();
-        let blocker_id = blocker.id().clone();
-        store.save(&blocker).await.expect("persist blocker");
-        let blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "joined same-session admission must still consume only one active slot"
-        );
-
-        drop(first);
-        let still_blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
-        assert!(
-            still_blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "capacity must remain held until the final same-session lease drops"
-        );
-
-        drop(second);
-        service
-            .reserve_runtime_turn_admission(&blocker_id)
-            .await
-            .expect("dropping all same-session leases should release capacity");
-    }
-
-    #[tokio::test]
-    async fn test_deferred_runtime_admission_restore_survives_joined_active_lease() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            FailingOverlayBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("staged", InitialTurnPolicy::Defer))
-            .await
-            .expect("create deferred session");
-        let promoted = service
-            .reserve_runtime_turn_admission(&created.session_id)
-            .await
-            .expect("promote staged admission");
-        let joined = service
-            .reserve_runtime_turn_admission(&created.session_id)
-            .await
-            .expect("join promoted active admission");
-
-        let mut start_req = start_turn_request("resume staged");
-        start_req.runtime.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay {
-            allowed_tools: Some(vec!["blocked-before-run".into()]),
-            blocked_tools: None,
-            dispatch_context: Default::default(),
-        });
-        let error = service
-            .start_turn_with_reserved_admission(&created.session_id, start_req, promoted)
-            .await
-            .expect_err("flow overlay setup should fail before the staged turn runs");
-        assert!(
-            error.to_string().contains("synthetic flow overlay failure"),
-            "unexpected start_turn error: {error:?}"
-        );
-
-        let blocker = Session::new();
-        let blocker_id = blocker.id().clone();
-        store.save(&blocker).await.expect("persist blocker");
-        let blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "joined active lease should keep capacity busy until it drops"
-        );
-
-        drop(joined);
-        let still_blocked = service.reserve_runtime_turn_admission(&blocker_id).await;
-        assert!(
-            still_blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "final joined release should restore the staged session capacity instead of freeing it"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reserved_create_admission_cancel_during_create_releases_capacity() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let builder = BlockingBuildBuilder::new();
-        let service = Arc::new(PersistentSessionService::new(
-            builder.clone(),
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        ));
-
-        let persisted = Session::new();
-        let persisted_id = persisted.id().clone();
-        store
-            .save(&persisted)
-            .await
-            .expect("persist source session");
-        let admission = service
-            .reserve_runtime_turn_admission(&persisted_id)
-            .await
-            .expect("reserve create admission");
-
-        let service_for_task = Arc::clone(&service);
-        let create_task = tokio::spawn(async move {
-            service_for_task
-                .create_session_with_reserved_admission(resume_request(persisted), admission)
-                .await
-        });
-        builder.wait_for_entered_builds(1).await;
-
-        create_task.abort();
-        let aborted = create_task
-            .await
-            .expect_err("aborted reserved create task should report cancellation");
-        assert!(aborted.is_cancelled());
-
-        let blocker = Session::new();
-        let blocker_id = blocker.id().clone();
-        store.save(&blocker).await.expect("persist blocker");
-        service
-            .reserve_runtime_turn_admission(&blocker_id)
-            .await
-            .expect("aborted reserved create should release active capacity");
-    }
-
-    #[tokio::test]
     async fn test_persistent_deferred_create_save_failure_discards_live_capacity() {
         let store = Arc::new(FailSaveStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
             1,
             Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
 
@@ -16393,597 +12223,6 @@ mod tests {
             ))
             .await
             .expect("failed deferred create should discard live capacity");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_archived_resume_session_rejected_without_capacity_leak() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let mut archived = Session::new();
-        archived
-            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
-            .expect("seed typed archived lifecycle-terminal fact");
-        store.save(&archived).await.expect("save archived session");
-
-        let rejected = service.create_session(resume_request(archived)).await;
-        assert!(
-            matches!(rejected, Err(SessionError::NotFound { .. })),
-            "archived resume should be rejected before reserving capacity: {rejected:?}"
-        );
-
-        service
-            .create_session(create_request(
-                "after archived resume",
-                InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("rejected archived resume should not leak active capacity");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_stale_resume_rechecks_current_archived_snapshot() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            2,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create session");
-        let stale_resume = service
-            .load_authoritative_session(&created.session_id)
-            .await
-            .expect("load authoritative")
-            .expect("session should exist");
-
-        let mut archived = store
-            .load(&created.session_id)
-            .await
-            .expect("raw store load should succeed")
-            .expect("session-store projection should exist");
-        archived
-            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
-            .expect("seed typed archived lifecycle-terminal fact");
-        store
-            .save(&archived)
-            .await
-            .expect("test should seed archived compatibility projection");
-        service
-            .discard_live_session(&created.session_id)
-            .await
-            .expect("test archive seed should release live capacity");
-
-        let rejected = service.create_session(resume_request(stale_resume)).await;
-        assert!(
-            matches!(rejected, Err(SessionError::NotFound { .. })),
-            "resume must recheck the current durable archive state: {rejected:?}"
-        );
-        assert!(
-            !service
-                .has_live_session(&created.session_id)
-                .await
-                .expect("live check should succeed"),
-            "stale resume must not recreate an archived live session"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_machine_authorized_archived_resume_is_not_metadata_driven() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create session");
-        let stale_resume = service
-            .load_authoritative_session(&created.session_id)
-            .await
-            .expect("load authoritative")
-            .expect("session should exist");
-
-        let mut archived = store
-            .load(&created.session_id)
-            .await
-            .expect("raw store load should succeed")
-            .expect("session-store projection should exist");
-        archived
-            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
-            .expect("seed typed archived lifecycle-terminal fact");
-        store
-            .save(&archived)
-            .await
-            .expect("test should seed archived compatibility projection");
-        service
-            .discard_live_session(&created.session_id)
-            .await
-            .expect("test archive seed should release live capacity");
-        let stored = service
-            .load_authoritative_session(&created.session_id)
-            .await
-            .expect("load archived snapshot")
-            .expect("archived snapshot should exist");
-        assert!(session_marks_archived(&stored));
-
-        let stale_resume_for_authorized = stale_resume.clone();
-        let rejected = service.create_session(resume_request(stale_resume)).await;
-        assert!(
-            matches!(rejected, Err(SessionError::NotFound { .. })),
-            "ordinary stale resume must not resurrect an archived snapshot: {rejected:?}"
-        );
-        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
-        let admission = service
-            .reserve_create_session_admission()
-            .await
-            .expect("reserve machine-authorized retry admission");
-        service
-            .create_session_with_reserved_machine_archived_resume_admission(
-                resume_request(stale_resume_for_authorized),
-                admission,
-                machine.session_control_authority(),
-            )
-            .await
-            .expect("machine-authorized pending-promotion retry may resume archived durable base");
-        service
-            .discard_live_session(&created.session_id)
-            .await
-            .expect("authorized retry should remain controllable and release capacity");
-
-        service
-            .create_session(create_request(
-                "after stale archived resume",
-                InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("archived resume checks should not leak active capacity");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_deferred_capacity_releases_after_first_turn() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let staged = service
-            .create_session(create_request("staged", InitialTurnPolicy::Defer))
-            .await
-            .expect("deferred session should be staged");
-        service
-            .start_turn(&staged.session_id, start_turn_request("materialize"))
-            .await
-            .expect("first turn should materialize the deferred session");
-        service
-            .create_session(create_request("next staged", InitialTurnPolicy::Defer))
-            .await
-            .expect("completed first turn should release deferred capacity");
-    }
-
-    #[tokio::test]
-    async fn test_persistent_runtime_turn_waits_for_archive_gate() {
-        let store = Arc::new(BlockingArchiveSaveStore::new());
-        let service = Arc::new(PersistentSessionService::new(
-            DummyBuilder,
-            2,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        ));
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create live session");
-
-        store.block_archived_saves();
-        let archive_service = Arc::clone(&service);
-        let archive_id = created.session_id.clone();
-        let archive_task = tokio::spawn(async move { archive_service.archive(&archive_id).await });
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            store.wait_for_archived_save(),
-        )
-        .await
-        .expect("archive should reach blocked durable save");
-
-        let turn_service = Arc::clone(&service);
-        let turn_id = created.session_id.clone();
-        let mut turn_task = Box::pin(tokio::spawn(async move {
-            turn_service
-                .apply_runtime_turn(
-                    &turn_id,
-                    RunId::new(),
-                    runtime_content_turn_request("turn during archive"),
-                    RunApplyBoundary::RunStart,
-                    vec![meerkat_core::lifecycle::InputId::new()],
-                )
-                .await
-        }));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut turn_task)
-                .await
-                .is_err(),
-            "runtime turn should wait while archive owns the per-session gate"
-        );
-
-        store.release_archived_save();
-        archive_task
-            .await
-            .expect("archive task should join")
-            .expect("archive should succeed");
-        let turn_result = turn_task.await.expect("turn task should join");
-        assert!(
-            matches!(turn_result, Err(SessionError::NotFound { .. })),
-            "turn that waited behind archive should see archived session as not found: {turn_result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_context_only_runtime_apply_waits_for_archive_gate() {
-        let store = Arc::new(BlockingArchiveSaveStore::new());
-        let service = Arc::new(PersistentSessionService::new(
-            DummyBuilder,
-            2,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        ));
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create live session");
-
-        store.block_archived_saves();
-        let archive_service = Arc::clone(&service);
-        let archive_id = created.session_id.clone();
-        let archive_task = tokio::spawn(async move { archive_service.archive(&archive_id).await });
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            store.wait_for_archived_save(),
-        )
-        .await
-        .expect("archive should reach blocked durable save");
-
-        let apply_service = Arc::clone(&service);
-        let apply_id = created.session_id.clone();
-        let mut apply_task = Box::pin(tokio::spawn(async move {
-            apply_service
-                .apply_runtime_context_appends(
-                    &apply_id,
-                    RunId::new(),
-                    vec![PendingSystemContextAppend {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            "context during archive".to_string(),
-                        ),
-                        source: Some("test".to_string()),
-                        idempotency_key: Some("archive-race".to_string()),
-                        source_kind: meerkat_core::session::SystemContextSource::Normal,
-                        accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                        peer_response_terminal: None,
-                    }],
-                    vec![meerkat_core::lifecycle::InputId::new()],
-                )
-                .await
-        }));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut apply_task)
-                .await
-                .is_err(),
-            "context-only runtime apply should wait while archive owns the per-session gate"
-        );
-
-        store.release_archived_save();
-        archive_task
-            .await
-            .expect("archive task should join")
-            .expect("archive should succeed");
-        let apply_result = apply_task.await.expect("apply task should join");
-        assert!(
-            matches!(apply_result, Err(SessionError::NotFound { .. })),
-            "context-only apply that waited behind archive should see archived session as not found: {apply_result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_external_user_append_waits_for_archive_gate() {
-        let store = Arc::new(BlockingArchiveSaveStore::new());
-        let service = Arc::new(PersistentSessionService::new(
-            DummyBuilder,
-            2,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        ));
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create live session");
-
-        store.block_archived_saves();
-        let archive_service = Arc::clone(&service);
-        let archive_id = created.session_id.clone();
-        let archive_task = tokio::spawn(async move { archive_service.archive(&archive_id).await });
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            store.wait_for_archived_save(),
-        )
-        .await
-        .expect("archive should reach blocked durable save");
-
-        let append_service = Arc::clone(&service);
-        let append_id = created.session_id.clone();
-        let mut append_task = Box::pin(tokio::spawn(async move {
-            append_service
-                .append_external_user_content(
-                    &append_id,
-                    ContentInput::Text("external user during archive".to_string()),
-                )
-                .await
-        }));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut append_task)
-                .await
-                .is_err(),
-            "external user append should wait while archive owns the per-session gate"
-        );
-
-        store.release_archived_save();
-        archive_task
-            .await
-            .expect("archive task should join")
-            .expect("archive should succeed");
-        let append_result = append_task.await.expect("append task should join");
-        assert!(
-            matches!(append_result, Err(SessionError::NotFound { .. })),
-            "external user append that waited behind archive should see archived session as not found: {append_result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_external_assistant_append_waits_for_archive_gate() {
-        let store = Arc::new(BlockingArchiveSaveStore::new());
-        let service = Arc::new(PersistentSessionService::new(
-            DummyBuilder,
-            2,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        ));
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::RunImmediately))
-            .await
-            .expect("create live session");
-
-        store.block_archived_saves();
-        let archive_service = Arc::clone(&service);
-        let archive_id = created.session_id.clone();
-        let archive_task = tokio::spawn(async move { archive_service.archive(&archive_id).await });
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            store.wait_for_archived_save(),
-        )
-        .await
-        .expect("archive should reach blocked durable save");
-
-        let append_service = Arc::clone(&service);
-        let append_id = created.session_id.clone();
-        let mut append_task = Box::pin(tokio::spawn(async move {
-            append_service
-                .append_external_assistant_output(
-                    &append_id,
-                    vec![AssistantBlock::Text {
-                        text: "external assistant during archive".to_string(),
-                        meta: None,
-                    }],
-                    StopReason::EndTurn,
-                    Usage::default(),
-                )
-                .await
-        }));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut append_task)
-                .await
-                .is_err(),
-            "external assistant append should wait while archive owns the per-session gate"
-        );
-
-        store.release_archived_save();
-        archive_task
-            .await
-            .expect("archive task should join")
-            .expect("archive should succeed");
-        let append_result = append_task.await.expect("append task should join");
-        assert!(
-            matches!(append_result, Err(SessionError::NotFound { .. })),
-            "external assistant append that waited behind archive should see archived session as not found: {append_result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_keep_alive_update_waits_for_archive_gate() {
-        let store = Arc::new(BlockingArchiveSaveStore::new());
-        let service = Arc::new(PersistentSessionService::new(
-            DummyBuilder,
-            2,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        ));
-        let created = service
-            .create_session(create_request_with_metadata(
-                "seed",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create live session");
-
-        store.block_archived_saves();
-        let archive_service = Arc::clone(&service);
-        let archive_id = created.session_id.clone();
-        let archive_task = tokio::spawn(async move { archive_service.archive(&archive_id).await });
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            store.wait_for_archived_save(),
-        )
-        .await
-        .expect("archive should reach blocked durable save");
-
-        let update_service = Arc::clone(&service);
-        let update_id = created.session_id.clone();
-        let mut update_task = Box::pin(tokio::spawn(async move {
-            update_service
-                .apply_runtime_session_keep_alive(&update_id, true)
-                .await
-        }));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut update_task)
-                .await
-                .is_err(),
-            "keep-alive update should wait while archive owns the per-session gate"
-        );
-
-        store.release_archived_save();
-        archive_task
-            .await
-            .expect("archive task should join")
-            .expect("archive should succeed");
-        let update_result = update_task.await.expect("update task should join");
-        assert!(
-            matches!(update_result, Err(SessionError::NotFound { .. })),
-            "keep-alive update that waited behind archive should see archived session as not found: {update_result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_external_tool_dispatch_waits_for_archive_gate() {
-        let store = Arc::new(BlockingArchiveSaveStore::new());
-        let service = Arc::new(PersistentSessionService::new(
-            ToolDispatchBuilder,
-            2,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        ));
-        let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::Defer))
-            .await
-            .expect("create live session");
-
-        store.block_archived_saves();
-        let archive_service = Arc::clone(&service);
-        let archive_id = created.session_id.clone();
-        let archive_task = tokio::spawn(async move { archive_service.archive(&archive_id).await });
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            store.wait_for_archived_save(),
-        )
-        .await
-        .expect("archive should reach blocked durable save");
-
-        let dispatch_service = Arc::clone(&service);
-        let dispatch_id = created.session_id.clone();
-        let mut dispatch_task = Box::pin(tokio::spawn(async move {
-            dispatch_service
-                .dispatch_external_tool_call(
-                    &dispatch_id,
-                    ToolCall::new(
-                        "call-during-archive".to_string(),
-                        "tool_catalog_load".to_string(),
-                        serde_json::json!({}),
-                    ),
-                )
-                .await
-        }));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut dispatch_task)
-                .await
-                .is_err(),
-            "external tool dispatch should wait while archive owns the per-session gate"
-        );
-
-        store.release_archived_save();
-        archive_task
-            .await
-            .expect("archive task should join")
-            .expect("archive should succeed");
-        let dispatch_result = dispatch_task.await.expect("dispatch task should join");
-        assert!(
-            matches!(dispatch_result, Err(SessionError::NotFound { .. })),
-            "external tool dispatch that waited behind archive should see archived session as not found: {dispatch_result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_persistent_eager_create_bounds_agent_builds() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let builder = BlockingBuildBuilder::new();
-        let service = Arc::new(PersistentSessionService::new(
-            builder.clone(),
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        ));
-
-        let service_for_first = Arc::clone(&service);
-        let first = tokio::spawn(async move {
-            service_for_first
-                .create_session(create_request("first", InitialTurnPolicy::RunImmediately))
-                .await
-        });
-
-        builder.wait_for_entered_builds(1).await;
-        let blocked = service
-            .create_session(create_request("blocked", InitialTurnPolicy::RunImmediately))
-            .await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "second eager create should be rejected before entering build: {blocked:?}"
-        );
-        assert_eq!(
-            builder.entered_builds.load(Ordering::Acquire),
-            1,
-            "capacity should prevent the second create from starting agent build"
-        );
-        assert_eq!(
-            builder.max_concurrent_builds.load(Ordering::Acquire),
-            1,
-            "agent build concurrency must stay bounded by max_sessions"
-        );
-
-        builder.release_notify.add_permits(1);
-        first
-            .await
-            .expect("first create task should join")
-            .expect("first eager create should complete");
     }
 
     #[tokio::test]
@@ -17028,61 +12267,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_persistent_discard_during_deferred_first_turn_keeps_capacity_until_turn_stops() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let builder = BlockingRunBuilder::new();
-        let service = Arc::new(PersistentSessionService::new(
-            builder.clone(),
-            1,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        ));
-
-        let staged = service
-            .create_session(create_request("staged", InitialTurnPolicy::Defer))
-            .await
-            .expect("deferred session should be staged");
-        let service_for_turn = Arc::clone(&service);
-        let session_for_turn = staged.session_id.clone();
-        let first_turn = tokio::spawn(async move {
-            service_for_turn
-                .start_turn(&session_for_turn, start_turn_request("materialize"))
-                .await
-        });
-
-        builder.wait_for_entered_runs(1).await;
-        service
-            .discard_live_session(&staged.session_id)
-            .await
-            .expect("discard should request shutdown while first turn runs");
-        let blocked = service
-            .create_session(create_request("blocked", InitialTurnPolicy::Defer))
-            .await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("Max sessions")),
-            "discard during a deferred first turn must not release capacity early: {blocked:?}"
-        );
-
-        builder.release_notify.add_permits(1);
-        let _ = first_turn.await.expect("first turn task should join");
-        service
-            .create_session(create_request("after turn", InitialTurnPolicy::Defer))
-            .await
-            .expect("capacity should release after discarded turn stops");
-    }
-
-    #[tokio::test]
     async fn test_append_system_context_repersist_live_session_when_store_row_missing() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
 
@@ -17137,120 +12328,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_append_system_context_live_save_failure_does_not_mutate_runtime_state() {
-        let store = Arc::new(FailSaveStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store) as Arc<dyn SessionStore>,
-            None,
-            memory_blob_store(),
-        );
-
-        let result = service
-            .create_session(create_request(
-                "hello",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create_session should succeed");
-        let id = result.session_id;
-
-        store.set_fail_save(true);
-        let err = service
-            .append_system_context(
-                &id,
-                AppendSystemContextRequest {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "runtime notice".to_string(),
-                    ),
-                    source: Some("mob".to_string()),
-                    idempotency_key: Some("ctx-save-failure".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-            )
-            .await
-            .expect_err("append should surface the store failure");
-        assert_eq!(err.code(), "SESSION_STORE_ERROR");
-
-        let state = service
-            .inner
-            .system_context_state(&id)
-            .await
-            .expect("live session should still exist");
-        let guard = state.snapshot();
-        assert!(
-            guard.pending().is_empty(),
-            "failed append must not mutate live runtime state"
-        );
-        assert!(
-            !guard.seen().contains_key("ctx-save-failure"),
-            "failed append must not reserve the idempotency key in live state"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_export_live_session_merges_shared_system_context_state() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
-
-        let result = service
-            .create_session(create_request(
-                "hello",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create_session should succeed");
-        let id = result.session_id;
-
-        let state = service
-            .inner
-            .system_context_state(&id)
-            .await
-            .expect("live session should expose shared system-context state");
-        state
-            .stage_append_with_snapshot(
-                &AppendSystemContextRequest {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "queued live append".to_string(),
-                    ),
-                    source: Some("mob".to_string()),
-                    idempotency_key: Some("ctx-export-merge".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                meerkat_core::time_compat::SystemTime::now(),
-            )
-            .expect("staging into shared state should succeed");
-
-        let exported = service
-            .export_live_session(&id)
-            .await
-            .expect("export should succeed");
-        let exported_state = exported
-            .system_context_state()
-            .expect("exported session should include merged system-context state");
-        assert_eq!(exported_state.pending().len(), 1);
-        assert_eq!(
-            exported_state.pending()[0].content.render_text(),
-            "queued live append"
-        );
-        assert!(
-            exported_state.seen().contains_key("ctx-export-merge"),
-            "exported session should include the staged idempotency key"
-        );
-    }
-
-    #[tokio::test]
     async fn test_append_system_context_unknown_session_does_not_allocate_gate() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
         let unknown = SessionId::new();
@@ -17285,7 +12369,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17311,7 +12395,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17349,7 +12433,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17420,7 +12504,7 @@ mod tests {
             builder.clone(),
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&service_runtime_store)),
+            Arc::clone(&service_runtime_store),
             memory_blob_store(),
         );
 
@@ -17506,7 +12590,7 @@ mod tests {
             CallbackPendingBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17571,7 +12655,7 @@ mod tests {
             CallbackPendingBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17640,7 +12724,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -17726,7 +12810,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17859,7 +12943,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17905,7 +12989,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -17960,7 +13044,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -18051,7 +13135,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18113,7 +13197,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18202,7 +13286,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18296,7 +13380,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
         let resume_source = restarted
@@ -18330,7 +13414,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18419,7 +13503,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
         let session_id = SessionId::new();
@@ -18454,7 +13538,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18506,7 +13590,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18553,7 +13637,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18611,7 +13695,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18660,7 +13744,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18705,7 +13789,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18734,7 +13818,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18763,7 +13847,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18827,7 +13911,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -18875,7 +13959,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -18921,7 +14005,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -19005,7 +14089,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -19081,7 +14165,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
         let resume_source = restarted
@@ -19145,7 +14229,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -19231,7 +14315,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -19297,7 +14381,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store.clone()),
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -19375,7 +14459,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
         let resume_source = restarted
@@ -19400,212 +14484,185 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_only_control_mutations_fail_closed_without_runtime_divergence() {
-        for runtime_backed in [true, false] {
-            let mode = if runtime_backed {
-                "runtime-backed"
-            } else {
-                "runtime-less"
-            };
-            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-            let runtime_store = runtime_backed.then(|| Arc::new(InMemoryRuntimeStore::new()));
-            let service_runtime_store = runtime_store
-                .as_ref()
-                .map(|store| Arc::clone(store) as Arc<dyn RuntimeStore>);
-            let service = PersistentSessionService::new(
-                DummyBuilder,
-                4,
-                Arc::clone(&store),
-                service_runtime_store,
-                memory_blob_store(),
-            );
-            let session = Session::new();
-            let id = session.id().clone();
-            store
-                .save(&session)
-                .await
-                .expect("test should seed a store-only compatibility projection");
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        store
+            .save(&session)
+            .await
+            .expect("test should seed a store-only compatibility projection");
 
-            let append_err = service
-                .append_system_context(
-                    &id,
-                    AppendSystemContextRequest {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            format!("{mode} store-only append must fail closed"),
-                        ),
-                        source: Some("api".to_string()),
-                        idempotency_key: Some(format!("store-only-{mode}-append")),
-                        source_kind: meerkat_core::session::SystemContextSource::Normal,
-                        peer_response_terminal: None,
-                    },
-                )
-                .await
-                .expect_err("store-only projection must not be promoted by append");
-            assert!(
-                matches!(
-                    append_err,
-                    SessionControlError::Session(SessionError::Unsupported(ref message))
-                        if message.contains("store-only compatibility projection")
-                            && message.contains("machine snapshot")
-                ),
-                "{mode} append error should require machine authority: {append_err:?}"
-            );
-
-            let stage_err = service
-                .stage_tool_results(
-                    &id,
-                    StageToolResultsRequest {
-                        results: vec![ToolResult::new(
-                            "tool-call-1".to_string(),
-                            "callback result".to_string(),
-                            false,
-                        )],
-                    },
-                )
-                .await
-                .expect_err("store-only projection must not be promoted by staged tool results");
-            assert!(
-                matches!(
-                    stage_err,
-                    SessionError::Unsupported(ref message)
-                        if message.contains("store-only compatibility projection")
-                            && message.contains("machine snapshot")
-                ),
-                "{mode} stage error should require machine authority: {stage_err:?}"
-            );
-
-            let archive_result = service.archive(&id).await;
-            if runtime_backed {
-                let archive_err =
-                    archive_result.expect_err("runtime-backed archive must route through machine");
-                assert!(
-                    matches!(
-                        archive_err,
-                        SessionError::Unsupported(ref message)
-                            if message.contains("MachineSessionArchiveProtocol")
+        let append_err = service
+            .append_system_context(
+                &id,
+                AppendSystemContextRequest {
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "store-only append must fail closed".to_string(),
                     ),
-                    "{mode} archive error should require machine authority: {archive_err:?}"
-                );
-            } else {
-                archive_result.expect("runtime-less compatibility archive should remain supported");
-            }
+                    source: Some("api".to_string()),
+                    idempotency_key: Some("store-only-append".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    peer_response_terminal: None,
+                },
+            )
+            .await
+            .expect_err("store-only projection must not be promoted by append");
+        assert!(
+            matches!(
+                append_err,
+                SessionControlError::Session(SessionError::Unsupported(ref message))
+                    if message.contains("store-only compatibility projection")
+                        && message.contains("machine snapshot")
+            ),
+            "append error should require machine authority: {append_err:?}"
+        );
 
-            let raw = store
-                .load(&id)
+        let stage_err = service
+            .stage_tool_results(
+                &id,
+                StageToolResultsRequest {
+                    results: vec![ToolResult::new(
+                        "tool-call-1".to_string(),
+                        "callback result".to_string(),
+                        false,
+                    )],
+                },
+            )
+            .await
+            .expect_err("store-only projection must not be promoted by staged tool results");
+        assert!(
+            matches!(
+                stage_err,
+                SessionError::Unsupported(ref message)
+                    if message.contains("store-only compatibility projection")
+                        && message.contains("machine snapshot")
+            ),
+            "stage error should require machine authority: {stage_err:?}"
+        );
+
+        let archive_err = service
+            .archive(&id)
+            .await
+            .expect_err("runtime-backed archive must route through machine");
+        assert!(
+            matches!(
+                archive_err,
+                SessionError::Unsupported(ref message)
+                    if message.contains("MachineSessionArchiveProtocol")
+            ),
+            "archive error should require machine authority: {archive_err:?}"
+        );
+
+        let raw = store
+            .load(&id)
+            .await
+            .expect("raw store load should succeed")
+            .expect("store-only projection should remain present");
+        assert!(
+            raw.system_context_state().is_none(),
+            "append rejection must not mutate the store-only projection"
+        );
+        assert!(
+            raw.deferred_turn_state().is_none(),
+            "stage rejection must not mutate the store-only projection"
+        );
+        assert!(
+            !session_marks_archived(&raw),
+            "archive rejection must not persist archived lifecycle metadata"
+        );
+        assert!(
+            runtime_store
+                .load_session_snapshot(
+                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id)
+                )
                 .await
-                .expect("raw store load should succeed")
-                .expect("store-only projection should remain present");
-            assert!(
-                raw.system_context_state().is_none(),
-                "{mode} append rejection must not mutate the store-only projection"
-            );
-            assert!(
-                raw.deferred_turn_state().is_none(),
-                "{mode} stage rejection must not mutate the store-only projection"
-            );
-            assert_eq!(
-                session_marks_archived(&raw),
-                !runtime_backed,
-                "{mode} archive lifecycle metadata should reflect runtime-less compatibility support"
-            );
-            if let Some(runtime_store) = runtime_store {
-                assert!(
-                    runtime_store
-                        .load_session_snapshot(
-                            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id)
-                        )
-                        .await
-                        .expect("runtime snapshot load should succeed")
-                        .is_none(),
-                    "store-only control mutations must not create runtime authority"
-                );
-            }
-        }
+                .expect("runtime snapshot load should succeed")
+                .is_none(),
+            "store-only control mutations must not create runtime authority"
+        );
     }
 
     #[tokio::test]
     async fn test_machine_authorized_archive_rejects_store_only_projection() {
-        for runtime_backed in [true, false] {
-            let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-            let runtime_store = runtime_backed.then(|| Arc::new(InMemoryRuntimeStore::new()));
-            let service_runtime_store = runtime_store
-                .as_ref()
-                .map(|store| Arc::clone(store) as Arc<dyn RuntimeStore>);
-            let service = PersistentSessionService::new(
-                DummyBuilder,
-                4,
-                Arc::clone(&store),
-                service_runtime_store,
-                memory_blob_store(),
-            );
-            let session = Session::new();
-            let id = session.id().clone();
-            store
-                .save(&session)
-                .await
-                .expect("test should seed a store-only compatibility projection");
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        store
+            .save(&session)
+            .await
+            .expect("test should seed a store-only compatibility projection");
 
-            let machine = if let Some(runtime_store) = runtime_store.as_ref() {
-                meerkat_runtime::MeerkatMachine::persistent(
-                    Arc::clone(runtime_store) as Arc<dyn RuntimeStore>,
-                    memory_blob_store(),
-                )
-            } else {
-                meerkat_runtime::MeerkatMachine::ephemeral()
-            };
-            let err = service
-                .archive_with_machine_protocol(
-                    &id,
-                    MachineSessionArchiveProtocol::from_machine(&machine),
-                )
-                .await
-                .expect_err("machine-routed archive must not promote store-only projection truth");
-            assert!(
-                matches!(err, SessionError::Unsupported(ref message)
-                    if message.contains("store-only compatibility projection")
-                        && message.contains("machine snapshot")),
-                "unexpected store-only archive error: {err:?}"
-            );
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let err = service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect_err("machine-routed archive must not promote store-only projection truth");
+        assert!(
+            matches!(err, SessionError::Unsupported(ref message)
+                if message.contains("store-only compatibility projection")
+                    && message.contains("machine snapshot")),
+            "unexpected store-only archive error: {err:?}"
+        );
 
-            let raw = store
-                .load(&id)
+        let raw = store
+            .load(&id)
+            .await
+            .expect("raw store load should succeed")
+            .expect("store-only projection should remain present");
+        assert!(
+            !session_marks_archived(&raw),
+            "machine-routed archive rejection must not persist archived lifecycle metadata"
+        );
+        assert!(
+            raw.system_context_state().is_none(),
+            "archive must not add control append state"
+        );
+        assert!(
+            raw.deferred_turn_state().is_none(),
+            "archive must not add deferred-turn control state"
+        );
+        assert!(
+            runtime_store
+                .load_session_snapshot(
+                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                )
                 .await
-                .expect("raw store load should succeed")
-                .expect("store-only projection should remain present");
-            assert!(
-                !session_marks_archived(&raw),
-                "machine-routed archive rejection must not persist archived lifecycle metadata"
-            );
-            assert!(
-                raw.system_context_state().is_none(),
-                "archive must not add control append state"
-            );
-            assert!(
-                raw.deferred_turn_state().is_none(),
-                "archive must not add deferred-turn control state"
-            );
-            if let Some(runtime_store) = runtime_store {
-                assert!(
-                    runtime_store
-                        .load_session_snapshot(
-                            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-                        )
-                        .await
-                        .expect("runtime snapshot load should succeed")
-                        .is_none(),
-                    "store-only machine archive rejection must not create runtime authority"
-                );
-                assert_eq!(
-                    meerkat_runtime::store::load_runtime_state(
-                        runtime_store.as_ref(),
-                        &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-                    )
-                    .await
-                    .expect("runtime state load should succeed"),
-                    None,
-                    "store-only machine archive rejection must not create retired lifecycle"
-                );
-            }
-        }
+                .expect("runtime snapshot load should succeed")
+                .is_none(),
+            "store-only machine archive rejection must not create runtime authority"
+        );
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime state load should succeed"),
+            None,
+            "store-only machine archive rejection must not create retired lifecycle"
+        );
     }
 
     #[tokio::test]
@@ -19615,7 +14672,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
 
@@ -19673,51 +14730,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_turn_recovery_rejects_missing_runtime_bindings() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("create deferred session");
-        let id = created.session_id;
-
-        service
-            .discard_live_session(&id)
-            .await
-            .expect("discard live session");
-
-        let error = service
-            .start_turn(&id, start_turn_request("follow up"))
-            .await
-            .expect_err("runtime-backed recovery should reject missing bindings");
-
-        assert!(
-            error
-                .to_string()
-                .contains("stored-session recovery via non-canonical runtime-binding providers has been deleted"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_metadata_only_projection_does_not_discard_live_session() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
 
@@ -19758,11 +14777,13 @@ mod tests {
         use meerkat_core::event::AgentEvent;
 
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::clone(&runtime_store),
             memory_blob_store(),
         );
 
@@ -19783,7 +14804,7 @@ mod tests {
             .await
             .expect("read baseline summary");
 
-        service
+        let output = service
             .apply_runtime_context_appends(
                 &session_id,
                 RunId::new(),
@@ -19801,6 +14822,20 @@ mod tests {
             )
             .await
             .expect("apply_runtime_context_appends");
+        // The runtime driver owns durability for context commits: it commits
+        // the returned machine snapshot to the runtime store. Mirror that
+        // ordering here so the summary read serves the committed revision.
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: output
+                        .session_snapshot
+                        .expect("context apply should carry a machine commit snapshot"),
+                },
+            )
+            .await
+            .expect("commit context apply snapshot");
 
         let post_context_summary = service
             .read(&session_id)
@@ -19867,7 +14902,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            runtime_store,
             memory_blob_store(),
         );
 
@@ -19964,7 +14999,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         )
         .with_event_projection(
@@ -20023,7 +15058,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         )
         .with_event_projection(
@@ -20070,7 +15105,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
         let session_id = SessionId::new();
@@ -20089,46 +15124,6 @@ mod tests {
                 .expect("read event log")
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn test_event_store_projection_records_eager_initial_turn_events() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let event_store = Arc::new(RecordingEventStore::default());
-        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let service = PersistentSessionService::new(
-            EventfulBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        )
-        .with_event_projection(
-            event_store_trait,
-            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
-        );
-
-        let run = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create session");
-        let session_id = run.session_id;
-
-        event_store.wait_for_seq(&session_id, 2).await;
-        assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);
-        let events_path = dir
-            .path()
-            .join(".rkat")
-            .join("sessions")
-            .join(session_id.to_string())
-            .join("events.jsonl");
-        let projected = read_projected_events_after(&events_path, "run_completed").await;
-        assert!(projected.contains("run_started"));
-        assert!(projected.contains("run_completed"));
     }
 
     /// Create a session request that seeds initial SessionMetadata so
@@ -20166,206 +15161,6 @@ mod tests {
         req
     }
 
-    #[tokio::test]
-    async fn test_update_keep_alive_persists_to_store() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create session");
-        let id = created.session_id;
-
-        // Verify initial keep_alive is false (default).
-        let persisted = store.load(&id).await.unwrap().unwrap();
-        let meta = persisted.session_metadata().expect("metadata present");
-        assert!(!meta.keep_alive, "initial keep_alive should be false");
-
-        // Update keep_alive to true on the live session.
-        service
-            .apply_runtime_session_keep_alive(&id, true)
-            .await
-            .expect("runtime keep_alive update should succeed");
-
-        // Verify the store reflects the update.
-        let persisted = store.load(&id).await.unwrap().unwrap();
-        let meta = persisted.session_metadata().expect("metadata present");
-        assert!(
-            meta.keep_alive,
-            "persisted keep_alive should be true after update"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_update_keep_alive_rolls_back_on_store_failure() {
-        let fail_store = Arc::new(FailSaveStore::new());
-        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create session");
-        let id = created.session_id;
-
-        // --- Transition: false → true with store failure ---
-        fail_store.set_fail_save(true);
-        let result = service.apply_runtime_session_keep_alive(&id, true).await;
-        assert!(result.is_err(), "false→true should fail when store fails");
-        fail_store.set_fail_save(false);
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        assert!(
-            !exported.session_metadata().unwrap().keep_alive,
-            "should roll back to false after failed false→true"
-        );
-
-        // --- Bring live state to true successfully ---
-        service
-            .apply_runtime_session_keep_alive(&id, true)
-            .await
-            .unwrap();
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        assert!(exported.session_metadata().unwrap().keep_alive);
-
-        // --- Transition: true → true with store failure (idempotent retry) ---
-        fail_store.set_fail_save(true);
-        let result = service.apply_runtime_session_keep_alive(&id, true).await;
-        assert!(result.is_err(), "true→true should fail when store fails");
-        fail_store.set_fail_save(false);
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        assert!(
-            exported.session_metadata().unwrap().keep_alive,
-            "should stay true after failed true→true (not flip to false)"
-        );
-
-        // --- Transition: true → false with store failure ---
-        fail_store.set_fail_save(true);
-        let result = service.apply_runtime_session_keep_alive(&id, false).await;
-        assert!(result.is_err(), "true→false should fail when store fails");
-        fail_store.set_fail_save(false);
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        assert!(
-            exported.session_metadata().unwrap().keep_alive,
-            "should roll back to true after failed true→false (not flip to false)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_session_tool_filter_does_not_forge_visibility_state() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create session");
-        let id = created.session_id;
-
-        let filter =
-            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect());
-
-        service
-            .set_session_tool_filter(&id, filter.clone())
-            .await
-            .expect("set_session_tool_filter should succeed");
-
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        let exported_state = exported
-            .tool_visibility_state()
-            .expect("live visibility state should decode");
-        assert!(
-            exported_state.is_none(),
-            "store-only filter update must not forge generated visibility authority"
-        );
-
-        let persisted = store.load(&id).await.unwrap().unwrap();
-        let persisted_state = persisted
-            .tool_visibility_state()
-            .expect("persisted visibility state should decode");
-        assert_eq!(persisted_state, exported_state);
-    }
-
-    #[tokio::test]
-    async fn test_set_session_tool_filter_rolls_back_on_store_failure() {
-        let fail_store = Arc::new(FailSaveStore::new());
-        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create session");
-        let id = created.session_id;
-
-        let baseline = service.export_session_with_labels(&id).await.unwrap();
-        assert!(
-            baseline
-                .tool_visibility_state()
-                .expect("baseline visibility state should decode")
-                .is_none(),
-            "new sessions should not materialize visibility metadata before updates"
-        );
-
-        let filter =
-            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect());
-
-        fail_store.set_fail_save(true);
-        let result = service.set_session_tool_filter(&id, filter).await;
-        assert!(
-            result.is_err(),
-            "store failure should abort the filter update"
-        );
-        fail_store.set_fail_save(false);
-
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        let exported_visibility_state = exported
-            .tool_visibility_state()
-            .expect("exported visibility state should decode");
-        let baseline_visibility_state = baseline
-            .tool_visibility_state()
-            .expect("baseline visibility state should decode");
-        assert_eq!(
-            exported_visibility_state, baseline_visibility_state,
-            "live session should roll back to the pre-mutation visibility state"
-        );
-
-        let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
-        let persisted_visibility_state = persisted
-            .tool_visibility_state()
-            .expect("persisted visibility state should decode");
-        assert_eq!(
-            persisted_visibility_state, baseline_visibility_state,
-            "store should retain the pre-mutation visibility state after rollback"
-        );
-    }
-
     #[test]
     fn rollback_snapshot_ignores_legacy_filter_metadata_when_canonical_state_is_absent() {
         let mut session = Session::new();
@@ -20394,326 +15189,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_session_tool_filter_rollback_does_not_promote_legacy_metadata() {
-        let fail_store = Arc::new(FailSaveStore::new());
-        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
-
-        let mut request = create_request_with_metadata("hello", InitialTurnPolicy::RunImmediately);
-        let session = request
-            .build
-            .as_mut()
-            .and_then(|build| build.resume_session.as_mut())
-            .expect("request should carry a resumable session");
-        session.set_metadata(
-            meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY,
-            serde_json::to_value(meerkat_core::ToolFilter::Deny(
-                ["secret".to_string()].into_iter().collect(),
-            ))
-            .unwrap(),
-        );
-        session.set_metadata(
-            meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY,
-            serde_json::to_value(meerkat_core::ToolFilter::Allow(
-                ["visible".to_string()].into_iter().collect(),
-            ))
-            .unwrap(),
-        );
-
-        let created = service
-            .create_session(request)
-            .await
-            .expect("create session");
-        let id = created.session_id;
-
-        let baseline = service.export_session_with_labels(&id).await.unwrap();
-        assert!(
-            baseline
-                .tool_visibility_state()
-                .expect("canonical visibility metadata should parse")
-                .is_none(),
-            "legacy-only metadata must not materialize canonical visibility state"
-        );
-        assert!(
-            baseline
-                .metadata()
-                .contains_key(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY),
-            "fixture should retain the stale external filter metadata key"
-        );
-        assert!(
-            baseline
-                .metadata()
-                .contains_key(meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY),
-            "fixture should retain the stale inherited filter metadata key"
-        );
-
-        let filter =
-            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect());
-
-        fail_store.set_fail_save(true);
-        let result = service.set_session_tool_filter(&id, filter).await;
-        assert!(
-            result.is_err(),
-            "store failure should abort the filter update"
-        );
-        fail_store.set_fail_save(false);
-
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        assert!(
-            exported
-                .tool_visibility_state()
-                .expect("canonical visibility metadata should parse")
-                .is_none(),
-            "failed rollback must not promote stale legacy metadata into canonical visibility"
-        );
-
-        let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
-        assert!(
-            persisted
-                .tool_visibility_state()
-                .expect("canonical visibility metadata should parse")
-                .is_none(),
-            "store should retain no canonical visibility state after failed rollback"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_session_tool_filter_rollback_rejects_malformed_canonical_visibility_state() {
-        let fail_store = Arc::new(FailSaveStore::new());
-        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
-
-        let mut request = create_request_with_metadata("hello", InitialTurnPolicy::RunImmediately);
-        let malformed_visibility_state = serde_json::json!("not-a-visibility-state");
-        let session = request
-            .build
-            .as_mut()
-            .and_then(|build| build.resume_session.as_mut())
-            .expect("request should carry a resumable session");
-        let mut raw_session = serde_json::to_value(&*session).expect("session should serialize");
-        raw_session
-            .get_mut("metadata")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("session JSON should carry metadata")
-            .insert(
-                meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY.to_string(),
-                malformed_visibility_state.clone(),
-            );
-        *session = serde_json::from_value(raw_session).expect("session should deserialize");
-
-        let created = service
-            .create_session(request)
-            .await
-            .expect("create session");
-        let id = created.session_id;
-
-        let baseline = service.export_session_with_labels(&id).await.unwrap();
-        assert!(
-            baseline.try_tool_visibility_state().is_err(),
-            "fixture should carry malformed canonical visibility metadata"
-        );
-        assert_eq!(
-            baseline
-                .metadata()
-                .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
-            Some(&malformed_visibility_state),
-            "fixture should retain the raw malformed canonical metadata"
-        );
-
-        let filter =
-            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect());
-
-        fail_store.set_fail_save(true);
-        let result = service.set_session_tool_filter(&id, filter).await;
-        let err = result
-            .expect_err("malformed canonical visibility should fail before staging or rollback");
-        assert!(
-            err.to_string()
-                .contains("invalid canonical tool visibility state"),
-            "unexpected error: {err}"
-        );
-        fail_store.set_fail_save(false);
-
-        let exported = service.export_session_with_labels(&id).await.unwrap();
-        assert_eq!(
-            exported
-                .metadata()
-                .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
-            Some(&malformed_visibility_state),
-            "failed mutation must preserve malformed canonical visibility metadata"
-        );
-        assert!(
-            exported.try_tool_visibility_state().is_err(),
-            "failed mutation must not replace malformed canonical visibility with default state"
-        );
-
-        let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
-        assert_eq!(
-            persisted
-                .metadata()
-                .get(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
-            Some(&malformed_visibility_state),
-            "store should retain the raw malformed canonical metadata after failed mutation"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_deferred_first_turn_system_prompt_is_applied_and_persisted() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("create deferred session");
-        let id = created.session_id;
-
-        service
-            .start_turn(
-                &id,
-                start_turn_request_with_system_prompt(
-                    "first turn",
-                    Some("You are a deferred-session reviewer."),
-                ),
-            )
-            .await
-            .expect("deferred first turn should succeed");
-
-        let restored = service
-            .export_live_session(&id)
-            .await
-            .expect("live session");
-        let system_prompt = restored
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .expect("restored session should contain a system prompt");
-        assert!(system_prompt.contains("deferred-session reviewer"));
-
-        let persisted = store
-            .load(&id)
-            .await
-            .expect("load should succeed")
-            .expect("session should be persisted");
-        let persisted_prompt = persisted
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .expect("persisted session should contain a system prompt");
-        assert!(persisted_prompt.contains("deferred-session reviewer"));
-    }
-
-    #[tokio::test]
-    async fn test_deferred_first_turn_system_prompt_overrides_create_time_prompt() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let mut req = create_request_with_metadata("hello", InitialTurnPolicy::Defer);
-        req.system_prompt =
-            meerkat_core::SystemPromptOverride::Set("You are the old prompt.".to_string());
-        let created = service
-            .create_session(req)
-            .await
-            .expect("create deferred session");
-        let id = created.session_id;
-
-        service
-            .start_turn(
-                &id,
-                start_turn_request_with_system_prompt(
-                    "first turn",
-                    Some("You are the new prompt."),
-                ),
-            )
-            .await
-            .expect("deferred first turn should succeed");
-
-        let restored = service
-            .export_live_session(&id)
-            .await
-            .expect("live session");
-        let system_prompt = restored
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .expect("restored session should contain a system prompt");
-        assert!(system_prompt.contains("new prompt"));
-        assert!(!system_prompt.contains("old prompt"));
-    }
-
-    #[tokio::test]
-    async fn test_materialized_start_turn_rejects_system_prompt_override() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request_with_metadata(
-                "hello",
-                InitialTurnPolicy::RunImmediately,
-            ))
-            .await
-            .expect("create immediate session");
-        let id = created.session_id;
-
-        let error = service
-            .start_turn(
-                &id,
-                start_turn_request_with_system_prompt(
-                    "follow-up",
-                    Some("You are a different prompt."),
-                ),
-            )
-            .await
-            .expect_err("materialized session should reject turn-time system_prompt");
-
-        match error {
-            SessionError::Unsupported(message) => {
-                assert!(message.contains("deferred session's first turn"));
-            }
-            other => panic!("expected Unsupported, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn test_dispatch_external_tool_call_does_not_forge_tool_visibility_state() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             ToolDispatchBuilder,
             4,
             Arc::clone(&store),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
 
@@ -20758,7 +15240,7 @@ mod tests {
             ToolDispatchBuilder,
             4,
             store.clone(),
-            None,
+            Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
         );
 
@@ -20856,7 +15338,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store_dyn),
+            runtime_store_dyn,
             memory_blob_store(),
         );
 

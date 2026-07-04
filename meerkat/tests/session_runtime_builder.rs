@@ -21,7 +21,11 @@ use meerkat_store::MemoryBlobStore;
 
 fn build_runtime() -> meerkat::session_runtime::MeerkatSessionRuntime {
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-    let persistence = PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
+    let persistence = PersistenceBundle::new(
+        session_store,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        Arc::new(MemoryBlobStore::new()),
+    );
     let temp = tempfile::tempdir().expect("tempdir");
     let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
     let builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -74,7 +78,11 @@ fn builder_with_skill_identity_roots_pre_populates_inner() {
     use std::path::PathBuf;
 
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-    let persistence = PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
+    let persistence = PersistenceBundle::new(
+        session_store,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        Arc::new(MemoryBlobStore::new()),
+    );
     let temp = tempfile::tempdir().expect("tempdir");
     let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
     let builder = FactoryAgentBuilder::new(factory, Config::default());
@@ -96,7 +104,11 @@ fn builder_with_skill_identity_roots_pre_populates_inner() {
 #[test]
 fn builder_with_realm_id_pre_populates_inner() {
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-    let persistence = PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
+    let persistence = PersistenceBundle::new(
+        session_store,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        Arc::new(MemoryBlobStore::new()),
+    );
     let temp = tempfile::tempdir().expect("tempdir");
     let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
     let builder = FactoryAgentBuilder::new(factory, Config::default());

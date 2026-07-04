@@ -490,10 +490,9 @@ async fn build_target_runtime_surface(
 
     let persistence = PersistenceBundle::new_with_schedule_store(
         Arc::clone(&jsonl_store) as Arc<dyn SessionStore>,
-        None,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-        schedule_store,
-    );
+        schedule_store);
     let runtime_adapter = persistence.runtime_adapter();
     let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
@@ -691,10 +690,9 @@ async fn main() -> anyhow::Result<()> {
     rpc_jsonl.init().await?;
     let rpc_persistence = PersistenceBundle::new_with_schedule_store(
         rpc_jsonl as Arc<dyn SessionStore>,
-        None,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-        rpc_schedule_store,
-    );
+        rpc_schedule_store);
     let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
         meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
     );
@@ -1376,10 +1374,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         rpc_jsonl.init().await?;
         let rpc_persistence = PersistenceBundle::new_with_schedule_store(
             rpc_jsonl as Arc<dyn SessionStore>,
-            None,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
-            rpc_schedule_store,
-        );
+            rpc_schedule_store);
         let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
             meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
         );
@@ -2270,10 +2267,9 @@ mod tests {
 
         let persistence = PersistenceBundle::new_with_schedule_store(
             Arc::new(bundle_store) as Arc<dyn SessionStore>,
-            None,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
-            schedule_store,
-        );
+            schedule_store);
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
@@ -2728,9 +2724,15 @@ mod tests {
         let feed = runtime_registry.completion_feed_handle();
         assert_eq!(feed.watermark(), 0);
 
+        let admission = surface
+            .service
+            .reserve_runtime_turn_admission(&session_id)
+            .await
+            .unwrap();
         surface
             .service
-            .start_turn(
+            .run_machine_committed_live_turn(
+                meerkat::MachineServiceTurnCommitProtocol::from_machine(&surface.runtime_adapter),
                 &session_id,
                 StartTurnRequest {
                     injected_context: Vec::new(),
@@ -2746,8 +2748,10 @@ mod tests {
                         },
                     ),
                 },
+                admission,
             )
             .await
+            .map_err(|(error, _admission)| error)
             .unwrap();
 
         timeout(Duration::from_secs(5), async {

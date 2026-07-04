@@ -669,14 +669,17 @@ where
         #[cfg(not(target_arch = "wasm32"))]
         {
             let key = std::ptr::from_ref(self) as usize;
-            self.runtime_store().map(|store| {
-                cached_runtime_adapter(persistent_runtime_adapter_cache(), key, || {
+            let store = self.runtime_store();
+            Some(cached_runtime_adapter(
+                persistent_runtime_adapter_cache(),
+                key,
+                || {
                     Arc::new(meerkat_runtime::MeerkatMachine::persistent(
                         store,
                         self.blob_store(),
                     ))
-                })
-            })
+                },
+            ))
         }
     }
 
@@ -687,10 +690,9 @@ where
         let Some(session) = self.load_authoritative_session(session_id).await? else {
             return Ok(None);
         };
-        if self.runtime_store().is_some()
-            && self
-                .session_archived_by_authority(session_id, &session)
-                .await?
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
         {
             return Ok(None);
         }

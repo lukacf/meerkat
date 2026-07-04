@@ -33,7 +33,7 @@ use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SkillRuntime, SkillSc
 use meerkat_core::skills::SkillEngine as _;
 use meerkat_core::skills::{
     SkillDescriptor, SkillDocument, SkillKey, SkillName, SourceIdentityRecord,
-    SourceIdentityStatus, SourceTransportKind, SourceUuid,
+    SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind, SourceUuid,
 };
 use meerkat_skills::source::SourceNode;
 use meerkat_skills::{
@@ -172,28 +172,39 @@ You are a security auditor reviewing code for vulnerabilities.
     // the same ID across sources, the first source wins (shadowing).
     // This enables layering: project skills override user skills override builtins.
 
-    let composite_source = CompositeSkillSource::from_named(vec![
-        NamedSource {
-            identity: SourceIdentityRecord {
-                source_uuid: SourceUuid::builtin(),
-                display_name: "inline".to_string(),
-                transport_kind: SourceTransportKind::Embedded,
-                fingerprint: "example:inline".to_string(),
-                status: SourceIdentityStatus::Active,
+    let inline_identity = SourceIdentityRecord {
+        source_uuid: SourceUuid::builtin(),
+        display_name: "inline".to_string(),
+        transport_kind: SourceTransportKind::Embedded,
+        fingerprint: "example:inline".to_string(),
+        status: SourceIdentityStatus::Active,
+    };
+    let filesystem_identity = SourceIdentityRecord {
+        source_uuid: SourceUuid::project_local(),
+        display_name: "filesystem".to_string(),
+        transport_kind: SourceTransportKind::Filesystem,
+        fingerprint: format!("example:filesystem:{}", skill_dir.display()),
+        status: SourceIdentityStatus::Active,
+    };
+    let registry = Arc::new(SourceIdentityRegistry::build(
+        vec![inline_identity.clone(), filesystem_identity.clone()],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?);
+    let composite_source = CompositeSkillSource::from_named_with_registry(
+        vec![
+            NamedSource {
+                identity: inline_identity,
+                source: SourceNode::Memory(inline_source),
             },
-            source: SourceNode::Memory(inline_source),
-        },
-        NamedSource {
-            identity: SourceIdentityRecord {
-                source_uuid: SourceUuid::project_local(),
-                display_name: "filesystem".to_string(),
-                transport_kind: SourceTransportKind::Filesystem,
-                fingerprint: format!("example:filesystem:{}", skill_dir.display()),
-                status: SourceIdentityStatus::Active,
+            NamedSource {
+                identity: filesystem_identity,
+                source: SourceNode::Filesystem(fs_source),
             },
-            source: SourceNode::Filesystem(fs_source),
-        },
-    ]);
+        ],
+        registry,
+    );
 
     // ── Step 4: Build the skill engine ───────────────────────────────────────
     //

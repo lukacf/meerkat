@@ -183,6 +183,11 @@ No durability across process restart.
 ### Persistent mode
 
 Durability follows the active persistent realm backend (`sqlite` or `jsonl`).
+Both persistent backends mount a SQLite runtime companion for runtime authority:
+`sqlite` realms keep the `runtime_*` tables inside `sessions.sqlite3`, and
+`jsonl` realms carry a dedicated `runtime.sqlite3` alongside the JSONL session
+documents. Queued inputs, run-boundary receipts, ops snapshots, and
+auth-lease/OAuth-flow authority are durable under both backends.
 The `memory` backend is explicit ephemeral storage and does not survive process
 restart.
 

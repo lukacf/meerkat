@@ -97,11 +97,13 @@ pub struct OpenAiLiveClient {
 impl OpenAiLiveClient {
     /// Create a new OpenAI live client.
     ///
-    /// Callers should acquire the api key via
-    /// `meerkat::resolve_provider_api_key(config, Provider::OpenAI)` so
-    /// env reads flow through the canonical `ProviderRuntimeRegistry`
-    /// resolver path (dogma §1/§7/§14). Direct env reads inside this
-    /// crate are forbidden — see plan §6.5.
+    /// The api key is the per-open resolved credential minted by
+    /// `OpenAiProviderRuntime::build_realtime_session_factory` from a
+    /// `ResolvedConnection` — i.e. resolved through the canonical
+    /// `ProviderRuntimeRegistry` path against the owning session's
+    /// `auth_binding` at open time, never a process-lifetime default baked
+    /// at startup (dogma §1/§7/§14). Direct env reads inside this crate
+    /// are forbidden — see plan §6.5.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
@@ -1372,7 +1374,11 @@ fn openai_realtime_capabilities_for(
 /// Identity-free capability advertisement for the factory seam, projected
 /// from the canonical realtime model's catalog row (see
 /// [`OPENAI_CANONICAL_REALTIME_MODEL`]).
-fn openai_realtime_capabilities_default() -> RealtimeCapabilities {
+///
+/// Public because composition seams that wrap the OpenAI factory (the
+/// facade's per-open credential-resolving factory) must advertise the same
+/// provider-owned answer instead of hand-authoring a capability mirror.
+pub fn openai_realtime_capabilities_default() -> RealtimeCapabilities {
     openai_realtime_capabilities_for(&meerkat_core::SessionLlmIdentity {
         model: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
         provider: Provider::OpenAI,
@@ -3070,11 +3076,17 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
     async fn attach_external_session(
         &self,
         target: &RealtimeExternalSessionTarget,
+        identity: &meerkat_core::SessionLlmIdentity,
         turning_mode: RealtimeTurningMode,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
         let target = OpenAiLiveCallTarget::new(target.provider_session_id.clone())?;
         let raw = self.raw_factory.attach_to_call(&target).await?;
-        Ok(Box::new(OpenAiRealtimeSession::new(raw, turning_mode)))
+        let mut session = OpenAiRealtimeSession::new(raw, turning_mode);
+        // R1: attach binds the channel to the owning session identity the
+        // same way the open paths do, so model-keyed capabilities/policy and
+        // the Refresh swap guard follow the attached session's identity.
+        session.set_current_identity(identity);
+        Ok(Box::new(session))
     }
 
     /// E25: Open a provider-native `LiveAdapter` directly.
@@ -5603,6 +5615,7 @@ mod tests {
         let mut opened = factory
             .attach_external_session(
                 &RealtimeExternalSessionTarget::new("call_123").expect("target"),
+                &sample_realtime_identity(),
                 RealtimeTurningMode::ExplicitCommit,
             )
             .await

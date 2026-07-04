@@ -332,8 +332,8 @@ case "${lane}" in
   wasm-check)
     configure_rust_with_wasm_target
     append_rust_cfg 'getrandom_backend="wasm_js"'
-    "${CARGO}" check -p meerkat-web-runtime --target wasm32-unknown-unknown
-    "${CARGO}" clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- -D warnings
+    "${CARGO}" check -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets
+    "${CARGO}" clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
     ;;
   wasm-contract-tests)
     configure_rust_with_wasm_target

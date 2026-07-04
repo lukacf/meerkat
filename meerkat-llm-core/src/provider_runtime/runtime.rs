@@ -10,6 +10,7 @@ use meerkat_core::{ImageGenerationProviderProfile, Provider};
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
 use crate::provider_runtime::errors::{ProviderAuthError, ProviderClientError};
 use crate::provider_runtime::registry::ResolverEnvironment;
+use crate::realtime_session::RealtimeSessionFactory;
 use crate::{ImageGenerationExecutor, LlmClient};
 
 /// Per-provider runtime contract: resolve credentials and construct clients.
@@ -50,6 +51,18 @@ pub trait ProviderRuntime: Send + Sync {
         _connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
         Err(ProviderClientError::MissingFeature("realtime-text"))
+    }
+
+    /// Construct a provider-neutral realtime session factory from a resolved
+    /// provider connection. Provider runtimes own the backend/auth gating for
+    /// the realtime socket — the same fail-closed matrix as
+    /// [`Self::build_realtime_text_client`] — and mint the concrete adapter
+    /// in-crate, so credential material never leaves the provider seam.
+    fn build_realtime_session_factory(
+        &self,
+        _connection: ResolvedConnection,
+    ) -> Result<Arc<dyn RealtimeSessionFactory>, ProviderClientError> {
+        Err(ProviderClientError::MissingFeature("realtime-session"))
     }
 
     /// Construct an optional image-generation executor from the same resolved
@@ -101,6 +114,40 @@ mod tests {
         ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
             Err(ProviderClientError::MissingFeature("mock"))
         }
+    }
+
+    #[test]
+    fn realtime_session_factory_defaults_to_missing_feature() {
+        use crate::provider_runtime::binding::StaticLease;
+
+        let runtime: Arc<dyn ProviderRuntime> = Arc::new(MockRuntime);
+        let connection = ResolvedConnection {
+            provider: Provider::Other,
+            backend: NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+            ),
+            backend_profile: Arc::new(meerkat_core::BackendProfile {
+                id: "b".into(),
+                provider: Provider::Other,
+                backend_kind: "other_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            }),
+            auth_lease: Arc::new(StaticLease::inline_secret(
+                "secret".into(),
+                AuthMetadata::default(),
+                None,
+                "test",
+            )),
+        };
+        let err = match runtime.build_realtime_session_factory(connection) {
+            Ok(_) => panic!("default realtime session factory must fail closed"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            ProviderClientError::MissingFeature("realtime-session")
+        ));
     }
 
     #[test]

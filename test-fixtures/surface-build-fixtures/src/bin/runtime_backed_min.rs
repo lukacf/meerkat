@@ -30,7 +30,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let config = fixture_config()?;
     let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-    let persistence = PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
+    let persistence = PersistenceBundle::new(
+        session_store,
+        Arc::new(meerkat::InMemoryRuntimeStore::new()),
+        Arc::new(MemoryBlobStore::new()),
+    );
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let builder = FactoryAgentBuilder::new(factory, config.clone());
     let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);

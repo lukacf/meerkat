@@ -64,6 +64,8 @@ from .generated.types import (
     McpServerConfig,
     MobDefinitionInput,
     MobFlowRunResult,
+    MobMemberParams,
+    MobMemberStatusResult,
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
@@ -162,9 +164,12 @@ from .mob import (
     MobMember,
     MobMemberRef,
     MobMemberSnapshot,
+    MobPeerConnectivity,
+    MobPeerConnectivitySnapshot,
     MobReadyMemberSnapshot,
     MobSpawnResult,
     MobSpawnSpec,
+    MobUnreachablePeer,
     MobWireMembersBatchEdgeInput,
     WorkOrigin,
 )
@@ -2333,17 +2338,28 @@ class MeerkatClient:
     async def mob_member_status(
         self, mob_id: str, agent_identity: str
     ) -> MobMemberSnapshot:
-        result = await self._request(
-            "mob/member_status",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
-        )
+        _rpc_signature: MobMemberStatusResult
+        params = MobMemberParams(mob_id=mob_id, agent_identity=agent_identity)
+        result = await self._request("mob/member_status", _wire_value(params))
         resolved_capabilities = self._parse_resolved_model_capabilities(
             result.get("resolved_capabilities")
+        )
+        peer_connectivity = self._parse_mob_peer_connectivity(
+            result.get("peer_connectivity"),
+            "Invalid mob/member_status response",
         )
         return {
             "status": self._require_string_field(
                 result,
                 "status",
+                "Invalid mob/member_status response",
+            ),
+            # The opaque member handle is runtime-owned: read it from the
+            # payload rather than synthesizing it client-side from
+            # {mob_id, agent_identity}.
+            "member_ref": self._require_string_field(
+                result,
+                "member_ref",
                 "Invalid mob/member_status response",
             ),
             **(
@@ -2372,13 +2388,18 @@ class MeerkatClient:
                 else {}
             ),
             **(
-                {"peer_connectivity": result["peer_connectivity"]}
-                if isinstance(result.get("peer_connectivity"), dict)
+                {"peer_connectivity": peer_connectivity}
+                if peer_connectivity is not None
                 else {}
             ),
             **(
                 {"kickoff": result["kickoff"]}
                 if isinstance(result.get("kickoff"), dict)
+                else {}
+            ),
+            **(
+                {"external_member": result["external_member"]}
+                if "external_member" in result
                 else {}
             ),
             # Preserve `current_session_id` as diagnostic status/continuity data only.
@@ -2412,6 +2433,10 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/wait_kickoff response: member entry must be an object",
                 )
+            peer_connectivity = self._parse_mob_peer_connectivity(
+                entry.get("peer_connectivity"),
+                "Invalid mob/wait_kickoff response",
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2445,8 +2470,8 @@ class MeerkatClient:
                         "Invalid mob/wait_kickoff response",
                     ),
                     **(
-                        {"peer_connectivity": entry["peer_connectivity"]}
-                        if isinstance(entry.get("peer_connectivity"), dict)
+                        {"peer_connectivity": peer_connectivity}
+                        if peer_connectivity is not None
                         else {}
                     ),
                     **(
@@ -2481,6 +2506,10 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/wait_ready response: member entry must be an object",
                 )
+            peer_connectivity = self._parse_mob_peer_connectivity(
+                entry.get("peer_connectivity"),
+                "Invalid mob/wait_ready response",
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2514,8 +2543,8 @@ class MeerkatClient:
                         "Invalid mob/wait_ready response",
                     ),
                     **(
-                        {"peer_connectivity": entry["peer_connectivity"]}
-                        if isinstance(entry.get("peer_connectivity"), dict)
+                        {"peer_connectivity": peer_connectivity}
+                        if peer_connectivity is not None
                         else {}
                     ),
                     **(
@@ -2561,7 +2590,11 @@ class MeerkatClient:
             )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
-            "tokens_used": int(result.get("tokens_used", 0)),
+            "tokens_used": self._require_number_field(
+                result,
+                "tokens_used",
+                "Invalid mob/spawn_helper response",
+            ),
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }
@@ -2604,7 +2637,11 @@ class MeerkatClient:
             )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
-            "tokens_used": int(result.get("tokens_used", 0)),
+            "tokens_used": self._require_number_field(
+                result,
+                "tokens_used",
+                "Invalid mob/fork_helper response",
+            ),
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }
@@ -3902,6 +3939,91 @@ class MeerkatClient:
         if isinstance(raw, str) and raw in {"staged", "duplicate"}:
             return raw
         raise MeerkatError("INVALID_RESPONSE", context)
+
+    @staticmethod
+    def _parse_mob_peer_connectivity_snapshot(
+        raw: Any, context: str
+    ) -> MobPeerConnectivitySnapshot:
+        if not isinstance(raw, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: peer_connectivity.snapshot must be object",
+            )
+        unreachable_raw = raw.get("unreachable_peers")
+        unreachable_peers: list[MobUnreachablePeer] = []
+        if unreachable_raw is not None:
+            if not isinstance(unreachable_raw, list):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: peer_connectivity.snapshot.unreachable_peers must be array",
+                )
+            for entry in unreachable_raw:
+                if not isinstance(entry, dict):
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        f"{context}: peer_connectivity.snapshot.unreachable_peers "
+                        "entry must be object",
+                    )
+                peer_entry: MobUnreachablePeer = {
+                    "peer": MeerkatClient._require_string_field(
+                        entry, "peer", context
+                    ),
+                }
+                reason = MeerkatClient._optional_string_field(
+                    entry, "reason", context
+                )
+                if reason is not None:
+                    peer_entry["reason"] = reason
+                unreachable_peers.append(peer_entry)
+        return {
+            "reachable_peer_count": MeerkatClient._require_number_field(
+                raw,
+                "reachable_peer_count",
+                context,
+                "peer_connectivity.snapshot.reachable_peer_count",
+            ),
+            "unknown_peer_count": MeerkatClient._require_number_field(
+                raw,
+                "unknown_peer_count",
+                context,
+                "peer_connectivity.snapshot.unknown_peer_count",
+            ),
+            "unreachable_peers": unreachable_peers,
+        }
+
+    @staticmethod
+    def _parse_mob_peer_connectivity(
+        raw: Any, context: str
+    ) -> MobPeerConnectivity | None:
+        """Fail-closed parser for the tri-state ``peer_connectivity``
+        projection. Switches on the variant ``status`` tag and raises on any
+        unknown tag rather than coalescing it into a permissive default.
+        Absent connectivity (the field was omitted) yields ``None``. Mirrors
+        the web SDK ``parseMobPeerConnectivity``.
+        """
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: peer_connectivity must be object",
+            )
+        status = raw.get("status")
+        if status == "not_applicable":
+            return {"status": "not_applicable"}
+        if status == "probe_timed_out":
+            return {"status": "probe_timed_out"}
+        if status == "known":
+            return {
+                "status": "known",
+                "snapshot": MeerkatClient._parse_mob_peer_connectivity_snapshot(
+                    raw.get("snapshot"), context
+                ),
+            }
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: unknown peer_connectivity status {status!r}",
+        )
 
     @staticmethod
     def _require_dict(raw: Any, field: str, context: str) -> dict[str, Any]:

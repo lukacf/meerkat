@@ -8,7 +8,7 @@ use meerkat_core::skills::{
     CapabilityId, ResolvedSkill, SkillArtifact, SkillArtifactContent, SkillCollection,
     SkillDescriptor, SkillDocument, SkillEngine, SkillError, SkillFilter, SkillFunctionName,
     SkillFunctionOutput, SkillIntrospectionEntry, SkillKey, SkillQuarantineDiagnostic, SkillRef,
-    SkillSource, SourceHealthSnapshot, SourceIdentityRecord, SourceIdentityRegistry,
+    SkillSource, SourceHealthSnapshot, SourceIdentityRegistry,
 };
 use meerkat_core::skills_config::default_source_identity_records;
 
@@ -61,18 +61,6 @@ where
         self.registry
             .resolve(key)
             .map(|resolved| resolved.key)
-            .map_err(|e| {
-                SkillError::Load(format!("source identity resolution failed for {key}: {e}").into())
-            })
-    }
-
-    fn resolve_source_identity(
-        &self,
-        key: &SkillKey,
-    ) -> Result<(SkillKey, SourceIdentityRecord), SkillError> {
-        self.registry
-            .resolve(key)
-            .map(|resolved| (resolved.key, resolved.source.clone()))
             .map_err(|e| {
                 SkillError::Load(format!("source identity resolution failed for {key}: {e}").into())
             })
@@ -244,10 +232,18 @@ where
     ) -> impl Future<Output = Result<Vec<SkillIntrospectionEntry>, SkillError>> + Send {
         async move {
             let entries = self.source.list_all_with_provenance(filter).await?;
-            let mut active_entries = Vec::new();
+            let mut listed = Vec::with_capacity(entries.len());
             for mut entry in entries {
-                let (canonical_key, source_identity) =
-                    self.resolve_source_identity(&entry.descriptor.key)?;
+                // Entries carrying typed source identity were canonicalized
+                // fail-closed by the identity-owning source (the composite).
+                // Entries without one have no identity authority vouching for
+                // them, so their keys must resolve under the same registry
+                // the engine's load path uses — otherwise the listing fails
+                // closed instead of advertising a skill that load would
+                // refuse.
+                if entry.source_identity.is_none() {
+                    entry.descriptor.key = self.resolve_key(&entry.descriptor.key)?;
+                }
                 if entry.is_active
                     && !entry
                         .descriptor
@@ -257,19 +253,9 @@ where
                 {
                     continue;
                 }
-                let skill_name = canonical_key.skill_name.clone();
-                entry.descriptor.key = canonical_key;
-                entry.descriptor.source_name = source_identity.display_name.clone();
-                entry.source_identity = Some(source_identity);
-                if let Some(source_uuid) = entry.shadowed_by_source_uuid.clone() {
-                    let shadow_key = SkillKey::new(source_uuid, skill_name);
-                    let (_, shadow_identity) = self.resolve_source_identity(&shadow_key)?;
-                    entry.shadowed_by = Some(shadow_identity.display_name.clone());
-                    entry.shadowed_by_identity = Some(shadow_identity);
-                }
-                active_entries.push(entry);
+                listed.push(entry);
             }
-            Ok(active_entries)
+            Ok(listed)
         }
     }
 
@@ -304,8 +290,8 @@ mod tests {
     use crate::source::{CompositeSkillSource, InMemorySkillSource, NamedSource, SourceNode};
     use indexmap::IndexMap;
     use meerkat_core::skills::{
-        SkillName, SkillScope, SourceIdentityRecord, SourceIdentityStatus, SourceTransportKind,
-        SourceUuid,
+        SkillKeyRemap, SkillName, SkillScope, SourceIdentityLineage, SourceIdentityLineageEvent,
+        SourceIdentityRecord, SourceIdentityStatus, SourceTransportKind, SourceUuid,
     };
 
     fn test_key(skill: &str) -> SkillKey {
@@ -395,16 +381,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inventory_section_renders_remapped_canonical_skill_once() {
+        let legacy_source = source_uuid("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
+        let canonical_source = source_uuid("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
+        let skill = "alpha";
+        let legacy_key = SkillKey::new(legacy_source.clone(), SkillName::parse(skill).unwrap());
+        let canonical_key =
+            SkillKey::new(canonical_source.clone(), SkillName::parse(skill).unwrap());
+        let registry = SourceIdentityRegistry::build(
+            vec![
+                source_record(
+                    legacy_source.clone(),
+                    "legacy",
+                    SourceIdentityStatus::Active,
+                ),
+                source_record(
+                    canonical_source.clone(),
+                    "canonical",
+                    SourceIdentityStatus::Active,
+                ),
+            ],
+            vec![SourceIdentityLineage {
+                event_id: "legacy-to-canonical".to_string(),
+                recorded_at_unix_secs: 1,
+                required_from_skills: Vec::new(),
+                event: SourceIdentityLineageEvent::RenameOrRelocate {
+                    from: legacy_source.clone(),
+                    to: canonical_source.clone(),
+                },
+            }],
+            vec![SkillKeyRemap {
+                from: legacy_key,
+                to: canonical_key,
+                reason: Some("test remap".to_string()),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let composite = CompositeSkillSource::from_named_with_registry(
+            vec![
+                NamedSource::new(
+                    source_record(
+                        legacy_source.clone(),
+                        "legacy",
+                        SourceIdentityStatus::Active,
+                    ),
+                    SourceNode::Memory(InMemorySkillSource::new(vec![test_skill_from_source(
+                        legacy_source.clone(),
+                        skill,
+                        "Legacy Alpha",
+                    )])),
+                ),
+                NamedSource::new(
+                    source_record(
+                        canonical_source.clone(),
+                        "canonical",
+                        SourceIdentityStatus::Active,
+                    ),
+                    SourceNode::Memory(InMemorySkillSource::new(vec![test_skill_from_source(
+                        canonical_source.clone(),
+                        skill,
+                        "Canonical Alpha",
+                    )])),
+                ),
+            ],
+            Arc::new(registry),
+        );
+        let engine = DefaultSkillEngine::new(composite, vec![]);
+
+        let section = engine.inventory_section().await.unwrap();
+
+        assert_eq!(
+            section.matches("skill_name=\"alpha\"").count(),
+            1,
+            "remapped canonical skill must render exactly once; got {section}"
+        );
+        assert!(
+            section.contains(&canonical_source.to_string()),
+            "inventory must advertise the canonical host key; got {section}"
+        );
+        assert!(
+            !section.contains(&legacy_source.to_string()),
+            "inventory must not advertise the remapped-away key; got {section}"
+        );
+        assert!(
+            section.contains("Description for Canonical Alpha"),
+            "inventory must carry the loadable copy's description; got {section}"
+        );
+    }
+
+    #[tokio::test]
     async fn inventory_section_reports_source_identity_resolution_failures() {
         let unknown_source = source_uuid("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
-        let source = InMemorySkillSource::new(vec![test_skill_from_source(
-            unknown_source.clone(),
-            "orphaned",
-            "Orphaned",
-        )]);
-        let registry = SourceIdentityRegistry::default();
-        let engine = DefaultSkillEngine::new(source, vec![])
-            .with_source_identity_registry(Arc::new(registry));
+        let composite = CompositeSkillSource::from_named_with_registry(
+            vec![NamedSource::new(
+                source_record(
+                    unknown_source.clone(),
+                    "orphaned fixture",
+                    SourceIdentityStatus::Active,
+                ),
+                SourceNode::Memory(InMemorySkillSource::new(vec![test_skill_from_source(
+                    unknown_source.clone(),
+                    "orphaned",
+                    "Orphaned",
+                )])),
+            )],
+            Arc::new(SourceIdentityRegistry::default()),
+        );
+        let engine = DefaultSkillEngine::new(composite, vec![]);
 
         let err = engine.inventory_section().await.unwrap_err();
         let message = err.to_string();
@@ -426,11 +510,6 @@ mod tests {
     #[tokio::test]
     async fn list_all_with_provenance_reports_source_identity_failures() {
         let disabled_source = source_uuid("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
-        let source = InMemorySkillSource::new(vec![test_skill_from_source(
-            disabled_source.clone(),
-            "disabled",
-            "Disabled",
-        )]);
         let registry = SourceIdentityRegistry::build(
             vec![source_record(
                 disabled_source.clone(),
@@ -442,8 +521,22 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let engine = DefaultSkillEngine::new(source, vec![])
-            .with_source_identity_registry(Arc::new(registry));
+        let composite = CompositeSkillSource::from_named_with_registry(
+            vec![NamedSource::new(
+                source_record(
+                    disabled_source.clone(),
+                    "disabled fixture",
+                    SourceIdentityStatus::Disabled,
+                ),
+                SourceNode::Memory(InMemorySkillSource::new(vec![test_skill_from_source(
+                    disabled_source.clone(),
+                    "disabled",
+                    "Disabled",
+                )])),
+            )],
+            Arc::new(registry),
+        );
+        let engine = DefaultSkillEngine::new(composite, vec![]);
 
         let err = engine
             .list_all_with_provenance(&SkillFilter::default())
@@ -535,9 +628,11 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let composite = CompositeSkillSource::from_named(vec![active_named, unknown_named]);
-        let engine = DefaultSkillEngine::new(composite, vec![])
-            .with_source_identity_registry(Arc::new(registry));
+        let composite = CompositeSkillSource::from_named_with_registry(
+            vec![active_named, unknown_named],
+            Arc::new(registry),
+        );
+        let engine = DefaultSkillEngine::new(composite, vec![]);
 
         let err = engine
             .list_all_with_provenance(&SkillFilter::default())

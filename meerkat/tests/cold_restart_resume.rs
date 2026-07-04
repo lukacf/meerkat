@@ -7,7 +7,7 @@
 //! append-only save guard — the resume projection is not allowed to diverge
 //! from the persisted session-store transcript.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 mod tests {

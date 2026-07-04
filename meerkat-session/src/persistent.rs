@@ -1209,9 +1209,77 @@ async fn verify_authoritative_projection_persisted_continuity(
             {
                 return Ok(Some(previous_projection_token));
             }
+            if runtime_projection_rollback_authorized(session, &previous)? {
+                return Ok(Some(previous_projection_token));
+            }
             Err(raw_error)
         }
     }
+}
+
+/// Decide whether a runtime-authoritative projection save may rebuild a
+/// durable row that ran AHEAD of the authority transcript.
+///
+/// The intra-turn best-effort checkpointer writes the durable row while the
+/// machine boundary commit writes the runtime authority; the two commit
+/// points are non-atomic. A host kill between them (or an in-process
+/// lifecycle-commit failure that evicted the uncommitted live turn) leaves
+/// the row carrying turn content the machine never acknowledged — and that
+/// tail would otherwise poison every subsequent save with a
+/// `MonotonicityViolation`, permanently stranding the session on resume.
+///
+/// The shell extracts two pure observations — the row judged as a faithful
+/// continuation of the authority transcript by the same run-boundary proof
+/// the save guard uses, and the row's typed intra-turn checkpoint provenance
+/// fact — and drives the canonical `SessionDocumentMachine`
+/// (`ResolveRuntimeProjectionRollback`); the machine — not this shell — owns
+/// the disposition. `RebuildToAuthority` lets the CAS projection write
+/// converge the row back onto committed truth (the unacknowledged tail is
+/// discarded, matching the in-process eviction contract) and requires BOTH
+/// observations: a row without the checkpointer's own provenance stamp is
+/// out-of-band divergence and keeps failing closed (`RejectDivergent`), as
+/// does any genuine content fork.
+fn runtime_projection_rollback_authorized(
+    session: &Session,
+    previous: &Session,
+) -> Result<bool, SessionStoreError> {
+    let row_continues_authority =
+        meerkat_core::session_store::run_boundary_snapshot_save_guard(previous, Some(session))
+            .is_ok();
+    let row_is_runtime_checkpoint = previous.has_runtime_checkpoint_provenance();
+    let mut authority = SessionDocumentMachineAuthority::new();
+    let effects = authority
+        .resolve_runtime_projection_rollback(
+            SessionDocumentKey::new(session.id().to_string()),
+            row_continues_authority,
+            row_is_runtime_checkpoint,
+        )
+        .map_err(|err| {
+            SessionStoreError::Internal(format!(
+                "generated session document authority rejected runtime-projection rollback \
+                 resolution for session {}: {err}",
+                session.id()
+            ))
+        })?;
+    let disposition = effects
+        .iter()
+        .find_map(|effect| match effect {
+            SessionDocumentEffect::RuntimeProjectionRollbackResolved { disposition } => {
+                Some(*disposition)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            SessionStoreError::Internal(format!(
+                "generated session document authority returned no runtime-projection rollback \
+                 disposition for session {}",
+                session.id()
+            ))
+        })?;
+    Ok(matches!(
+        disposition,
+        meerkat_core::generated::session_document::RuntimeProjectionRollbackDisposition::RebuildToAuthority
+    ))
 }
 
 #[async_trait]
@@ -1236,6 +1304,12 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
             return;
         }
         let mut persisted = session.clone();
+        // Typed provenance: this row is being written by the intra-turn
+        // best-effort checkpointer ahead of the runtime boundary commit. The
+        // runtime-projection rollback consults this fact so only tails the
+        // system itself checkpointed can be converged back onto committed
+        // truth after a kill between the two commit points.
+        persisted.set_runtime_checkpoint_provenance();
         if let Err(e) = persisted
             .externalize_media(self.blob_store.as_ref(), 0)
             .await
@@ -2627,6 +2701,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session: &Session,
     ) -> Result<(), SessionError> {
+        // This is a boundary-following persist: the replay projector — not the
+        // intra-turn checkpointer — is this row's writer, so the checkpoint
+        // provenance fact must not survive (a stamped source row loaded via
+        // the store-recovery fallback would otherwise re-persist the stamp
+        // and inject it into the runtime authority snapshot, falsifying the
+        // "last writer" contract the rollback machine consumes).
+        let mut session = session.clone();
+        session.clear_runtime_checkpoint_provenance();
+        let session = &session;
         let expected_current_revision = self
             .store
             .load(session.id())
@@ -3912,6 +3995,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         mut session: Session,
     ) -> Result<Session, SessionError> {
+        // Boundary-following persists own the row: the intra-turn checkpoint
+        // provenance fact identifies the row's last writer, so every
+        // normalized persist strips it (a session resumed from a
+        // checkpointed row must not re-persist the stamp).
+        session.clear_runtime_checkpoint_provenance();
         session
             .externalize_media(self.blob_store.as_ref(), 0)
             .await
@@ -20701,6 +20789,120 @@ mod tests {
         assert!(
             matches!(live, Err(SessionError::NotFound { .. })),
             "expected live session to be discarded after persist failure, got {live:?}"
+        );
+    }
+
+    /// Pin BOTH conjuncts of the machine-owned runtime-projection rollback:
+    /// a row is rebuilt onto committed truth ONLY when it (a) faithfully
+    /// continues the authority transcript AND (b) carries the intra-turn
+    /// checkpointer's typed provenance stamp. Dropping either observation
+    /// must keep the save fail-closed.
+    #[test]
+    fn runtime_projection_rollback_requires_both_continuity_and_provenance() {
+        let mut authority = Session::new();
+        authority.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+
+        // (1) Stamped + faithful continuation (row = authority + one turn):
+        // rollback authorized.
+        let mut ahead_row = authority.clone();
+        ahead_row.push(Message::User(UserMessage::text(
+            "checkpointed but uncommitted".to_string(),
+        )));
+        ahead_row.set_runtime_checkpoint_provenance();
+        assert!(
+            runtime_projection_rollback_authorized(&authority, &ahead_row)
+                .expect("rollback resolution should succeed"),
+            "a stamped faithful-continuation row must be rebuilt onto authority"
+        );
+
+        // (2) Faithful continuation WITHOUT the stamp (out-of-band writer):
+        // fail closed.
+        let mut unstamped_row = authority.clone();
+        unstamped_row.push(Message::User(UserMessage::text(
+            "out-of-band appended".to_string(),
+        )));
+        assert!(
+            !runtime_projection_rollback_authorized(&authority, &unstamped_row)
+                .expect("rollback resolution should succeed"),
+            "a row without the checkpointer's own stamp must not be rebuilt"
+        );
+
+        // (3) Stamped but CONTENT-FORKED row (not a continuation): fail
+        // closed — the stamp alone must never authorize destroying a fork.
+        let mut forked_row = Session::new();
+        forked_row.push(Message::User(UserMessage::text(
+            "a different conversation".to_string(),
+        )));
+        forked_row.push(Message::User(UserMessage::text("entirely".to_string())));
+        forked_row.set_runtime_checkpoint_provenance();
+        assert!(
+            !runtime_projection_rollback_authorized(&authority, &forked_row)
+                .expect("rollback resolution should succeed"),
+            "a stamped row that forks from the authority must not be rebuilt"
+        );
+    }
+
+    /// Pin the strip half of the provenance contract: every
+    /// boundary-following persist erases the intra-turn checkpoint stamp, so
+    /// the stamp is present on a row iff the checkpointer wrote it last.
+    #[tokio::test]
+    async fn boundary_following_persists_strip_checkpoint_provenance() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store_dyn),
+            memory_blob_store(),
+        );
+
+        // normalized_session_for_persistence (the shared normalize step of
+        // save_normalized_session and save_compatibility_projection_only)
+        // strips the stamp.
+        let mut stamped = Session::new();
+        stamped.push(Message::User(UserMessage::text("hello".to_string())));
+        stamped.set_runtime_checkpoint_provenance();
+        let normalized = service
+            .normalized_session_for_persistence(stamped.clone())
+            .await
+            .expect("normalize should succeed");
+        assert!(
+            !normalized.has_runtime_checkpoint_provenance(),
+            "normalized persistence must strip the checkpoint provenance stamp"
+        );
+
+        // persist_replayed_transcript_projection_for_mutation (the replay
+        // projector's boundary-following persist) strips the stamp from BOTH
+        // the durable row and the runtime authority snapshot.
+        service
+            .persist_replayed_transcript_projection_for_mutation(&stamped)
+            .await
+            .expect("replayed projection persist should succeed");
+        let row = store
+            .load(stamped.id())
+            .await
+            .expect("load persisted row")
+            .expect("row present");
+        assert!(
+            !row.has_runtime_checkpoint_provenance(),
+            "replay projection persist must not re-persist the stamp on the row"
+        );
+        let snapshot_bytes = runtime_store
+            .load_session_snapshot(&meerkat_runtime::LogicalRuntimeId::for_session(
+                stamped.id(),
+            ))
+            .await
+            .expect("load runtime snapshot")
+            .expect("runtime snapshot present");
+        let snapshot: Session =
+            serde_json::from_slice(&snapshot_bytes).expect("snapshot deserializes");
+        assert!(
+            !snapshot.has_runtime_checkpoint_provenance(),
+            "replay projection persist must not inject the stamp into the runtime snapshot"
         );
     }
 }

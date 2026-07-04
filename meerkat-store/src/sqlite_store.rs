@@ -1,6 +1,7 @@
 //! SQLite-backed session store.
 
 use crate::error::into_session_store_error;
+use crate::json_column::JsonColumnBytes;
 use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
 use meerkat_core::time_compat::SystemTime;
@@ -130,7 +131,7 @@ fn load_session_snapshot_in_txn(
     tx.query_row(
         "SELECT session_json FROM sessions WHERE session_id = ?1",
         params![id.to_string()],
-        |row| row.get::<_, Vec<u8>>(0),
+        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
     )
     .optional()?
     .map(|bytes| {
@@ -183,7 +184,7 @@ impl SqliteSessionStore {
             conn.query_row(
                 "SELECT session_json FROM sessions WHERE session_id = ?1",
                 params![session_id],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
             )
             .optional()?
             .map(|bytes| {
@@ -224,8 +225,8 @@ impl SqliteSessionStore {
             let rows = stmt.query_map(
                 params![created_after, updated_after, limit, offset],
                 |row| {
-                    let metadata_json: String = row.get(5)?;
-                    let metadata = serde_json::from_str(&metadata_json).map_err(|err| {
+                    let metadata_json = row.get::<_, JsonColumnBytes>(5)?.into_bytes();
+                    let metadata = serde_json::from_slice(&metadata_json).map_err(|err| {
                         rusqlite::Error::FromSqlConversionFailure(
                             5,
                             rusqlite::types::Type::Text,

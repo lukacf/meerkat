@@ -175,6 +175,13 @@ pub enum LiveSessionAuthorityReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeProjectionRollbackDisposition {
+    #[default]
+    RejectDivergent,
+    RebuildToAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SessionDocumentLifecycle {
     #[default]
     Active,
@@ -350,6 +357,11 @@ pub enum SessionDocumentInput {
         has_build_state: bool,
         runtime_projection_quarantined: bool,
     },
+    ResolveRuntimeProjectionRollback {
+        session_id: SessionDocumentKey,
+        row_continues_authority: bool,
+        row_is_runtime_checkpoint: bool,
+    },
     ApplyPendingToolResults {
         session_id: SessionDocumentKey,
         result_count: u64,
@@ -452,6 +464,9 @@ pub enum SessionDocumentEffect {
     },
     SessionStoreRecoverySourceResolved {
         recoverable: bool,
+    },
+    RuntimeProjectionRollbackResolved {
+        disposition: RuntimeProjectionRollbackDisposition,
     },
     SessionToolResultsApplied {
         session_id: SessionDocumentKey,
@@ -584,6 +599,8 @@ enum SessionDocumentTransition {
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
+    ResolveRuntimeProjectionRollbackRebuild,
+    ResolveRuntimeProjectionRollbackReject,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
@@ -2575,6 +2592,49 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ResolveRuntimeProjectionRollback {
+                session_id,
+                row_continues_authority,
+                row_is_runtime_checkpoint,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((row_continues_authority == true) && (row_is_runtime_checkpoint == true))
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolveRuntimeProjectionRollbackRebuild);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((row_continues_authority == false) || (row_is_runtime_checkpoint == false))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRuntimeProjectionRollbackReject);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRuntimeProjectionRollback")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRuntimeProjectionRollbackRebuild => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeProjectionRollbackResolved {
+                                disposition:
+                                    RuntimeProjectionRollbackDisposition::RebuildToAuthority,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRuntimeProjectionRollbackReject => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeProjectionRollbackResolved {
+                                disposition: RuntimeProjectionRollbackDisposition::RejectDivergent,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveRuntimeProjectionRollback_transition",
+                    }),
+                }
+            }
             SessionDocumentInput::ApplyPendingToolResults {
                 session_id,
                 result_count,
@@ -3122,6 +3182,19 @@ impl SessionDocumentMachineAuthority {
             has_metadata,
             has_build_state,
             runtime_projection_quarantined,
+        })
+    }
+
+    pub fn resolve_runtime_projection_rollback(
+        &mut self,
+        session_id: SessionDocumentKey,
+        row_continues_authority: bool,
+        row_is_runtime_checkpoint: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveRuntimeProjectionRollback {
+            session_id,
+            row_continues_authority,
+            row_is_runtime_checkpoint,
         })
     }
 

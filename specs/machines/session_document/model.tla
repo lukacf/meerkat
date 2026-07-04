@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, SessionArchiveDispositionValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues, TranscriptEditKindValues
+CONSTANTS BooleanValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RuntimeProjectionRollbackDispositionValues, SessionArchiveDispositionValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues, TranscriptEditKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -670,6 +670,22 @@ RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, 
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
+ResolveRuntimeProjectionRollbackRebuild(session_id, row_continues_authority, row_is_runtime_checkpoint) ==
+    /\ phase = "Ready"
+    /\ ((row_continues_authority = TRUE) /\ (row_is_runtime_checkpoint = TRUE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
+ResolveRuntimeProjectionRollbackReject(session_id, row_continues_authority, row_is_runtime_checkpoint) ==
+    /\ phase = "Ready"
+    /\ (IF (row_continues_authority = FALSE) THEN TRUE ELSE (row_is_runtime_checkpoint = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
 ApplyPendingToolResults(session_id, result_count) ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
@@ -794,6 +810,8 @@ Next ==
     \/ \E stored_transcript_diverged \in BOOLEAN : \E live_has_uncommitted_transcript \in BOOLEAN : \E runtime_system_context_diverged \in BOOLEAN : \E stored_is_archived \in BOOLEAN : ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
+    \/ \E session_id \in SessionIdValues : \E row_continues_authority \in BOOLEAN : \E row_is_runtime_checkpoint \in BOOLEAN : ResolveRuntimeProjectionRollbackRebuild(session_id, row_continues_authority, row_is_runtime_checkpoint)
+    \/ \E session_id \in SessionIdValues : \E row_continues_authority \in BOOLEAN : \E row_is_runtime_checkpoint \in BOOLEAN : ResolveRuntimeProjectionRollbackReject(session_id, row_continues_authority, row_is_runtime_checkpoint)
     \/ \E session_id \in SessionIdValues : \E result_count \in 0..2 : ApplyPendingToolResults(session_id, result_count)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditFork(session_id, fork_or_rewrite_directive)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditRewrite(session_id, fork_or_rewrite_directive)

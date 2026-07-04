@@ -3,6 +3,7 @@
 //! SQLite-backed implementation used by `JsonlStore` to avoid per-list
 //! directory scans and per-session metadata file reads.
 
+use crate::json_column::JsonColumnBytes;
 use crate::{SessionFilter, StoreError};
 use meerkat_core::{SessionId, SessionMeta};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -75,7 +76,7 @@ impl SqliteSessionIndex {
         conn.query_row(
             "SELECT meta_json FROM session_index WHERE session_id = ?1",
             params![id.to_string()],
-            |row| row.get::<_, Vec<u8>>(0),
+            |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
         )
         .optional()?
         .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
@@ -144,7 +145,7 @@ impl SqliteSessionIndex {
         )?;
         let rows = stmt.query_map(
             params![created_after, updated_after, limit, offset],
-            |row| row.get::<_, Vec<u8>>(0),
+            |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
         )?;
 
         let mut metas = Vec::new();

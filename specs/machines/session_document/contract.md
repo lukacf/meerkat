@@ -43,6 +43,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
 - `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
+- `ResolveRuntimeProjectionRollback`(session_id: SessionId, row_continues_authority: Bool, row_is_runtime_checkpoint: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
@@ -75,6 +76,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionResumeOverridesRejected`(reason: ResumeOverrideRejection)
 - `LiveSessionAuthorityClassified`(authority: LiveSessionAuthorityKind, reason: LiveSessionAuthorityReason)
 - `SessionStoreRecoverySourceResolved`(recoverable: Bool)
+- `RuntimeProjectionRollbackResolved`(disposition: RuntimeProjectionRollbackDisposition)
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
 - `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
 - `SessionLifecycleTerminalRecovered`
@@ -692,6 +694,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `SessionStoreRecoverySourceResolved`
+- To: `Ready`
+
+### `ResolveRuntimeProjectionRollbackRebuild`
+- From: `Ready`
+- On: `ResolveRuntimeProjectionRollback`(session_id, row_continues_authority, row_is_runtime_checkpoint)
+- Guards:
+  - ``
+- Emits: `RuntimeProjectionRollbackResolved`
+- To: `Ready`
+
+### `ResolveRuntimeProjectionRollbackReject`
+- From: `Ready`
+- On: `ResolveRuntimeProjectionRollback`(session_id, row_continues_authority, row_is_runtime_checkpoint)
+- Guards:
+  - ``
+- Emits: `RuntimeProjectionRollbackResolved`
 - To: `Ready`
 
 ### `ApplyPendingToolResults`

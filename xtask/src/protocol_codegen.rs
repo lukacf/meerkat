@@ -4623,6 +4623,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
+        "RuntimeProjectionRollbackDisposition",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
     ] {
@@ -4715,6 +4716,7 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "ResumeSelfHostedSelection" => Ok("Clear"),
         "LiveSessionAuthorityKind" => Ok("LiveAuthoritative"),
         "LiveSessionAuthorityReason" => Ok("StoredArchived"),
+        "RuntimeProjectionRollbackDisposition" => Ok("RejectDivergent"),
         "SessionDocumentLifecycle" => Ok("Active"),
         "SessionArchiveDisposition" => Ok("Archive"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
@@ -5638,6 +5640,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
+        "RuntimeProjectionRollbackDisposition",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
     ] {

@@ -5,6 +5,7 @@ mod inner {
     use std::path::{Path, PathBuf};
 
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+    use meerkat_store::json_column::JsonColumnBytes;
     use meerkat_store::sqlite_store::{begin_immediate_transaction, open_connection};
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -293,7 +294,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                 WHERE id = ?1
                 ",
                 params![AUTH_OAUTH_FLOW_STATE_ID],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
             )
             .optional()
             .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
@@ -313,7 +314,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     WHERE id = ?1
                     ",
                     params![AUTH_OAUTH_FLOW_STATE_ID],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
@@ -349,7 +350,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                         params![runtime_id_text(&runtime_id)],
-                        |row| row.get::<_, Vec<u8>>(0),
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                     )
                     .optional()
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
@@ -389,7 +390,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                         params![runtime_id_text(&runtime_id)],
-                        |row| row.get::<_, Vec<u8>>(0),
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                     )
                     .optional()
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
@@ -463,7 +464,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                         .query_row(
                             "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                             params![runtime_id_text(&runtime_id)],
-                            |row| row.get::<_, Vec<u8>>(0),
+                            |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                         )
                         .optional()
                         .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
@@ -537,7 +538,8 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
                 let rows = stmt
                     .query_map(params![runtime_id_text(&runtime_id)], |row| {
-                        row.get::<_, Vec<u8>>(0)
+                        row.get::<_, JsonColumnBytes>(0)
+                            .map(JsonColumnBytes::into_bytes)
                     })
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
                 rows.map(|row| {
@@ -573,7 +575,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                         run_id.0.to_string(),
                         encode_receipt_sequence(sequence)
                     ],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
@@ -598,7 +600,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                 conn.query_row(
                     "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                     params![runtime_id_text(&runtime_id)],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
@@ -647,7 +649,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                         params![runtime_id_text(&runtime_id)],
-                        |row| row.get::<_, Vec<u8>>(0),
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                     )
                     .optional()
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
@@ -678,7 +680,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                         params![runtime_id_text(&runtime_id)],
-                        |row| row.get::<_, Vec<u8>>(0),
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                     )
                     .optional()
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
@@ -758,7 +760,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     WHERE runtime_id = ?1 AND input_id = ?2
                     ",
                     params![runtime_id_text(&runtime_id), input_id.0.to_string()],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
@@ -780,7 +782,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                 conn.query_row(
                     "SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1",
                     params![runtime_id_text(&runtime_id)],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
@@ -856,7 +858,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                 conn.query_row(
                     "SELECT state_json FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
                     params![runtime_id_text(&runtime_id)],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
                 )
                 .optional()
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
@@ -1916,6 +1918,45 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     "cleared quarantine marker must stay cleared across restart"
                 );
             }
+        }
+
+        /// Upgrade-carry: JSON payload columns written as TEXT by an external
+        /// host (SQLite affinity keeps whatever type a writer bound) must
+        /// still read; one legacy row must not fail every load. Same contract
+        /// as the meerkat-store `JsonColumnBytes` boundary this store reuses.
+        #[tokio::test]
+        async fn legacy_text_json_columns_still_read() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let session = session_with_one_turn();
+            let snapshot = serde_json::to_vec(&session).unwrap();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            {
+                let conn = open_runtime_connection(store.path()).unwrap();
+                let changed = conn
+                    .execute(
+                        "UPDATE runtime_session_snapshots                          SET session_snapshot = CAST(session_snapshot AS TEXT)",
+                        [],
+                    )
+                    .unwrap();
+                assert!(changed > 0, "expected snapshot rows to degrade");
+            }
+
+            let carried = store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("load over TEXT snapshot must not fail")
+                .expect("snapshot present");
+            assert_eq!(carried, snapshot, "TEXT snapshot bytes must round-trip");
         }
     }
 }

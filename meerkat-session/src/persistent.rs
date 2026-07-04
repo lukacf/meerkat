@@ -2701,6 +2701,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session: &Session,
     ) -> Result<(), SessionError> {
+        // This is a boundary-following persist: the replay projector — not the
+        // intra-turn checkpointer — is this row's writer, so the checkpoint
+        // provenance fact must not survive (a stamped source row loaded via
+        // the store-recovery fallback would otherwise re-persist the stamp
+        // and inject it into the runtime authority snapshot, falsifying the
+        // "last writer" contract the rollback machine consumes).
+        let mut session = session.clone();
+        session.clear_runtime_checkpoint_provenance();
+        let session = &session;
         let expected_current_revision = self
             .store
             .load(session.id())
@@ -20780,6 +20789,120 @@ mod tests {
         assert!(
             matches!(live, Err(SessionError::NotFound { .. })),
             "expected live session to be discarded after persist failure, got {live:?}"
+        );
+    }
+
+    /// Pin BOTH conjuncts of the machine-owned runtime-projection rollback:
+    /// a row is rebuilt onto committed truth ONLY when it (a) faithfully
+    /// continues the authority transcript AND (b) carries the intra-turn
+    /// checkpointer's typed provenance stamp. Dropping either observation
+    /// must keep the save fail-closed.
+    #[test]
+    fn runtime_projection_rollback_requires_both_continuity_and_provenance() {
+        let mut authority = Session::new();
+        authority.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+
+        // (1) Stamped + faithful continuation (row = authority + one turn):
+        // rollback authorized.
+        let mut ahead_row = authority.clone();
+        ahead_row.push(Message::User(UserMessage::text(
+            "checkpointed but uncommitted".to_string(),
+        )));
+        ahead_row.set_runtime_checkpoint_provenance();
+        assert!(
+            runtime_projection_rollback_authorized(&authority, &ahead_row)
+                .expect("rollback resolution should succeed"),
+            "a stamped faithful-continuation row must be rebuilt onto authority"
+        );
+
+        // (2) Faithful continuation WITHOUT the stamp (out-of-band writer):
+        // fail closed.
+        let mut unstamped_row = authority.clone();
+        unstamped_row.push(Message::User(UserMessage::text(
+            "out-of-band appended".to_string(),
+        )));
+        assert!(
+            !runtime_projection_rollback_authorized(&authority, &unstamped_row)
+                .expect("rollback resolution should succeed"),
+            "a row without the checkpointer's own stamp must not be rebuilt"
+        );
+
+        // (3) Stamped but CONTENT-FORKED row (not a continuation): fail
+        // closed — the stamp alone must never authorize destroying a fork.
+        let mut forked_row = Session::new();
+        forked_row.push(Message::User(UserMessage::text(
+            "a different conversation".to_string(),
+        )));
+        forked_row.push(Message::User(UserMessage::text("entirely".to_string())));
+        forked_row.set_runtime_checkpoint_provenance();
+        assert!(
+            !runtime_projection_rollback_authorized(&authority, &forked_row)
+                .expect("rollback resolution should succeed"),
+            "a stamped row that forks from the authority must not be rebuilt"
+        );
+    }
+
+    /// Pin the strip half of the provenance contract: every
+    /// boundary-following persist erases the intra-turn checkpoint stamp, so
+    /// the stamp is present on a row iff the checkpointer wrote it last.
+    #[tokio::test]
+    async fn boundary_following_persists_strip_checkpoint_provenance() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store_dyn),
+            memory_blob_store(),
+        );
+
+        // normalized_session_for_persistence (the shared normalize step of
+        // save_normalized_session and save_compatibility_projection_only)
+        // strips the stamp.
+        let mut stamped = Session::new();
+        stamped.push(Message::User(UserMessage::text("hello".to_string())));
+        stamped.set_runtime_checkpoint_provenance();
+        let normalized = service
+            .normalized_session_for_persistence(stamped.clone())
+            .await
+            .expect("normalize should succeed");
+        assert!(
+            !normalized.has_runtime_checkpoint_provenance(),
+            "normalized persistence must strip the checkpoint provenance stamp"
+        );
+
+        // persist_replayed_transcript_projection_for_mutation (the replay
+        // projector's boundary-following persist) strips the stamp from BOTH
+        // the durable row and the runtime authority snapshot.
+        service
+            .persist_replayed_transcript_projection_for_mutation(&stamped)
+            .await
+            .expect("replayed projection persist should succeed");
+        let row = store
+            .load(stamped.id())
+            .await
+            .expect("load persisted row")
+            .expect("row present");
+        assert!(
+            !row.has_runtime_checkpoint_provenance(),
+            "replay projection persist must not re-persist the stamp on the row"
+        );
+        let snapshot_bytes = runtime_store
+            .load_session_snapshot(&meerkat_runtime::LogicalRuntimeId::for_session(
+                stamped.id(),
+            ))
+            .await
+            .expect("load runtime snapshot")
+            .expect("runtime snapshot present");
+        let snapshot: Session =
+            serde_json::from_slice(&snapshot_bytes).expect("snapshot deserializes");
+        assert!(
+            !snapshot.has_runtime_checkpoint_provenance(),
+            "replay projection persist must not inject the stamp into the runtime snapshot"
         );
     }
 }

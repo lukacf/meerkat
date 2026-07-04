@@ -10,10 +10,10 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 
 /// UTF-8 JSON payload read from a SQLite column, tolerant of both the
 /// canonical BLOB encoding and legacy TEXT rows.
-pub(crate) struct JsonColumnBytes(Vec<u8>);
+pub struct JsonColumnBytes(Vec<u8>);
 
 impl JsonColumnBytes {
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
+    pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
 }

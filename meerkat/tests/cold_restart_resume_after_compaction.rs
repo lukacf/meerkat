@@ -55,8 +55,10 @@ mod tests {
     /// auto-compaction threshold so the estimated-history-tokens trigger fires
     /// on the second pre-LLM boundary (first boundary never compacts).
     fn create_request() -> CreateSessionRequest {
-        let mut build = SessionBuildOptions::default();
-        build.auto_compact_threshold_override = std::num::NonZeroU64::new(1);
+        let build = SessionBuildOptions {
+            auto_compact_threshold_override: std::num::NonZeroU64::new(1),
+            ..SessionBuildOptions::default()
+        };
         CreateSessionRequest {
             injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),

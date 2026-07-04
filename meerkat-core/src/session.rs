@@ -4604,7 +4604,7 @@ mod tests {
                 },
                 TranscriptRevisionBody {
                     revision: commit.revision.clone(),
-                    parent_revision: Some(commit.parent_revision.clone()),
+                    parent_revision: Some(commit.parent_revision),
                     messages: revision_messages.clone(),
                     created_at: SystemTime::now(),
                 },
@@ -4659,12 +4659,12 @@ mod tests {
             "parent_body": TranscriptRevisionBody {
                 revision: commit.parent_revision.clone(),
                 parent_revision: None,
-                messages: parent_messages.clone(),
+                messages: parent_messages,
                 created_at: SystemTime::now(),
             },
             "revision_body": TranscriptRevisionBody {
                 revision: commit.revision.clone(),
-                parent_revision: Some(commit.parent_revision.clone()),
+                parent_revision: Some(commit.parent_revision),
                 messages: revision_messages.clone(),
                 created_at: SystemTime::now(),
             },
@@ -4676,12 +4676,8 @@ mod tests {
             transcript_messages_digest(&revision_messages).expect("content digest")
         );
         // The healed record passes the same validation `new` enforces.
-        TranscriptRewriteRecord::new(
-            healed.commit.clone(),
-            healed.parent_body.clone(),
-            healed.revision_body.clone(),
-        )
-        .expect("healed record must validate");
+        TranscriptRewriteRecord::new(healed.commit, healed.parent_body, healed.revision_body)
+            .expect("healed record must validate");
     }
 
     #[test]

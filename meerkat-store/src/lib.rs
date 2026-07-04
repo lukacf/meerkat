@@ -18,7 +18,7 @@ mod error;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod index;
 #[cfg(not(target_arch = "wasm32"))]
-mod json_column;
+pub mod json_column;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod realm;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]

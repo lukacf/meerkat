@@ -199,11 +199,10 @@ async fn wait_for_history_contains_all(
         if needles.iter().all(|needle| blob.contains(needle)) {
             return blob;
         }
-        if Instant::now() >= deadline {
-            panic!(
-                "[{context}] timed out waiting for {needles:?} in history of {session_id}.\ncurrent history: {blob}"
-            );
-        }
+        assert!(
+            Instant::now() < deadline,
+            "[{context}] timed out waiting for {needles:?} in history of {session_id}.\ncurrent history: {blob}"
+        );
         sleep(Duration::from_millis(200)).await;
     }
 }
@@ -515,12 +514,12 @@ async fn mob_cold_restart_resume_with_reset_runtime_store() {
     run_cold_restart_scenario(false, MobRuntimeMode::TurnDriven).await;
 }
 
-/// AutonomousHost (keep-alive) lead + durable runtime store: keep-alive
-/// interactions advance the durable session-store row via the injected
-/// StoreCheckpointer, while the runtime-store snapshot only advances at
-/// runtime run boundaries. On cold restart the authoritative loader prefers
-/// the (potentially lagged) runtime snapshot — the divergence window the
-/// downstream save-guard failure points at.
+/// AutonomousHost (keep-alive) lead + durable runtime store, graceful stop:
+/// plain cold-restart resume coverage for the keep-alive lead mode. The
+/// graceful shutdown converges the stores before restart, so this scenario
+/// does NOT exercise the kill window (see
+/// `mob_cold_restart_resume_after_kill_between_commit_points` for that); it
+/// pins that ordinary autonomous-lead mobs revive across restarts.
 #[tokio::test(flavor = "multi_thread")]
 async fn mob_cold_restart_resume_autonomous_lead_durable_runtime_store() {
     run_cold_restart_scenario(true, MobRuntimeMode::AutonomousHost).await;
@@ -540,19 +539,23 @@ async fn mob_cold_restart_resume_autonomous_lead_durable_runtime_store() {
 // so the resumed projection is behind the persisted row and the first
 // post-resume persist trips the append-only save guard.
 //
-// The power cut is simulated by a RuntimeStore wrapper whose WRITES silently
-// stop persisting after the cut: the in-process actor keeps believing the
-// commits landed (exactly what a killed process "believes" — it is not around
-// to observe anything), while the durable contents freeze at the kill point.
-// All durable contents are exactly what real code paths wrote. A fail-loud
-// cut is wrong here: it rejects the turn at durable-before-ack input
-// admission, which happens BEFORE the kill window, and lets the live actor
-// react to failures a killed process would never observe.
+// The power cut is simulated by a RuntimeStore wrapper with a SURGICAL loud
+// failure: input-admission writes (durable-before-ack) still land so the turn
+// is admitted and runs into the window, while the boundary-commit writes (the
+// ones carrying a session snapshot delta) fail loudly — exactly the durable
+// state a host killed at the boundary-commit write leaves behind: the
+// intra-turn checkpointer already wrote the durable row (with its typed
+// provenance stamp), the runtime snapshot never advanced, and the admitted
+// input never reached a terminal state (so restart redelivers it). A blanket
+// silent cut is wrong (it launders lost durable writes into "committed"
+// in-memory state a real kill also destroys); a blanket loud cut is wrong
+// (it rejects the turn at input admission, before the window).
 // ===========================================================================
 
 struct PowerCutRuntimeStore {
     inner: meerkat_runtime::InMemoryRuntimeStore,
     cut: std::sync::atomic::AtomicBool,
+    boundary_commit_rejections: std::sync::atomic::AtomicUsize,
 }
 
 impl PowerCutRuntimeStore {
@@ -560,6 +563,7 @@ impl PowerCutRuntimeStore {
         Self {
             inner: meerkat_runtime::InMemoryRuntimeStore::new(),
             cut: std::sync::atomic::AtomicBool::new(false),
+            boundary_commit_rejections: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -569,6 +573,16 @@ impl PowerCutRuntimeStore {
 
     fn is_cut(&self) -> bool {
         self.cut.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn boundary_commit_rejections(&self) -> usize {
+        self.boundary_commit_rejections
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn record_boundary_commit_rejection(&self) {
+        self.boundary_commit_rejections
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -604,6 +618,7 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         session_delta: meerkat_runtime::SessionDelta,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         if self.is_cut() {
+            self.record_boundary_commit_rejection();
             return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                 "power cut (commit_session_snapshot): durable runtime-store write lost".to_string(),
             ));
@@ -643,6 +658,7 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         // loudly, modeling a host that dies at the boundary-commit write
         // AFTER the intra-turn checkpointer already wrote the durable row.
         if self.is_cut() && session_delta.is_some() {
+            self.record_boundary_commit_rejection();
             return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                 "power cut (atomic_apply): durable runtime-store write lost".to_string(),
             ));
@@ -838,11 +854,10 @@ async fn wait_for_row_contains(
         if blob.contains(needle) {
             return blob;
         }
-        if Instant::now() >= deadline {
-            panic!(
-                "[{context}] timed out waiting for '{needle}' in durable row of {session_id}.\nrow: {blob}"
-            );
-        }
+        assert!(
+            Instant::now() < deadline,
+            "[{context}] timed out waiting for '{needle}' in durable row of {session_id}.\nrow: {blob}"
+        );
         sleep(Duration::from_millis(100)).await;
     }
 }
@@ -938,6 +953,33 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         "runtime snapshot must still carry turn A: {stale_snapshot}"
     );
 
+    // Synchronize on the kill window actually having happened: the boundary
+    // commit for turn B must have been rejected BEFORE power is restored,
+    // otherwise a late commit could converge the stores and the scenario
+    // degenerates to a plain resume (vacuous pass).
+    {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while power_store.boundary_commit_rejections() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "[kill-window] boundary commit was never rejected under the cut"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    // The rollback precondition is durable: the row's last writer was the
+    // intra-turn checkpointer, so it carries the typed provenance stamp.
+    let stamped_row = store_1
+        .load(&w1_sid)
+        .await
+        .expect("load durable row before restart")
+        .expect("durable row present before restart");
+    assert!(
+        stamped_row.has_runtime_checkpoint_provenance(),
+        "the ahead-of-authority row must carry the checkpointer's provenance stamp"
+    );
+
     // The process is dead: drop everything without graceful shutdown.
     drop(handle_1);
     drop(service_1);
@@ -993,8 +1035,10 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
     // admitted INPUT (durable-before-ack admission — the sender holds a
     // delivery receipt) is redelivered after restart and re-executes through
     // a fresh machine-committed run. All three inputs land in committed
-    // history.
-    wait_for_history_contains_all(
+    // history EXACTLY ONCE — a laundered (rolled-back-then-resurrected) copy
+    // of the uncommitted turn or a duplicate redelivery would show up as a
+    // second occurrence.
+    let w1_final = wait_for_history_contains_all(
         service_2.as_ref(),
         &w1_sid,
         &[
@@ -1005,5 +1049,28 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         "kill-window-final-history",
     )
     .await;
+    for needle in [
+        "PRE_CUT_W1_TURN",
+        "POST_CUT_W1_TURN",
+        "POST_RESTART_W1_TURN",
+    ] {
+        let occurrences = w1_final.matches(needle).count();
+        assert_eq!(
+            occurrences, 1,
+            "'{needle}' must appear exactly once in committed history              (laundering or duplicate redelivery detected): {w1_final}"
+        );
+    }
+    // The committed pre-restart turn stays first. (The relative order of the
+    // REDELIVERED input vs the fresh post-restart input is queue-admission
+    // order, not part of the contract, so it is deliberately not asserted.)
+    let pre_cut_at = w1_final.find("PRE_CUT_W1_TURN").expect("pre-cut present");
+    let post_cut_at = w1_final.find("POST_CUT_W1_TURN").expect("post-cut present");
+    let post_restart_at = w1_final
+        .find("POST_RESTART_W1_TURN")
+        .expect("post-restart present");
+    assert!(
+        pre_cut_at < post_cut_at && pre_cut_at < post_restart_at,
+        "committed pre-restart history must precede post-restart turns: {w1_final}"
+    );
     assert_member_active(&member_entry(&handle_2, "w-1").await, "kill-window-final");
 }

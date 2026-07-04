@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-07-04
+
+Meerkat 0.7.15 fixes cold-restart transcript loss for hosts that re-send
+explicit system prompts on resume (the SDK-gateway shape), with the
+system-prompt reconciliation hardened by an adversarial review of its tail
+verification and continuation-walker seams. It also carries the scoped
+Windows release-lane ThinLTO fix. (0.7.14 published to all registries but its
+GitHub release assets were blocked by offline Windows build executors; 0.7.15
+supersedes it.)
+
 ### Fixed
 
 - Cold-restart resume no longer loses the transcript when the host re-sends

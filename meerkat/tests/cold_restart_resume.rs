@@ -221,6 +221,197 @@ mod tests {
         );
     }
 
+    /// Upstream report (0.7.14/0.7.21): every cold restart of a runtime-backed
+    /// session lost the transcript when the host re-sent its explicit
+    /// per-request system prompt on resume (the SDK-gateway shape: member
+    /// specs carry `SystemPromptOverride::Set` on every build).
+    ///
+    /// During the first lifetime the runtime appends system context (comms
+    /// roster, host context) onto the persisted System message
+    /// (`mutation_kind = RuntimeContextAppend`). The resume build used to
+    /// blind-replace `messages[0]` with the re-assembled base prompt, so the
+    /// resumed projection diverged from the persisted revision, the
+    /// continuity preflight failed closed, and the live session was
+    /// discarded — silent history loss for the caller.
+    #[tokio::test]
+    async fn cold_restart_resume_survives_runtime_context_appended_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // First host lifetime: create with an explicit prompt, run a turn,
+        // append runtime system context, run another turn so the appended
+        // prompt is committed to both stores.
+        let session_id = {
+            let (service, adapter) = build_service(temp.path()).await;
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, "first turn before restart").await;
+
+            let append = meerkat_core::PendingSystemContextAppend {
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                    text: "peer roster: lead-1, w-1".to_string(),
+                },
+                source: Some("comms:roster".to_string()),
+                idempotency_key: Some("comms:roster:v1".to_string()),
+                source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
+                accepted_at: std::time::SystemTime::now(),
+            };
+            service
+                .apply_runtime_system_context_for_turn(&session_id, vec![append])
+                .await
+                .expect("apply runtime system context");
+            run_prompt(&adapter, &session_id, "turn after context append").await;
+            session_id
+        };
+
+        // Second host lifetime: resume with the SAME explicit prompt the
+        // gateway would re-send. The persisted System message carries the
+        // runtime context append; the rebuilt projection must continue it.
+        let (service, adapter) = build_service(temp.path()).await;
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after restart")
+            .expect("session should survive restart");
+        materialize(&service, &adapter, resume_source).await;
+        run_prompt(&adapter, &session_id, "second turn after restart").await;
+
+        let final_session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after resumed turn")
+            .expect("session should still exist");
+        let texts = user_texts(&final_session);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("first turn before restart")),
+            "history from before the restart must survive: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("second turn after restart")),
+            "the post-restart turn must be recorded: {texts:?}"
+        );
+        let system_prompt = match final_session.messages().first() {
+            Some(meerkat_core::Message::System(system)) => system.content.clone(),
+            other => panic!("expected leading system message, got {other:?}"),
+        };
+        assert!(
+            system_prompt.contains("peer roster: lead-1, w-1"),
+            "runtime-applied system context must survive the resume: {system_prompt}"
+        );
+    }
+
+    /// Companion to the runtime-context-append regression: when the host
+    /// re-sends a *different* explicit base prompt on resume (definition
+    /// edit), the transcript must still resume — the base-prompt change is
+    /// committed as a typed transcript rewrite (auditable, guard-admitted)
+    /// instead of a blind replace that fails the continuity preflight, and
+    /// the runtime-applied context tail survives onto the new base.
+    #[tokio::test]
+    async fn cold_restart_resume_survives_changed_explicit_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let session_id = {
+            let (service, adapter) = build_service(temp.path()).await;
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, "first turn before restart").await;
+
+            let append = meerkat_core::PendingSystemContextAppend {
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                    text: "peer roster: lead-1, w-1".to_string(),
+                },
+                source: Some("comms:roster".to_string()),
+                idempotency_key: Some("comms:roster:v1".to_string()),
+                source_kind: meerkat_core::session::SystemContextSource::Normal,
+                peer_response_terminal: None,
+                accepted_at: std::time::SystemTime::now(),
+            };
+            service
+                .apply_runtime_system_context_for_turn(&session_id, vec![append])
+                .await
+                .expect("apply runtime system context");
+            run_prompt(&adapter, &session_id, "turn after context append").await;
+            session_id
+        };
+
+        // Second host lifetime: the host's definition changed, so it re-sends
+        // a different explicit base prompt.
+        let (service, adapter) = build_service(temp.path()).await;
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after restart")
+            .expect("session should survive restart");
+        let mut request = create_request();
+        request.system_prompt =
+            meerkat::SystemPromptOverride::Set("cold restart resume contract v2".to_string());
+        let service_for_executor = Arc::clone(&service);
+        let adapter_for_executor = Arc::clone(&adapter);
+        Box::pin(materialize_session(
+            &service,
+            &adapter,
+            resume_source,
+            request,
+            move |session_id| {
+                default_persistent_executor(service_for_executor, adapter_for_executor, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session with changed prompt");
+        run_prompt(&adapter, &session_id, "second turn after restart").await;
+
+        let final_session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after resumed turn")
+            .expect("session should still exist");
+        let texts = user_texts(&final_session);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("first turn before restart")),
+            "history from before the restart must survive: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("second turn after restart")),
+            "the post-restart turn must be recorded: {texts:?}"
+        );
+        let system_prompt = match final_session.messages().first() {
+            Some(meerkat_core::Message::System(system)) => system.content.clone(),
+            other => panic!("expected leading system message, got {other:?}"),
+        };
+        assert!(
+            system_prompt.contains("cold restart resume contract v2"),
+            "the changed explicit base prompt must be applied: {system_prompt}"
+        );
+        assert!(
+            system_prompt.contains("peer roster: lead-1, w-1"),
+            "runtime-applied system context must survive the base change: {system_prompt}"
+        );
+        let history = final_session
+            .transcript_history_state()
+            .expect("transcript history state must deserialize")
+            .expect("base-prompt change must record transcript history");
+        assert!(
+            history.commits.iter().any(|commit| commit.reason.kind
+                == meerkat_core::RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON),
+            "base-prompt change must be recorded as a typed rewrite commit: {:?}",
+            history
+                .commits
+                .iter()
+                .map(|commit| &commit.reason.kind)
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn cold_restart_resume_continues_persisted_history() {
         let temp = tempfile::tempdir().expect("tempdir");

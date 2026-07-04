@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Cold-restart resume no longer loses the transcript when the host re-sends
+  an explicit per-request system prompt (the SDK-gateway shape: member specs
+  carry `SystemPromptOverride::Set` on every build). The factory build used
+  to blind-replace the resumed session's leading System message with the
+  re-assembled base prompt, discarding every runtime-applied system-context
+  append (comms rosters, host context) and re-stamping the typed
+  `mutation_kind` — so the resumed projection was no longer a continuation
+  of the persisted transcript revision, the continuity preflight failed
+  closed on the very first post-resume persist, the live session was
+  discarded, and downstream hosts fell back to fresh empty spawns (silent
+  history loss on every restart, including sessions freshly written by the
+  same version). Resume now reconciles instead of replacing
+  (`Session::reconcile_resumed_system_prompt`): a base the persisted System
+  message already carries — identical, or extended only by runtime
+  system-context appends — is preserved byte-for-byte (digest unchanged),
+  and a genuinely changed base is committed as a typed transcript rewrite
+  (`resume-system-prompt-refresh`) that preserves the runtime-appended tail
+  (reconstructed byte-exactly from the new
+  `SessionBuildState.assembled_system_prompt` record, with an
+  applied-append re-render fallback), so the first post-resume persist
+  proves a transcript graph edge from the persisted head instead of failing
+  closed. The rewrite-chain continuation walker also no longer aborts as a
+  cycle when a same-length rewrite commit sits exactly at the persisted
+  head (`find_transcript_rewrite_commit_chain_extending_session` skips
+  commits that cannot advance the cursor), which previously rejected the
+  first post-resume turn after such a rewrite. Regression coverage: resume
+  with a runtime-context-appended prompt (unchanged and changed explicit
+  base) over durable sqlite realm stores, mob cold-restart revival with a
+  context-appended member prompt, and unit pins on the reconciliation
+  outcomes.
+- Reconciliation hardening from the adversarial review of the fix above: an
+  all-context System prompt (empty/`Disable` base plus runtime appends) is
+  carried onto a new base instead of being misread as an "empty tail"; when
+  an unverifiable tail must be dropped, the orphaned applied-append records
+  and their idempotency keys are cleared (with a warning) so keyed re-sends
+  can restore the context instead of deduplicating forever; a shortened
+  explicit base whose removed remainder merely looks like a context tail
+  (the separator is ordinary markdown) is applied through the audited
+  rewrite instead of silently ignored — byte-exact verification against the
+  recorded prior base runs first, and the structural fast path is admitted
+  by the canonical `SessionDocumentMachine` from the typed
+  `RuntimeContextAppend` provenance, not shape alone. The rewrite-chain
+  walker's plain-append fallback no longer accepts untyped leading-System
+  replacements via the system-refresh equivalence (that equivalence now
+  bridges commit PARENT bookkeeping only), and the empty-chain acceptance
+  re-checks graph-head/message-digest agreement. `run_boundary_snapshot_save_guard`
+  adopts a first runtime-boundary commit that carries a validated typed
+  rewrite graph (resume/import over fresh runtime state); the plain
+  `SessionStore::save` first-save seeding rejection is unchanged. Both
+  resume rewrite sites drive `authorize_system_prompt_mutation` (the
+  generated durable-config authority) instead of hand-stamping the mutation
+  provenance, and the append-path block rendering is shared with the
+  resume-time tail verification so the two compositions cannot drift.
+
 ## [0.7.14] - 2026-07-04
 
 Meerkat 0.7.14 makes cold-restart resume survivable (content-addressed

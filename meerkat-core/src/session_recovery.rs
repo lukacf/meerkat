@@ -807,6 +807,7 @@ mod tests {
                     ),
                 ),
                 call_timeout_override: CallTimeoutOverride::Value(Duration::from_secs(42)),
+                assembled_system_prompt: None,
             })
             .expect("session build state");
         let mut deferred = SessionDeferredTurnState::default();

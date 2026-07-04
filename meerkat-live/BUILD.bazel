@@ -46,7 +46,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_MANIFEST_DIR": "./meerkat-live",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -83,7 +83,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_MANIFEST_DIR": "./meerkat-live",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -124,7 +124,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_MANIFEST_DIR": "./meerkat-live",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },

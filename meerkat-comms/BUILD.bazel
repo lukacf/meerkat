@@ -44,7 +44,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
     proc_macro_deps = all_crate_deps(
@@ -80,7 +80,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
     proc_macro_deps = all_crate_deps(
@@ -120,7 +120,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
     tags = [
@@ -176,7 +176,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_BIN_NAME": "e2e",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
@@ -232,7 +232,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_BIN_NAME": "inbox_admission_toctou",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
@@ -287,7 +287,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_BIN_NAME": "inproc_canonical_peer_routing",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
@@ -342,7 +342,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_BIN_NAME": "router_ambiguous_name_typed_error",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
@@ -397,7 +397,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_BIN_NAME": "router_integration",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },
@@ -452,7 +452,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.14",
+        "CARGO_PKG_VERSION": "0.7.15",
         "CARGO_BIN_NAME": "trust_duplicate_name_ok_duplicate_id_rejected",
         "CARGO_MANIFEST_DIR": "./meerkat-comms",
     },

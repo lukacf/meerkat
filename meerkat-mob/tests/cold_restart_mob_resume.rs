@@ -325,6 +325,33 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
         "lifetime1",
     )
     .await;
+
+    // Upstream 0.7.21 transcript-loss shape: a runtime system-context append
+    // (comms roster) lands on the worker's System message before the cold
+    // stop. The resumed projection must continue this appended prompt instead
+    // of failing the continuity preflight and fresh-spawning.
+    let roster_append = meerkat_core::PendingSystemContextAppend {
+        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+            text: "peer roster: lead-1, w-1".to_string(),
+        },
+        source: Some("comms:roster".to_string()),
+        idempotency_key: Some("comms:roster:v1".to_string()),
+        source_kind: meerkat_core::session::SystemContextSource::Normal,
+        peer_response_terminal: None,
+        accepted_at: std::time::SystemTime::now(),
+    };
+    service_1
+        .apply_runtime_system_context_for_turn(&w1_sid, vec![roster_append])
+        .await
+        .expect("apply runtime system context to worker");
+    send_and_wait(
+        &handle_1,
+        service_1.as_ref(),
+        "w-1",
+        "PRE_RESTART_W1_TURN2 token-omega",
+        "lifetime1",
+    )
+    .await;
     if lead_mode == MobRuntimeMode::TurnDriven {
         send_and_wait(
             &handle_1,
@@ -429,10 +456,26 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     wait_for_history_contains_all(
         service_2.as_ref(),
         &w1_sid,
-        &["PRE_RESTART_W1_TURN"],
+        &["PRE_RESTART_W1_TURN", "PRE_RESTART_W1_TURN2"],
         "post-resume-w1-history",
     )
     .await;
+
+    // The runtime-appended system context must have survived the resume
+    // byte-for-byte on the worker's leading System message.
+    let w1_resumed = service_2
+        .load_authoritative_session(&w1_sid)
+        .await
+        .expect("load resumed worker session")
+        .expect("worker session must survive restart");
+    let w1_prompt = match w1_resumed.messages().first() {
+        Some(meerkat_core::Message::System(system)) => system.content.clone(),
+        other => panic!("expected leading system message on resumed worker, got {other:?}"),
+    };
+    assert!(
+        w1_prompt.contains("peer roster: lead-1, w-1"),
+        "runtime-applied system context must survive the mob cold restart: {w1_prompt}"
+    );
 
     // First post-restart member turn: this drives the resumed projection into
     // the save guard against the persisted pre-restart row.

@@ -796,6 +796,16 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
         };
         let mut selected = None;
         for commit in &state.commits {
+            // A commit whose revision is already the cursor cannot advance
+            // the walk — selecting it only revisits the cursor and aborts as
+            // a cycle. Same-length rewrites (e.g. a resume-time system-prompt
+            // refresh) can otherwise be spuriously selected here because
+            // their parent body also "extends" the cursor under the
+            // system-refresh equivalence; plain append continuation from
+            // this cursor is proven by the fallback below instead.
+            if commit.revision == cursor {
+                continue;
+            }
             if !transcript_history_revision_extends(state, incoming_revision, &commit.revision) {
                 continue;
             }

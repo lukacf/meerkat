@@ -5305,6 +5305,17 @@ impl AgentFactory {
             shell_env: build_config.shell_env.clone(),
             mob_tool_authority_context: build_config.mob_tool_authority_context.clone(),
             call_timeout_override: build_config.call_timeout_override.clone(),
+            // Record the exact assembled base-prompt bytes (or carry the
+            // prior build's record through an Inherit resume) so a later
+            // resume can split the persisted System content into base +
+            // runtime-appended tail byte-exactly.
+            assembled_system_prompt: system_prompt.clone().or_else(|| {
+                build_config
+                    .resume_session
+                    .as_ref()
+                    .and_then(|session| session.build_state())
+                    .and_then(|state| state.assembled_system_prompt)
+            }),
         };
 
         // Resolve the structured-output retry budget exactly once, here at the
@@ -5465,6 +5476,40 @@ impl AgentFactory {
         if let Some(state) = initial_visibility_state {
             builder = builder.with_initial_tool_visibility_state(state);
         }
+        // Resume continuity: an explicit per-request prompt on a resumed,
+        // established transcript must not blind-replace the persisted System
+        // message — that discards runtime-applied system context and produces
+        // a projection that is no longer a continuation of the persisted
+        // transcript revision, so the append-only continuity guard rejects
+        // the very first post-resume persist and the live session is
+        // discarded (cold-restart transcript loss for runtime-backed hosts).
+        // Reconcile instead: a base the persisted prompt already carries is
+        // preserved byte-for-byte; a genuinely changed base is committed as a
+        // typed transcript rewrite so the persist proves a graph edge from
+        // the persisted head.
+        let system_prompt = match system_prompt {
+            Some(assembled)
+                if build_config.resume_session.is_some() && !resume_session_is_precreated_empty =>
+            {
+                let reconciliation = session
+                    .reconcile_resumed_system_prompt(
+                        assembled,
+                        Some("agent-factory/resume".to_string()),
+                    )
+                    .map_err(|err| {
+                        BuildAgentError::Config(format!(
+                            "failed to reconcile resumed system prompt: {err}"
+                        ))
+                    })?;
+                tracing::debug!(
+                    session_id = %session.id(),
+                    ?reconciliation,
+                    "reconciled explicit system prompt against resumed transcript"
+                );
+                None
+            }
+            other => other,
+        };
         if let Some(system_prompt) = system_prompt {
             builder = builder.system_prompt(system_prompt);
         }

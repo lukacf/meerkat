@@ -124,6 +124,27 @@ impl TranscriptRewriteReason {
     }
 }
 
+/// Typed rewrite-commit reason for a resume-time base-prompt refresh
+/// committed by [`Session::reconcile_resumed_system_prompt`].
+pub const RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON: &str = "resume-system-prompt-refresh";
+
+/// Typed outcome of [`Session::reconcile_resumed_system_prompt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumedSystemPromptReconciliation {
+    /// The persisted System message already carries the assembled base prompt
+    /// (identical, or extended only by runtime system-context appends). The
+    /// transcript was left untouched, so the resumed projection digests to
+    /// the persisted revision.
+    PreservedContinuation,
+    /// The assembled base prompt diverged from the persisted System message;
+    /// the replacement was committed as a typed transcript rewrite so the
+    /// first post-resume persist proves a graph edge from the persisted head.
+    RewrittenBase,
+    /// The resumed transcript has no leading System message and the assembled
+    /// prompt is empty — nothing to reconcile.
+    NoChange,
+}
+
 impl std::fmt::Display for TranscriptRewriteReason {
     /// Human-facing projection consumed by revision-list reads. The typed
     /// `{kind, note}` pair stays the owner; this rendering is derived only.
@@ -1680,6 +1701,14 @@ pub struct SessionBuildState {
     pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
     #[serde(default, skip_serializing_if = "is_default_call_timeout_override")]
     pub call_timeout_override: crate::CallTimeoutOverride,
+    /// Exact assembled base-prompt bytes the last build applied (or verified)
+    /// for this session. Runtime system-context appends extend the leading
+    /// System message past this base; recording the base lets a later resume
+    /// split the persisted content into `base + appended tail` byte-exactly
+    /// (see [`Session::reconcile_resumed_system_prompt`]) instead of
+    /// re-deriving append renders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembled_system_prompt: Option<String>,
 }
 
 /// Deferred create-time prompt staged for the next turn.
@@ -3269,6 +3298,142 @@ impl Session {
         if let Err(err) = self.set_system_context_state(state) {
             tracing::warn!(error = %err, "failed to persist applied system-context state");
         }
+    }
+
+    /// Reconcile a resumed session's persisted system prompt with a freshly
+    /// assembled base prompt.
+    ///
+    /// A resumed transcript is durable state: its leading [`Message::System`]
+    /// carries the base prompt PLUS every runtime system-context append the
+    /// runtime durably applied (comms rosters, host context — rendered by
+    /// [`Session::append_system_context_blocks`]). Blind-replacing that
+    /// message with a re-assembled base prompt discards the runtime-applied
+    /// context and produces a projection that is no longer a continuation of
+    /// the persisted transcript revision — the append-only save guard then
+    /// rejects the very first post-resume persist and the live session is
+    /// discarded (the upstream cold-restart transcript-loss report).
+    ///
+    /// Reconciliation instead of replacement:
+    /// - If the persisted System content IS the assembled base — identical, or
+    ///   extended only by [`SYSTEM_CONTEXT_SEPARATOR`]-joined runtime context
+    ///   appends — the transcript is left untouched (byte-for-byte, including
+    ///   the typed `mutation_kind`), so the resumed projection digests to the
+    ///   persisted revision.
+    /// - If the base genuinely changed, the new System message (new base plus
+    ///   the reconstructed runtime-append tail, when the persisted tail is
+    ///   verifiable from the durable applied-append records) is committed
+    ///   through [`Session::commit_transcript_rewrite`] — the canonical typed
+    ///   rewrite path — so the first post-resume persist proves a transcript
+    ///   graph edge from the persisted head instead of failing closed.
+    pub fn reconcile_resumed_system_prompt(
+        &mut self,
+        assembled_base: String,
+        actor: Option<String>,
+    ) -> Result<ResumedSystemPromptReconciliation, TranscriptEditError> {
+        use crate::types::{SystemMessage, SystemPromptMutationKind};
+
+        let persisted_content = match self.messages.first() {
+            Some(Message::System(system)) => Some(system.content.clone()),
+            _ => None,
+        };
+
+        let Some(persisted_content) = persisted_content else {
+            if assembled_base.is_empty() {
+                return Ok(ResumedSystemPromptReconciliation::NoChange);
+            }
+            // The persisted transcript never had a system prompt; introducing
+            // one changes the transcript, so it flows through the same typed
+            // rewrite path (an insert rewrite over the empty leading span).
+            let replacement = Message::System(SystemMessage::with_mutation_kind(
+                assembled_base,
+                SystemPromptMutationKind::ExplicitBuild,
+            ));
+            self.commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
+                vec![replacement],
+                TranscriptRewriteReason::new(RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON),
+                actor,
+                None,
+            )?;
+            return Ok(ResumedSystemPromptReconciliation::RewrittenBase);
+        };
+
+        // Continuation fast path: the persisted prompt already carries this
+        // base. `base + SYSTEM_CONTEXT_SEPARATOR + …` is exactly the shape
+        // `append_system_context_blocks` produces for runtime context appends.
+        if persisted_content == assembled_base
+            || (persisted_content.starts_with(&assembled_base)
+                && persisted_content[assembled_base.len()..].starts_with(SYSTEM_CONTEXT_SEPARATOR))
+        {
+            return Ok(ResumedSystemPromptReconciliation::PreservedContinuation);
+        }
+
+        // The base diverged. Preserve the runtime-appended context tail when
+        // it is verifiable — first byte-exactly against the prior build's
+        // recorded assembled base, then against a re-render of the durable
+        // applied-append records; otherwise the tail is not reconstructible
+        // and only the new base is written.
+        let prior_base_tail = self
+            .build_state()
+            .and_then(|state| state.assembled_system_prompt)
+            .and_then(|prior_base| {
+                if persisted_content == prior_base {
+                    return Some(String::new());
+                }
+                let appended = persisted_content.strip_prefix(prior_base.as_str())?;
+                appended
+                    .starts_with(SYSTEM_CONTEXT_SEPARATOR)
+                    .then(|| appended.to_string())
+            });
+        let verified_tail = prior_base_tail.or_else(|| {
+            let rendered_tail = self
+                .system_context_state()
+                .map(|state| {
+                    state
+                        .applied
+                        .iter()
+                        .map(render_system_context_block)
+                        .collect::<Vec<_>>()
+                        .join(SYSTEM_CONTEXT_SEPARATOR)
+                })
+                .unwrap_or_default();
+            if rendered_tail.is_empty() {
+                None
+            } else if persisted_content == rendered_tail {
+                Some(String::new())
+            } else if persisted_content
+                .ends_with(&format!("{SYSTEM_CONTEXT_SEPARATOR}{rendered_tail}"))
+            {
+                Some(format!("{SYSTEM_CONTEXT_SEPARATOR}{rendered_tail}"))
+            } else {
+                None
+            }
+        });
+        let replacement_content = match verified_tail {
+            None => assembled_base,
+            Some(tail) if tail.is_empty() => assembled_base,
+            Some(tail) if assembled_base.is_empty() => tail
+                .strip_prefix(SYSTEM_CONTEXT_SEPARATOR)
+                .map(str::to_string)
+                .unwrap_or(tail),
+            Some(tail) => format!("{assembled_base}{tail}"),
+        };
+        if replacement_content == persisted_content {
+            return Ok(ResumedSystemPromptReconciliation::PreservedContinuation);
+        }
+
+        let replacement = Message::System(SystemMessage::with_mutation_kind(
+            replacement_content,
+            SystemPromptMutationKind::ExplicitBuild,
+        ));
+        self.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![replacement],
+            TranscriptRewriteReason::new(RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON),
+            actor,
+            None,
+        )?;
+        Ok(ResumedSystemPromptReconciliation::RewrittenBase)
     }
 
     /// Get the last assistant message text content.
@@ -7489,6 +7654,140 @@ mod tests {
             .system_context_state()
             .expect("append should persist typed context state");
         assert_eq!(state.applied, vec![append]);
+    }
+
+    fn roster_append() -> PendingSystemContextAppend {
+        PendingSystemContextAppend {
+            content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                "peer roster: lead-1, w-1".to_string(),
+            ),
+            source: Some("comms:roster".to_string()),
+            idempotency_key: Some("comms:roster:v1".to_string()),
+            source_kind: SystemContextSource::Normal,
+            peer_response_terminal: None,
+            accepted_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn resumed_session_with_context_appended_prompt(base: &str) -> Session {
+        let mut session = Session::new();
+        session.set_system_prompt(base.to_string());
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session.append_system_context_blocks(std::slice::from_ref(&roster_append()));
+        session
+    }
+
+    #[test]
+    fn reconcile_resumed_system_prompt_preserves_identical_base() {
+        let mut session = Session::new();
+        session.set_system_prompt("base prompt".to_string());
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        let digest_before = transcript_messages_digest(session.messages()).unwrap();
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("base prompt".to_string(), None)
+            .expect("reconcile");
+
+        assert_eq!(
+            outcome,
+            ResumedSystemPromptReconciliation::PreservedContinuation
+        );
+        assert_eq!(
+            transcript_messages_digest(session.messages()).unwrap(),
+            digest_before,
+            "identical base must leave the transcript revision unchanged"
+        );
+    }
+
+    #[test]
+    fn reconcile_resumed_system_prompt_preserves_context_appended_base() {
+        let mut session = resumed_session_with_context_appended_prompt("base prompt");
+        let digest_before = transcript_messages_digest(session.messages()).unwrap();
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("base prompt".to_string(), None)
+            .expect("reconcile");
+
+        assert_eq!(
+            outcome,
+            ResumedSystemPromptReconciliation::PreservedContinuation
+        );
+        assert_eq!(
+            transcript_messages_digest(session.messages()).unwrap(),
+            digest_before,
+            "a base extended only by runtime context appends must stay untouched"
+        );
+        let system = match session.messages().first() {
+            Some(Message::System(system)) => system.clone(),
+            other => panic!("expected system message, got {other:?}"),
+        };
+        assert!(system.content.contains("peer roster: lead-1, w-1"));
+        assert!(
+            system.mutation_kind.is_runtime_context_append(),
+            "the persisted mutation provenance must survive reconciliation"
+        );
+    }
+
+    #[test]
+    fn reconcile_resumed_system_prompt_rewrites_changed_base_preserving_tail() {
+        let mut session = resumed_session_with_context_appended_prompt("base prompt");
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("new base prompt".to_string(), None)
+            .expect("reconcile");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        let system_content = match session.messages().first() {
+            Some(Message::System(system)) => system.content.clone(),
+            other => panic!("expected system message, got {other:?}"),
+        };
+        assert!(
+            system_content.starts_with("new base prompt"),
+            "the changed base must be applied: {system_content}"
+        );
+        assert!(
+            system_content.contains("peer roster: lead-1, w-1"),
+            "the runtime-applied context tail must survive the base change: {system_content}"
+        );
+        let state = session
+            .transcript_history_state()
+            .expect("history state deserializes")
+            .expect("rewrite must record transcript history");
+        assert_eq!(state.commits.len(), 1);
+        assert_eq!(
+            state.commits[0].reason.kind,
+            RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON
+        );
+        assert_eq!(
+            state.head,
+            transcript_messages_digest(session.messages()).unwrap(),
+            "the committed head must match the rewritten transcript"
+        );
+    }
+
+    #[test]
+    fn reconcile_resumed_system_prompt_inserts_prompt_on_promptless_transcript() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+
+        let outcome = session
+            .reconcile_resumed_system_prompt("late prompt".to_string(), None)
+            .expect("reconcile");
+
+        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
+        assert!(matches!(
+            session.messages().first(),
+            Some(Message::System(system)) if system.content == "late prompt"
+        ));
+        let state = session
+            .transcript_history_state()
+            .expect("history state deserializes")
+            .expect("insert must record transcript history");
+        assert_eq!(state.commits.len(), 1);
+        assert_eq!(
+            state.commits[0].reason.kind,
+            RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON
+        );
     }
 
     #[test]

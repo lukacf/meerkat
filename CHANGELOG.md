@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Cold-restart resume no longer loses the transcript when the host re-sends
+  an explicit per-request system prompt (the SDK-gateway shape: member specs
+  carry `SystemPromptOverride::Set` on every build). The factory build used
+  to blind-replace the resumed session's leading System message with the
+  re-assembled base prompt, discarding every runtime-applied system-context
+  append (comms rosters, host context) and re-stamping the typed
+  `mutation_kind` — so the resumed projection was no longer a continuation
+  of the persisted transcript revision, the continuity preflight failed
+  closed on the very first post-resume persist, the live session was
+  discarded, and downstream hosts fell back to fresh empty spawns (silent
+  history loss on every restart, including sessions freshly written by the
+  same version). Resume now reconciles instead of replacing
+  (`Session::reconcile_resumed_system_prompt`): a base the persisted System
+  message already carries — identical, or extended only by runtime
+  system-context appends — is preserved byte-for-byte (digest unchanged),
+  and a genuinely changed base is committed as a typed transcript rewrite
+  (`resume-system-prompt-refresh`) that preserves the runtime-appended tail
+  (reconstructed byte-exactly from the new
+  `SessionBuildState.assembled_system_prompt` record, with an
+  applied-append re-render fallback), so the first post-resume persist
+  proves a transcript graph edge from the persisted head instead of failing
+  closed. The rewrite-chain continuation walker also no longer aborts as a
+  cycle when a same-length rewrite commit sits exactly at the persisted
+  head (`find_transcript_rewrite_commit_chain_extending_session` skips
+  commits that cannot advance the cursor), which previously rejected the
+  first post-resume turn after such a rewrite. Regression coverage: resume
+  with a runtime-context-appended prompt (unchanged and changed explicit
+  base) over durable sqlite realm stores, mob cold-restart revival with a
+  context-appended member prompt, and unit pins on the reconciliation
+  outcomes.
+
 ## [0.7.14] - 2026-07-04
 
 Meerkat 0.7.14 makes cold-restart resume survivable (content-addressed

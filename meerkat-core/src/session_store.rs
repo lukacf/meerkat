@@ -562,6 +562,29 @@ pub fn run_boundary_snapshot_save_guard(
                 return Ok(());
             }
             let Some(previous) = previous else {
+                // First runtime-boundary commit for a session this authority
+                // has never snapshotted: adoption of a resumed/imported
+                // session. A typed rewrite graph carried in is audited by its
+                // own commits — validate every one against its retained
+                // bodies and require the graph head to match the incoming
+                // digest. Plain `SessionStore::save` keeps rejecting such
+                // seeds (the trait-level append-only contract); adoption is a
+                // runtime-authority decision, not an ordinary row write.
+                let incoming_revision = transcript_messages_digest(incoming.messages())
+                    .map_err(SessionStoreError::from)?;
+                if let Some(state) = incoming.transcript_history_state().map_err(|err| {
+                    SessionStoreError::InvalidTranscriptRewrite {
+                        id: incoming.id().clone(),
+                        reason: format!("incoming transcript history state is malformed: {err}"),
+                    }
+                })? && !state.commits.is_empty()
+                    && state.head == incoming_revision
+                {
+                    for commit in &state.commits {
+                        validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
+                    }
+                    return Ok(());
+                }
                 return Err(append_error);
             };
             let incoming_revision =
@@ -594,6 +617,20 @@ pub fn run_boundary_snapshot_save_guard(
             let Some(commit) = commits.first() else {
                 if state.commits.is_empty() {
                     return Err(append_error);
+                }
+                // Empty chain: the persisted row is already at (or past) the
+                // last rewrite and the incoming head extends it by plain
+                // appends. Unlike the non-empty chain below, no bridge guard
+                // runs here, so re-check the graph-head/message-digest
+                // agreement explicitly before accepting.
+                if state.head != incoming_revision {
+                    return Err(SessionStoreError::InvalidTranscriptRewrite {
+                        id: incoming.id().clone(),
+                        reason: format!(
+                            "incoming transcript graph head {} does not match current message digest {incoming_revision}",
+                            state.head
+                        ),
+                    });
                 }
                 for commit in &state.commits {
                     validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
@@ -815,6 +852,7 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
                     &commit.parent_revision,
                     cursor_messages,
                     cursor,
+                    true,
                 )?;
             if parent_extends_cursor {
                 selected = Some(commit);
@@ -828,6 +866,7 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
                 incoming_revision,
                 cursor_messages,
                 cursor,
+                false,
             )? {
                 return Ok(Some(chain));
             }
@@ -859,6 +898,7 @@ fn revision_body_preserves_append_continuation_prefix(
     revision: &str,
     ancestor_messages: &[Message],
     ancestor_revision: &str,
+    allow_leading_system_refresh: bool,
 ) -> Result<bool, SessionStoreError> {
     if revision == ancestor_revision {
         return Ok(true);
@@ -877,15 +917,19 @@ fn revision_body_preserves_append_continuation_prefix(
             return Ok(true);
         }
     }
-    Ok(
-        messages_preserve_conversation_tail_with_system_context_append(
-            &body.messages,
-            ancestor_messages,
-        )? || messages_preserve_tail_after_leading_system_refresh(
-            &body.messages,
-            ancestor_messages,
-        )?,
-    )
+    if messages_preserve_conversation_tail_with_system_context_append(
+        &body.messages,
+        ancestor_messages,
+    )? {
+        return Ok(true);
+    }
+    // The untyped leading-System-refresh equivalence bridges bookkeeping
+    // divergence between a persisted row and a rewrite commit's recorded
+    // PARENT body only. It must not prove the final plain-append
+    // continuation: that would admit an unaudited System replacement (a
+    // recorded refresh body with no typed commit) as an ordinary append.
+    Ok(allow_leading_system_refresh
+        && messages_preserve_tail_after_leading_system_refresh(&body.messages, ancestor_messages)?)
 }
 
 fn messages_preserve_tail_after_leading_system_refresh(
@@ -1978,6 +2022,99 @@ mod tests {
             Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
                 if reason.contains("first save would seed transcript history state")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_adopts_commit_carrying_history_on_first_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A runtime authority adopting a session it never snapshotted
+        // (resume/import over fresh runtime state) may receive a session that
+        // already carries a typed rewrite graph — e.g. a resume-time
+        // base-prompt refresh. The commits are the audit: the run-boundary
+        // guard accepts the validated graph, while the plain trait-level
+        // `SessionStore::save` contract keeps rejecting first-save seeds.
+        let mut incoming = Session::new();
+        incoming.set_system_prompt("old base".to_string());
+        incoming.push(Message::User(UserMessage::text("hello".to_string())));
+        incoming.commit_transcript_rewrite(
+            crate::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::with_mutation_kind(
+                "new base".to_string(),
+                crate::types::SystemPromptMutationKind::ExplicitBuild,
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            None,
+            None,
+        )?;
+
+        assert!(run_boundary_snapshot_save_guard(&incoming, None).is_ok());
+        assert!(matches!(
+            append_only_save_guard(&incoming, None),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_rejects_untyped_leading_system_refresh_after_head_rewrite()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A same-length rewrite commit sitting exactly at the persisted head
+        // (the resume-refresh shape) must not widen acceptance to UNTYPED
+        // leading-System replacements: a plain set_system_prompt records a
+        // refresh body via the head refresh but carries no commit, and the
+        // chain walker's fallback must not admit it as an ordinary append
+        // continuation via the leading-system-refresh equivalence.
+        let mut previous = Session::new();
+        previous.set_system_prompt("original base".to_string());
+        previous.push(Message::User(UserMessage::text("hello".to_string())));
+        previous.commit_transcript_rewrite(
+            crate::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::with_mutation_kind(
+                "refreshed base".to_string(),
+                crate::types::SystemPromptMutationKind::ExplicitBuild,
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            None,
+            None,
+        )?;
+
+        let mut incoming = previous.clone();
+        incoming.set_system_prompt("untyped hijack".to_string());
+
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::TranscriptContinuityViolation { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_accepts_plain_append_after_head_rewrite()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The empty-chain acceptance the cycle-skip exists for: the persisted
+        // row is already AT the rewrite revision and the incoming snapshot
+        // extends it by ordinary appends.
+        let mut previous = Session::new();
+        previous.set_system_prompt("original base".to_string());
+        previous.push(Message::User(UserMessage::text("hello".to_string())));
+        previous.commit_transcript_rewrite(
+            crate::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::with_mutation_kind(
+                "refreshed base".to_string(),
+                crate::types::SystemPromptMutationKind::ExplicitBuild,
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            None,
+            None,
+        )?;
+
+        let mut incoming = previous.clone();
+        incoming.push(Message::User(UserMessage::text(
+            "post-rewrite turn".to_string(),
+        )));
+
+        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
         Ok(())
     }
 

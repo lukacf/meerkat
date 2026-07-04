@@ -39,6 +39,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   base) over durable sqlite realm stores, mob cold-restart revival with a
   context-appended member prompt, and unit pins on the reconciliation
   outcomes.
+- Reconciliation hardening from the adversarial review of the fix above: an
+  all-context System prompt (empty/`Disable` base plus runtime appends) is
+  carried onto a new base instead of being misread as an "empty tail"; when
+  an unverifiable tail must be dropped, the orphaned applied-append records
+  and their idempotency keys are cleared (with a warning) so keyed re-sends
+  can restore the context instead of deduplicating forever; a shortened
+  explicit base whose removed remainder merely looks like a context tail
+  (the separator is ordinary markdown) is applied through the audited
+  rewrite instead of silently ignored — byte-exact verification against the
+  recorded prior base runs first, and the structural fast path is admitted
+  by the canonical `SessionDocumentMachine` from the typed
+  `RuntimeContextAppend` provenance, not shape alone. The rewrite-chain
+  walker's plain-append fallback no longer accepts untyped leading-System
+  replacements via the system-refresh equivalence (that equivalence now
+  bridges commit PARENT bookkeeping only), and the empty-chain acceptance
+  re-checks graph-head/message-digest agreement. `run_boundary_snapshot_save_guard`
+  adopts a first runtime-boundary commit that carries a validated typed
+  rewrite graph (resume/import over fresh runtime state); the plain
+  `SessionStore::save` first-save seeding rejection is unchanged. Both
+  resume rewrite sites drive `authorize_system_prompt_mutation` (the
+  generated durable-config authority) instead of hand-stamping the mutation
+  provenance, and the append-path block rendering is shared with the
+  resume-time tail verification so the two compositions cannot drift.
 
 ## [0.7.14] - 2026-07-04
 

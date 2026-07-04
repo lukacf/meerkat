@@ -42,7 +42,10 @@ rust_library(
     edition = "2024",
     rustc_flags = [
         "-Ccodegen-units=256",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["-Clto=off"],
+        "//conditions:default": [],
+    }),
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -96,7 +99,10 @@ rust_library(
     edition = "2024",
     rustc_flags = [
         "-Ccodegen-units=256",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["-Clto=off"],
+        "//conditions:default": [],
+    }),
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",

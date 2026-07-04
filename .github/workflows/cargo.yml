@@ -12,8 +12,9 @@ name: Cargo CI
 #   clippy          — workspace clippy, all features, lib/bin targets
 #                     (--all-targets multiplies build volume several-fold for
 #                     test-only lint yield; it runs nightly)
-#   unit (x6)       — lib unit tests, nextest hash-partitioned
-#   int (x6)        — integration-fast tests, nextest hash-partitioned
+#   unit (x8)       — lib unit tests, nextest hash-partitioned
+#   int-heavy (x3)  — meerkat-integration-tests integration lane
+#   int-rest (x3)   — integration tests for the rest of the workspace
 #   e2e-fast        — deterministic end-to-end lane (real binaries)
 #   ratchets        — version/schema/SDK/surface generation ratchets
 #   wasm-check      — wasm32 cargo check (every code change)
@@ -193,14 +194,14 @@ jobs:
         run: ./scripts/repo-cargo clippy --workspace --all-features -- -D warnings
 
   unit:
-    name: Unit tests (shard ${{ matrix.partition }}/6)
+    name: Unit tests (shard ${{ matrix.partition }}/8)
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4, 5, 6]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -229,17 +230,21 @@ jobs:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Unit tests (shard)
-        run: ./scripts/repo-cargo unit --partition "hash:${{ matrix.partition }}/6"
+        run: ./scripts/repo-cargo unit --partition "hash:${{ matrix.partition }}/8"
 
-  int:
-    name: Integration tests (shard ${{ matrix.partition }}/6)
+  # Integration tests split by BUILD scope, not just run partition: linking
+  # every integration binary in the workspace is the dominant fixed cost, and
+  # meerkat-integration-tests owns the biggest binaries. Coverage is complete
+  # by construction: one crate + workspace-minus-that-crate.
+  int-heavy:
+    name: Integration tests, meerkat-integration-tests (shard ${{ matrix.partition }}/3)
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4, 5, 6]
+        partition: [1, 2, 3]
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -258,15 +263,57 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-int
+          shared-key: ci-int-heavy
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
-      - name: Integration-fast tests (shard)
-        run: ./scripts/repo-cargo int --partition "hash:${{ matrix.partition }}/6"
+      - name: Integration-fast tests (integration crate shard)
+        run: >-
+          ./scripts/repo-cargo nextest run -p meerkat-integration-tests --tests
+          --profile fast --show-progress none --status-level none
+          --final-status-level fail --partition "hash:${{ matrix.partition }}/3"
+
+  int-rest:
+    name: Integration tests, rest of workspace (shard ${{ matrix.partition }}/3)
+    needs: changes
+    if: ${{ needs.changes.outputs.code_changed == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-int-rest
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Integration-fast tests (workspace-rest shard)
+        run: >-
+          ./scripts/repo-cargo int --exclude meerkat-integration-tests
+          --partition "hash:${{ matrix.partition }}/3"
 
   e2e-fast:
     name: Deterministic e2e lane
@@ -464,7 +511,8 @@ jobs:
       - fmt-governance
       - clippy
       - unit
-      - int
+      - int-heavy
+      - int-rest
       - e2e-fast
       - ratchets
       - wasm-check
@@ -480,7 +528,8 @@ jobs:
             ${{ needs.fmt-governance.result }}
             ${{ needs.clippy.result }}
             ${{ needs.unit.result }}
-            ${{ needs.int.result }}
+            ${{ needs.int-heavy.result }}
+            ${{ needs.int-rest.result }}
             ${{ needs.e2e-fast.result }}
             ${{ needs.ratchets.result }}
             ${{ needs.wasm-check.result }}

@@ -5,8 +5,7 @@ use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
     SkillFunctionName, SkillFunctionOutput, SkillIntrospectionEntry, SkillKey,
     SkillQuarantineDiagnostic, SkillSource, SourceHealthSnapshot, SourceHealthState,
-    SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
-    SourceUuid, apply_filter,
+    SourceIdentityRecord, SourceIdentityRegistry, SourceUuid, apply_filter,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -45,16 +44,10 @@ pub struct CompositeSkillSource {
 }
 
 impl CompositeSkillSource {
-    /// Create from named sources (precedence = order).
-    pub fn from_named(sources: Vec<NamedSource>) -> Self {
-        Self {
-            sources,
-            registry: None,
-        }
-    }
-
-    /// Create from named sources with source-identity resolution applied
-    /// before direct composite loads.
+    /// Create from named sources (precedence = order) with source-identity
+    /// resolution applied before direct composite loads. This is the only
+    /// constructor: a composite without an attached registry has no identity
+    /// authority and every operation on it fails closed.
     pub fn from_named_with_registry(
         sources: Vec<NamedSource>,
         registry: Arc<SourceIdentityRegistry>,
@@ -62,33 +55,6 @@ impl CompositeSkillSource {
         Self {
             sources,
             registry: Some(registry),
-        }
-    }
-
-    pub fn with_source_identity_registry(mut self, registry: Arc<SourceIdentityRegistry>) -> Self {
-        self.registry = Some(registry);
-        self
-    }
-
-    /// Create from unnamed sources (backward compatibility).
-    pub fn new(sources: Vec<SourceNode>) -> Self {
-        let named = sources
-            .into_iter()
-            .enumerate()
-            .map(|(i, source)| NamedSource {
-                identity: SourceIdentityRecord {
-                    source_uuid: SourceUuid::builtin(),
-                    display_name: format!("source_{i}"),
-                    transport_kind: SourceTransportKind::Embedded,
-                    fingerprint: format!("legacy:source_{i}"),
-                    status: SourceIdentityStatus::Active,
-                },
-                source,
-            })
-            .collect();
-        Self {
-            sources: named,
-            registry: None,
         }
     }
 
@@ -340,6 +306,7 @@ mod tests {
     use indexmap::IndexMap;
     use meerkat_core::skills::{
         SkillKeyRemap, SkillName, SkillScope, SourceIdentityLineage, SourceIdentityLineageEvent,
+        SourceIdentityStatus, SourceTransportKind,
     };
 
     fn source_uuid(raw: &str) -> SourceUuid {
@@ -708,16 +675,21 @@ mod tests {
     async fn load_without_registry_fails_closed() {
         // Row #11: a composite with no attached source-identity registry must
         // refuse to load or list (no silent raw-key pass-through anywhere).
+        // No public constructor can build this state — the negative case is
+        // assembled through the private fields to pin the rejection machinery.
         let source = source_uuid("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
         let key = skill_key(&source, "alpha");
-        let composite = CompositeSkillSource::from_named(vec![NamedSource::new(
-            source_record(source, "legacy"),
-            SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
-                key.clone(),
-                "Alpha",
-                "body",
-            )])),
-        )]);
+        let composite = CompositeSkillSource {
+            sources: vec![NamedSource::new(
+                source_record(source, "legacy"),
+                SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
+                    key.clone(),
+                    "Alpha",
+                    "body",
+                )])),
+            )],
+            registry: None,
+        };
 
         let err = composite.load(&key).await.unwrap_err();
         assert!(

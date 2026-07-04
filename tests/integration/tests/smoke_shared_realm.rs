@@ -462,10 +462,13 @@ async fn spawn_stdio_process_without_openai(
 }
 
 /// Spawn `rkat-rpc` (or another stdio binary) with a synthetic OpenAI API
-/// key. Used by M-cluster live-adapter contract tests so the OpenAI realtime
-/// session factory builds successfully (B15 startup gate) without any real
-/// upstream request — the precheck (B17/B18/B19) and chunk-decode (D24)
-/// paths fire before any provider call would happen.
+/// key. Used by M-cluster live-adapter contract tests. Startup performs only
+/// a wiring/feature preflight (B15) — no credential resolves at startup.
+/// Realtime credentials resolve per-open under the owning session identity:
+/// the fake `OPENAI_API_KEY` is consumed by the per-open
+/// `ResolverEnvironment` resolution at `live/open` time, and no real
+/// upstream request happens — the precheck (B17/B18/B19) and chunk-decode
+/// (D24) paths fire before any provider call would happen.
 ///
 /// Tests rely on `kill_on_drop(true)` (F35) to clean up the subprocess on
 /// panic.
@@ -5055,9 +5058,11 @@ async fn e2e_scenario_72_live_adapter_model_switch_continuity()
 // M-cluster live-adapter contract tests (wave 2).
 //
 // Each of these pins one specific live/* error contract and runs deterministically
-// without contacting OpenAI: the OpenAI realtime factory builds with a synthetic
-// key (B15 only requires the credential to *resolve*, not to be valid), and the
-// catalog-driven precheck + base64 decode paths fire before any provider call.
+// without contacting OpenAI: startup performs only a wiring/feature preflight
+// (B15), each `live/open` re-resolves the owning session's credential per-open
+// (the synthetic OPENAI_API_KEY resolves via the per-open ResolverEnvironment;
+// it never has to be valid upstream), and the catalog-driven precheck + base64
+// decode paths fire before any provider call.
 //
 // Lane: `e2e-system` — these tests need the `rkat-rpc` binary built but no live
 // provider connection.
@@ -5515,9 +5520,11 @@ async fn e2e_m73_live_open_gemini_provider_rejected_by_precheck()
         l.local_addr()?.port()
     };
 
-    // Both a fake OpenAI key (so the realtime factory builds and B15 is
-    // satisfied) AND a fake Gemini key (so session/create can resolve a
-    // Gemini binding for the deferred-initial-turn session).
+    // Both a fake OpenAI key (consumed only by per-open realtime credential
+    // resolution at live/open time — the B15 startup preflight checks
+    // wiring/features, never credentials) AND a fake Gemini key (so
+    // session/create can resolve a Gemini binding for the
+    // deferred-initial-turn session).
     let mut cmd = Command::new(&rkat_rpc);
     cmd.current_dir(&project_dir)
         .env("HOME", &project_dir)

@@ -371,20 +371,20 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // truth the session runtime composes for agent builds: the durable head
     // store plus the active realm's parent chain. Every `live/open`
     // re-resolves the owning session's auth binding against this source.
+    // The composition itself lives in `meerkat_rpc::live_wiring` so the
+    // exact factory the binary ships is covered by unit tests.
     #[cfg(feature = "openai-realtime")]
     let live_session_factory: Option<
         Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
     > = if live_transport_enabled {
-        let realtime_config_source = Arc::new(
-            meerkat::session_runtime::realtime_credentials::StoreBackedRealtimeConfigSource::new(
+        Some(
+            meerkat_rpc::live_wiring::build_per_open_realtime_session_factory(
+                &realtime_agent_factory,
                 Arc::clone(&config_store),
-                Some(meerkat::RealmInheritance::new(
-                    Arc::clone(&realm_config_source),
-                    locator.realm.clone(),
-                )),
+                Arc::clone(&realm_config_source),
+                locator.realm.clone(),
             ),
-        );
-        Some(realtime_agent_factory.build_openai_realtime_session_factory(realtime_config_source))
+        )
     } else {
         None
     };

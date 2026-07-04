@@ -2930,6 +2930,31 @@ describe("Parity wrappers", () => {
         /tokens_used must be number/.test(String(error.message)),
     );
   });
+
+  it("rejects helper receipts with a fractional/negative tokens_used (wire u64)", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      output: "ok",
+      tokens_used: -3.5,
+      agent_identity: "helper-1",
+      member_ref: makeMemberRef("mob-1", "helper-1"),
+    });
+
+    await assert.rejects(
+      () => client.spawnMobHelper("mob-1", "help"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /tokens_used must be a non-negative integer/.test(String(error.message)),
+    );
+    await assert.rejects(
+      () => client.forkMobHelper("mob-1", "source", "help"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /tokens_used must be a non-negative integer/.test(String(error.message)),
+    );
+  });
 });
 
 describe("Mob kickoff wait wrappers", () => {
@@ -3090,6 +3115,60 @@ describe("Mob decoder strictness", () => {
     await assert.rejects(
       () => client.waitMobReady("mob-1"),
       /unknown peer_connectivity status/,
+    );
+  });
+
+  it("rejects a fractional/negative tokens_used in wait member snapshots (wire u64)", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      members: [
+        {
+          agent_identity: "lead",
+          status: "active",
+          tokens_used: -3.5,
+          is_final: false,
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.waitMobKickoff("mob-1"),
+      /tokens_used must be a non-negative integer/,
+    );
+    await assert.rejects(
+      () => client.waitMobReady("mob-1"),
+      /tokens_used must be a non-negative integer/,
+    );
+  });
+
+  it("rejects a fractional reachable_peer_count in wait member snapshots (wire usize)", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      members: [
+        {
+          agent_identity: "lead",
+          status: "active",
+          tokens_used: 42,
+          is_final: false,
+          peer_connectivity: {
+            status: "known",
+            snapshot: {
+              reachable_peer_count: 1.5,
+              unknown_peer_count: 0,
+              unreachable_peers: [],
+            },
+          },
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.waitMobKickoff("mob-1"),
+      /reachable_peer_count must be a non-negative integer/,
+    );
+    await assert.rejects(
+      () => client.waitMobReady("mob-1"),
+      /reachable_peer_count must be a non-negative integer/,
     );
   });
 });
@@ -3503,6 +3582,113 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
           unreachablePeers: [{ peer: "worker-2", reason: "timeout" }],
         },
       });
+    });
+
+    it("omits an absent unreachable peer reason instead of materializing it", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          peer_connectivity: {
+            status: "known",
+            snapshot: {
+              reachable_peer_count: 0,
+              unknown_peer_count: 0,
+              unreachable_peers: [{ peer: "worker-2" }],
+            },
+          },
+        }),
+      );
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.deepEqual(result.peerConnectivity.snapshot.unreachablePeers, [
+        { peer: "worker-2" },
+      ]);
+    });
+
+    it("rejects a non-string unreachable peer reason instead of coercing", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          peer_connectivity: {
+            status: "known",
+            snapshot: {
+              reachable_peer_count: 0,
+              unknown_peer_count: 0,
+              unreachable_peers: [{ peer: "worker-2", reason: 42 }],
+            },
+          },
+        }),
+      );
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /unreachable_peers entry reason must be string/.test(String(error.message)),
+      );
+    });
+
+    it("rejects a fractional reachable_peer_count (wire usize)", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          peer_connectivity: {
+            status: "known",
+            snapshot: {
+              reachable_peer_count: 1.5,
+              unknown_peer_count: 0,
+              unreachable_peers: [],
+            },
+          },
+        }),
+      );
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /reachable_peer_count must be a non-negative integer/.test(String(error.message)),
+      );
+    });
+
+    it("rejects a negative unknown_peer_count (wire usize)", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          peer_connectivity: {
+            status: "known",
+            snapshot: {
+              reachable_peer_count: 1,
+              unknown_peer_count: -1,
+              unreachable_peers: [],
+            },
+          },
+        }),
+      );
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /unknown_peer_count must be a non-negative integer/.test(String(error.message)),
+      );
+    });
+
+    it("rejects a fractional/negative tokens_used (wire u64)", async () => {
+      const client = memberStatusClient(validResponse({ tokens_used: -3.5 }));
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /tokens_used must be a non-negative integer/.test(String(error.message)),
+      );
+    });
+
+    it("rejects a present-but-non-record kickoff instead of dropping it", async () => {
+      const client = memberStatusClient(validResponse({ kickoff: "pending" }));
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /missing kickoff/.test(String(error.message)),
+      );
     });
 
     for (const variant of ["not_applicable", "probe_timed_out"]) {

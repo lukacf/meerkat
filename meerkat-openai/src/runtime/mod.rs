@@ -143,6 +143,63 @@ fn azure_openai_wire_config(connection: &ResolvedConnection) -> AzureOpenAiWireC
     }
 }
 
+/// Single textual owner of the fail-closed OpenAI realtime connection gate.
+///
+/// Decides which resolved OpenAI connections may carry a realtime transport
+/// and returns the inline secret the realtime adapters authenticate with.
+/// Both realtime builders (`build_realtime_text_client` and
+/// `build_realtime_session_factory`) route through this helper so the
+/// semantic fact "which resolved OpenAI connections support realtime" cannot
+/// drift between them. Rejections are typed `MissingFeature` codes pinned by
+/// tests:
+///
+/// - `openai-realtime-chatgpt-backend` / `openai-realtime-azure-openai` —
+///   only the plain OpenAI API backend speaks the realtime protocol
+/// - `openai-realtime-authorizer-auth` — authorizer-backed leases cannot
+///   sign a WebSocket upgrade
+/// - `openai-realtime-custom-base-url` — the realtime endpoint is not
+///   base-url-configurable
+/// - `NoCredentialMaterial` — the lease resolved without an inline secret
+fn gate_realtime_connection(
+    connection: &ResolvedConnection,
+) -> Result<String, ProviderClientError> {
+    // ProviderRuntimeRegistry dispatches on Provider enum; non-OpenAI
+    // arms are unreachable at runtime.
+    let backend_kind = match connection.backend {
+        NormalizedBackendKind::OpenAi(k) => k,
+        other => unreachable!(
+            "OpenAiProviderRuntime received non-OpenAi backend: {other:?} \
+             — registry dispatch invariant violated"
+        ),
+    };
+    match backend_kind {
+        OpenAiBackendKind::OpenAiApi => {}
+        OpenAiBackendKind::ChatGptBackend => {
+            return Err(ProviderClientError::MissingFeature(
+                "openai-realtime-chatgpt-backend",
+            ));
+        }
+        OpenAiBackendKind::AzureOpenAi => {
+            return Err(ProviderClientError::MissingFeature(
+                "openai-realtime-azure-openai",
+            ));
+        }
+    }
+    if connection.resolved_authorizer().is_some() {
+        return Err(ProviderClientError::MissingFeature(
+            "openai-realtime-authorizer-auth",
+        ));
+    }
+    if connection.backend_profile.base_url.is_some() {
+        return Err(ProviderClientError::MissingFeature(
+            "openai-realtime-custom-base-url",
+        ));
+    }
+    connection
+        .resolved_secret()
+        .ok_or(ProviderClientError::NoCredentialMaterial)
+}
+
 fn chatgpt_backend_extra_headers(connection: &ResolvedConnection) -> Vec<(String, String)> {
     // Pull account identity + fedramp from the resolved lease's AuthMetadata
     // so the ChatGPT backend can emit the wire headers Codex's
@@ -485,39 +542,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         &self,
         connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-        let backend_kind = match connection.backend {
-            NormalizedBackendKind::OpenAi(k) => k,
-            other => unreachable!(
-                "OpenAiProviderRuntime received non-OpenAi backend: {other:?} \
-                 — registry dispatch invariant violated"
-            ),
-        };
-        match backend_kind {
-            OpenAiBackendKind::OpenAiApi => {}
-            OpenAiBackendKind::ChatGptBackend => {
-                return Err(ProviderClientError::MissingFeature(
-                    "openai-realtime-chatgpt-backend",
-                ));
-            }
-            OpenAiBackendKind::AzureOpenAi => {
-                return Err(ProviderClientError::MissingFeature(
-                    "openai-realtime-azure-openai",
-                ));
-            }
-        }
-        if connection.resolved_authorizer().is_some() {
-            return Err(ProviderClientError::MissingFeature(
-                "openai-realtime-authorizer-auth",
-            ));
-        }
-        if connection.backend_profile.base_url.is_some() {
-            return Err(ProviderClientError::MissingFeature(
-                "openai-realtime-custom-base-url",
-            ));
-        }
-        let secret = connection
-            .resolved_secret()
-            .ok_or(ProviderClientError::NoCredentialMaterial)?;
+        let secret = gate_realtime_connection(&connection)?;
         #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
         {
             Ok(Arc::new(crate::OpenAiRealtimeTextAdapter::new(secret)))
@@ -536,39 +561,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         Arc<dyn meerkat_llm_core::realtime_session::RealtimeSessionFactory>,
         ProviderClientError,
     > {
-        let backend_kind = match connection.backend {
-            NormalizedBackendKind::OpenAi(k) => k,
-            other => unreachable!(
-                "OpenAiProviderRuntime received non-OpenAi backend: {other:?} \
-                 — registry dispatch invariant violated"
-            ),
-        };
-        match backend_kind {
-            OpenAiBackendKind::OpenAiApi => {}
-            OpenAiBackendKind::ChatGptBackend => {
-                return Err(ProviderClientError::MissingFeature(
-                    "openai-realtime-chatgpt-backend",
-                ));
-            }
-            OpenAiBackendKind::AzureOpenAi => {
-                return Err(ProviderClientError::MissingFeature(
-                    "openai-realtime-azure-openai",
-                ));
-            }
-        }
-        if connection.resolved_authorizer().is_some() {
-            return Err(ProviderClientError::MissingFeature(
-                "openai-realtime-authorizer-auth",
-            ));
-        }
-        if connection.backend_profile.base_url.is_some() {
-            return Err(ProviderClientError::MissingFeature(
-                "openai-realtime-custom-base-url",
-            ));
-        }
-        let secret = connection
-            .resolved_secret()
-            .ok_or(ProviderClientError::NoCredentialMaterial)?;
+        let secret = gate_realtime_connection(&connection)?;
         #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
         {
             let live = Arc::new(crate::live::OpenAiLiveClient::new(secret))

@@ -18,6 +18,8 @@ pub mod callback_dispatcher;
 pub mod error;
 pub mod handlers;
 pub mod live_projection_sink;
+#[cfg(feature = "openai-realtime")]
+pub mod live_wiring;
 pub mod protocol;
 pub mod router;
 pub mod secure_rpc;

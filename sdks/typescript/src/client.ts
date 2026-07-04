@@ -1923,7 +1923,7 @@ export class MeerkatClient {
       ),
       outputPreview: result.output_preview != null ? String(result.output_preview) : undefined,
       error: result.error != null ? String(result.error) : undefined,
-      tokensUsed: MeerkatClient.requireNumberField(
+      tokensUsed: MeerkatClient.requireNonNegativeIntegerField(
         result,
         "tokens_used",
         "Invalid mob/member_status response",
@@ -2109,7 +2109,7 @@ export class MeerkatClient {
         "status",
         "Invalid mob/wait_kickoff response",
       );
-      const tokensUsed = MeerkatClient.requireNumberField(
+      const tokensUsed = MeerkatClient.requireNonNegativeIntegerField(
         member,
         "tokens_used",
         "Invalid mob/wait_kickoff response",
@@ -2164,7 +2164,7 @@ export class MeerkatClient {
         "status",
         "Invalid mob/wait_ready response",
       );
-      const tokensUsed = MeerkatClient.requireNumberField(
+      const tokensUsed = MeerkatClient.requireNonNegativeIntegerField(
         member,
         "tokens_used",
         "Invalid mob/wait_ready response",
@@ -2242,7 +2242,7 @@ export class MeerkatClient {
     }
     return {
       output: result.output != null ? String(result.output) : undefined,
-      tokensUsed: MeerkatClient.requireNumberField(
+      tokensUsed: MeerkatClient.requireNonNegativeIntegerField(
         result,
         "tokens_used",
         "Invalid mob/spawn_helper response",
@@ -2294,7 +2294,7 @@ export class MeerkatClient {
     }
     return {
       output: result.output != null ? String(result.output) : undefined,
-      tokensUsed: MeerkatClient.requireNumberField(
+      tokensUsed: MeerkatClient.requireNonNegativeIntegerField(
         result,
         "tokens_used",
         "Invalid mob/fork_helper response",
@@ -3338,6 +3338,55 @@ export class MeerkatClient {
     return value;
   }
 
+  /**
+   * Require a wire count/total field (Rust `usize`/`u64`). A present value
+   * that is fractional or negative can never be a valid unsigned integer, so
+   * it is a contract violation and fails closed instead of being accepted as
+   * an any-finite-number. Mirrors the web SDK `requireNonNegativeIntegerField`
+   * and Python `_require_non_negative_integer_field`.
+   */
+  private static requireNonNegativeIntegerField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+    displayField = field,
+  ): number {
+    const value = MeerkatClient.requireNumberField(raw, field, context, displayField);
+    if (!Number.isInteger(value) || value < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: ${displayField} must be a non-negative integer`,
+      );
+    }
+    return value;
+  }
+
+  /**
+   * Return an optional wire string, failing closed on malformed shapes.
+   * An absent or `null` field yields `undefined`; a field that is
+   * present-but-non-string is a contract violation and throws
+   * `INVALID_RESPONSE` rather than being coerced with `String(...)`. Mirrors
+   * the web SDK `optionalStringField` and Python `_optional_string_field`.
+   */
+  private static optionalStringField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+    displayField = field,
+  ): string | undefined {
+    const value = raw[field];
+    if (value == null) {
+      return undefined;
+    }
+    if (typeof value !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: ${displayField} must be string`,
+      );
+    }
+    return value;
+  }
+
   private static requireBooleanField(
     raw: Record<string, unknown>,
     field: string,
@@ -3389,20 +3438,24 @@ export class MeerkatClient {
           "peer_connectivity.snapshot.unreachable_peers entry",
           context,
         );
-        return {
-          peer: MeerkatClient.requireStringField(peerRecord, "peer", context),
-          reason: peerRecord.reason != null ? String(peerRecord.reason) : undefined,
-        };
+        const peerId = MeerkatClient.requireStringField(peerRecord, "peer", context);
+        const reason = MeerkatClient.optionalStringField(
+          peerRecord,
+          "reason",
+          context,
+          "peer_connectivity.snapshot.unreachable_peers entry reason",
+        );
+        return reason === undefined ? { peer: peerId } : { peer: peerId, reason };
       });
     }
     return {
-      reachablePeerCount: MeerkatClient.requireNumberField(
+      reachablePeerCount: MeerkatClient.requireNonNegativeIntegerField(
         record,
         "reachable_peer_count",
         context,
         "peer_connectivity.snapshot.reachable_peer_count",
       ),
-      unknownPeerCount: MeerkatClient.requireNumberField(
+      unknownPeerCount: MeerkatClient.requireNonNegativeIntegerField(
         record,
         "unknown_peer_count",
         context,

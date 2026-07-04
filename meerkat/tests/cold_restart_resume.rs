@@ -422,6 +422,67 @@ mod tests {
         );
     }
 
+    /// Seed an accepted-but-unconsumed queued input directly into the runtime
+    /// store, exactly as the driver persists one that was admitted but never
+    /// consumed before the host died (mirrors the REST persist_input_state
+    /// seeding shape). Returns the seeded input id.
+    async fn seed_accepted_unconsumed_input(
+        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+        session_id: &meerkat::SessionId,
+        prompt: &str,
+    ) -> meerkat_core::InputId {
+        let persisted_input = Input::Prompt(PromptInput::new(
+            prompt,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let input_id = persisted_input.header().id.clone();
+        let policy = meerkat_runtime::DefaultPolicyTable::resolve(&persisted_input, true);
+        let mut input_state = meerkat_runtime::InputState::new_accepted(input_id.clone());
+        input_state.runtime_semantics = Some(
+            meerkat_runtime::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                &persisted_input,
+                true,
+            )
+            .expect("generated admission semantics"),
+        );
+        input_state.policy = Some(meerkat_runtime::PolicySnapshot {
+            version: policy.policy_version,
+            decision: policy,
+        });
+        input_state.persisted_input = Some(persisted_input);
+        let mut seed = meerkat_runtime::input_state::InputStateSeed::new_accepted();
+        seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
+        let bundle = meerkat_runtime::input_state::StoredInputState {
+            state: input_state,
+            seed,
+        };
+        let record = {
+            let mut driver = meerkat_runtime::EphemeralRuntimeDriver::new(
+                meerkat_runtime::identifiers::LogicalRuntimeId::new(format!(
+                    "cold-restart-persistence-record-{session_id}"
+                )),
+            );
+            driver
+                .recover_input_state_persistence_record(bundle)
+                .expect("test input-state seed should pass generated recovery authority")
+        };
+        runtime_store
+            .persist_input_state(
+                &meerkat_runtime::identifiers::LogicalRuntimeId::for_session(session_id),
+                &record,
+            )
+            .await
+            .expect("persist accepted-but-unconsumed input state");
+        input_id
+    }
+
     /// JSONL-realm parity with the sqlite cold-restart contract: the realm's
     /// sqlite runtime companion (`runtime.sqlite3`) must recover queued-input
     /// bookkeeping, run-boundary receipts, and the runtime session snapshot
@@ -432,16 +493,24 @@ mod tests {
     async fn cold_restart_resume_jsonl_realm_recovers_runtime_authority() {
         let temp = tempfile::tempdir().expect("tempdir");
 
-        // First host lifetime: create the session and run one turn.
-        let session_id = {
+        // First host lifetime: create the session, run one turn, and accept
+        // one more input that is never consumed before the host dies.
+        let (session_id, queued_input_id) = {
             let (service, adapter) =
                 build_service_with_backend(temp.path(), meerkat_store::RealmBackend::Jsonl).await;
             let session = Session::new();
             let session_id = session.id().clone();
             materialize(&service, &adapter, session).await;
             run_prompt(&adapter, &session_id, "first turn before restart").await;
-            // Cold stop: the host dies without archiving or retiring anything.
-            session_id
+            let queued_input_id = seed_accepted_unconsumed_input(
+                &service.runtime_store(),
+                &session_id,
+                "queued prompt accepted before the crash",
+            )
+            .await;
+            // Cold stop: the host dies without archiving or retiring anything,
+            // leaving the accepted input unconsumed.
+            (session_id, queued_input_id)
         };
 
         let realm_paths = meerkat_store::realm_paths_in(temp.path(), "restart-realm");
@@ -483,6 +552,36 @@ mod tests {
             receipt.run_id, recovered_run_id,
             "recovered receipt must belong to the consumed input's run"
         );
+
+        // The input accepted (but never consumed) before the crash must
+        // survive recovery: still tracked, still unconsumed, and still
+        // carrying its persisted prompt payload for replay.
+        let queued = recovered_inputs
+            .iter()
+            .find(|stored| stored.state.input_id == queued_input_id)
+            .expect("the accepted-but-unconsumed input must survive the jsonl-realm restart");
+        assert_eq!(
+            queued.seed.phase,
+            meerkat_runtime::InputLifecycleState::Queued,
+            "the accepted input must recover in the recovery authority's re-processable queued phase, not a fabricated terminal"
+        );
+        assert!(
+            queued.seed.last_run_id.is_none() && queued.seed.terminal_outcome.is_none(),
+            "the queued input must not recover with consumed-run bookkeeping"
+        );
+        match queued
+            .state
+            .persisted_input
+            .as_ref()
+            .expect("the queued input must recover its persisted payload")
+        {
+            Input::Prompt(prompt) => assert_eq!(
+                prompt.content.text_content(),
+                "queued prompt accepted before the crash",
+                "the queued input's prompt payload must survive the restart"
+            ),
+            other => panic!("expected the queued prompt input to survive, got {other:?}"),
+        }
 
         let resume_source = service
             .load_authoritative_session(&session_id)

@@ -235,14 +235,25 @@ where
             let mut listed = Vec::with_capacity(entries.len());
             for mut entry in entries {
                 // Entries carrying typed source identity were canonicalized
-                // fail-closed by the identity-owning source (the composite).
-                // Entries without one have no identity authority vouching for
-                // them, so their keys must resolve under the same registry
-                // the engine's load path uses — otherwise the listing fails
-                // closed instead of advertising a skill that load would
-                // refuse.
+                // fail-closed by the identity-owning source (the composite);
+                // they pass through untouched. Entries without one have no
+                // identity authority vouching for them, so their raw keys
+                // must still resolve under the same registry the engine's
+                // load path uses — otherwise the listing fails closed instead
+                // of advertising a skill that load would refuse. The engine
+                // never rewrites keys: when resolution lands on a different
+                // canonical key, this entry is a remapped-away physical copy
+                // that load no longer serves, so it is listed inactive under
+                // its raw key with no shadowing host named — there is no
+                // identity authority here to name one.
                 if entry.source_identity.is_none() {
-                    entry.descriptor.key = self.resolve_key(&entry.descriptor.key)?;
+                    let canonical = self.resolve_key(&entry.descriptor.key)?;
+                    if canonical != entry.descriptor.key {
+                        entry.is_active = false;
+                        entry.shadowed_by = None;
+                        entry.shadowed_by_identity = None;
+                        entry.shadowed_by_source_uuid = None;
+                    }
                 }
                 if entry.is_active
                     && !entry
@@ -647,6 +658,99 @@ mod tests {
         assert!(
             message.contains("source unknown"),
             "composite provenance listing must include the registry failure; got {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_all_with_provenance_bare_source_lists_remapped_copy_inactive() {
+        // A bare source (no typed source identity on its entries) hosting both
+        // the remapped-away key and its canonical target: the canonical host
+        // is the single active entry, the remapped-away copy is inactive under
+        // its raw (physical) key, and no shadowing host is named — the engine
+        // has no identity authority to name one.
+        let host = source_uuid("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+        let old_key = SkillKey::new(host.clone(), SkillName::parse("old-name").unwrap());
+        let new_key = SkillKey::new(host.clone(), SkillName::parse("new-name").unwrap());
+        let registry = SourceIdentityRegistry::build(
+            vec![source_record(
+                host.clone(),
+                "project",
+                SourceIdentityStatus::Active,
+            )],
+            Vec::new(),
+            vec![SkillKeyRemap {
+                from: old_key.clone(),
+                to: new_key.clone(),
+                reason: Some("rename".to_string()),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let source = InMemorySkillSource::new(vec![
+            test_skill_from_source(host.clone(), "old-name", "Old Name"),
+            test_skill_from_source(host.clone(), "new-name", "New Name"),
+        ]);
+        let engine = DefaultSkillEngine::new(source, vec![])
+            .with_source_identity_registry(Arc::new(registry));
+
+        let entries = engine
+            .list_all_with_provenance(&SkillFilter::default())
+            .await
+            .unwrap();
+
+        assert_eq!(entries.len(), 2, "both physical copies stay listed");
+        let active: Vec<_> = entries.iter().filter(|entry| entry.is_active).collect();
+        assert_eq!(
+            active.len(),
+            1,
+            "exactly one active entry per canonical key; got {entries:?}"
+        );
+        assert_eq!(
+            active[0].descriptor.key, new_key,
+            "the canonical host (raw == canonical) stays active; got {entries:?}"
+        );
+        assert_eq!(active[0].descriptor.name, "New Name");
+        let inactive = entries.iter().find(|entry| !entry.is_active).unwrap();
+        assert_eq!(
+            inactive.descriptor.key, old_key,
+            "the remapped-away copy keeps its raw physical key; got {entries:?}"
+        );
+        assert!(
+            inactive.shadowed_by.is_none(),
+            "no identity authority exists to name a shadowing host; got {entries:?}"
+        );
+        assert!(inactive.shadowed_by_identity.is_none());
+        assert!(inactive.shadowed_by_source_uuid.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_all_with_provenance_bare_unknown_source_fails_closed() {
+        let unknown_source = source_uuid("88888888-8888-4888-8888-888888888888");
+        let source = InMemorySkillSource::new(vec![test_skill_from_source(
+            unknown_source.clone(),
+            "orphaned",
+            "Orphaned",
+        )]);
+        let engine = DefaultSkillEngine::new(source, vec![])
+            .with_source_identity_registry(Arc::new(SourceIdentityRegistry::default()));
+
+        let err = engine
+            .list_all_with_provenance(&SkillFilter::default())
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("source identity resolution failed"),
+            "bare-source listing must fail closed on unknown identity; got {message}"
+        );
+        assert!(
+            message.contains(&unknown_source.to_string()),
+            "bare-source listing error must identify the failing source; got {message}"
+        );
+        assert!(
+            message.contains("source unknown"),
+            "bare-source listing error must include the registry failure; got {message}"
         );
     }
 

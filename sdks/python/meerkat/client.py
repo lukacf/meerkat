@@ -2348,6 +2348,11 @@ class MeerkatClient:
             result.get("peer_connectivity"),
             "Invalid mob/member_status response",
         )
+        kickoff = self._optional_dict_field(
+            result,
+            "kickoff",
+            "Invalid mob/member_status response",
+        )
         return {
             "status": self._require_string_field(
                 result,
@@ -2372,7 +2377,7 @@ class MeerkatClient:
                 if result.get("error") is not None
                 else {}
             ),
-            "tokens_used": self._require_number_field(
+            "tokens_used": self._require_non_negative_integer_field(
                 result,
                 "tokens_used",
                 "Invalid mob/member_status response",
@@ -2392,11 +2397,7 @@ class MeerkatClient:
                 if peer_connectivity is not None
                 else {}
             ),
-            **(
-                {"kickoff": result["kickoff"]}
-                if isinstance(result.get("kickoff"), dict)
-                else {}
-            ),
+            **({"kickoff": kickoff} if kickoff is not None else {}),
             **(
                 {"external_member": result["external_member"]}
                 if "external_member" in result
@@ -2437,6 +2438,11 @@ class MeerkatClient:
                 entry.get("peer_connectivity"),
                 "Invalid mob/wait_kickoff response",
             )
+            kickoff = self._optional_dict_field(
+                entry,
+                "kickoff",
+                "Invalid mob/wait_kickoff response",
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2459,7 +2465,7 @@ class MeerkatClient:
                         if entry.get("error") is not None
                         else {}
                     ),
-                    "tokens_used": self._require_number_field(
+                    "tokens_used": self._require_non_negative_integer_field(
                         entry,
                         "tokens_used",
                         "Invalid mob/wait_kickoff response",
@@ -2474,11 +2480,7 @@ class MeerkatClient:
                         if peer_connectivity is not None
                         else {}
                     ),
-                    **(
-                        {"kickoff": entry["kickoff"]}
-                        if isinstance(entry.get("kickoff"), dict)
-                        else {}
-                    ),
+                    **({"kickoff": kickoff} if kickoff is not None else {}),
                 }
             )
         return normalized
@@ -2510,6 +2512,11 @@ class MeerkatClient:
                 entry.get("peer_connectivity"),
                 "Invalid mob/wait_ready response",
             )
+            kickoff = self._optional_dict_field(
+                entry,
+                "kickoff",
+                "Invalid mob/wait_ready response",
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2532,7 +2539,7 @@ class MeerkatClient:
                         if entry.get("error") is not None
                         else {}
                     ),
-                    "tokens_used": self._require_number_field(
+                    "tokens_used": self._require_non_negative_integer_field(
                         entry,
                         "tokens_used",
                         "Invalid mob/wait_ready response",
@@ -2547,11 +2554,7 @@ class MeerkatClient:
                         if peer_connectivity is not None
                         else {}
                     ),
-                    **(
-                        {"kickoff": entry["kickoff"]}
-                        if isinstance(entry.get("kickoff"), dict)
-                        else {}
-                    ),
+                    **({"kickoff": kickoff} if kickoff is not None else {}),
                 }
             )
         return normalized
@@ -2590,7 +2593,7 @@ class MeerkatClient:
             )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
-            "tokens_used": self._require_number_field(
+            "tokens_used": self._require_non_negative_integer_field(
                 result,
                 "tokens_used",
                 "Invalid mob/spawn_helper response",
@@ -2637,7 +2640,7 @@ class MeerkatClient:
             )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
-            "tokens_used": self._require_number_field(
+            "tokens_used": self._require_non_negative_integer_field(
                 result,
                 "tokens_used",
                 "Invalid mob/fork_helper response",
@@ -3976,13 +3979,13 @@ class MeerkatClient:
                     peer_entry["reason"] = reason
                 unreachable_peers.append(peer_entry)
         return {
-            "reachable_peer_count": MeerkatClient._require_number_field(
+            "reachable_peer_count": MeerkatClient._require_non_negative_integer_field(
                 raw,
                 "reachable_peer_count",
                 context,
                 "peer_connectivity.snapshot.reachable_peer_count",
             ),
-            "unknown_peer_count": MeerkatClient._require_number_field(
+            "unknown_peer_count": MeerkatClient._require_non_negative_integer_field(
                 raw,
                 "unknown_peer_count",
                 context,
@@ -4054,6 +4057,33 @@ class MeerkatClient:
         return value
 
     @staticmethod
+    def _require_non_negative_integer_field(
+        raw: dict[str, Any],
+        field: str,
+        context: str,
+        display_field: str | None = None,
+    ) -> int:
+        """Return a required wire count/total field (Rust ``usize``/``u64``).
+
+        Delegates the base number check to ``_require_number_field``; a
+        present value that is fractional or negative can never be a valid
+        unsigned integer, so it is a contract violation and raises
+        ``INVALID_RESPONSE`` rather than being accepted as an
+        any-finite-number. Mirrors the web SDK
+        ``requireNonNegativeIntegerField`` and the TypeScript SDK
+        ``requireNonNegativeIntegerField``.
+        """
+        value = MeerkatClient._require_number_field(
+            raw, field, context, display_field
+        )
+        if value < 0 or (isinstance(value, float) and not value.is_integer()):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: {display_field or field} must be a non-negative integer",
+            )
+        return int(value)
+
+    @staticmethod
     def _require_bool_field(raw: dict[str, Any], field: str, context: str) -> bool:
         value = raw.get(field)
         if not isinstance(value, bool):
@@ -4076,6 +4106,27 @@ class MeerkatClient:
         if not isinstance(value, str):
             raise MeerkatError(
                 "INVALID_RESPONSE", f"{context}: {field} must be string"
+            )
+        return value
+
+    @staticmethod
+    def _optional_dict_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> dict[str, Any] | None:
+        """Return an optional wire object, failing closed on malformed shapes.
+
+        An absent or ``null`` field yields ``None``; a field that is
+        *present-but-non-object* is a contract violation and raises
+        ``INVALID_RESPONSE`` rather than being silently dropped. Mirrors the
+        web SDK ``optionalRecordField`` and the TypeScript SDK
+        ``requireRecord``-on-present policy.
+        """
+        value = raw.get(field)
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: {field} must be object"
             )
         return value
 

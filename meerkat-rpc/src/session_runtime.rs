@@ -12536,16 +12536,6 @@ mod tests {
             .expect("seed typed archived lifecycle-terminal fact");
     }
 
-    fn archived_projection_without_machine_authority_session_error(err: &SessionError) -> bool {
-        archived_store_projection_session_error(err)
-            || matches!(
-                err,
-                SessionError::Agent(meerkat_core::AgentError::InternalError(message))
-                    if message.contains("runtime-backed archived projection")
-                        && message.contains("missing machine lifecycle state")
-            )
-    }
-
     #[test]
     fn session_runtime_new_preserves_persistence_oauth_flow_authority() {
         let temp = tempfile::tempdir().unwrap();
@@ -12770,6 +12760,57 @@ mod tests {
             .approval_service()
             .get(&record.approval_id)
             .expect("load approval after runtime reconstruction");
+        assert_eq!(loaded.approval_id, record.approval_id);
+        assert_eq!(loaded.status, meerkat_core::ApprovalStatus::Pending);
+    }
+
+    /// Jsonl sibling of the sqlite reopen test above: reopen-from-realm-
+    /// persistence must also carry pending approvals across runtime
+    /// reconstruction when the realm runs the jsonl runtime companion.
+    #[tokio::test]
+    async fn approval_service_reopens_from_jsonl_realm_persistence_store_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_manifest, bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "approval-realm",
+            Some(meerkat_store::RealmBackend::Jsonl),
+            None,
+        )
+        .await
+        .expect("open persistence");
+        let runtime = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-a")),
+            Config::default(),
+            10,
+            bundle,
+            crate::router::NotificationSink::noop(),
+        );
+        assert!(runtime.approval_service().is_persistent());
+        let record = runtime
+            .approval_service()
+            .request(approval_request())
+            .expect("request approval");
+
+        let (_manifest, reopened_bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "approval-realm",
+            Some(meerkat_store::RealmBackend::Jsonl),
+            None,
+        )
+        .await
+        .expect("reopen persistence");
+        let reopened = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-b")),
+            Config::default(),
+            10,
+            reopened_bundle,
+            crate::router::NotificationSink::noop(),
+        );
+        assert!(reopened.approval_service().is_persistent());
+        let loaded = reopened
+            .approval_service()
+            .get(&record.approval_id)
+            .expect("load approval after jsonl runtime reconstruction");
         assert_eq!(loaded.approval_id, record.approval_id);
         assert_eq!(loaded.status, meerkat_core::ApprovalStatus::Pending);
     }
@@ -14417,7 +14458,7 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_session_service_archived_projection_without_machine_authority_fails_closed_without_admission_leak()
+    async fn mob_session_service_archived_projection_without_runtime_state_reads_archived_without_admission_leak()
      {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
@@ -14444,6 +14485,9 @@ mod tests {
             "mob service should hide archived persisted sessions"
         );
 
+        // An archived document with NO runtime lifecycle state (legacy
+        // store-only archive) reads as archived: resume rejects with the
+        // typed archived/NotFound contract, never an untyped internal error.
         let mut req = service_create_request(mock_build_config(), InitialTurnPolicy::Defer);
         req.build
             .as_mut()
@@ -14454,8 +14498,8 @@ mod tests {
             resumed
                 .as_ref()
                 .err()
-                .is_some_and(archived_projection_without_machine_authority_session_error),
-            "archived store projection without machine lifecycle state should fail closed: {resumed:?}"
+                .is_some_and(|err| matches!(err, SessionError::NotFound { .. })),
+            "archived store projection without runtime lifecycle state should reject with the archived NotFound contract: {resumed:?}"
         );
 
         runtime

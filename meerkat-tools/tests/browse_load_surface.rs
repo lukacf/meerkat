@@ -12,6 +12,8 @@
 //! - browse with `query` narrows by substring match (case-insensitive).
 //! - browse with `source_uuid` filter narrows by source.
 //! - browse rejects an unparseable `source_uuid`.
+//! - browse over a composite with a key remap emits the canonical skill
+//!   exactly once, matching the copy load serves.
 //! - load returns the skill body + key fields for a known key.
 //! - load surfaces `ExecutionFailed` for a missing key.
 //! - load rejects a missing `source_uuid` / `skill_name` as
@@ -25,10 +27,12 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillDescriptor, SkillDocument, SkillError, SkillFilter,
-    SkillKey, SkillName, SkillRuntime, SkillScope, SkillSource, SourceIdentityRecord,
+    SkillKey, SkillKeyRemap, SkillName, SkillRuntime, SkillScope, SkillSource,
+    SourceIdentityLineage, SourceIdentityLineageEvent, SourceIdentityRecord,
     SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind, SourceUuid, apply_filter,
 };
-use meerkat_skills::{DefaultSkillEngine, InMemorySkillSource};
+use meerkat_skills::source::SourceNode;
+use meerkat_skills::{CompositeSkillSource, DefaultSkillEngine, InMemorySkillSource, NamedSource};
 use meerkat_tools::BuiltinTool;
 use meerkat_tools::builtin::skills::{
     BrowseSkillsTool, LoadSkillTool, SkillInvokeFunctionTool, SkillListResourcesTool,
@@ -109,6 +113,83 @@ fn runtime_with_unknown_source_identity() -> (Arc<SkillRuntime>, SourceUuid) {
     let engine = DefaultSkillEngine::new(source, Vec::new())
         .with_source_identity_registry(Arc::new(SourceIdentityRegistry::default()));
     (Arc::new(SkillRuntime::new(Arc::new(engine))), unknown)
+}
+
+/// Composite fixture mirroring the engine remap fixture: a legacy source and
+/// a canonical source both hosting `alpha`, with a source-identity remap
+/// `legacy/alpha -> canonical/alpha`. Returns the runtime plus both keys.
+fn remap_composite_runtime() -> (Arc<SkillRuntime>, SkillKey, SkillKey) {
+    let legacy_source = SourceUuid::parse("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").unwrap();
+    let canonical_source = SourceUuid::parse("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").unwrap();
+    let legacy_key = SkillKey {
+        source_uuid: legacy_source.clone(),
+        skill_name: SkillName::parse("alpha").unwrap(),
+    };
+    let canonical_key = SkillKey {
+        source_uuid: canonical_source.clone(),
+        skill_name: SkillName::parse("alpha").unwrap(),
+    };
+    let record = |source_uuid: &SourceUuid, name: &str| SourceIdentityRecord {
+        source_uuid: source_uuid.clone(),
+        display_name: name.to_string(),
+        transport_kind: SourceTransportKind::Filesystem,
+        fingerprint: format!("fixture:{name}"),
+        status: SourceIdentityStatus::Active,
+    };
+    let registry = Arc::new(
+        SourceIdentityRegistry::build(
+            vec![
+                record(&legacy_source, "legacy"),
+                record(&canonical_source, "canonical"),
+            ],
+            vec![SourceIdentityLineage {
+                event_id: "legacy-to-canonical".to_string(),
+                recorded_at_unix_secs: 1,
+                required_from_skills: Vec::new(),
+                event: SourceIdentityLineageEvent::RenameOrRelocate {
+                    from: legacy_source.clone(),
+                    to: canonical_source.clone(),
+                },
+            }],
+            vec![SkillKeyRemap {
+                from: legacy_key.clone(),
+                to: canonical_key.clone(),
+                reason: Some("test remap".to_string()),
+            }],
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    let composite = CompositeSkillSource::from_named_with_registry(
+        vec![
+            NamedSource::new(
+                record(&legacy_source, "legacy"),
+                SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
+                    &legacy_source,
+                    "alpha",
+                    "Legacy Alpha",
+                    "# Legacy Alpha\n\nbody-legacy",
+                )])),
+            ),
+            NamedSource::new(
+                record(&canonical_source, "canonical"),
+                SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
+                    &canonical_source,
+                    "alpha",
+                    "Canonical Alpha",
+                    "# Canonical Alpha\n\nbody-canonical",
+                )])),
+            ),
+        ],
+        Arc::clone(&registry),
+    );
+    let engine =
+        DefaultSkillEngine::new(composite, Vec::new()).with_source_identity_registry(registry);
+    (
+        Arc::new(SkillRuntime::new(Arc::new(engine))),
+        legacy_key,
+        canonical_key,
+    )
 }
 
 struct HarnessSkillSource {
@@ -322,6 +403,71 @@ async fn browse_surfaces_source_identity_registry_failures() {
         }
         other => panic!("expected ExecutionFailed for source identity failure, got {other:?}"),
     }
+}
+
+/// Browse over a composite with a key remap must emit the canonical skill
+/// EXACTLY ONCE, advertising the copy `load` actually serves (the canonical
+/// host), never the remapped-away duplicate.
+#[tokio::test]
+async fn browse_emits_remapped_canonical_skill_once_matching_load() {
+    let (runtime, legacy_key, canonical_key) = remap_composite_runtime();
+    let browse = BrowseSkillsTool::new(Arc::clone(&runtime));
+
+    let output = browse.call(serde_json::json!({})).await.unwrap();
+    let json = output.into_json().unwrap();
+    let skills = json["skills"].as_array().unwrap();
+
+    assert_eq!(
+        skills.len(),
+        1,
+        "the remapped canonical skill must browse exactly once; got {json}"
+    );
+    let entry = &skills[0];
+    assert_eq!(
+        entry["source_uuid"].as_str().unwrap(),
+        canonical_key.source_uuid.to_string(),
+        "browse must advertise the canonical host key; got {json}"
+    );
+    assert_eq!(
+        entry["skill_name"].as_str().unwrap(),
+        canonical_key.skill_name.as_str()
+    );
+    assert_eq!(
+        entry["name"].as_str().unwrap(),
+        "Canonical Alpha",
+        "browse must carry the loadable copy's display name; got {json}"
+    );
+    assert_eq!(
+        entry["description"].as_str().unwrap(),
+        "description for Canonical Alpha",
+        "browse must carry the loadable copy's description; got {json}"
+    );
+
+    // Load through the remapped-away key: the runtime must serve exactly the
+    // copy browse advertised.
+    let load = LoadSkillTool::new(runtime);
+    let loaded = load
+        .call(serde_json::json!({
+            "source_uuid": legacy_key.source_uuid.to_string(),
+            "skill_name": legacy_key.skill_name.as_str(),
+        }))
+        .await
+        .unwrap();
+    let loaded = loaded.into_json().unwrap();
+
+    assert_eq!(
+        loaded["source_uuid"], entry["source_uuid"],
+        "browse and load must agree on the served key; got browse={entry} load={loaded}"
+    );
+    assert_eq!(loaded["skill_name"], entry["skill_name"]);
+    assert_eq!(
+        loaded["name"], entry["name"],
+        "browse and load must agree on the served copy; got browse={entry} load={loaded}"
+    );
+    assert!(
+        loaded["body"].as_str().unwrap().contains("body-canonical"),
+        "load must serve the canonical host body; got {loaded}"
+    );
 }
 
 #[tokio::test]

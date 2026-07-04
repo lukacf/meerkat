@@ -14,7 +14,8 @@ name: Cargo CI
 #                     test-only lint yield; it runs nightly)
 #   unit (x8)       — lib unit tests, nextest hash-partitioned
 #   int-heavy (x3)  — meerkat-integration-tests integration lane
-#   int-rest (x4)   — integration tests in crate-group lanes; the last
+#   int-rest (x7)   — integration tests in crate-group lanes (heavy groups
+#                     also hash-partitioned); the last
 #                     group is the complement of the named ones
 #   e2e-fast        — deterministic end-to-end lane (real binaries)
 #   ratchets        — version/schema/SDK/surface generation ratchets
@@ -291,11 +292,18 @@ jobs:
       # construction — a new crate lands there automatically.
       matrix:
         include:
-          - group: mob
+          - group: mob-1of2
+            partition: "hash:1/2"
+            scope: >-
+              -p meerkat-mob -p meerkat-mob-adaptive -p meerkat-mob-mcp
+              -p meerkat-mob-pack -p meerkat-schedule -p meerkat-workgraph
+          - group: mob-2of2
+            partition: "hash:2/2"
             scope: >-
               -p meerkat-mob -p meerkat-mob-adaptive -p meerkat-mob-mcp
               -p meerkat-mob-pack -p meerkat-schedule -p meerkat-workgraph
           - group: core-machine
+            partition: "hash:1/1"
             scope: >-
               -p meerkat-core -p meerkat-models -p meerkat-machine-codegen
               -p meerkat-machine-derive -p meerkat-machine-dsl
@@ -304,13 +312,57 @@ jobs:
               -p meerkat-capabilities -p meerkat-agent-build-authority
               -p meerkat-contracts
           - group: client-session
+            partition: "hash:1/1"
             scope: >-
               -p meerkat-anthropic -p meerkat-auth-core -p meerkat-client
               -p meerkat-comms -p meerkat-gemini -p meerkat-hooks
               -p meerkat-llm-core -p meerkat-mcp -p meerkat-memory
               -p meerkat-openai -p meerkat-providers -p meerkat-session
               -p meerkat-skills -p meerkat-store -p meerkat-tools
-          - group: everything-else
+          - group: everything-else-1of3
+            partition: "hash:1/3"
+            scope: >-
+              --workspace --exclude meerkat-integration-tests
+              --exclude meerkat-mob --exclude meerkat-mob-adaptive
+              --exclude meerkat-mob-mcp --exclude meerkat-mob-pack
+              --exclude meerkat-schedule --exclude meerkat-workgraph
+              --exclude meerkat-core --exclude meerkat-models
+              --exclude meerkat-machine-codegen --exclude meerkat-machine-derive
+              --exclude meerkat-machine-dsl --exclude meerkat-machine-dsl-core
+              --exclude meerkat-machine-kernels --exclude meerkat-machine-schema
+              --exclude machine-dsl-tests --exclude meerkat-capabilities
+              --exclude meerkat-agent-build-authority --exclude meerkat-contracts
+              --exclude meerkat-anthropic --exclude meerkat-auth-core
+              --exclude meerkat-client --exclude meerkat-comms
+              --exclude meerkat-gemini --exclude meerkat-hooks
+              --exclude meerkat-llm-core --exclude meerkat-mcp
+              --exclude meerkat-memory --exclude meerkat-openai
+              --exclude meerkat-providers --exclude meerkat-session
+              --exclude meerkat-skills --exclude meerkat-store
+              --exclude meerkat-tools
+          - group: everything-else-2of3
+            partition: "hash:2/3"
+            scope: >-
+              --workspace --exclude meerkat-integration-tests
+              --exclude meerkat-mob --exclude meerkat-mob-adaptive
+              --exclude meerkat-mob-mcp --exclude meerkat-mob-pack
+              --exclude meerkat-schedule --exclude meerkat-workgraph
+              --exclude meerkat-core --exclude meerkat-models
+              --exclude meerkat-machine-codegen --exclude meerkat-machine-derive
+              --exclude meerkat-machine-dsl --exclude meerkat-machine-dsl-core
+              --exclude meerkat-machine-kernels --exclude meerkat-machine-schema
+              --exclude machine-dsl-tests --exclude meerkat-capabilities
+              --exclude meerkat-agent-build-authority --exclude meerkat-contracts
+              --exclude meerkat-anthropic --exclude meerkat-auth-core
+              --exclude meerkat-client --exclude meerkat-comms
+              --exclude meerkat-gemini --exclude meerkat-hooks
+              --exclude meerkat-llm-core --exclude meerkat-mcp
+              --exclude meerkat-memory --exclude meerkat-openai
+              --exclude meerkat-providers --exclude meerkat-session
+              --exclude meerkat-skills --exclude meerkat-store
+              --exclude meerkat-tools
+          - group: everything-else-3of3
+            partition: "hash:3/3"
             scope: >-
               --workspace --exclude meerkat-integration-tests
               --exclude meerkat-mob --exclude meerkat-mob-adaptive
@@ -359,7 +411,7 @@ jobs:
         run: >-
           ./scripts/repo-cargo nextest run ${{ matrix.scope }} --tests
           --profile fast --show-progress none --status-level none
-          --final-status-level fail
+          --final-status-level fail --partition "${{ matrix.partition }}"
 
   e2e-fast:
     name: Deterministic e2e lane

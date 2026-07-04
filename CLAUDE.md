@@ -311,7 +311,7 @@ make audit       # Security audit via cargo-deny
 - `fmt-governance` — fmt, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
 - `clippy` — workspace clippy, all features, lib/bin targets (`--all-targets` runs nightly)
 - `unit` ×8 — `cargo unit` sharded via nextest hash partitions
-- `int-heavy` ×3 / `int-rest` ×4 — integration tests split by build scope: `-p meerkat-integration-tests` shards plus crate-group lanes (mob, core-machine, client-session, and the complement group), so no job links every integration binary
+- `int-heavy` ×3 / `int-rest` ×7 — integration tests split by build scope: `-p meerkat-integration-tests` shards plus crate-group lanes (mob ×2, core-machine, client-session, complement group ×3), so no job links every integration binary
 - `e2e-fast` — deterministic end-to-end lane
 - `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness
 - `wasm-check` — wasm32 cargo check (every code change)

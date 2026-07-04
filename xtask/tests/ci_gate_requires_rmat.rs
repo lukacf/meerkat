@@ -111,7 +111,7 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
         "clippy --workspace --all-features",
         "repo-cargo unit --partition",
         "-p meerkat-integration-tests --tests",
-        "int --exclude meerkat-integration-tests",
+        "--workspace --exclude meerkat-integration-tests",
         "make e2e-fast",
         "make verify-schema-freshness",
         "make verify-sdk-codegen-freshness",

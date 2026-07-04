@@ -14,7 +14,8 @@ name: Cargo CI
 #                     test-only lint yield; it runs nightly)
 #   unit (x8)       — lib unit tests, nextest hash-partitioned
 #   int-heavy (x3)  — meerkat-integration-tests integration lane
-#   int-rest (x3)   — integration tests for the rest of the workspace
+#   int-rest (x4)   — integration tests in crate-group lanes; the last
+#                     group is the complement of the named ones
 #   e2e-fast        — deterministic end-to-end lane (real binaries)
 #   ratchets        — version/schema/SDK/surface generation ratchets
 #   wasm-check      — wasm32 cargo check (every code change)
@@ -277,14 +278,58 @@ jobs:
           --final-status-level fail --partition "hash:${{ matrix.partition }}/3"
 
   int-rest:
-    name: Integration tests, rest of workspace (shard ${{ matrix.partition }}/3)
+    name: Integration tests, ${{ matrix.group }} crates
     needs: changes
     if: ${{ needs.changes.outputs.code_changed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Crate-group lanes: each job builds and links ONLY its group's
+      # integration binaries (linking all ~44 crates' test bins per shard was
+      # the dominant fixed cost). The `everything-else` group is the
+      # COMPLEMENT of the named groups, so coverage stays complete by
+      # construction — a new crate lands there automatically.
       matrix:
-        partition: [1, 2, 3]
+        include:
+          - group: mob
+            scope: >-
+              -p meerkat-mob -p meerkat-mob-adaptive -p meerkat-mob-mcp
+              -p meerkat-mob-pack -p meerkat-schedule -p meerkat-workgraph
+          - group: core-machine
+            scope: >-
+              -p meerkat-core -p meerkat-models -p meerkat-machine-codegen
+              -p meerkat-machine-derive -p meerkat-machine-dsl
+              -p meerkat-machine-dsl-core -p meerkat-machine-kernels
+              -p meerkat-machine-schema -p machine-dsl-tests
+              -p meerkat-capabilities -p meerkat-agent-build-authority
+              -p meerkat-contracts
+          - group: client-session
+            scope: >-
+              -p meerkat-anthropic -p meerkat-auth-core -p meerkat-client
+              -p meerkat-comms -p meerkat-gemini -p meerkat-hooks
+              -p meerkat-llm-core -p meerkat-mcp -p meerkat-memory
+              -p meerkat-openai -p meerkat-providers -p meerkat-session
+              -p meerkat-skills -p meerkat-store -p meerkat-tools
+          - group: everything-else
+            scope: >-
+              --workspace --exclude meerkat-integration-tests
+              --exclude meerkat-mob --exclude meerkat-mob-adaptive
+              --exclude meerkat-mob-mcp --exclude meerkat-mob-pack
+              --exclude meerkat-schedule --exclude meerkat-workgraph
+              --exclude meerkat-core --exclude meerkat-models
+              --exclude meerkat-machine-codegen --exclude meerkat-machine-derive
+              --exclude meerkat-machine-dsl --exclude meerkat-machine-dsl-core
+              --exclude meerkat-machine-kernels --exclude meerkat-machine-schema
+              --exclude machine-dsl-tests --exclude meerkat-capabilities
+              --exclude meerkat-agent-build-authority --exclude meerkat-contracts
+              --exclude meerkat-anthropic --exclude meerkat-auth-core
+              --exclude meerkat-client --exclude meerkat-comms
+              --exclude meerkat-gemini --exclude meerkat-hooks
+              --exclude meerkat-llm-core --exclude meerkat-mcp
+              --exclude meerkat-memory --exclude meerkat-openai
+              --exclude meerkat-providers --exclude meerkat-session
+              --exclude meerkat-skills --exclude meerkat-store
+              --exclude meerkat-tools
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -303,17 +348,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-int-rest
+          shared-key: ci-int-${{ matrix.group }}
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
-      - name: Integration-fast tests (workspace-rest shard)
+      - name: Integration-fast tests (crate group)
         run: >-
-          ./scripts/repo-cargo int --exclude meerkat-integration-tests
-          --partition "hash:${{ matrix.partition }}/3"
+          ./scripts/repo-cargo nextest run ${{ matrix.scope }} --tests
+          --profile fast --show-progress none --status-level none
+          --final-status-level fail
 
   e2e-fast:
     name: Deterministic e2e lane

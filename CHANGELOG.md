@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-07-04
+
 Meerkat 0.7.14 makes cold-restart resume survivable (content-addressed
 transcript revisions + machine-owned resume projection authority) and lets
 sqlite stores read legacy TEXT JSON rows carried in from external writers.

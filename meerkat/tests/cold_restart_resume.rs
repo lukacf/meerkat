@@ -58,13 +58,15 @@ mod tests {
     }
 
     fn create_request() -> CreateSessionRequest {
+        create_request_with_prompt("cold restart resume contract")
+    }
+
+    fn create_request_with_prompt(system_prompt: &str) -> CreateSessionRequest {
         CreateSessionRequest {
             injected_context: Vec::new(),
             model: "gpt-5.4".to_string(),
             prompt: meerkat_core::ContentInput::Text(String::new()),
-            system_prompt: meerkat::SystemPromptOverride::Set(
-                "cold restart resume contract".to_string(),
-            ),
+            system_prompt: meerkat::SystemPromptOverride::Set(system_prompt.to_string()),
             max_tokens: None,
             event_tx: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -79,13 +81,22 @@ mod tests {
         adapter: &Arc<MeerkatMachine>,
         session: Session,
     ) {
+        materialize_with_prompt(service, adapter, session, "cold restart resume contract").await;
+    }
+
+    async fn materialize_with_prompt(
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        adapter: &Arc<MeerkatMachine>,
+        session: Session,
+        system_prompt: &str,
+    ) {
         let service_for_executor = Arc::clone(service);
         let adapter_for_executor = Arc::clone(adapter);
         Box::pin(materialize_session(
             service,
             adapter,
             session,
-            create_request(),
+            create_request_with_prompt(system_prompt),
             move |session_id| {
                 default_persistent_executor(service_for_executor, adapter_for_executor, session_id)
             },
@@ -668,6 +679,82 @@ mod tests {
                 .iter()
                 .any(|t| t.contains("second turn after restart")),
             "the post-restart turn must be recorded: {texts:?}"
+        );
+    }
+
+    /// Chained resume-time system-prompt refreshes with NO turn in between
+    /// must not strand the session. An idle host member whose system prompt
+    /// carries drifting parts (mob comms rosters, host context) gets a
+    /// `resume-system-prompt-refresh` rewrite committed on every boot; if no
+    /// turn runs before the next boot, the graph retains several chained
+    /// refresh commits. The rewrite-chain walk used by the run-boundary save
+    /// guard would then spuriously select an OLDER refresh commit under the
+    /// system-refresh equivalence, walk onto its own cursor, and abort as a
+    /// cycle — failing the first post-resume boundary commit with "incoming
+    /// append-only save would change retained transcript revision graph"
+    /// (mobkit 0.7.23 / meerkat 0.7.17 field regression: 14 of 15 idle
+    /// identities permanently refused resume; the one healed by intervening
+    /// turns survived).
+    #[tokio::test]
+    async fn cold_restart_resume_survives_chained_promptless_refresh_boots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // Lifetime 0: create the session and run turns, then cold-stop.
+        let session_id = {
+            let (service, adapter) = build_service(temp.path()).await;
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize_with_prompt(&service, &adapter, session, "member prompt roster v1").await;
+            run_prompt(&adapter, &session_id, "the codeword is birch seventeen").await;
+            session_id
+        };
+
+        // Lifetimes 1..=3: each boot resumes with a drifted system prompt
+        // (committing a refresh rewrite) and dies before any turn runs.
+        for roster in ["roster v2", "roster v3", "roster v4"] {
+            let (service, adapter) = build_service(temp.path()).await;
+            let resume_source = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("authoritative load on refresh-only boot")
+                .expect("session should survive refresh-only boots");
+            materialize_with_prompt(
+                &service,
+                &adapter,
+                resume_source,
+                &format!("member prompt {roster}"),
+            )
+            .await;
+            // Cold stop: no turn, no archive.
+        }
+
+        // Final lifetime: another drifted resume, and this time a turn runs.
+        // The turn's completed-boundary commit must accept the transcript as
+        // a continuation of the persisted head.
+        let (service, adapter) = build_service(temp.path()).await;
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load on final boot")
+            .expect("session should survive to the final boot");
+        materialize_with_prompt(&service, &adapter, resume_source, "member prompt roster v5").await;
+        run_prompt(&adapter, &session_id, "what was the codeword?").await;
+
+        let final_session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after resumed turn")
+            .expect("session should still exist after the resumed turn");
+        let texts = user_texts(&final_session);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("the codeword is birch seventeen")),
+            "history from before the refresh-only boots must survive: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("what was the codeword?")),
+            "the resumed turn must be persisted: {texts:?}"
         );
     }
 }

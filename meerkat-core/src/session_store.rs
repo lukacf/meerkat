@@ -598,6 +598,16 @@ pub fn run_boundary_snapshot_save_guard(
             else {
                 return Err(append_error);
             };
+            // append_only_save_guard's digest validation of the incoming
+            // history state was discarded with its error above; a
+            // digest-inconsistent witness body must not be able to prove a
+            // fork as a plain append on this branch either.
+            incoming
+                .validate_transcript_history_state()
+                .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+                    id: incoming.id().clone(),
+                    reason: format!("incoming transcript history state is malformed: {err}"),
+                })?;
             validate_rewrite_save_retains_previous_commits(incoming, previous, &state)?;
             let commits = find_transcript_rewrite_commit_chain_extending_session(
                 &state,
@@ -638,7 +648,12 @@ pub fn run_boundary_snapshot_save_guard(
                 return Ok(());
             };
             transcript_rewrite_bridge_save_guard(incoming, commit, &state, &incoming_revision)?;
-            for commit in commits.iter().skip(1) {
+            // Validate every retained commit's recorded bodies, not only the
+            // walked chain: a plain-continuation proof can legitimately end
+            // the walk before trailing rebookkept commits, and those must
+            // stay digest-consistent to ride along (mirrors the empty-chain
+            // arm above).
+            for commit in &state.commits {
                 validate_transcript_rewrite_commit_bodies(incoming, commit, &state)?;
             }
             Ok(())
@@ -831,36 +846,38 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
         ) else {
             return Ok(None);
         };
+
+        // Exact graph edges are authoritative: a commit recorded directly
+        // against this cursor advances the walk (and keeps that commit on
+        // the audited persistence chain). A commit whose revision is the
+        // cursor itself, or any revision this walk already visited, cannot
+        // make progress and is never selected.
         let mut selected = None;
         for commit in &state.commits {
-            // A commit whose revision is already the cursor cannot advance
-            // the walk — selecting it only revisits the cursor and aborts as
-            // a cycle. Same-length rewrites (e.g. a resume-time system-prompt
-            // refresh) can otherwise be spuriously selected here because
-            // their parent body also "extends" the cursor under the
-            // system-refresh equivalence; plain append continuation from
-            // this cursor is proven by the fallback below instead.
-            if commit.revision == cursor {
+            if commit.revision == cursor || visited.contains(&commit.revision) {
                 continue;
             }
             if !transcript_history_revision_extends(state, incoming_revision, &commit.revision) {
                 continue;
             }
-            let parent_extends_cursor = commit.parent_revision == cursor
-                || revision_body_preserves_append_continuation_prefix(
-                    state,
-                    &commit.parent_revision,
-                    cursor_messages,
-                    cursor,
-                    true,
-                )?;
-            if parent_extends_cursor {
+            if commit.parent_revision == cursor {
                 selected = Some(commit);
                 break;
             }
         }
 
-        let Some(commit) = selected else {
+        // With no exact edge, a plain append continuation from this cursor
+        // completes the proof: the incoming transcript preserves the
+        // cursor's content and no further rewrite edge is needed. Proving
+        // this BEFORE the equivalence-based selection below is load-bearing:
+        // once the graph retains SEVERAL chained system-prompt-refresh
+        // commits, the refresh equivalence makes every retained refresh
+        // commit's parent body "extend" the cursor, so selection would walk
+        // an OLDER refresh commit forward onto the revision the cursor
+        // already reached and abort as a cycle — rejecting a valid append
+        // (chained resume refreshes with no turn in between, the idle mob
+        // member roster-drift shape).
+        if selected.is_none() {
             if revision_body_preserves_append_continuation_prefix(
                 state,
                 incoming_revision,
@@ -870,6 +887,32 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
             )? {
                 return Ok(Some(chain));
             }
+            // Only when neither an exact edge nor a plain continuation
+            // exists, fall back to the system-refresh equivalence: a refresh
+            // commit recorded against a rebookkept parent (the resume-time
+            // shape) whose parent body still extends the cursor.
+            for commit in &state.commits {
+                if commit.revision == cursor || visited.contains(&commit.revision) {
+                    continue;
+                }
+                if !transcript_history_revision_extends(state, incoming_revision, &commit.revision)
+                {
+                    continue;
+                }
+                if revision_body_preserves_append_continuation_prefix(
+                    state,
+                    &commit.parent_revision,
+                    cursor_messages,
+                    cursor,
+                    true,
+                )? {
+                    selected = Some(commit);
+                    break;
+                }
+            }
+        }
+
+        let Some(commit) = selected else {
             return Ok(None);
         };
         cursor = &commit.revision;
@@ -968,7 +1011,13 @@ fn transcript_history_revision_extends(
         return true;
     }
     let mut cursor = descendant;
+    // Parent pointers are metadata, not digest-covered: bound the walk so a
+    // crafted cyclic revision-parent chain fails closed instead of hanging.
+    let mut visited = std::collections::BTreeSet::new();
     while let Some(body) = state.revisions.iter().find(|body| body.revision == cursor) {
+        if !visited.insert(body.revision.clone()) {
+            return false;
+        }
         let Some(parent) = body.parent_revision.as_deref() else {
             return false;
         };
@@ -1441,6 +1490,226 @@ mod tests {
         AssistantBlock, BlockAssistantMessage, StopReason, SystemMessage, SystemNoticeBlock,
         SystemNoticeKind, SystemNoticeMessage, UserMessage,
     };
+
+    /// A lagging persisted row must be walkable across chained refresh
+    /// commits whose recorded parents were rebookkept (only the fuzzy
+    /// refresh-equivalence edge can advance), without the walk re-selecting
+    /// a refresh commit whose revision it already visited: at the later
+    /// cursors, every OLDER refresh commit's parent body still "extends" the
+    /// cursor under the refresh equivalence, and re-selecting one walks back
+    /// onto visited territory and aborts as a cycle. Pins the
+    /// visited-revision skip in both selection scans.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn boundary_commit_walks_lagging_row_across_rebookkept_refresh_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut base = Session::new();
+        base.push(Message::System(SystemMessage::new(
+            "member prompt roster v1",
+        )));
+        base.push(Message::User(UserMessage::text(
+            "the codeword is birch seventeen".to_string(),
+        )));
+        // The persisted row lags the whole rewrite graph (written before any
+        // refresh boot, carrying no history state).
+        let previous = base.clone();
+        let v1 = base.transcript_revision()?;
+
+        // Three refresh boots chain commits onto the graph.
+        let mut session = base;
+        session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new(
+                "member prompt roster v2",
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            Some("agent-factory/resume".to_string()),
+            Some(v1),
+        )?;
+        let v2 = session.transcript_revision()?;
+        session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new(
+                "member prompt roster v3",
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            Some("agent-factory/resume".to_string()),
+            Some(v2.clone()),
+        )?;
+        let v3 = session.transcript_revision()?;
+        session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new(
+                "member prompt roster v4",
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            Some("agent-factory/resume".to_string()),
+            Some(v3.clone()),
+        )?;
+
+        // Rebookkeep the recorded parents of the later refresh commits: each
+        // now points at an equivalent parent body with re-stamped leading
+        // System content (the re-created-authority shape), so no exact edge
+        // exists from the walked cursors and only the refresh equivalence
+        // can advance.
+        let mut state = session
+            .transcript_history_state()?
+            .expect("chained refreshes retain history state");
+        let rebookkeep = |state: &mut TranscriptHistoryState,
+                          original_parent: &str,
+                          stamp: &str|
+         -> Result<String, Box<dyn std::error::Error>> {
+            let body = state
+                .revisions
+                .iter()
+                .find(|body| body.revision == original_parent)
+                .expect("parent body retained")
+                .clone();
+            let mut messages = body.messages;
+            messages[0] = Message::System(SystemMessage::new(stamp));
+            let revision = transcript_messages_digest(&messages)?;
+            // The rebookkept body chains off the revision it restamps, so
+            // the graph stays a valid extension chain for the validator.
+            state
+                .revisions
+                .push(crate::session::TranscriptRevisionBody {
+                    revision: revision.clone(),
+                    parent_revision: Some(original_parent.to_string()),
+                    messages,
+                    created_at: SystemTime::now(),
+                });
+            Ok(revision)
+        };
+        let v2_rebookkept = rebookkeep(&mut state, &v2, "member prompt roster v2 restamped")?;
+        let v3_rebookkept = rebookkeep(&mut state, &v3, "member prompt roster v3 restamped")?;
+        // Every refresh commit in this fixture rewrites message range 0..1,
+        // so the rebookkept parent's recorded span is its leading System
+        // message.
+        let respan = |state: &TranscriptHistoryState,
+                      parent: &str|
+         -> Result<String, Box<dyn std::error::Error>> {
+            let body = state
+                .revisions
+                .iter()
+                .find(|body| body.revision == parent)
+                .expect("rebookkept parent body retained");
+            Ok(transcript_messages_digest(&body.messages[0..1])?)
+        };
+        state.commits[1].original_span_digest = respan(&state, &v2_rebookkept)?;
+        state.commits[1].parent_revision = v2_rebookkept;
+        state.commits[2].original_span_digest = respan(&state, &v3_rebookkept)?;
+        state.commits[2].parent_revision = v3_rebookkept;
+
+        // The turn finally runs: two checkpointer-recorded appends.
+        let mut incoming = session;
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(&state)?,
+        );
+        let mut state = incoming
+            .transcript_history_state()?
+            .expect("history state survives rebookkeeping");
+        for text in ["what was the codeword?", "birch seventeen"] {
+            incoming.push(Message::User(UserMessage::text(text.to_string())));
+            let appended_revision = incoming.transcript_revision()?;
+            state
+                .revisions
+                .push(crate::session::TranscriptRevisionBody {
+                    revision: appended_revision.clone(),
+                    parent_revision: Some(state.head.clone()),
+                    messages: incoming.messages().to_vec(),
+                    created_at: SystemTime::now(),
+                });
+            state.head = appended_revision;
+        }
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state)?,
+        );
+
+        run_boundary_snapshot_save_guard(&incoming, Some(&previous))?;
+        Ok(())
+    }
+
+    /// Chained system-prompt-refresh commits with NO turn in between: the
+    /// rewrite-chain walk must prove the plain append continuation from the
+    /// persisted head instead of spuriously selecting an OLDER refresh
+    /// commit (whose parent body also "extends" the head under the
+    /// system-refresh equivalence), walking back onto its own cursor, and
+    /// aborting as a cycle. Field regression (mobkit 0.7.23): idle mob
+    /// members whose prompts carry drifting rosters get one refresh rewrite
+    /// per boot; after two turn-less boots the next turn's run-boundary
+    /// commit was rejected with "incoming append-only save would change
+    /// retained transcript revision graph", permanently refusing resume.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn boundary_commit_accepts_append_after_chained_promptless_system_refreshes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut base = Session::new();
+        base.push(Message::System(SystemMessage::new(
+            "member prompt roster v1",
+        )));
+        base.push(Message::User(UserMessage::text(
+            "the codeword is birch seventeen".to_string(),
+        )));
+        let v1 = base.transcript_revision()?;
+
+        // Boot 1: resume refreshes the system prompt; the host dies before
+        // any turn runs.
+        let mut refreshed_once = base.clone();
+        refreshed_once.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new(
+                "member prompt roster v2",
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            Some("agent-factory/resume".to_string()),
+            Some(v1),
+        )?;
+        let v2 = refreshed_once.transcript_revision()?;
+
+        // Boot 2: another turn-less refresh chains onto the graph.
+        let mut previous = refreshed_once.clone();
+        previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::System(SystemMessage::new(
+                "member prompt roster v3",
+            ))],
+            crate::TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+            Some("agent-factory/resume".to_string()),
+            Some(v2),
+        )?;
+
+        // Boot 3: the first turn finally runs. The intra-turn checkpointer
+        // records one revision body per save, so the boundary commit's
+        // incoming state carries MORE than one appended revision — the plain
+        // +1 append validation cannot accept it and continuity must be
+        // proven by the rewrite-chain walk.
+        let mut incoming = previous.clone();
+        let mut state = incoming
+            .transcript_history_state()?
+            .expect("chained refreshes retain history state");
+        for text in ["what was the codeword?", "birch seventeen"] {
+            incoming.push(Message::User(UserMessage::text(text.to_string())));
+            let appended_revision = incoming.transcript_revision()?;
+            state
+                .revisions
+                .push(crate::session::TranscriptRevisionBody {
+                    revision: appended_revision.clone(),
+                    parent_revision: Some(state.head.clone()),
+                    messages: incoming.messages().to_vec(),
+                    created_at: SystemTime::now(),
+                });
+            state.head = appended_revision;
+        }
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state)?,
+        );
+
+        run_boundary_snapshot_save_guard(&incoming, Some(&previous))?;
+        Ok(())
+    }
 
     /// FOLD C: the canonical SessionDocumentMachine — not a handwritten shell
     /// boolean reducer — owns the live-vs-durable session-document authority

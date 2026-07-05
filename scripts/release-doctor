@@ -121,24 +121,25 @@ fi
 if awk '
     /^  build_binaries_buildbuddy:/ { in_job = 1; next }
     in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
-    in_job && /release-build-windows-x86/ { found = 1 }
-    END { exit found ? 0 : 1 }
-  ' .github/workflows/release.yml &&
-  grep -Fq 'GitHub-hosted release binary build skipped' .github/workflows/release.yml; then
-  pass "Release workflow builds Linux/macOS/Windows assets on BuildBuddy for owner releases"
+    in_job && /release-build-(linux|macos)/ { found = 1 }
+    in_job && /release-build-windows/ { windows = 1 }
+    END { exit (found && !windows) ? 0 : 1 }
+  ' .github/workflows/release.yml; then
+  pass "Release workflow builds Linux/macOS assets on BuildBuddy for owner releases (no Windows BuildBuddy lane)"
 else
-  bad "Release workflow should build Linux/macOS/Windows assets on BuildBuddy for owner releases"
+  bad "Release workflow should build Linux/macOS assets on BuildBuddy and keep Windows off the BuildBuddy lane (no self-hosted Windows RBE executors are registered)"
 fi
 
-if grep -Fq 'Use hosted BuildBuddy Windows release endpoint' .github/workflows/release.yml &&
-  grep -Fq 'BUILDBUDDY_GRPC_URL:' .github/workflows/release.yml &&
-  grep -Fq 'grpcs://king.europe.buildbuddy.io' .github/workflows/release.yml &&
-  ! grep -Fq "release-build-windows-x86' && secrets.BUILDBUDDY_ENDPOINT" .github/workflows/release.yml &&
-  grep -Fq 'build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true' .bazelrc &&
-  grep -Fq '"use-self-hosted-executors": "true"' platforms/BUILD.bazel; then
-  pass "Release workflow routes Windows builds to the hosted King BuildBuddy endpoint"
+# Windows release binaries always build on a GitHub-hosted runner: under the
+# BuildBuddy lane split the hosted job runs with a Windows-only matrix, and
+# the binary gate requires BOTH lanes to succeed.
+if grep -Fq '"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc"' .github/workflows/release.yml &&
+  grep -Fq 'GitHub-hosted release binary build (Windows) selected' .github/workflows/release.yml &&
+  grep -Fq '[[ "${buildbuddy_result}" == "success" && "${github_result}" == "success" ]]' .github/workflows/release.yml &&
+  ! grep -Fq 'king.europe.buildbuddy.io' .github/workflows/release.yml; then
+  pass "Release workflow routes Windows builds to a GitHub-hosted runner alongside the BuildBuddy Linux/macOS lanes"
 else
-  bad "Release workflow should route Windows builds to grpcs://king.europe.buildbuddy.io, not a private/stale secret endpoint"
+  bad "Release workflow should build Windows on a GitHub-hosted runner (Windows-only matrix under the BuildBuddy lane split) with a gate requiring both lanes"
 fi
 
 web_build_timeout="$(

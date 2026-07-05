@@ -368,13 +368,7 @@ jobs:
         needs.release_validate_gate.result == 'skipped')) &&
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.publish_release_assets_only == 'true')) &&
-      !(github.actor == 'lukacf' &&
-        ((github.event_name == 'workflow_dispatch' &&
-          github.event.inputs.release_backend == 'buildbuddy') ||
-         (github.event_name != 'workflow_dispatch' &&
-          (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-           vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
+        github.event.inputs.publish_release_assets_only == 'true'))
     runs-on: ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
@@ -507,9 +501,6 @@ jobs:
           - bb_command: release-build-macos-x86
             target: x86_64-apple-darwin
             archive_ext: tar.gz
-          - bb_command: release-build-windows-x86
-            target: x86_64-pc-windows-msvc
-            archive_ext: zip
 
     steps:
       - name: Checkout
@@ -521,57 +512,19 @@ jobs:
         with:
           profile: native
 
-      - name: Use hosted BuildBuddy Windows release endpoint
-        if: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("scripts/buildbuddy-bazel-poc")
-          text = path.read_text(encoding="utf-8")
-          start = text.index("  release-build-windows-x86)")
-          end = text.index("    ;;\n", start)
-          block = text[start:end]
-          needle = "      --compilation_mode=opt\n"
-          replacement = "      --compilation_mode=opt\n      --verbose_failures\n"
-          if replacement not in block:
-              block = block.replace(needle, replacement, 1)
-              text = text[:start] + block + text[end:]
-          path.write_text(text, encoding="utf-8")
-          PY
-
       - name: Build release binaries via BuildBuddy
         shell: bash
         env:
           BUILDBUDDY_BAZEL_COMMAND: ${{ matrix.bb_command }}
-          BUILDBUDDY_GRPC_URL: ${{ matrix.bb_command == 'release-build-windows-x86' && 'grpcs://king.europe.buildbuddy.io' || '' }}
-          BUILDBUDDY_HTTP_URL: ${{ matrix.bb_command == 'release-build-windows-x86' && 'https://king.europe.buildbuddy.io' || '' }}
           BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release
-          # The Windows x86_64 binary lane runs on a smaller-memory executor
-          # pool; at the default 64 concurrent actions, the large meerkat-mob
-          # `-opt` rustc OOM'd (rustc-LLVM out of memory) and failed the
-          # 0.7.9/0.7.10 binary builds. Cap Windows concurrency hard so fewer
-          # rustc share the executor's RAM. Other targets keep the fast default.
-          BUILDBUDDY_RELEASE_JOBS: ${{ matrix.bb_command == 'release-build-windows-x86' && (vars.MEERKAT_RELEASE_BUILDBUDDY_WINDOWS_JOBS || '4') || (vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || '64') }}
-          # By 0.7.12 the single meerkat-mob `-opt` rustc exceeded the Windows
-          # executor's RAM even with --jobs=2 (rustc parallelizes LLVM codegen
-          # across codegen units internally). The variable carries extra bazel
-          # flags for the Windows lane only — e.g. a rules_rust
-          # extra_rustc_flag raising -Ccodegen-units so each concurrent LLVM
-          # module is smaller — tunable without re-tagging a release.
-          BUILDBUDDY_RELEASE_EXTRA_BAZEL_ARGS: ${{ matrix.bb_command == 'release-build-windows-x86' && (vars.MEERKAT_RELEASE_BUILDBUDDY_WINDOWS_EXTRA_BAZEL_ARGS || '') || '' }}
+          BUILDBUDDY_RELEASE_JOBS: ${{ vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || '64' }}
           TARGET: ${{ matrix.target }}
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set +e
-          # BUILDBUDDY_RELEASE_EXTRA_BAZEL_ARGS is deliberately word-split:
-          # it carries zero or more bazel flags.
-          # shellcheck disable=SC2086
-          scripts/buildbuddy-bazel-poc --jobs="${BUILDBUDDY_RELEASE_JOBS}" ${BUILDBUDDY_RELEASE_EXTRA_BAZEL_ARGS}
+          scripts/buildbuddy-bazel-poc --jobs="${BUILDBUDDY_RELEASE_JOBS}"
           status="$?"
           set -e
 
@@ -779,9 +732,12 @@ jobs:
           buildbuddy_result="${{ needs.build_binaries_buildbuddy.result }}"
 
           if [[ "${bb_selected}" == "true" ]]; then
-            echo "BuildBuddy release binary build selected: ${buildbuddy_result}"
-            echo "GitHub-hosted release binary build skipped: ${github_result}"
-            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "skipped" ]]
+            # Hybrid lane split: BuildBuddy builds Linux/macOS; Windows always
+            # builds on a GitHub-hosted runner (no self-hosted Windows RBE
+            # executors are registered for the org's pool).
+            echo "BuildBuddy release binary build (Linux/macOS) selected: ${buildbuddy_result}"
+            echo "GitHub-hosted release binary build (Windows) selected: ${github_result}"
+            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "success" ]]
             exit $?
           fi
 

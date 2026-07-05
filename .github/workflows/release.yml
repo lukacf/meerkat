@@ -413,23 +413,16 @@ jobs:
           CARGO_TARGET_DIR: target
         run: |
           set -euo pipefail
-          # Windows: even with the expanded pagefile, four concurrent opt-3
-          # rustc processes exceed the runner's commit capacity (v0.7.16 tag
-          # run: LLVM "out of memory" on meerkat-mcp), and LLVM worker
-          # threads overflow their stacks on the deeply recursive opt-3
-          # passes over the large generated-heavy crates (0xc0000409 on
-          # meerkat-runtime — RUST_MIN_STACK does not reach LLVM's workers,
-          # proven by the v0.7.16 recovery run). Halve build parallelism and
-          # pin the two proven-overrun crates to opt-level 1 via a
-          # config-level profile override, Windows lane only — shipped
-          # Linux/macOS binaries keep full release codegen.
+          # Windows has no memory overcommit, so it was the lane that exposed
+          # the DSL schema() emission blowup (rustc peaking at tens of GB on
+          # the machine catalog: LLVM OOM on meerkat-mcp, 0xc0000409 stack
+          # overruns on meerkat-runtime/meerkat-machine-schema across the
+          # v0.7.14-v0.7.16 tag runs). The root cause is fixed at the
+          # generator (#835 chunks the emission), so the opt-level pins that
+          # papered over it are gone; the parallelism cap stays as cheap
+          # commit-capacity headroom on the 16GB runner.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             export CARGO_BUILD_JOBS=2
-            mkdir -p .cargo
-            {
-              printf '\n[profile.release.package.meerkat-runtime]\nopt-level = 1\n'
-              printf '\n[profile.release.package.meerkat-mcp]\nopt-level = 1\n'
-            } >> .cargo/config.toml
           fi
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")

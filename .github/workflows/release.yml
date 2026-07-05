@@ -410,6 +410,17 @@ jobs:
           CARGO_TARGET_DIR: target
         run: |
           set -euo pipefail
+          # Windows: even with the expanded pagefile, four concurrent opt-3
+          # rustc processes exceed the runner's commit capacity (v0.7.16 tag
+          # run: LLVM "out of memory" on meerkat-mcp), and rustc's own worker
+          # stacks overflow on the deeply recursive LLVM passes of the large
+          # crates (0xc0000409 on meerkat-runtime). Halve build parallelism
+          # and raise rustc's thread stack size on Windows only; other lanes
+          # keep cargo defaults.
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            export CARGO_BUILD_JOBS=2
+            export RUST_MIN_STACK=33554432
+          fi
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
           for pkg in "${PACKAGES[@]}"; do

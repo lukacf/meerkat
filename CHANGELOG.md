@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.18] - 2026-07-06
+
+Meerkat 0.7.18 fixes the resume regression that stranded idle mob members
+after prompt-drifting host upgrades (mobkit 0.7.23 field incident: 14 of 15
+identities permanently refused resume).
+
+### Fixed
+
+- Chained turn-less resume refreshes no longer strand sessions. A member
+  whose system prompt carries drifting parts (comms rosters, host context)
+  gets a `resume-system-prompt-refresh` rewrite committed on every boot;
+  with no turn in between, the transcript history graph retains several
+  chained refresh commits, and the rewrite-chain walk failed closed on the
+  next turn's run-boundary commit ("incoming append-only save would change
+  retained transcript revision graph"): it selected an OLDER refresh commit
+  under the system-refresh equivalence, walked forward onto the revision
+  the cursor had already reached, and aborted as a cycle — rejecting a
+  valid plain-append continuation. Reproduced end-to-end against stores
+  seeded by real meerkat 0.7.13/0.7.14/0.7.15 binaries. The walk now
+  proves continuity in authority order per iteration: exact graph edge
+  first (real rewrite commits stay on the audited persistence chain), then
+  the plain append continuation (with the leading-System-refresh
+  equivalence still unprovable there, so unaudited System swaps keep
+  failing), and only then the fuzzy refresh-equivalence edge; both
+  selection scans skip already-visited revisions. Sessions stranded by
+  this bug recover on their next resume — no data was lost (the durable
+  transcripts were preserved the whole time).
+- Crafted-state hardening from the adversarial review of the fix: the
+  run-boundary rewrite branch re-validates the incoming transcript history
+  state; the non-empty-chain arm validates every retained commit's
+  recorded bodies (mirroring the empty-chain arm); and the revision
+  ancestry walk is bounded so cyclic revision-parent metadata fails closed
+  instead of hanging the boundary commit.
+
+
 ## [0.7.17] - 2026-07-05
 
 Meerkat 0.7.17 fixes the machine-catalog compile blowup at its root and

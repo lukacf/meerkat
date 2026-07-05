@@ -1583,14 +1583,6 @@ for (const pkg of localPackages.values()) {
           internalAttrs[rustcEnvIndex] = `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`;
         }
       }
-      if (key === "meerkat-machine-schema" || key === "meerkat-runtime") {
-        const editionIndex = internalAttrs.indexOf(`    edition = "2024",`);
-        internalAttrs.splice(
-          editionIndex + 1,
-          0,
-          `    rustc_flags = ["-Copt-level=0"],`,
-        );
-      }
       rules.push(`rust_library(\n${internalAttrs.join("\n")}\n)`);
       if (shouldGenerateRuntimeAgentFactoryTestSupportVariantForKey(key)) {
         const internalTestSupportDepsWithOptionalExternal = rewriteRuntimeTestSupportDeps(

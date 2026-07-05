@@ -186,16 +186,6 @@ split-debuginfo = "off"
 codegen-units = 16
 strip = "symbols"
 
-# The generated machine catalog blows past rustc's resource envelope when
-# optimized: opt-level 3 aborts on Windows (0xc0000409) and OOM-kills hosted
-# macOS runners; even opt-level 2 peaks at ~50GB rustc RSS, far beyond the
-# 16GB GitHub-hosted runners' commit limit. Tests already compile this crate
-# at opt-level 0 daily. The crate is schema data + validation, not a runtime
-# hot path, so release keeps it unoptimized.
-[profile.release.package.meerkat-machine-schema]
-opt-level = 0
-
-
 [workspace.lints.rust]
 unsafe_code = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(meerkat_internal_agent_factory_build)", "cfg(meerkat_internal_generated_authority_bridge)"] }

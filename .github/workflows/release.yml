@@ -386,6 +386,19 @@ jobs:
       - name: Add release target
         run: rustup target add ${{ matrix.target }}
 
+      # Windows has no memory overcommit: rustc's peak commit on the large
+      # generated crates (meerkat-machine-schema) exceeds the 16GB runner's
+      # default commit limit and aborts with 0xc0000409 ("memory allocation
+      # of N bytes failed"). Expand the pagefile so commit capacity matches
+      # what Linux runners get via overcommit.
+      - name: Expand Windows pagefile
+        if: runner.os == 'Windows'
+        uses: al-cheb/configure-pagefile-action@a3b6ebd6b634da88790d9c58d4b37a7f4a7b8708 # v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 24GB
+          disk-root: 'C:'
+
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:

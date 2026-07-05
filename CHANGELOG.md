@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-07-05
+
+Meerkat 0.7.16 closes all six rows of the 2026-07-04 dogma audit — most
+visibly, JSONL realms gain durable runtime authority and OpenAI live channels
+resolve credentials per-open from the session's own auth binding — and moves
+Windows release binaries to GitHub-hosted runners. Every row was
+adversarially re-verified against HEAD before the fix, and the combined diff
+went through a second adversarial review whose confirmed findings are all
+resolved in this release.
+
+### Fixed
+
+- OpenAI live channels authenticate with the session's credential, not a
+  process-default one. `rkat-rpc` used to resolve the default OpenAI binding
+  once at startup and bake that secret into every realtime socket, so a
+  session with an explicit `auth_binding` had live admission scoped to one
+  identity while the provider socket authenticated as another. Realtime
+  credentials now resolve per-open from the session's `SessionLlmIdentity`
+  (owning-realm binding provenance, live config store — never a stale startup
+  clone) through a new registry-owned
+  `ProviderRuntime::build_realtime_session_factory` seam that carries the
+  same fail-closed backend/auth gating as the text path (ChatGPT-backend,
+  Azure, authorizer-auth, and custom-base-url bindings are rejected with the
+  typed errors instead of opening a mis-keyed socket; the gate matrix has one
+  shared owner). The facade never extracts secrets;
+  `attach_external_session` carries the session identity; startup performs a
+  wiring preflight only, so explicit-binding-only configs boot.
+- JSONL realms run on durable runtime authority. The jsonl persistence
+  bundle used to carry no runtime store, silently degrading every
+  runtime-backed surface to an in-memory control plane (fresh ops epoch per
+  restart: queued inputs, run-boundary receipts, and admission state all
+  evaporated). JSONL realms now mount a sqlite runtime companion
+  (`runtime.sqlite3`, typed `RealmPaths::runtime_sqlite_path`) next to the
+  JSONL session documents; `runtime_store` is non-optional across
+  `PersistenceBundle` and `PersistentSessionService`, and every store-only
+  compatibility branch is deleted. Cold-restart parity for jsonl realms
+  (runtime snapshot, boundary receipts, queued-input recovery) is pinned by
+  tests. A durable document carrying the Archived lifecycle terminal with no
+  runtime lifecycle state (legacy store-only archives) reads as archived —
+  terminal and non-resumable — instead of failing realm `list()` closed with
+  an untyped error.
+- Skill inventory shadowing is computed over canonical identity.
+  `CompositeSkillSource` canonicalizes every descriptor through the
+  `SourceIdentityRegistry` before computing active/shadowed status
+  (canonical-host rule: only the source physically hosting the canonical key
+  can be active; remapped-away copies list inactive naming the active host),
+  so remap/merge lineage can no longer advertise duplicate active canonical
+  skills in browse/introspection. Listing fails closed without a registry;
+  the registry-less composite constructors are deleted; the engine never
+  rewrites keys and fail-closed-resolves entries that carry no typed source
+  identity, so inventory can never advertise a skill the load authority
+  refuses.
+- `memory_search` no longer advertises previous-session recall. The
+  model-facing ToolDef, the embedded memory-retrieval skill, the crate docs,
+  and the guides now state the session-scoped contract (recall from earlier
+  in this session, including turns compacted away before a resume), matching
+  the typed scope model and the HNSW session filter; the dead second
+  guidance string (`usage_instructions`) is deleted and the contract is
+  pinned by tests.
+- Python and TypeScript mob member-status wrappers stopped dropping and
+  fabricating wire facts: required `member_ref` is surfaced, missing
+  `tokens_used`/`is_final` fail closed instead of coercing to `0`/`false`,
+  `peer_connectivity` is parsed as the tagged tri-state (unknown tags and
+  the legacy flat shape rejected) with non-negative-integer validation on
+  counts and tokens, and present-but-malformed `kickoff` payloads fail
+  closed — mirroring the Web SDK reference in both SDKs. The four
+  `mob/member_status` grandfather entries are deleted from the signature
+  parity baseline (cap ratcheted down and enforced).
+- The WASM browser contract mirror is truthful and actually executed. The
+  wasm-bindgen suite still asserted the pre-0.6.23 contract (in-band
+  `status` strings, addressable archived state after `destroy_session`) and
+  — deeper — lacked `run_in_browser`, so even the BuildBuddy chrome lane had
+  been silently skipping it while exiting green. The suite is rewritten to
+  the shipped contract (tagged `WirePromptInput`, typed `WireRunResult`
+  assertions, fail-closed `invalid_session_handle` after destroy) and now
+  genuinely runs in headless Chrome.
+
+### Changed
+
+- CI: `wasm-check` compiles and lints all wasm32 targets (`--all-targets`),
+  and a new path-filtered `wasm-contract` job executes the browser contract
+  suite via `wasm-pack test --headless --chrome` on every wasm-relevant
+  change (unconditionally in nightly), closing the gate hole that let the
+  stale mirror survive.
+- Windows release binaries build on GitHub-hosted runners (the org pool has
+  no self-hosted Windows RBE executors); Linux/macOS release binaries stay
+  on the BuildBuddy lane. `meerkat-machine-schema` pins its release opt
+  level to avoid the rustc-LLVM OOM in the Windows lane.
+
 ## [0.7.15] - 2026-07-04
 
 Meerkat 0.7.15 fixes cold-restart transcript loss for hosts that re-send

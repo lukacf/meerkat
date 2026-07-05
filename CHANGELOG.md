@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-07-05
+
+Meerkat 0.7.17 fixes the machine-catalog compile blowup at its root and
+supersedes 0.7.16, whose registry packages published but whose GitHub
+release assets were blocked by the Windows binary lane. (Same shape as
+0.7.15 superseding 0.7.14 — install 0.7.17.)
+
+### Fixed
+
+- The generated machine catalog no longer blows up rustc. The DSL
+  `schema()` emission produced one enormous function per machine, driving
+  rustc/LLVM to tens of GB of peak memory and deeply recursive opt-3
+  passes — the root cause of every Windows release-lane failure from
+  v0.7.14 through v0.7.16 (LLVM out-of-memory on `meerkat-mcp`,
+  `0xc0000409` stack overruns on `meerkat-runtime` and
+  `meerkat-machine-schema`) and of multi-hour local release builds. The
+  emission is now chunked so the catalog compiles with sane memory on
+  every platform (#835).
+
+### Changed
+
+- Windows release lane: with the generator fixed, every opt-level pin
+  that papered over the blowup is removed (`meerkat-machine-schema`'s
+  release pin from #832 in #835; the lane-local `meerkat-runtime` /
+  `meerkat-mcp` pins from #834 in #836) — release binaries ship full
+  codegen again on every platform. The lane keeps a two-job parallelism
+  cap as commit-capacity headroom on the 16GB no-overcommit runner
+  (#833, #836), alongside the pagefile expansion (#831).
+
 ## [0.7.16] - 2026-07-05
 
 Meerkat 0.7.16 closes all six rows of the 2026-07-04 dogma audit — most

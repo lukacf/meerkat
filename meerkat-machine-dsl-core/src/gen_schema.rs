@@ -41,45 +41,58 @@ fn non_literal_amount_compile_error(field: &str, update_kind: &str) -> TokenStre
 /// This is the backward-compatibility bridge: codegen, RMAT, validation, and
 /// xtask all work with MachineSchema. The invoking crate must depend on
 /// `meerkat-machine-schema` — we just emit the constructor tokens.
+/// A schema list emitted as per-element helper functions plus an assembly
+/// expression, instead of one inline `vec![...]` literal.
+///
+/// Inlining every constructor into the single `schema()` body produces one
+/// function of >100k expanded lines for the large machines; rustc's
+/// optimizer scales super-linearly in function-body size and peaks above
+/// 46GB RSS compiling it at opt-level 2. Splitting each element into its own
+/// `#[inline(never)]` associated function keeps every MIR body small at any
+/// opt level.
+struct ChunkedList {
+    part_fns: Vec<TokenStream>,
+    vec_expr: TokenStream,
+}
+
+fn chunk_schema_list(
+    schema_crate: &TokenStream,
+    elem_ty: &str,
+    prefix: &str,
+    elems: &[TokenStream],
+) -> ChunkedList {
+    let ty = syn::Ident::new(elem_ty, proc_macro2::Span::call_site());
+    let mut part_fns = Vec::with_capacity(elems.len());
+    let mut calls = Vec::with_capacity(elems.len());
+    for (idx, elem) in elems.iter().enumerate() {
+        let name = syn::Ident::new(
+            &format!("__schema_{prefix}_{idx}"),
+            proc_macro2::Span::call_site(),
+        );
+        part_fns.push(quote! {
+            #[doc(hidden)]
+            #[inline(never)]
+            fn #name() -> #schema_crate::#ty {
+                #[allow(unused_imports)]
+                use #schema_crate::*;
+                #[allow(unused_imports)]
+                use #schema_crate::identity::*;
+                #elem
+            }
+        });
+        calls.push(quote! { Self::#name() });
+    }
+    ChunkedList {
+        part_fns,
+        vec_expr: quote! { vec![#(#calls),*] },
+    }
+}
+
 pub fn generate(def: &MachineDef) -> TokenStream {
     let machine_name = def.name.to_string();
     let version = def.version;
     let rust_crate = &def.rust_crate;
     let rust_module = &def.rust_module;
-
-    let phase_enum_name = def.phase_enum.name.to_string();
-    let phase_variants = gen_variants(&def.phase_enum.variants);
-
-    let state_fields = gen_state_fields(def);
-    let init_phase = def.init_phase.to_string();
-    let init_fields = gen_init_fields(def);
-    let terminal_phases: Vec<_> = def
-        .terminal_phases
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
-
-    let input_name = def.inputs.name.to_string();
-    let input_variants = gen_enum_variants(&def.inputs);
-
-    let surface_only: Vec<_> = def
-        .surface_only_inputs
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
-
-    let signal_name = def.signals.name.to_string();
-    let signal_variants = gen_enum_variants(&def.signals);
-
-    let effect_name = def.effects.name.to_string();
-    let effect_variants = gen_enum_variants(&def.effects);
-
-    let helpers = gen_helpers(def);
-    let invariants = gen_invariants(def);
-    let transitions = gen_transitions(def);
-    let dispositions = gen_dispositions(def);
-
-    let state_name = crate::gen_state::state_struct_name(def);
 
     // When rust_crate is "self", the DSL is invoked inside meerkat-machine-schema
     // itself, so imports use `crate::` instead of `meerkat_machine_schema::`.
@@ -88,6 +101,85 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     } else {
         quote! { meerkat_machine_schema }
     };
+
+    let phase_enum_name = def.phase_enum.name.to_string();
+    let phase_variants = chunk_schema_list(
+        &schema_crate,
+        "VariantSchema",
+        "phase_variant",
+        &gen_variants(&def.phase_enum.variants),
+    );
+
+    let state_fields = chunk_schema_list(
+        &schema_crate,
+        "FieldSchema",
+        "state_field",
+        &gen_state_fields(def),
+    );
+    let init_phase = def.init_phase.to_string();
+    let init_fields = chunk_schema_list(
+        &schema_crate,
+        "FieldInit",
+        "init_field",
+        &gen_init_fields(def),
+    );
+    let terminal_phases: Vec<_> = def
+        .terminal_phases
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let input_name = def.inputs.name.to_string();
+    let input_variants = chunk_schema_list(
+        &schema_crate,
+        "VariantSchema",
+        "input_variant",
+        &gen_enum_variants(&def.inputs),
+    );
+
+    let surface_only: Vec<_> = def
+        .surface_only_inputs
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+    let signal_name = def.signals.name.to_string();
+    let signal_variants = chunk_schema_list(
+        &schema_crate,
+        "VariantSchema",
+        "signal_variant",
+        &gen_enum_variants(&def.signals),
+    );
+
+    let effect_name = def.effects.name.to_string();
+    let effect_variants = chunk_schema_list(
+        &schema_crate,
+        "VariantSchema",
+        "effect_variant",
+        &gen_enum_variants(&def.effects),
+    );
+
+    let helpers = chunk_schema_list(&schema_crate, "HelperSchema", "helper", &gen_helpers(def));
+    let invariants = chunk_schema_list(
+        &schema_crate,
+        "InvariantSchema",
+        "invariant",
+        &gen_invariants(def),
+    );
+    let transitions = chunk_schema_list(
+        &schema_crate,
+        "TransitionSchema",
+        "transition",
+        &gen_transitions(def),
+    );
+    let dispositions = chunk_schema_list(
+        &schema_crate,
+        "EffectDispositionRule",
+        "disposition",
+        &gen_dispositions(def),
+    );
+
+    let state_name = crate::gen_state::state_struct_name(def);
 
     let machine_id = typed_id("MachineId", &machine_name);
     let init_phase_id = typed_id("PhaseId", &init_phase);
@@ -100,8 +192,40 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         .map(|variant| typed_id("InputVariantId", variant))
         .collect();
 
+    let phase_variant_fns = &phase_variants.part_fns;
+    let phase_variants_expr = &phase_variants.vec_expr;
+    let state_field_fns = &state_fields.part_fns;
+    let state_fields_expr = &state_fields.vec_expr;
+    let init_field_fns = &init_fields.part_fns;
+    let init_fields_expr = &init_fields.vec_expr;
+    let input_variant_fns = &input_variants.part_fns;
+    let input_variants_expr = &input_variants.vec_expr;
+    let signal_variant_fns = &signal_variants.part_fns;
+    let signal_variants_expr = &signal_variants.vec_expr;
+    let effect_variant_fns = &effect_variants.part_fns;
+    let effect_variants_expr = &effect_variants.vec_expr;
+    let helper_fns = &helpers.part_fns;
+    let helpers_expr = &helpers.vec_expr;
+    let invariant_fns = &invariants.part_fns;
+    let invariants_expr = &invariants.vec_expr;
+    let transition_fns = &transitions.part_fns;
+    let transitions_expr = &transitions.vec_expr;
+    let disposition_fns = &dispositions.part_fns;
+    let dispositions_expr = &dispositions.vec_expr;
+
     quote! {
         impl #state_name {
+            #(#phase_variant_fns)*
+            #(#state_field_fns)*
+            #(#init_field_fns)*
+            #(#input_variant_fns)*
+            #(#signal_variant_fns)*
+            #(#effect_variant_fns)*
+            #(#helper_fns)*
+            #(#invariant_fns)*
+            #(#transition_fns)*
+            #(#disposition_fns)*
+
             pub fn schema() -> #schema_crate::MachineSchema {
                 use #schema_crate::*;
                 use #schema_crate::identity::*;
@@ -116,35 +240,35 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     state: StateSchema {
                         phase: EnumSchema {
                             name: #phase_enum_name.into(),
-                            variants: vec![#(#phase_variants),*],
+                            variants: #phase_variants_expr,
                         },
-                        fields: vec![#(#state_fields),*],
+                        fields: #state_fields_expr,
                         init: InitSchema {
                             phase: #init_phase_id,
-                            fields: vec![#(#init_fields),*],
+                            fields: #init_fields_expr,
                         },
                         terminal_phases: vec![#(#terminal_phase_ids),*],
                     },
                     inputs: EnumSchema {
                         name: #input_name.into(),
-                        variants: vec![#(#input_variants),*],
+                        variants: #input_variants_expr,
                     },
                     surface_only_inputs: vec![#(#surface_only_ids),*],
                     runtime_internal_inputs: vec![],
                     signals: EnumSchema {
                         name: #signal_name.into(),
-                        variants: vec![#(#signal_variants),*],
+                        variants: #signal_variants_expr,
                     },
                     effects: EnumSchema {
                         name: #effect_name.into(),
-                        variants: vec![#(#effect_variants),*],
+                        variants: #effect_variants_expr,
                     },
-                    helpers: vec![#(#helpers),*],
+                    helpers: #helpers_expr,
                     derived: vec![],
                     command_plans: vec![],
-                    invariants: vec![#(#invariants),*],
-                    transitions: vec![#(#transitions),*],
-                    effect_dispositions: vec![#(#dispositions),*],
+                    invariants: #invariants_expr,
+                    transitions: #transitions_expr,
+                    effect_dispositions: #dispositions_expr,
                     // Named-type bindings are attached by the catalog
                     // wrapper (`catalog::dsl::mod::with_named_types`) so the
                     // DSL macro surface stays stable while the authoritative

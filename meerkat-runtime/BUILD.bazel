@@ -146,7 +146,6 @@ rust_library(
         "sqlite-store",
     ],
     edition = "2024",
-    rustc_flags = ["-Copt-level=0"],
     compile_data = [
         "Cargo.toml",
         "src/comms_drain.rs",
@@ -194,7 +193,6 @@ rust_library(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = ["-Copt-level=0"],
     compile_data = [
         "Cargo.toml",
         "src/comms_drain.rs",

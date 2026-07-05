@@ -556,7 +556,11 @@ impl AuthHarness {
             factory,
             config.clone(),
             10,
-            meerkat::PersistenceBundle::new(store, None, blob_store),
+            meerkat::PersistenceBundle::new(
+                store,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                blob_store,
+            ),
             NotificationSink::noop(),
         );
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(

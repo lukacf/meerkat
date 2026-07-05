@@ -182,10 +182,9 @@ async fn main() -> anyhow::Result<()> {
     hive_jsonl.init().await?;
     let hive_persistence = meerkat::PersistenceBundle::new_with_schedule_store(
         hive_jsonl as Arc<dyn SessionStore>,
-        None,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-        hive_schedule_store,
-    );
+        hive_schedule_store);
 
     // ── Hive agent: SessionRuntime with mob tools ───────────────────────────
     let hive_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(

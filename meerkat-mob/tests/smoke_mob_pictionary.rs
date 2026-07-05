@@ -241,7 +241,7 @@ async fn setup_mob()
         builder,
         16,
         store_dyn,
-        Some(runtime_store),
+        runtime_store,
         blob_store,
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();

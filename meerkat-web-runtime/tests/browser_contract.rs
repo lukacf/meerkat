@@ -1,6 +1,8 @@
 #![cfg(target_arch = "wasm32")]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use js_sys::Function;
+use meerkat_contracts::WireRunResult;
 use meerkat_web_runtime::{
     append_system_context, clear_tool_callbacks, create_session_simple, destroy_session,
     get_session_state, init_runtime_from_config, inspect_mobpack, poll_events, register_js_tool,
@@ -9,6 +11,11 @@ use meerkat_web_runtime::{
 use serde_json::{Value, json};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
+
+// Without this, `wasm-pack test --headless --chrome` silently SKIPS the whole
+// suite ("only configured to run in node.js") while still exiting 0 — the
+// browser lane must actually execute these assertions.
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 fn parse_js_error(value: JsValue) -> Value {
     let raw = value.as_string().expect("error string");
@@ -240,15 +247,28 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         "browser-local run_counter must not be present before turns"
     );
 
-    let turn = parse_js_result(
-        start_turn(handle, "Use the echo_browser tool, then answer.")
-            .await
-            .expect("start turn"),
+    let turn_raw = start_turn(
+        handle,
+        &json!({ "text": "Use the echo_browser tool, then answer." }).to_string(),
+    )
+    .await
+    .expect("start turn")
+    .as_string()
+    .expect("turn result string");
+    let turn_value: Value = serde_json::from_str(&turn_raw).expect("turn result json");
+    assert!(
+        turn_value.get("status").is_none(),
+        "start_turn must resolve the canonical WireRunResult, never an in-band status string"
     );
-    assert_eq!(turn["status"], "completed");
-    assert_eq!(turn["session_id"], session_id);
-    assert!(turn["tool_calls"].as_u64().unwrap_or_default() >= 1);
-    assert_eq!(turn["text"], "browser tool contract ok");
+    let turn: WireRunResult =
+        serde_json::from_str(&turn_raw).expect("canonical WireRunResult payload");
+    assert_eq!(turn.session_id.to_string(), session_id);
+    assert!(turn.tool_calls >= 1);
+    assert_eq!(turn.text, "browser tool contract ok");
+    assert!(
+        turn.terminal_cause_kind.is_none(),
+        "a clean completion carries no runtime-owned terminal failure cause"
+    );
 
     let events: Value =
         serde_json::from_str(&poll_events(handle).expect("poll events")).expect("events json");
@@ -280,16 +300,25 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
 
     clear_tool_callbacks();
     destroy_session(handle).expect("destroy session");
-    let archived: Value =
-        serde_json::from_str(&get_session_state(handle).expect("canonical archived state"))
-            .expect("archived state json");
-    assert_eq!(archived["session_id"], session_id);
-    assert_eq!(archived["is_active"], false);
 
-    let stale_control = start_turn(handle, "stale handles must not restart archived sessions")
-        .await
-        .expect_err("stale handle control must fail through canonical session authority");
-    assert_eq!(parse_js_error(stale_control)["code"], "SESSION_NOT_FOUND");
+    // A destroyed handle is retired, not left as an addressable archived
+    // projection: every subsequent call on it fails closed with the typed
+    // invalid_session_handle code (mirrors the host-lane pin
+    // `destroy_session_retires_handle_and_fails_closed`).
+    let stale_state = get_session_state(handle)
+        .expect_err("destroyed handle must fail closed, not return archived state");
+    assert_eq!(
+        parse_js_error(stale_state)["code"],
+        "invalid_session_handle"
+    );
+
+    let stale_turn = start_turn(
+        handle,
+        &json!({ "text": "stale handles must not restart archived sessions" }).to_string(),
+    )
+    .await
+    .expect_err("stale handle turn must fail through the retired-handle authority");
+    assert_eq!(parse_js_error(stale_turn)["code"], "invalid_session_handle");
 
     let stale_append = append_system_context(
         handle,
@@ -301,8 +330,48 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         .to_string(),
     )
     .await
-    .expect_err("stale handle mutation must fail through canonical session authority");
-    assert_eq!(parse_js_error(stale_append)["code"], "SESSION_NOT_FOUND");
+    .expect_err("stale handle mutation must fail through the retired-handle authority");
+    assert_eq!(
+        parse_js_error(stale_append)["code"],
+        "invalid_session_handle"
+    );
+
+    let stale_poll =
+        poll_events(handle).expect_err("stale handle poll must fail through the retired handle");
+    assert_eq!(parse_js_error(stale_poll)["code"], "invalid_session_handle");
+}
+
+#[wasm_bindgen_test(async)]
+async fn browser_contract_rejects_untagged_raw_string_prompts_fail_closed() {
+    let init = parse_js_result(
+        init_runtime_from_config(
+            &json!({
+                "anthropic_api_key": "sk-test",
+                "model": "claude-sonnet-4-5"
+            })
+            .to_string(),
+        )
+        .expect("init runtime"),
+    );
+    assert_eq!(init["status"], "initialized");
+
+    let handle = create_session_simple(
+        &json!({
+            "model": "claude-sonnet-4-5",
+            "api_key": "sk-test"
+        })
+        .to_string(),
+    )
+    .expect("create direct session façade");
+
+    // K19: prompts are the tagged `WirePromptInput` contract shape. A bare
+    // untagged string is rejected fail-closed, never shape-sniffed into text.
+    let rejected = start_turn(handle, "hello world")
+        .await
+        .expect_err("untagged raw-string prompt must fail closed");
+    assert_eq!(parse_js_error(rejected)["code"], "INVALID_PARAMS");
+
+    destroy_session(handle).expect("destroy session");
 }
 
 #[wasm_bindgen_test]

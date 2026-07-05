@@ -1,8 +1,14 @@
 #![cfg(target_arch = "wasm32")]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat_web_runtime::{create_session_simple, init_runtime_from_config};
 use serde_json::json;
 use wasm_bindgen_test::wasm_bindgen_test;
+
+// Without this, `wasm-pack test --headless --chrome` silently SKIPS the whole
+// suite ("only configured to run in node.js") while still exiting 0 — the
+// browser lane must actually execute these assertions.
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 fn parse_js_error(raw: wasm_bindgen::JsValue) -> serde_json::Value {
     serde_json::from_str(&raw.as_string().expect("error string")).expect("error json")

@@ -462,10 +462,13 @@ async fn spawn_stdio_process_without_openai(
 }
 
 /// Spawn `rkat-rpc` (or another stdio binary) with a synthetic OpenAI API
-/// key. Used by M-cluster live-adapter contract tests so the OpenAI realtime
-/// session factory builds successfully (B15 startup gate) without any real
-/// upstream request — the precheck (B17/B18/B19) and chunk-decode (D24)
-/// paths fire before any provider call would happen.
+/// key. Used by M-cluster live-adapter contract tests. Startup performs only
+/// a wiring/feature preflight (B15) — no credential resolves at startup.
+/// Realtime credentials resolve per-open under the owning session identity:
+/// the fake `OPENAI_API_KEY` is consumed by the per-open
+/// `ResolverEnvironment` resolution at `live/open` time, and no real
+/// upstream request happens — the precheck (B17/B18/B19) and chunk-decode
+/// (D24) paths fire before any provider call would happen.
 ///
 /// Tests rely on `kill_on_drop(true)` (F35) to clean up the subprocess on
 /// panic.
@@ -5055,9 +5058,11 @@ async fn e2e_scenario_72_live_adapter_model_switch_continuity()
 // M-cluster live-adapter contract tests (wave 2).
 //
 // Each of these pins one specific live/* error contract and runs deterministically
-// without contacting OpenAI: the OpenAI realtime factory builds with a synthetic
-// key (B15 only requires the credential to *resolve*, not to be valid), and the
-// catalog-driven precheck + base64 decode paths fire before any provider call.
+// without contacting OpenAI: startup performs only a wiring/feature preflight
+// (B15), each `live/open` re-resolves the owning session's credential per-open
+// (the synthetic OPENAI_API_KEY resolves via the per-open ResolverEnvironment;
+// it never has to be valid upstream), and the catalog-driven precheck + base64
+// decode paths fire before any provider call.
 //
 // Lane: `e2e-system` — these tests need the `rkat-rpc` binary built but no live
 // provider connection.
@@ -5210,13 +5215,16 @@ async fn e2e_m68_live_open_without_live_ws_returns_method_not_found()
 }
 
 /// M69: with `--live-ws` set but no resolvable OpenAI credential, `rkat-rpc`
-/// must fail at startup (B15) rather than expose `live/*` with a `None`
-/// factory. This is observed via the child process exiting non-zero before
-/// it can answer an `initialize` request.
+/// must BOOT and register `live/*`. Realtime credentials are resolved
+/// per-open from the session's own LLM identity (owning-realm binding), so a
+/// startup default-binding requirement would wrongly block
+/// explicit-binding-only configs. The per-open resolver failing closed
+/// without credential material is pinned at the facade seam; this lane pins
+/// the boot contract.
 #[tokio::test]
 #[ignore = "lane:e2e-system"]
-async fn e2e_m69_live_ws_without_credential_fails_startup() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn e2e_m69_live_ws_without_credential_boots_and_registers_live()
+-> Result<(), Box<dyn std::error::Error>> {
     let rkat_rpc = binary_path("rkat-rpc");
     if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
         return Ok(());
@@ -5235,11 +5243,9 @@ async fn e2e_m69_live_ws_without_credential_fails_startup() -> Result<(), Box<dy
         l.local_addr()?.port()
     };
 
-    // --live-ws set, but spawn the child WITHOUT any OpenAI credential. The
-    // factory build resolves the realm/binding from `meerkat-providers`,
-    // which requires resolved credential material; with no env keys the
-    // resolver fails and `async_main` returns Err with the B15 startup
-    // diagnostic.
+    // --live-ws set, but spawn the child WITHOUT any OpenAI credential.
+    // Startup performs only a wiring/feature preflight; credential
+    // resolution is deferred to each live/open under the session's binding.
     let mut rpc = spawn_stdio_process_without_openai(
         &rkat_rpc,
         &project_dir,
@@ -5257,29 +5263,34 @@ async fn e2e_m69_live_ws_without_credential_fails_startup() -> Result<(), Box<dy
     )
     .await?;
 
-    // The child should exit before it ever answers an `initialize` call. We
-    // give it a short window — a healthy server would normally answer
-    // within milliseconds. A handshake success here is a regression: it
-    // means rkat-rpc kept running with `live/*` exposed but no provider
-    // factory wired, which is exactly the B15 invariant violation.
     let mut pump = RpcEventPump::default();
     let init_result = pump
         .call(
             &mut rpc,
             "initialize",
             json!({"client_info": {"name": "m69", "version": "0.0.1"}}),
-            5,
+            10,
         )
         .await;
     let stderr_dump = read_available_stderr(&mut rpc, 500).await;
-
-    // Either: (a) the child died and the call errored (broken pipe / child
-    // exit) — that is the correct B15 behavior; or (b) startup logged a
-    // build failure to stderr. We accept either signal; what we DON'T
-    // accept is `init_result.is_ok()`.
     assert!(
-        init_result.is_err(),
-        "rkat-rpc with --live-ws and no OpenAI credential must fail startup, but initialize succeeded; stderr: {stderr_dump}"
+        init_result.is_ok(),
+        "rkat-rpc with --live-ws and no OpenAI credential must boot (credentials resolve per-open, not at startup); stderr: {stderr_dump}"
+    );
+
+    // live/* must be registered: a status probe on a fabricated channel is
+    // routed to the handler (typed error), not -32601 method-not-found.
+    let (code, _message) = pump
+        .call_expect_error(
+            &mut rpc,
+            "live/status",
+            json!({"channel_id": "live-nonexistent"}),
+            10,
+        )
+        .await?;
+    assert_ne!(
+        code, -32601,
+        "live/status must be registered when --live-ws is set even without startup credentials"
     );
 
     shutdown_child(rpc.child).await?;
@@ -5509,9 +5520,11 @@ async fn e2e_m73_live_open_gemini_provider_rejected_by_precheck()
         l.local_addr()?.port()
     };
 
-    // Both a fake OpenAI key (so the realtime factory builds and B15 is
-    // satisfied) AND a fake Gemini key (so session/create can resolve a
-    // Gemini binding for the deferred-initial-turn session).
+    // Both a fake OpenAI key (consumed only by per-open realtime credential
+    // resolution at live/open time — the B15 startup preflight checks
+    // wiring/features, never credentials) AND a fake Gemini key (so
+    // session/create can resolve a Gemini binding for the
+    // deferred-initial-turn session).
     let mut cmd = Command::new(&rkat_rpc);
     cmd.current_dir(&project_dir)
         .env("HOME", &project_dir)

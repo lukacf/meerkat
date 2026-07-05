@@ -105,22 +105,56 @@ MobPeerConnectivitySnapshot = TypedDict(
     },
 )
 
+MobPeerConnectivityNotApplicable = TypedDict(
+    "MobPeerConnectivityNotApplicable",
+    {"status": Literal["not_applicable"]},
+)
+
+MobPeerConnectivityProbeTimedOut = TypedDict(
+    "MobPeerConnectivityProbeTimedOut",
+    {"status": Literal["probe_timed_out"]},
+)
+
+MobPeerConnectivityKnown = TypedDict(
+    "MobPeerConnectivityKnown",
+    {
+        "status": Literal["known"],
+        "snapshot": MobPeerConnectivitySnapshot,
+    },
+)
+
+# Tri-state peer-connectivity projection for a mob member snapshot.
+# Distinguishes a member with no bridge session (`not_applicable`) from a
+# transiently-unresolved live probe (`probe_timed_out`) from a resolved
+# connectivity snapshot (`known`).
+MobPeerConnectivity = (
+    MobPeerConnectivityNotApplicable
+    | MobPeerConnectivityProbeTimedOut
+    | MobPeerConnectivityKnown
+)
+
 MobMemberSnapshot = TypedDict(
     "MobMemberSnapshot",
     {
         "status": str,
+        # Server-resolved opaque handle for subsequent member-targeted calls.
+        "member_ref": MobMemberRef,
         "output_preview": NotRequired[str],
         "error": NotRequired[str],
         "tokens_used": int,
         "is_final": bool,
         "resolved_capabilities": NotRequired[ResolvedModelCapabilities],
-        "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+        "peer_connectivity": NotRequired[MobPeerConnectivity],
         "kickoff": NotRequired[dict[str, Any]],
+        "external_member": NotRequired[Any],
         # Diagnostic bridge-session id for status/continuity only.
         "current_session_id": NotRequired[str],
     },
 )
 
+# Member snapshot carried by the `mob/wait_kickoff` / `mob/wait_ready`
+# member lists. The wait wire carries no `member_ref`, so this stays a
+# separate shape from `MobMemberSnapshot`.
 MobKickoffMemberSnapshot = TypedDict(
     "MobKickoffMemberSnapshot",
     {
@@ -130,7 +164,7 @@ MobKickoffMemberSnapshot = TypedDict(
         "error": NotRequired[str],
         "tokens_used": int,
         "is_final": bool,
-        "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+        "peer_connectivity": NotRequired[MobPeerConnectivity],
         "kickoff": NotRequired[dict[str, Any]],
     },
 )

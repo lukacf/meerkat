@@ -15,6 +15,7 @@
 //! the registration no-op shim lives in the module's `#[test]` block.
 
 #![cfg(target_arch = "wasm32")]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::sync::Arc;
 

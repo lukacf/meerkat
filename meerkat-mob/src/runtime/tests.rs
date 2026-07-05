@@ -6238,7 +6238,7 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
         PersistentMockBuilder,
         16,
         store,
-        Some(runtime_store),
+        runtime_store,
         blob_store,
     ));
     MobBuilder::new(definition, MobStorage::in_memory())

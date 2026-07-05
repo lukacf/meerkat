@@ -131,7 +131,11 @@ async fn make_smoke_rpc_stack(
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
-    let persistence = meerkat::PersistenceBundle::new(store, None, blob_store);
+    let persistence = meerkat::PersistenceBundle::new(
+        store,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        blob_store,
+    );
 
     let mut runtime = SessionRuntime::new(
         factory,

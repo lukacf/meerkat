@@ -20929,7 +20929,7 @@ capabilities = ["rpc"]
         let session_store = sqlite_session_store(&temp);
         let persistence = PersistenceBundle::new(
             Arc::clone(&session_store),
-            Some(Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
         );
         let factory = AgentFactory::new(temp.path().join("sessions"))
@@ -21210,7 +21210,7 @@ capabilities = ["rpc"]
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let persistence = PersistenceBundle::new(
             Arc::clone(&session_store),
-            Some(runtime_store),
+            runtime_store,
             Arc::new(meerkat_store::MemoryBlobStore::default()),
         );
         let persistence_adapter = persistence.runtime_adapter();
@@ -21258,7 +21258,7 @@ capabilities = ["rpc"]
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let persistence = PersistenceBundle::new(
             Arc::clone(&session_store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
         );
         let factory = AgentFactory::new(temp.path().join("sessions"))
@@ -21356,7 +21356,7 @@ capabilities = ["rpc"]
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let persistence = PersistenceBundle::new(
             Arc::clone(&session_store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
         );
         let factory = AgentFactory::new(temp.path().join("sessions"))

@@ -1480,7 +1480,7 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let persistence = PersistenceBundle::new(
             session_store,
-            Some(runtime_store),
+            runtime_store,
             Arc::new(MemoryBlobStore::new()),
         );
 

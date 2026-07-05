@@ -24,6 +24,12 @@ pub mod errors;
 pub mod live_orchestration;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod llm_reconfigure;
+#[cfg(all(
+    feature = "openai",
+    feature = "openai-realtime",
+    not(target_arch = "wasm32")
+))]
+pub mod realtime_credentials;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod recovery;
 #[cfg(not(target_arch = "wasm32"))]

@@ -874,7 +874,11 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
+            meerkat::PersistenceBundle::new(
+                store,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            ),
             crate::router::NotificationSink::noop(),
         );
         let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(

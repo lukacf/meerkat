@@ -3160,10 +3160,21 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         if method == "mob/member_status":
             return {
                 "status": "active",
+                "member_ref": _make_member_ref("mob-1", "agent-a"),
                 "tokens_used": 5,
                 "is_final": False,
                 "agent_runtime_id": {"identity": "agent-a", "generation": 1},
                 "fence_token": 7,
+                "peer_connectivity": {
+                    "status": "known",
+                    "snapshot": {
+                        "reachable_peer_count": 2,
+                        "unknown_peer_count": 1,
+                        "unreachable_peers": [
+                            {"peer": "agent-b", "reason": "timeout"}
+                        ],
+                    },
+                },
                 "resolved_capabilities": {
                     "vision": False,
                     "image_input": False,
@@ -3267,6 +3278,15 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     status = await client.mob_member_status("mob-1", "agent-a")
     assert "agent_runtime_id" not in status
     assert "fence_token" not in status
+    assert status["member_ref"] == expected_agent_a_ref
+    assert status["peer_connectivity"] == {
+        "status": "known",
+        "snapshot": {
+            "reachable_peer_count": 2,
+            "unknown_peer_count": 1,
+            "unreachable_peers": [{"peer": "agent-b", "reason": "timeout"}],
+        },
+    }
     assert status["resolved_capabilities"]["realtime"] is True
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -3446,6 +3466,382 @@ async def test_wait_mob_ready_rejects_malformed_member_snapshot():
     client._request = fake_request  # type: ignore[method-assign]
 
     with pytest.raises(MeerkatError, match="is_final must be boolean"):
+        await client.wait_mob_ready("mob-1")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_missing_member_ref():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # member_ref absent: the runtime-owned handle is required, so the
+        # SDK must fail closed rather than fabricate or omit it.
+        return {"status": "active", "tokens_used": 5, "is_final": False}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing member_ref"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_missing_tokens_used():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "is_final": False,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="tokens_used must be number"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_parses_tri_state_peer_connectivity():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 5,
+            "is_final": False,
+            "peer_connectivity": {"status": "probe_timed_out"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["peer_connectivity"] == {"status": "probe_timed_out"}
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_unknown_peer_connectivity_tag():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 5,
+            "is_final": False,
+            "peer_connectivity": {"status": "half-open"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="unknown peer_connectivity status"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_legacy_flat_peer_connectivity():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 5,
+            "is_final": False,
+            "peer_connectivity": {
+                "reachable_peer_count": 2,
+                "unknown_peer_count": 0,
+                "unreachable_peers": [],
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="unknown peer_connectivity status"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_kickoff_parses_tri_state_peer_connectivity():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "active",
+                    "tokens_used": 42,
+                    "is_final": False,
+                    "peer_connectivity": {
+                        "status": "known",
+                        "snapshot": {
+                            "reachable_peer_count": 1,
+                            "unknown_peer_count": 0,
+                        },
+                    },
+                }
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    members = await client.wait_mob_kickoff("mob-1")
+    assert members[0]["peer_connectivity"] == {
+        "status": "known",
+        "snapshot": {
+            "reachable_peer_count": 1,
+            "unknown_peer_count": 0,
+            "unreachable_peers": [],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_kickoff_rejects_unknown_peer_connectivity_tag():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "active",
+                    "tokens_used": 42,
+                    "is_final": False,
+                    "peer_connectivity": {"status": "half-open"},
+                }
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="unknown peer_connectivity status"):
+        await client.wait_mob_kickoff("mob-1")
+
+
+@pytest.mark.asyncio
+async def test_mob_helper_wrappers_reject_missing_tokens_used():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "output": "ok",
+            "agent_identity": "helper-a",
+            "member_ref": _make_member_ref("mob-1", "helper-a"),
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="tokens_used must be number"):
+        await client.spawn_mob_helper("mob-1", "help")
+    with pytest.raises(MeerkatError, match="tokens_used must be number"):
+        await client.fork_mob_helper("mob-1", "agent-a", "help")
+
+
+@pytest.mark.asyncio
+async def test_mob_helper_wrappers_reject_fractional_negative_tokens_used():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # tokens_used is a wire u64: a fractional/negative number can never be
+        # a valid value, so the SDK fails closed instead of accepting any
+        # finite number.
+        return {
+            "output": "ok",
+            "tokens_used": -3.5,
+            "agent_identity": "helper-a",
+            "member_ref": _make_member_ref("mob-1", "helper-a"),
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(
+        MeerkatError, match="tokens_used must be a non-negative integer"
+    ):
+        await client.spawn_mob_helper("mob-1", "help")
+    with pytest.raises(
+        MeerkatError, match="tokens_used must be a non-negative integer"
+    ):
+        await client.fork_mob_helper("mob-1", "agent-a", "help")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_fractional_negative_tokens_used():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": -3.5,
+            "is_final": False,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(
+        MeerkatError, match="tokens_used must be a non-negative integer"
+    ):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_fractional_reachable_peer_count():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 5,
+            "is_final": False,
+            "peer_connectivity": {
+                "status": "known",
+                "snapshot": {
+                    "reachable_peer_count": 1.5,
+                    "unknown_peer_count": 0,
+                    "unreachable_peers": [],
+                },
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(
+        MeerkatError,
+        match="reachable_peer_count must be a non-negative integer",
+    ):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_negative_unknown_peer_count():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 5,
+            "is_final": False,
+            "peer_connectivity": {
+                "status": "known",
+                "snapshot": {
+                    "reachable_peer_count": 1,
+                    "unknown_peer_count": -1,
+                    "unreachable_peers": [],
+                },
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(
+        MeerkatError,
+        match="unknown_peer_count must be a non-negative integer",
+    ):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_non_string_unreachable_peer_reason():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 5,
+            "is_final": False,
+            "peer_connectivity": {
+                "status": "known",
+                "snapshot": {
+                    "reachable_peer_count": 0,
+                    "unknown_peer_count": 0,
+                    "unreachable_peers": [{"peer": "agent-b", "reason": 42}],
+                },
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="reason must be string"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_non_dict_kickoff():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        # A present-but-non-object kickoff is a contract violation: the SDK
+        # must fail closed rather than silently drop the field.
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 5,
+            "is_final": False,
+            "kickoff": "pending",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="kickoff must be object"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_wait_wrappers_reject_non_dict_kickoff():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "active",
+                    "tokens_used": 42,
+                    "is_final": False,
+                    "kickoff": "pending",
+                }
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="kickoff must be object"):
+        await client.wait_mob_kickoff("mob-1")
+    with pytest.raises(MeerkatError, match="kickoff must be object"):
+        await client.wait_mob_ready("mob-1")
+
+
+@pytest.mark.asyncio
+async def test_wait_wrappers_reject_fractional_negative_tokens_used():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "active",
+                    "tokens_used": -3.5,
+                    "is_final": False,
+                }
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(
+        MeerkatError, match="tokens_used must be a non-negative integer"
+    ):
+        await client.wait_mob_kickoff("mob-1")
+    with pytest.raises(
+        MeerkatError, match="tokens_used must be a non-negative integer"
+    ):
         await client.wait_mob_ready("mob-1")
 
 

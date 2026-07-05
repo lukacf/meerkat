@@ -8518,10 +8518,7 @@ mod tests {
             .unregister_session(&target_session_id)
             .await;
 
-        let runtime_store = state
-            .session_service
-            .runtime_store()
-            .expect("REST capacity test state should include runtime store");
+        let runtime_store = state.session_service.runtime_store();
         let persisted_input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
             "conflicting recovered prompt",
             Some(

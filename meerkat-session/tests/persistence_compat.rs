@@ -341,7 +341,7 @@ mod runtime_backed_llm_reconfigure_tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(Arc::clone(&runtime_store)),
+            Arc::clone(&runtime_store),
             Arc::new(MemoryBlobStore::new()),
         );
 
@@ -363,32 +363,5 @@ mod runtime_backed_llm_reconfigure_tests {
             matches!(&err, SessionError::Unsupported(message) if message.contains("runtime turn metadata reconfiguration")),
             "raw client swap should point callers at the runtime-owned reconfiguration seam: {err:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn store_only_set_session_client_still_delegates() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            Arc::new(MemoryBlobStore::new()),
-        );
-
-        let created = service
-            .create_session(create_deferred_request("seed"))
-            .await
-            .expect("create_session should succeed");
-
-        service
-            .set_session_client(
-                &created.session_id,
-                Arc::new(NoopAgentLlmClient {
-                    model: "store-only-swap".to_string(),
-                }),
-            )
-            .await
-            .expect("store-only persistent sessions should preserve raw client swaps");
     }
 }

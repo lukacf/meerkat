@@ -696,8 +696,8 @@ mod tests {
         jsonl_store.init().await.expect("init jsonl store");
         let persistence = crate::PersistenceBundle::new(
             jsonl_store as Arc<dyn crate::SessionStore>,
-            Some(Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
-                as Arc<dyn meerkat_runtime::RuntimeStore>),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
+                as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::new(crate::MemoryBlobStore::new()),
         );
         let factory = crate::AgentFactory::new(temp.path().join("sessions"))

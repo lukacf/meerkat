@@ -388,8 +388,11 @@ mod orchestrator_e2e {
 
     fn build_fixture() -> Fixture {
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let persistence =
-            PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
+        let persistence = PersistenceBundle::new(
+            session_store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(MemoryBlobStore::new()),
+        );
         let temp = tempfile::tempdir().expect("tempdir");
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let builder = FactoryAgentBuilder::new(factory, Config::default());

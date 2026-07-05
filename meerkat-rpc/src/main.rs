@@ -305,26 +305,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // N74 updated: only build the OpenAI realtime factory when a live
     // transport is configured; otherwise live/* is not exposed and the
-    // factory work is wasted. B15: when live is configured, factory build
-    // failure must fail at startup rather than leaving live/open exposed
-    // with no provider wired.
-    #[cfg(feature = "openai-realtime")]
-    let live_session_factory: Option<
-        Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
-    > = if live_transport_enabled {
-        match factory.build_openai_realtime_session_factory(&config).await {
-            Ok(f) => Some(f),
-            Err(err) => {
-                return Err(format!(
-                    "a live transport is configured but the OpenAI realtime session factory \
-                     could not be built: {err}"
-                )
-                .into());
-            }
-        }
-    } else {
-        None
-    };
+    // factory work is wasted. B15 demoted to a wiring/feature preflight:
+    // no credential is resolved at startup. Credential truth is owned by
+    // the per-open resolving factory, which re-resolves the owning
+    // session's auth binding on every open and fails the open closed with
+    // its typed error — so explicit-binding-only configs boot cleanly.
     #[cfg(not(feature = "openai-realtime"))]
     let live_session_factory: Option<
         Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
@@ -337,6 +322,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    #[cfg(feature = "openai-realtime")]
+    let realtime_agent_factory = factory.clone();
 
     let config_runtime = Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
@@ -378,7 +365,29 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             global_doc,
             meerkat_models::canonical(),
         ));
-    runtime.set_realm_config_source(realm_config_source);
+    runtime.set_realm_config_source(Arc::clone(&realm_config_source));
+
+    // Per-open realtime credential resolution reads the SAME live config
+    // truth the session runtime composes for agent builds: the durable head
+    // store plus the active realm's parent chain. Every `live/open`
+    // re-resolves the owning session's auth binding against this source.
+    // The composition itself lives in `meerkat_rpc::live_wiring` so the
+    // exact factory the binary ships is covered by unit tests.
+    #[cfg(feature = "openai-realtime")]
+    let live_session_factory: Option<
+        Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
+    > = if live_transport_enabled {
+        Some(
+            meerkat_rpc::live_wiring::build_per_open_realtime_session_factory(
+                &realtime_agent_factory,
+                Arc::clone(&config_store),
+                Arc::clone(&realm_config_source),
+                locator.realm.clone(),
+            ),
+        )
+    } else {
+        None
+    };
 
     let runtime = Arc::new(runtime);
 

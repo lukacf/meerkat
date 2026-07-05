@@ -1,7 +1,8 @@
 //! meerkat-memory — Semantic memory store for Meerkat.
 //!
 //! Provides `HnswMemoryStore` for indexing discarded conversation history
-//! during compaction, enabling semantic search across past sessions.
+//! during compaction, enabling session-scoped semantic search over compacted
+//! history.
 //!
 //! Uses `hnsw_rs` for approximate nearest-neighbor search and SQLite for
 //! metadata persistence.

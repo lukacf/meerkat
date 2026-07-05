@@ -1087,8 +1087,8 @@ mod tests {
             .map_err(|error| SessionStoreError::Internal(error.to_string()))?;
         Ok(PersistenceBundle::new(
             jsonl_store as Arc<dyn SessionStore>,
-            Some(Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
-                as Arc<dyn meerkat_runtime::RuntimeStore>),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
+                as Arc<dyn meerkat_runtime::RuntimeStore>,
             Arc::new(MemoryBlobStore::new()),
         ))
     }

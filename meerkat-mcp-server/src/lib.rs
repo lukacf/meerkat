@@ -863,13 +863,18 @@ impl MeerkatMcpState {
     /// Test constructor that accepts an injected store (avoids opening redb at platform data dir).
     #[cfg(test)]
     pub(crate) async fn new_with_store(store: Arc<dyn SessionStore>) -> Self {
-        Self::new_with_store_options(store, None, None).await
+        Self::new_with_store_options(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+        )
+        .await
     }
 
     #[cfg(test)]
     pub(crate) async fn new_with_store_and_runtime_store(
         store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
     ) -> Self {
         Self::new_with_store_options(store, runtime_store, None).await
     }
@@ -879,13 +884,18 @@ impl MeerkatMcpState {
         store: Arc<dyn SessionStore>,
         max_sessions_override: Option<usize>,
     ) -> Self {
-        Self::new_with_store_options(store, None, max_sessions_override).await
+        Self::new_with_store_options(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            max_sessions_override,
+        )
+        .await
     }
 
     #[cfg(test)]
     async fn new_with_store_options(
         store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
         max_sessions_override: Option<usize>,
     ) -> Self {
         let bootstrap = RuntimeBootstrap::default();
@@ -6306,11 +6316,37 @@ mod tests {
         );
     }
 
+    /// Seed a session into runtime authority the way a prior host lifetime
+    /// would have: a committed runtime-store snapshot (store rows alone are
+    /// projection, not authority).
+    async fn seed_runtime_authority_session(
+        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+        session: &Session,
+    ) {
+        use meerkat_runtime::RuntimeStore as _;
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::identifiers::LogicalRuntimeId::for_session(session.id()),
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(session)
+                        .expect("session snapshot should serialize"),
+                },
+            )
+            .await
+            .expect("session snapshot should commit to runtime authority");
+    }
+
     #[tokio::test]
     async fn test_handle_meerkat_resume_capacity_failure_unregisters_prepared_runtime() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state =
-            MeerkatMcpState::new_with_store_and_max_sessions(Arc::clone(&store), Some(1)).await;
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_options(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            Some(1),
+        )
+        .await;
         let mut session = Session::new();
         let session_id = session.id().clone();
         session
@@ -6342,6 +6378,7 @@ mod tests {
             .save(&blocker_session)
             .await
             .expect("persist blocker session");
+        seed_runtime_authority_session(&runtime_store, &blocker_session).await;
         let _blocker = state
             .service
             .reserve_runtime_turn_admission(&blocker_id)
@@ -6402,8 +6439,14 @@ mod tests {
     async fn test_handle_meerkat_resume_live_no_rebuild_capacity_failure_does_not_prepare_runtime()
     {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state =
-            MeerkatMcpState::new_with_store_and_max_sessions(Arc::clone(&store), Some(1)).await;
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_options(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            Some(1),
+        )
+        .await;
         let pre_session = Session::new();
         let session_id = pre_session.id().clone();
         let bindings = state
@@ -6465,6 +6508,7 @@ mod tests {
             .save(&blocker_session)
             .await
             .expect("persist blocker session");
+        seed_runtime_authority_session(&runtime_store, &blocker_session).await;
         let _blocker = state
             .service
             .reserve_runtime_turn_admission(&blocker_id)
@@ -6526,8 +6570,14 @@ mod tests {
     async fn test_handle_meerkat_resume_keep_alive_capacity_failure_does_not_configure_peer_ingress()
      {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state =
-            MeerkatMcpState::new_with_store_and_max_sessions(Arc::clone(&store), Some(1)).await;
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_options(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            Some(1),
+        )
+        .await;
         let pre_session = Session::new();
         let session_id = pre_session.id().clone();
         let bindings = state
@@ -6590,6 +6640,7 @@ mod tests {
             .save(&blocker_session)
             .await
             .expect("persist blocker session");
+        seed_runtime_authority_session(&runtime_store, &blocker_session).await;
         let _blocker = state
             .service
             .reserve_runtime_turn_admission(&blocker_id)
@@ -7268,11 +7319,9 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        let state = MeerkatMcpState::new_with_store_and_runtime_store(
-            store,
-            Some(Arc::clone(&runtime_store)),
-        )
-        .await;
+        let state =
+            MeerkatMcpState::new_with_store_and_runtime_store(store, Arc::clone(&runtime_store))
+                .await;
         let created = state
             .service
             .create_session(CreateSessionRequest {
@@ -7327,7 +7376,14 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_history_returns_messages_for_live_and_archived_sessions() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state = MeerkatMcpState::new_with_store(Arc::clone(&store)).await;
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_options(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            None,
+        )
+        .await;
         let mut session = meerkat::Session::new();
         let session_id = session.id().to_string();
 
@@ -7366,6 +7422,7 @@ mod tests {
             .save(&session)
             .await
             .expect("persisted history session");
+        seed_runtime_authority_session(&runtime_store, &session).await;
 
         let history = Box::pin(handle_tools_call(
             &state,
@@ -7384,19 +7441,13 @@ mod tests {
         assert_eq!(history_payload["has_more"], true);
         assert_eq!(history_payload["messages"].as_array().unwrap().len(), 2);
 
-        // Archive requires runtime authority; store-only sessions are
-        // rejected. Skip archived-history assertions when archive is
-        // unavailable on the store-only test path.
-        let archive_result = Box::pin(handle_tools_call(
+        Box::pin(handle_tools_call(
             &state,
             "meerkat_archive",
             &json!({ "session_id": session_id }),
         ))
-        .await;
-
-        if archive_result.is_err() {
-            return;
-        }
+        .await
+        .expect("archive through runtime authority should succeed");
 
         let archived_history = Box::pin(handle_tools_call(
             &state,
@@ -7438,7 +7489,14 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_history_serializes_mixed_message_kinds() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state = MeerkatMcpState::new_with_store(Arc::clone(&store)).await;
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_options(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            None,
+        )
+        .await;
         let mut session = meerkat::Session::new();
         let session_id = session.id().to_string();
 
@@ -7466,6 +7524,7 @@ mod tests {
             meerkat_core::types::ToolResult::new("tool-2".to_string(), "done".to_string(), false),
         ]));
         store.save(&session).await.expect("persisted mixed session");
+        seed_runtime_authority_session(&runtime_store, &session).await;
 
         let history = Box::pin(handle_tools_call(
             &state,

@@ -11781,7 +11781,7 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -11867,7 +11867,7 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -11972,7 +11972,7 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -12066,7 +12066,7 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -12180,7 +12180,7 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Some(Arc::clone(&runtime_store)), blob_store),
+            meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         );
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -12415,7 +12415,7 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
         )
     }
@@ -12431,7 +12431,11 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, None, blob_store),
+            meerkat::PersistenceBundle::new(
+                store,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                blob_store,
+            ),
             crate::router::NotificationSink::noop(),
         )
     }
@@ -12449,7 +12453,7 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
         )
     }
@@ -12467,7 +12471,7 @@ mod tests {
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
         )
     }
@@ -12486,11 +12490,7 @@ mod tests {
                 factory,
                 Config::default(),
                 max_sessions,
-                meerkat::PersistenceBundle::new(
-                    store,
-                    Some(Arc::clone(&runtime_store)),
-                    blob_store,
-                ),
+                meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
                 crate::router::NotificationSink::noop(),
             ),
             runtime_store,
@@ -12536,16 +12536,6 @@ mod tests {
             .expect("seed typed archived lifecycle-terminal fact");
     }
 
-    fn archived_projection_without_machine_authority_session_error(err: &SessionError) -> bool {
-        archived_store_projection_session_error(err)
-            || matches!(
-                err,
-                SessionError::Agent(meerkat_core::AgentError::InternalError(message))
-                    if message.contains("runtime-backed archived projection")
-                        && message.contains("missing machine lifecycle state")
-            )
-    }
-
     #[test]
     fn session_runtime_new_preserves_persistence_oauth_flow_authority() {
         let temp = tempfile::tempdir().unwrap();
@@ -12554,7 +12544,7 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let persistence = meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store);
+        let persistence = meerkat::PersistenceBundle::new(store, runtime_store, blob_store);
         let adapter = persistence.runtime_adapter();
         let target = test_auth_binding("dev", "default_openai");
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -12770,6 +12760,57 @@ mod tests {
             .approval_service()
             .get(&record.approval_id)
             .expect("load approval after runtime reconstruction");
+        assert_eq!(loaded.approval_id, record.approval_id);
+        assert_eq!(loaded.status, meerkat_core::ApprovalStatus::Pending);
+    }
+
+    /// Jsonl sibling of the sqlite reopen test above: reopen-from-realm-
+    /// persistence must also carry pending approvals across runtime
+    /// reconstruction when the realm runs the jsonl runtime companion.
+    #[tokio::test]
+    async fn approval_service_reopens_from_jsonl_realm_persistence_store_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_manifest, bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "approval-realm",
+            Some(meerkat_store::RealmBackend::Jsonl),
+            None,
+        )
+        .await
+        .expect("open persistence");
+        let runtime = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-a")),
+            Config::default(),
+            10,
+            bundle,
+            crate::router::NotificationSink::noop(),
+        );
+        assert!(runtime.approval_service().is_persistent());
+        let record = runtime
+            .approval_service()
+            .request(approval_request())
+            .expect("request approval");
+
+        let (_manifest, reopened_bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "approval-realm",
+            Some(meerkat_store::RealmBackend::Jsonl),
+            None,
+        )
+        .await
+        .expect("reopen persistence");
+        let reopened = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-b")),
+            Config::default(),
+            10,
+            reopened_bundle,
+            crate::router::NotificationSink::noop(),
+        );
+        assert!(reopened.approval_service().is_persistent());
+        let loaded = reopened
+            .approval_service()
+            .get(&record.approval_id)
+            .expect("load approval after jsonl runtime reconstruction");
         assert_eq!(loaded.approval_id, record.approval_id);
         assert_eq!(loaded.status, meerkat_core::ApprovalStatus::Pending);
     }
@@ -13587,7 +13628,7 @@ mod tests {
             temp_factory(&temp),
             Config::default(),
             10,
-            meerkat::PersistenceBundle::new(store, Some(runtime_store_dyn), blob_store),
+            meerkat::PersistenceBundle::new(store, runtime_store_dyn, blob_store),
             crate::router::NotificationSink::noop(),
         ));
 
@@ -14417,7 +14458,7 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_session_service_archived_projection_without_machine_authority_fails_closed_without_admission_leak()
+    async fn mob_session_service_archived_projection_without_runtime_state_reads_archived_without_admission_leak()
      {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
@@ -14444,6 +14485,9 @@ mod tests {
             "mob service should hide archived persisted sessions"
         );
 
+        // An archived document with NO runtime lifecycle state (legacy
+        // store-only archive) reads as archived: resume rejects with the
+        // typed archived/NotFound contract, never an untyped internal error.
         let mut req = service_create_request(mock_build_config(), InitialTurnPolicy::Defer);
         req.build
             .as_mut()
@@ -14454,8 +14498,8 @@ mod tests {
             resumed
                 .as_ref()
                 .err()
-                .is_some_and(archived_projection_without_machine_authority_session_error),
-            "archived store projection without machine lifecycle state should fail closed: {resumed:?}"
+                .is_some_and(|err| matches!(err, SessionError::NotFound { .. })),
+            "archived store projection without runtime lifecycle state should reject with the archived NotFound contract: {resumed:?}"
         );
 
         runtime
@@ -14743,18 +14787,22 @@ mod tests {
     #[tokio::test]
     async fn external_event_accept_preserves_new_runtime_registration() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(meerkat::MemoryStore::new());
-        let runtime = Arc::new(make_runtime_with_session_store(
-            temp_factory(&temp),
-            1,
-            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
-        ));
+        let (runtime, runtime_store) =
+            make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
+        let runtime = Arc::new(runtime);
 
         let session = Session::new();
         let session_id = session.id().clone();
-        meerkat::SessionStore::save(store.as_ref(), &session)
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session)
+                        .expect("serialize persisted session"),
+                },
+            )
             .await
-            .expect("save persisted session");
+            .expect("commit persisted runtime authority snapshot");
 
         let accepted = runtime
             .accept_external_event_via_runtime(
@@ -15126,18 +15174,22 @@ mod tests {
     #[tokio::test]
     async fn runtime_accept_validation_failure_unregisters_new_executor() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(meerkat::MemoryStore::new());
-        let runtime = Arc::new(make_runtime_with_session_store(
-            temp_factory(&temp),
-            1,
-            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
-        ));
+        let (runtime, runtime_store) =
+            make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
+        let runtime = Arc::new(runtime);
 
         let session = Session::new();
         let session_id = session.id().clone();
-        meerkat::SessionStore::save(store.as_ref(), &session)
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session)
+                        .expect("serialize persisted session"),
+                },
+            )
             .await
-            .expect("save store-only session");
+            .expect("commit persisted runtime authority snapshot");
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
             injected_context: Vec::new(),
@@ -15191,18 +15243,22 @@ mod tests {
     #[tokio::test]
     async fn runtime_accept_terminal_no_handle_unregisters_new_executor() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(meerkat::MemoryStore::new());
-        let runtime = Arc::new(make_runtime_with_session_store(
-            temp_factory(&temp),
-            1,
-            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
-        ));
+        let (runtime, runtime_store) =
+            make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
+        let runtime = Arc::new(runtime);
 
         let session = Session::new();
         let session_id = session.id().clone();
-        meerkat::SessionStore::save(store.as_ref(), &session)
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session)
+                        .expect("serialize persisted session"),
+                },
+            )
             .await
-            .expect("save store-only session");
+            .expect("commit persisted runtime authority snapshot");
 
         let operation_id = meerkat_core::OperationId::new();
         let input = meerkat_runtime::Input::Operation(meerkat_runtime::OperationInput {
@@ -15571,21 +15627,25 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn archived_store_only_rotation_registration_rejects_archived_projection() {
+    async fn rotation_registration_rejects_archived_runtime_authority_session() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(meerkat::MemoryStore::new());
-        let runtime = Arc::new(make_runtime_with_session_store(
-            temp_factory(&temp),
-            1,
-            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
-        ));
+        let (runtime, runtime_store) =
+            make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
+        let runtime = Arc::new(runtime);
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
         mark_archived_store_projection(&mut archived);
-        meerkat::SessionStore::save(store.as_ref(), &archived)
+        runtime_store
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&archived_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&archived)
+                        .expect("serialize archived session"),
+                },
+            )
             .await
-            .expect("save archived store-only session");
+            .expect("commit archived runtime authority snapshot");
 
         let registered = runtime
             .ensure_runtime_session_for_rotation(&archived_id)
@@ -15595,11 +15655,11 @@ mod tests {
                 .as_ref()
                 .err()
                 .is_some_and(|err| matches!(err, SessionError::NotFound { .. })),
-            "store-only archived compatibility projection should reject rotation registration: {registered:?}"
+            "archived runtime-authority session should reject rotation registration: {registered:?}"
         );
         assert!(
             !runtime.runtime_adapter.contains_session(&archived_id).await,
-            "store-only archived compatibility projection must not register runtime state"
+            "archived runtime-authority session must not register runtime state"
         );
     }
 

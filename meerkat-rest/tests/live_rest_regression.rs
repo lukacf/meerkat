@@ -60,8 +60,11 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
     let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(client.clone());
-    let persistence =
-        PersistenceBundle::new(store, None, Arc::new(meerkat_store::MemoryBlobStore::new()));
+    let persistence = PersistenceBundle::new(
+        store,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
     let runtime_adapter = persistence.runtime_adapter();
     let workgraph_store = persistence.workgraph_store();
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));

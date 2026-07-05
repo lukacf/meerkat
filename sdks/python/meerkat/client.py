@@ -64,6 +64,8 @@ from .generated.types import (
     McpServerConfig,
     MobDefinitionInput,
     MobFlowRunResult,
+    MobMemberParams,
+    MobMemberStatusResult,
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
@@ -162,9 +164,12 @@ from .mob import (
     MobMember,
     MobMemberRef,
     MobMemberSnapshot,
+    MobPeerConnectivity,
+    MobPeerConnectivitySnapshot,
     MobReadyMemberSnapshot,
     MobSpawnResult,
     MobSpawnSpec,
+    MobUnreachablePeer,
     MobWireMembersBatchEdgeInput,
     WorkOrigin,
 )
@@ -2333,17 +2338,33 @@ class MeerkatClient:
     async def mob_member_status(
         self, mob_id: str, agent_identity: str
     ) -> MobMemberSnapshot:
-        result = await self._request(
-            "mob/member_status",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
-        )
+        _rpc_signature: MobMemberStatusResult
+        params = MobMemberParams(mob_id=mob_id, agent_identity=agent_identity)
+        result = await self._request("mob/member_status", _wire_value(params))
         resolved_capabilities = self._parse_resolved_model_capabilities(
             result.get("resolved_capabilities")
+        )
+        peer_connectivity = self._parse_mob_peer_connectivity(
+            result.get("peer_connectivity"),
+            "Invalid mob/member_status response",
+        )
+        kickoff = self._optional_dict_field(
+            result,
+            "kickoff",
+            "Invalid mob/member_status response",
         )
         return {
             "status": self._require_string_field(
                 result,
                 "status",
+                "Invalid mob/member_status response",
+            ),
+            # The opaque member handle is runtime-owned: read it from the
+            # payload rather than synthesizing it client-side from
+            # {mob_id, agent_identity}.
+            "member_ref": self._require_string_field(
+                result,
+                "member_ref",
                 "Invalid mob/member_status response",
             ),
             **(
@@ -2356,7 +2377,7 @@ class MeerkatClient:
                 if result.get("error") is not None
                 else {}
             ),
-            "tokens_used": self._require_number_field(
+            "tokens_used": self._require_non_negative_integer_field(
                 result,
                 "tokens_used",
                 "Invalid mob/member_status response",
@@ -2372,13 +2393,14 @@ class MeerkatClient:
                 else {}
             ),
             **(
-                {"peer_connectivity": result["peer_connectivity"]}
-                if isinstance(result.get("peer_connectivity"), dict)
+                {"peer_connectivity": peer_connectivity}
+                if peer_connectivity is not None
                 else {}
             ),
+            **({"kickoff": kickoff} if kickoff is not None else {}),
             **(
-                {"kickoff": result["kickoff"]}
-                if isinstance(result.get("kickoff"), dict)
+                {"external_member": result["external_member"]}
+                if "external_member" in result
                 else {}
             ),
             # Preserve `current_session_id` as diagnostic status/continuity data only.
@@ -2412,6 +2434,15 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/wait_kickoff response: member entry must be an object",
                 )
+            peer_connectivity = self._parse_mob_peer_connectivity(
+                entry.get("peer_connectivity"),
+                "Invalid mob/wait_kickoff response",
+            )
+            kickoff = self._optional_dict_field(
+                entry,
+                "kickoff",
+                "Invalid mob/wait_kickoff response",
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2434,7 +2465,7 @@ class MeerkatClient:
                         if entry.get("error") is not None
                         else {}
                     ),
-                    "tokens_used": self._require_number_field(
+                    "tokens_used": self._require_non_negative_integer_field(
                         entry,
                         "tokens_used",
                         "Invalid mob/wait_kickoff response",
@@ -2445,15 +2476,11 @@ class MeerkatClient:
                         "Invalid mob/wait_kickoff response",
                     ),
                     **(
-                        {"peer_connectivity": entry["peer_connectivity"]}
-                        if isinstance(entry.get("peer_connectivity"), dict)
+                        {"peer_connectivity": peer_connectivity}
+                        if peer_connectivity is not None
                         else {}
                     ),
-                    **(
-                        {"kickoff": entry["kickoff"]}
-                        if isinstance(entry.get("kickoff"), dict)
-                        else {}
-                    ),
+                    **({"kickoff": kickoff} if kickoff is not None else {}),
                 }
             )
         return normalized
@@ -2481,6 +2508,15 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/wait_ready response: member entry must be an object",
                 )
+            peer_connectivity = self._parse_mob_peer_connectivity(
+                entry.get("peer_connectivity"),
+                "Invalid mob/wait_ready response",
+            )
+            kickoff = self._optional_dict_field(
+                entry,
+                "kickoff",
+                "Invalid mob/wait_ready response",
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -2503,7 +2539,7 @@ class MeerkatClient:
                         if entry.get("error") is not None
                         else {}
                     ),
-                    "tokens_used": self._require_number_field(
+                    "tokens_used": self._require_non_negative_integer_field(
                         entry,
                         "tokens_used",
                         "Invalid mob/wait_ready response",
@@ -2514,15 +2550,11 @@ class MeerkatClient:
                         "Invalid mob/wait_ready response",
                     ),
                     **(
-                        {"peer_connectivity": entry["peer_connectivity"]}
-                        if isinstance(entry.get("peer_connectivity"), dict)
+                        {"peer_connectivity": peer_connectivity}
+                        if peer_connectivity is not None
                         else {}
                     ),
-                    **(
-                        {"kickoff": entry["kickoff"]}
-                        if isinstance(entry.get("kickoff"), dict)
-                        else {}
-                    ),
+                    **({"kickoff": kickoff} if kickoff is not None else {}),
                 }
             )
         return normalized
@@ -2561,7 +2593,11 @@ class MeerkatClient:
             )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
-            "tokens_used": int(result.get("tokens_used", 0)),
+            "tokens_used": self._require_non_negative_integer_field(
+                result,
+                "tokens_used",
+                "Invalid mob/spawn_helper response",
+            ),
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }
@@ -2604,7 +2640,11 @@ class MeerkatClient:
             )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
-            "tokens_used": int(result.get("tokens_used", 0)),
+            "tokens_used": self._require_non_negative_integer_field(
+                result,
+                "tokens_used",
+                "Invalid mob/fork_helper response",
+            ),
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }
@@ -3904,6 +3944,91 @@ class MeerkatClient:
         raise MeerkatError("INVALID_RESPONSE", context)
 
     @staticmethod
+    def _parse_mob_peer_connectivity_snapshot(
+        raw: Any, context: str
+    ) -> MobPeerConnectivitySnapshot:
+        if not isinstance(raw, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: peer_connectivity.snapshot must be object",
+            )
+        unreachable_raw = raw.get("unreachable_peers")
+        unreachable_peers: list[MobUnreachablePeer] = []
+        if unreachable_raw is not None:
+            if not isinstance(unreachable_raw, list):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: peer_connectivity.snapshot.unreachable_peers must be array",
+                )
+            for entry in unreachable_raw:
+                if not isinstance(entry, dict):
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        f"{context}: peer_connectivity.snapshot.unreachable_peers "
+                        "entry must be object",
+                    )
+                peer_entry: MobUnreachablePeer = {
+                    "peer": MeerkatClient._require_string_field(
+                        entry, "peer", context
+                    ),
+                }
+                reason = MeerkatClient._optional_string_field(
+                    entry, "reason", context
+                )
+                if reason is not None:
+                    peer_entry["reason"] = reason
+                unreachable_peers.append(peer_entry)
+        return {
+            "reachable_peer_count": MeerkatClient._require_non_negative_integer_field(
+                raw,
+                "reachable_peer_count",
+                context,
+                "peer_connectivity.snapshot.reachable_peer_count",
+            ),
+            "unknown_peer_count": MeerkatClient._require_non_negative_integer_field(
+                raw,
+                "unknown_peer_count",
+                context,
+                "peer_connectivity.snapshot.unknown_peer_count",
+            ),
+            "unreachable_peers": unreachable_peers,
+        }
+
+    @staticmethod
+    def _parse_mob_peer_connectivity(
+        raw: Any, context: str
+    ) -> MobPeerConnectivity | None:
+        """Fail-closed parser for the tri-state ``peer_connectivity``
+        projection. Switches on the variant ``status`` tag and raises on any
+        unknown tag rather than coalescing it into a permissive default.
+        Absent connectivity (the field was omitted) yields ``None``. Mirrors
+        the web SDK ``parseMobPeerConnectivity``.
+        """
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: peer_connectivity must be object",
+            )
+        status = raw.get("status")
+        if status == "not_applicable":
+            return {"status": "not_applicable"}
+        if status == "probe_timed_out":
+            return {"status": "probe_timed_out"}
+        if status == "known":
+            return {
+                "status": "known",
+                "snapshot": MeerkatClient._parse_mob_peer_connectivity_snapshot(
+                    raw.get("snapshot"), context
+                ),
+            }
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: unknown peer_connectivity status {status!r}",
+        )
+
+    @staticmethod
     def _require_dict(raw: Any, field: str, context: str) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
@@ -3932,6 +4057,33 @@ class MeerkatClient:
         return value
 
     @staticmethod
+    def _require_non_negative_integer_field(
+        raw: dict[str, Any],
+        field: str,
+        context: str,
+        display_field: str | None = None,
+    ) -> int:
+        """Return a required wire count/total field (Rust ``usize``/``u64``).
+
+        Delegates the base number check to ``_require_number_field``; a
+        present value that is fractional or negative can never be a valid
+        unsigned integer, so it is a contract violation and raises
+        ``INVALID_RESPONSE`` rather than being accepted as an
+        any-finite-number. Mirrors the web SDK
+        ``requireNonNegativeIntegerField`` and the TypeScript SDK
+        ``requireNonNegativeIntegerField``.
+        """
+        value = MeerkatClient._require_number_field(
+            raw, field, context, display_field
+        )
+        if value < 0 or (isinstance(value, float) and not value.is_integer()):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: {display_field or field} must be a non-negative integer",
+            )
+        return int(value)
+
+    @staticmethod
     def _require_bool_field(raw: dict[str, Any], field: str, context: str) -> bool:
         value = raw.get(field)
         if not isinstance(value, bool):
@@ -3954,6 +4106,27 @@ class MeerkatClient:
         if not isinstance(value, str):
             raise MeerkatError(
                 "INVALID_RESPONSE", f"{context}: {field} must be string"
+            )
+        return value
+
+    @staticmethod
+    def _optional_dict_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> dict[str, Any] | None:
+        """Return an optional wire object, failing closed on malformed shapes.
+
+        An absent or ``null`` field yields ``None``; a field that is
+        *present-but-non-object* is a contract violation and raises
+        ``INVALID_RESPONSE`` rather than being silently dropped. Mirrors the
+        web SDK ``optionalRecordField`` and the TypeScript SDK
+        ``requireRecord``-on-present policy.
+        """
+        value = raw.get(field)
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: {field} must be object"
             )
         return value
 

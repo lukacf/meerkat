@@ -341,7 +341,7 @@ mod tests {
         );
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
-        let bundle = PersistenceBundle::new(session_store, Some(runtime_store), blob_store);
+        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store);
 
         let factory = AgentFactory::new(root.join("sessions"));
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());

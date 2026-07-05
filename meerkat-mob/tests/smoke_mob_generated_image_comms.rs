@@ -235,7 +235,7 @@ async fn setup_generated_image_comms_mob(
         builder,
         8,
         store_dyn,
-        Some(runtime_store),
+        runtime_store,
         blob_store,
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
@@ -286,7 +286,7 @@ async fn setup_image_relay_mob(
         builder,
         8,
         store_dyn,
-        Some(runtime_store),
+        runtime_store,
         blob_store,
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();

@@ -70,6 +70,8 @@ import {
   type MobRunParams,
   type MobRunResult,
   type MobRunResultParams,
+  type MobMemberParams,
+  type MobMemberStatusResult,
   type MobSpawnManyParams,
   type MobSpawnManyResult,
   type WireLiveAdapterObservation,
@@ -162,11 +164,16 @@ import {
   type MemberDeliveryReceipt,
   type MemberSendOptions,
   type MobHandlingMode,
+  type MobHelperResult,
   type MobKickoffMemberSnapshot,
   type MobKickoffWaitOptions,
+  type MobMemberSnapshot,
+  type MobPeerConnectivity,
+  type MobPeerConnectivitySnapshot,
   type MobReadyMemberSnapshot,
   type MobReadyWaitOptions,
   type MobPeerTarget,
+  type MobUnreachablePeer,
 } from "./mob.js";
 import { parseCoreEvent } from "./events.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
@@ -1894,54 +1901,42 @@ export class MeerkatClient {
   async mobMemberStatus(
     mobId: string,
     agentIdentity: string,
-  ): Promise<{
-    status: string;
-    outputPreview?: string;
-    error?: string;
-    tokensUsed: number;
-    isFinal: boolean;
-    peerConnectivity?: {
-      reachablePeerCount: number;
-      unknownPeerCount: number;
-      unreachablePeers: Array<{ peer: string; reason?: string }>;
-    };
-    resolvedCapabilities?: ResolvedModelCapabilities;
-    /** Diagnostic bridge-session id for status/continuity only. */
-    currentSessionId?: string;
-  }> {
-    const result = await this.request("mob/member_status", {
+  ): Promise<MobMemberSnapshot> {
+    const params: MobMemberParams = {
       mob_id: mobId,
       agent_identity: agentIdentity,
-    });
-    const rawConnectivity =
-      result.peer_connectivity && typeof result.peer_connectivity === "object"
-        ? (result.peer_connectivity as Record<string, unknown>)
-        : undefined;
-    return {
+    };
+    const result = await this.request<
+      Partial<MobMemberStatusResult> & Record<string, unknown>
+    >("mob/member_status", params);
+    const snapshot: MobMemberSnapshot = {
       status: MeerkatClient.parseWireMobMemberStatus(
         result.status,
         "Invalid mob/member_status response: missing or invalid status",
       ),
+      // The opaque member handle is runtime-owned: read it from the payload
+      // rather than synthesizing it client-side from {mobId, agentIdentity}.
+      memberRef: MeerkatClient.requireStringField(
+        result,
+        "member_ref",
+        "Invalid mob/member_status response",
+      ),
       outputPreview: result.output_preview != null ? String(result.output_preview) : undefined,
       error: result.error != null ? String(result.error) : undefined,
-      tokensUsed: Number(result.tokens_used ?? 0),
-      isFinal: Boolean(result.is_final),
-      peerConnectivity: rawConnectivity
-        ? {
-            reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
-            unknownPeerCount: Number(rawConnectivity.unknown_peer_count ?? 0),
-            unreachablePeers: Array.isArray(rawConnectivity.unreachable_peers)
-              ? rawConnectivity.unreachable_peers.map((peer) => {
-                  const rawPeer =
-                    peer && typeof peer === "object" ? (peer as Record<string, unknown>) : {};
-                  return {
-                    peer: String(rawPeer.peer ?? ""),
-                    reason: rawPeer.reason != null ? String(rawPeer.reason) : undefined,
-                  };
-                })
-              : [],
-          }
-        : undefined,
+      tokensUsed: MeerkatClient.requireNonNegativeIntegerField(
+        result,
+        "tokens_used",
+        "Invalid mob/member_status response",
+      ),
+      isFinal: MeerkatClient.requireBooleanField(
+        result,
+        "is_final",
+        "Invalid mob/member_status response",
+      ),
+      peerConnectivity: MeerkatClient.parseMobPeerConnectivity(
+        result.peer_connectivity,
+        "Invalid mob/member_status response",
+      ),
       resolvedCapabilities: MeerkatClient.parseResolvedModelCapabilities(
         result.resolved_capabilities,
       ),
@@ -1950,6 +1945,17 @@ export class MeerkatClient {
           ? result.current_session_id
           : undefined,
     };
+    if (result.kickoff !== undefined && result.kickoff !== null) {
+      snapshot.kickoff = MeerkatClient.requireRecord(
+        result.kickoff,
+        "kickoff",
+        "Invalid mob/member_status response",
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(result, "external_member")) {
+      snapshot.externalMember = result.external_member;
+    }
+    return snapshot;
   }
 
   /**
@@ -2103,7 +2109,7 @@ export class MeerkatClient {
         "status",
         "Invalid mob/wait_kickoff response",
       );
-      const tokensUsed = MeerkatClient.requireNumberField(
+      const tokensUsed = MeerkatClient.requireNonNegativeIntegerField(
         member,
         "tokens_used",
         "Invalid mob/wait_kickoff response",
@@ -2113,10 +2119,6 @@ export class MeerkatClient {
         "is_final",
         "Invalid mob/wait_kickoff response",
       );
-      const rawConnectivity =
-        member.peer_connectivity && typeof member.peer_connectivity === "object"
-          ? (member.peer_connectivity as Record<string, unknown>)
-          : undefined;
       return {
         agentIdentity,
         status,
@@ -2125,22 +2127,10 @@ export class MeerkatClient {
         error: member.error != null ? String(member.error) : undefined,
         tokensUsed,
         isFinal,
-        peerConnectivity: rawConnectivity
-          ? {
-              reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
-              unknownPeerCount: Number(rawConnectivity.unknown_peer_count ?? 0),
-              unreachablePeers: Array.isArray(rawConnectivity.unreachable_peers)
-                ? rawConnectivity.unreachable_peers.map((peer) => {
-                    const rawPeer =
-                      peer && typeof peer === "object" ? (peer as Record<string, unknown>) : {};
-                    return {
-                      peer: String(rawPeer.peer ?? ""),
-                      reason: rawPeer.reason != null ? String(rawPeer.reason) : undefined,
-                    };
-                  })
-                : [],
-            }
-          : undefined,
+        peerConnectivity: MeerkatClient.parseMobPeerConnectivity(
+          member.peer_connectivity,
+          "Invalid mob/wait_kickoff response",
+        ),
       };
     });
   }
@@ -2174,7 +2164,7 @@ export class MeerkatClient {
         "status",
         "Invalid mob/wait_ready response",
       );
-      const tokensUsed = MeerkatClient.requireNumberField(
+      const tokensUsed = MeerkatClient.requireNonNegativeIntegerField(
         member,
         "tokens_used",
         "Invalid mob/wait_ready response",
@@ -2184,10 +2174,6 @@ export class MeerkatClient {
         "is_final",
         "Invalid mob/wait_ready response",
       );
-      const rawConnectivity =
-        member.peer_connectivity && typeof member.peer_connectivity === "object"
-          ? (member.peer_connectivity as Record<string, unknown>)
-          : undefined;
       return {
         agentIdentity,
         status,
@@ -2196,22 +2182,10 @@ export class MeerkatClient {
         error: member.error != null ? String(member.error) : undefined,
         tokensUsed,
         isFinal,
-        peerConnectivity: rawConnectivity
-          ? {
-              reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
-              unknownPeerCount: Number(rawConnectivity.unknown_peer_count ?? 0),
-              unreachablePeers: Array.isArray(rawConnectivity.unreachable_peers)
-                ? rawConnectivity.unreachable_peers.map((peer) => {
-                    const rawPeer =
-                      peer && typeof peer === "object" ? (peer as Record<string, unknown>) : {};
-                    return {
-                      peer: String(rawPeer.peer ?? ""),
-                      reason: rawPeer.reason != null ? String(rawPeer.reason) : undefined,
-                    };
-                  })
-                : [],
-            }
-          : undefined,
+        peerConnectivity: MeerkatClient.parseMobPeerConnectivity(
+          member.peer_connectivity,
+          "Invalid mob/wait_ready response",
+        ),
       };
     });
   }
@@ -2241,12 +2215,7 @@ export class MeerkatClient {
       runtimeMode?: string;
       backend?: string;
     },
-  ): Promise<{
-    output?: string;
-    tokensUsed: number;
-    agentIdentity: string;
-    memberRef: MobMemberRef;
-  }> {
+  ): Promise<MobHelperResult> {
     const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/spawn_helper", {
       mob_id: mobId,
@@ -2273,7 +2242,11 @@ export class MeerkatClient {
     }
     return {
       output: result.output != null ? String(result.output) : undefined,
-      tokensUsed: Number(result.tokens_used ?? 0),
+      tokensUsed: MeerkatClient.requireNonNegativeIntegerField(
+        result,
+        "tokens_used",
+        "Invalid mob/spawn_helper response",
+      ),
       agentIdentity: resultIdentity,
       memberRef,
     };
@@ -2292,12 +2265,7 @@ export class MeerkatClient {
       runtimeMode?: string;
       backend?: string;
     },
-  ): Promise<{
-    output?: string;
-    tokensUsed: number;
-    agentIdentity: string;
-    memberRef: MobMemberRef;
-  }> {
+  ): Promise<MobHelperResult> {
     const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/fork_helper", {
       mob_id: mobId,
@@ -2326,7 +2294,11 @@ export class MeerkatClient {
     }
     return {
       output: result.output != null ? String(result.output) : undefined,
-      tokensUsed: Number(result.tokens_used ?? 0),
+      tokensUsed: MeerkatClient.requireNonNegativeIntegerField(
+        result,
+        "tokens_used",
+        "Invalid mob/fork_helper response",
+      ),
       agentIdentity: resultIdentity,
       memberRef,
     };
@@ -3366,6 +3338,55 @@ export class MeerkatClient {
     return value;
   }
 
+  /**
+   * Require a wire count/total field (Rust `usize`/`u64`). A present value
+   * that is fractional or negative can never be a valid unsigned integer, so
+   * it is a contract violation and fails closed instead of being accepted as
+   * an any-finite-number. Mirrors the web SDK `requireNonNegativeIntegerField`
+   * and Python `_require_non_negative_integer_field`.
+   */
+  private static requireNonNegativeIntegerField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+    displayField = field,
+  ): number {
+    const value = MeerkatClient.requireNumberField(raw, field, context, displayField);
+    if (!Number.isInteger(value) || value < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: ${displayField} must be a non-negative integer`,
+      );
+    }
+    return value;
+  }
+
+  /**
+   * Return an optional wire string, failing closed on malformed shapes.
+   * An absent or `null` field yields `undefined`; a field that is
+   * present-but-non-string is a contract violation and throws
+   * `INVALID_RESPONSE` rather than being coerced with `String(...)`. Mirrors
+   * the web SDK `optionalStringField` and Python `_optional_string_field`.
+   */
+  private static optionalStringField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+    displayField = field,
+  ): string | undefined {
+    const value = raw[field];
+    if (value == null) {
+      return undefined;
+    }
+    if (typeof value !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: ${displayField} must be string`,
+      );
+    }
+    return value;
+  }
+
   private static requireBooleanField(
     raw: Record<string, unknown>,
     field: string,
@@ -3391,6 +3412,94 @@ export class MeerkatClient {
       return raw as WireMobMemberStatus;
     }
     throw new MeerkatError("INVALID_RESPONSE", message);
+  }
+
+  private static parseMobPeerConnectivitySnapshot(
+    raw: unknown,
+    context: string,
+  ): MobPeerConnectivitySnapshot {
+    const record = MeerkatClient.requireRecord(
+      raw,
+      "peer_connectivity.snapshot",
+      context,
+    );
+    const unreachableRaw = record.unreachable_peers;
+    let unreachablePeers: MobUnreachablePeer[] = [];
+    if (unreachableRaw !== undefined) {
+      if (!Array.isArray(unreachableRaw)) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: peer_connectivity.snapshot.unreachable_peers must be array`,
+        );
+      }
+      unreachablePeers = unreachableRaw.map((peer) => {
+        const peerRecord = MeerkatClient.requireRecord(
+          peer,
+          "peer_connectivity.snapshot.unreachable_peers entry",
+          context,
+        );
+        const peerId = MeerkatClient.requireStringField(peerRecord, "peer", context);
+        const reason = MeerkatClient.optionalStringField(
+          peerRecord,
+          "reason",
+          context,
+          "peer_connectivity.snapshot.unreachable_peers entry reason",
+        );
+        return reason === undefined ? { peer: peerId } : { peer: peerId, reason };
+      });
+    }
+    return {
+      reachablePeerCount: MeerkatClient.requireNonNegativeIntegerField(
+        record,
+        "reachable_peer_count",
+        context,
+        "peer_connectivity.snapshot.reachable_peer_count",
+      ),
+      unknownPeerCount: MeerkatClient.requireNonNegativeIntegerField(
+        record,
+        "unknown_peer_count",
+        context,
+        "peer_connectivity.snapshot.unknown_peer_count",
+      ),
+      unreachablePeers,
+    };
+  }
+
+  /**
+   * Fail-closed parser for the tri-state `peer_connectivity` projection.
+   * Switches on the variant `status` tag and THROWS on any unknown tag rather
+   * than coalescing it into a permissive default. Absent connectivity (the
+   * field was omitted) returns `undefined`. Mirrors the web SDK
+   * `parseMobPeerConnectivity` and Python `_parse_mob_peer_connectivity`.
+   */
+  private static parseMobPeerConnectivity(
+    raw: unknown,
+    context: string,
+  ): MobPeerConnectivity | undefined {
+    if (raw == null) {
+      return undefined;
+    }
+    const record = MeerkatClient.requireRecord(raw, "peer_connectivity", context);
+    const status = record.status;
+    switch (status) {
+      case "not_applicable":
+        return { status: "not_applicable" };
+      case "probe_timed_out":
+        return { status: "probe_timed_out" };
+      case "known":
+        return {
+          status: "known",
+          snapshot: MeerkatClient.parseMobPeerConnectivitySnapshot(
+            record.snapshot,
+            context,
+          ),
+        };
+      default:
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: unknown peer_connectivity status ${JSON.stringify(status)}`,
+        );
+    }
   }
 
   /**

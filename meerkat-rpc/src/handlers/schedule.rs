@@ -341,7 +341,7 @@ mod tests {
             10,
             PersistenceBundle::new_with_schedule_store(
                 store,
-                None,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
                 memory_blob_store(),
                 Arc::new(MemoryScheduleStore::new()),
             ),

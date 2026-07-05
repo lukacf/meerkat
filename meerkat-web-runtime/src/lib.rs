@@ -2945,10 +2945,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{Credentials, build_bootstrap_config, extract_verify_and_parse_mobpack};
     use super::{
-        StreamRef, SubscriptionInner, close_subscription, destroy_session_with_services,
-        merge_runtime_system_context_state, mob_destroy_error_value, parse_js_tool_result,
-        parse_mob_event_cursor, parse_mob_lifecycle_action_arg, parse_mobpack,
-        parse_prompt_content_input, poll_subscription, serialize_subscription_item,
+        StreamRef, SubscriptionInner, close_subscription, merge_runtime_system_context_state,
+        parse_js_tool_result, parse_mob_event_cursor, parse_mob_lifecycle_action_arg,
+        parse_mobpack, parse_prompt_content_input, poll_subscription, serialize_subscription_item,
         session_error_envelope, stream_lagged_envelope,
     };
     #[cfg(target_arch = "wasm32")]
@@ -2957,7 +2956,10 @@ mod tests {
         get_session_state, init_runtime_from_config, register_js_tool,
     };
     #[cfg(not(target_arch = "wasm32"))]
-    use super::{build_service_infrastructure, populate_realm_from_api_keys};
+    use super::{
+        build_service_infrastructure, destroy_session_with_services, mob_destroy_error_value,
+        populate_realm_from_api_keys,
+    };
     #[cfg(not(target_arch = "wasm32"))]
     use super::{helper_result_payload, spawn_member_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
@@ -3101,6 +3103,7 @@ capabilities = [{capability_values}]
         assert_eq!(anthropic_backend.base_url, None);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn omitted_auth_binding_resolves_synthesized_global_realm() {
         // MF-2 regression guard. api-keys synthesize the binding section under

@@ -119,11 +119,6 @@ enum SessionCommand {
         request_policy: Box<meerkat_core::SessionLlmRequestPolicy>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
-    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    UpdateKeepAlive {
-        keep_alive: bool,
-        reply_tx: oneshot::Sender<()>,
-    },
     StageToolFilter {
         filter: meerkat_core::ToolFilter,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -2435,36 +2430,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(handle.llm_identity_rx.borrow().clone())
     }
 
-    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    pub(crate) async fn update_session_keep_alive(
-        &self,
-        id: &SessionId,
-        keep_alive: bool,
-    ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::UpdateKeepAlive {
-                keep_alive,
-                reply_tx,
-            })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-        reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped reply channel".to_string(),
-            ))
-        })
-    }
-
     /// Get the comms runtime for a session, if available.
     pub async fn comms_runtime(
         &self,
@@ -3770,10 +3735,6 @@ fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::HotSwapLlmIdentity { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::UpdateKeepAlive { reply_tx, .. } => {
-                let _ = reply_tx.send(());
-            }
             SessionCommand::StageToolFilter { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
@@ -3852,15 +3813,6 @@ async fn session_task<A: SessionAgent>(
                     control.llm_identity_tx.send_replace(*identity);
                 }
                 let _ = reply_tx.send(result);
-                continue;
-            }
-            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-            SessionCommand::UpdateKeepAlive {
-                keep_alive,
-                reply_tx,
-            } => {
-                agent.update_keep_alive(keep_alive);
-                let _ = reply_tx.send(());
                 continue;
             }
             SessionCommand::StageToolFilter { filter, reply_tx } => {

@@ -27,10 +27,15 @@ export { DeferredSession, Session } from "./session.js";
 export type { DeferredTurnOptions } from "./session.js";
 export { Mob } from "./mob.js";
 export type {
+  MobHelperResult,
   MobKickoffMemberSnapshot,
   MobKickoffWaitOptions,
+  MobMemberSnapshot,
+  MobPeerConnectivity,
+  MobPeerConnectivitySnapshot,
   MobReadyMemberSnapshot,
   MobReadyWaitOptions,
+  MobUnreachablePeer,
 } from "./mob.js";
 export { LiveChannel } from "./live.js";
 export type { LiveChannelOptions } from "./live.js";

@@ -236,12 +236,70 @@ mod tests {
         request
     }
 
+    fn catalog_route_turn_request(prompt: &str) -> meerkat_core::service::StartTurnRequest {
+        meerkat_core::service::StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt: prompt.to_string().into(),
+            system_prompt: None,
+            event_tx: None,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::runtime_metadata(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    async fn run_committed_runtime_turn(
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+        session_id: &meerkat::SessionId,
+        prompt: &str,
+    ) {
+        let output = service
+            .apply_runtime_turn(
+                session_id,
+                meerkat_core::RunId::new(),
+                catalog_route_turn_request(prompt),
+                meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                vec![meerkat_core::InputId::new()],
+            )
+            .await
+            .expect("runtime turn should complete");
+        let snapshot = output
+            .session_snapshot
+            .clone()
+            .expect("runtime turn should produce a session snapshot");
+        runtime_store
+            .atomic_apply(
+                &meerkat_runtime::LogicalRuntimeId::for_session(session_id),
+                Some(meerkat_runtime::store::SessionDelta {
+                    session_snapshot: snapshot.clone(),
+                }),
+                output.receipt.clone().into_sequenced(0),
+                Vec::new(),
+                Some(session_id.clone()),
+            )
+            .await
+            .expect("machine-owned runtime output commit should succeed");
+        service
+            .checkpoint_committed_runtime_session_snapshot(session_id, &snapshot)
+            .await
+            .expect("committed runtime snapshot should project to the session store");
+    }
+
     fn catalog_route_service(
         store_path: impl Into<std::path::PathBuf>,
         store: Arc<dyn meerkat::SessionStore>,
         dispatcher: Arc<DeferredCatalogDispatcher>,
         client: Arc<CatalogLoadClient>,
-    ) -> PersistentSessionService<FactoryAgentBuilder> {
+    ) -> (
+        PersistentSessionService<FactoryAgentBuilder>,
+        Arc<dyn meerkat_runtime::RuntimeStore>,
+    ) {
         let factory = AgentFactory::new(store_path)
             .builtins(false)
             .shell(false)
@@ -252,7 +310,16 @@ mod tests {
         let tool_dispatcher: Arc<dyn AgentToolDispatcher> = dispatcher;
         builder.default_llm_client = Some(llm_client);
         builder.default_tool_dispatcher = Some(tool_dispatcher);
-        PersistentSessionService::new(builder, 4, store, None, Arc::new(MemoryBlobStore::new()))
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            builder,
+            4,
+            store,
+            Arc::clone(&runtime_store),
+            Arc::new(MemoryBlobStore::new()),
+        );
+        (service, runtime_store)
     }
 
     #[tokio::test]
@@ -261,7 +328,7 @@ mod tests {
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let persistence = PersistenceBundle::new(
             Arc::clone(&session_store),
-            None,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
         );
 
@@ -304,7 +371,7 @@ mod tests {
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let persistence = PersistenceBundle::new(
             Arc::clone(&session_store),
-            None,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
         );
 
@@ -351,7 +418,7 @@ mod tests {
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let dispatcher = Arc::new(DeferredCatalogDispatcher::new());
         let client = Arc::new(CatalogLoadClient::default());
-        let service = catalog_route_service(
+        let (service, runtime_store) = catalog_route_service(
             temp.path().join("sessions"),
             Arc::clone(&session_store),
             Arc::clone(&dispatcher),
@@ -359,13 +426,17 @@ mod tests {
         );
 
         let created = service
-            .create_session(catalog_route_request(
-                "load the deferred catalog tool",
-                InitialTurnPolicy::RunImmediately,
-            ))
+            .create_session(catalog_route_request("", InitialTurnPolicy::Defer))
             .await
-            .expect("real catalog-load route should complete");
+            .expect("deferred create should stage the session");
         let id = created.session_id;
+        run_committed_runtime_turn(
+            &service,
+            &runtime_store,
+            &id,
+            "load the deferred catalog tool",
+        )
+        .await;
 
         let seen_tools = client.seen_tools();
         assert!(
@@ -411,7 +482,7 @@ mod tests {
         );
 
         let restarted_client = Arc::new(CatalogLoadClient::default());
-        let restarted = catalog_route_service(
+        let (restarted, _restarted_runtime_store) = catalog_route_service(
             temp.path().join("sessions-restarted"),
             Arc::clone(&session_store),
             Arc::clone(&dispatcher),

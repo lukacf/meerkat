@@ -287,7 +287,7 @@ pub use meerkat_core::{
     SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionSummary, SessionUsage,
     SessionView, StartTurnRequest,
 };
-pub use meerkat_runtime::{Input, PromptInput};
+pub use meerkat_runtime::{InMemoryRuntimeStore, Input, PromptInput, RuntimeStore};
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;
 // PersistentSessionService: used by runtime-backed surfaces (REST, RPC, MCP).

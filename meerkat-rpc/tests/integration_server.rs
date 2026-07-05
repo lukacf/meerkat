@@ -144,7 +144,11 @@ fn spawn_test_server() -> (
         factory,
         config,
         10,
-        meerkat::PersistenceBundle::new(store, None, blob_store),
+        meerkat::PersistenceBundle::new(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            blob_store,
+        ),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
@@ -189,7 +193,11 @@ fn spawn_test_server_with_client(
         factory,
         config,
         10,
-        meerkat::PersistenceBundle::new(store, None, blob_store),
+        meerkat::PersistenceBundle::new(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            blob_store,
+        ),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(

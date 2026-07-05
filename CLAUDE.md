@@ -314,11 +314,12 @@ make audit       # Security audit via cargo-deny
 - `int-heavy` ×3 / `int-rest` ×7 — integration tests split by build scope: `-p meerkat-integration-tests` shards plus crate-group lanes (mob ×2, core-machine, client-session, complement group ×3), so no job links every integration binary
 - `e2e-fast` — deterministic end-to-end lane
 - `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, machine-kernel staleness
-- `wasm-check` — wasm32 cargo check (every code change)
+- `wasm-check` — wasm32 cargo check + clippy `--all-targets` (every code change)
+- `wasm-contract` — executes the browser contract test via `wasm-pack test --headless --chrome` (only when wasm-relevant paths changed: meerkat-web-runtime, meerkat-contracts, sdks/web, the workflow itself)
 - `sdk-web` — full Web SDK suite (only when SDK-relevant paths changed)
 - `audit` — cargo-deny
 
-**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint` (clippy `--all-targets`), `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `test-sdk-web` (unconditional), `check-rust-release-packaging`, cargo-deny sweep.
+**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint` (clippy `--all-targets`), `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `test-sdk-web` (unconditional), `wasm-contract` (unconditional), `check-rust-release-packaging`, cargo-deny sweep.
 
 The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io) covers Linux/macOS binaries; Windows release binaries build on GitHub-hosted runners (the org pool has no self-hosted Windows RBE executors).
 

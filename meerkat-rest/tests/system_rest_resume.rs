@@ -55,7 +55,7 @@ async fn inner_test_rest_resume_metadata() {
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence = PersistenceBundle::new(
         store.clone(),
-        None,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     );
     let runtime_adapter = persistence.runtime_adapter();
@@ -191,7 +191,7 @@ async fn inner_test_rest_resume_metadata() {
     builder2.default_llm_client = Some(Arc::new(TestClient::default()));
     let persistence2 = PersistenceBundle::new(
         store.clone(),
-        None,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     );
     let runtime_adapter2 = persistence2.runtime_adapter();

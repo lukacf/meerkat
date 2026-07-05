@@ -186,6 +186,13 @@ split-debuginfo = "off"
 codegen-units = 16
 strip = "symbols"
 
+# The generated machine catalog blows past rustc's resource envelope at
+# opt-level 3: STATUS_STACK_BUFFER_OVERRUN (rustc stack overflow) on Windows
+# and SIGKILL (OOM) on hosted macOS runners during release binary builds.
+# The crate is schema data + validation, not a runtime hot path.
+[profile.release.package.meerkat-machine-schema]
+opt-level = 2
+
 
 [workspace.lints.rust]
 unsafe_code = "deny"

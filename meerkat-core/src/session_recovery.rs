@@ -565,6 +565,10 @@ pub fn resolve_effective_turn_config(
             None => metadata.provider_params.clone(),
         },
         external_tools: context.external_tools,
+        // Caller-scoped build input, same treatment as `custom_models`: the
+        // owning surface re-supplies declarative MCP servers on resume (mob
+        // members re-derive them from the durable profile).
+        mcp_servers: Vec::new(),
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
         blob_store_override: None,
         llm_client_override: context.llm_client_override,

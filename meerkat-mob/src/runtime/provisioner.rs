@@ -864,6 +864,38 @@ impl SessionBackend {
                 "SessionBackend::archive_with_authority_then_unregister start"
             );
             self.retire_runtime_before_archive(session_id).await?;
+
+            // Ownership read on the owning authority BEFORE archiving: a
+            // member adopted from a host-owned session service
+            // (`MemberLaunchMode::Resume` over a store the mob does not own,
+            // e.g. an embedder's console sessions) legitimately has no
+            // durable record here. For those, disposal means retiring the
+            // runtime session and releasing the binding — the durable
+            // session's lifecycle belongs to its host, and archiving through
+            // the mob authority is not this mob's to perform. The
+            // NotFound-with-registered-runtime escalation below stays fully
+            // fail-closed for sessions the authority DOES own (a mid-archive
+            // record loss is a genuine split-state, never tolerated).
+            if !self
+                .session_service
+                .session_known_to_archive_authority(session_id)
+                .await?
+                && let Some(adapter) = &self.runtime_adapter
+                && adapter.contains_session(session_id).await
+            {
+                tracing::info!(
+                    session_id = %session_id,
+                    "mob archive authority does not own this session's durable record; completing host-owned disposal (runtime retire + binding release)"
+                );
+                crate::runtime::session_service::retire_runtime_session_for_archive(
+                    adapter.as_ref(),
+                    session_id,
+                )
+                .await?;
+                self.unregister_runtime_session_binding(session_id).await;
+                return Ok(());
+            }
+
             tracing::info!(
                 session_id = %session_id,
                 "SessionBackend::archive_with_authority_then_unregister archiving session service"

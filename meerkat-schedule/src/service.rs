@@ -82,6 +82,21 @@ impl ScheduleService {
             .map_err(Into::into)
     }
 
+    /// List non-deleted schedules with per-row tolerance: rows that fail
+    /// typed recovery are skipped and surfaced as typed faults instead of
+    /// failing the listing wholesale (the driver's scan path).
+    pub async fn list_with_row_faults(
+        &self,
+    ) -> Result<(Vec<Schedule>, Vec<crate::ScheduleStoreRowFault>), ScheduleDomainError> {
+        self.store
+            .list_schedules_with_row_faults(ScheduleFilter {
+                include_deleted: false,
+                ..ScheduleFilter::default()
+            })
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn list_filtered(
         &self,
         filter: ScheduleFilter,

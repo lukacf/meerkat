@@ -149,6 +149,13 @@ pub trait RuntimeDriver: Send + Sync {
     /// Get the persisted shell+seed bundle for a specific input.
     fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState>;
 
+    /// Resolve the machine-owned idempotency-key binding to its input id.
+    ///
+    /// Read-only reconciliation mirror of the generated admission map — it
+    /// decides nothing and never registers a binding (the accept-path
+    /// admission resolution stays the only mutator).
+    fn input_id_for_idempotency_key(&self, idempotency_key: &str) -> Option<InputId>;
+
     /// List all non-terminal input IDs.
     fn active_input_ids(&self) -> Vec<InputId>;
 }

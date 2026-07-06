@@ -222,9 +222,15 @@ async fn sqlite_public_effect_tampering_cannot_forge_supersession()
     Ok(())
 }
 
+/// The claim scan is bounded in SQL by the phase COLUMN — a write-coherent
+/// projection of the canonical schedule JSON — so terminal history never
+/// pays per-tick deserialization (ask 19). Within everything the prefilter
+/// admits, the CANONICAL JSON stays the deciding authority: a schedule whose
+/// canonical state is a tombstone claims nothing even when its projection
+/// column still reads 'active'.
 #[tokio::test]
-async fn sqlite_claim_due_reads_canonical_schedule_phase() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn sqlite_claim_due_canonical_phase_decides_within_the_column_prefilter()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("schedule.sqlite3");
     let store = SqliteScheduleStore::open(&path)?;
@@ -240,12 +246,28 @@ async fn sqlite_claim_due_reads_canonical_schedule_phase() -> Result<(), Box<dyn
         Utc::now() - Duration::seconds(1),
     )
     .expect("due occurrence planning should pass generated authority");
-    let occurrence = occurrence_write.occurrence().clone();
     store.commit_occurrence_write(occurrence_write).await?;
 
+    // Canonically delete the schedule, then force the projection COLUMN back
+    // to 'active' out of band: the prefilter admits the row, and the
+    // canonical tombstone must still refuse the claim.
+    let deleted = meerkat_schedule::Schedule::apply(
+        Some(schedule.clone()),
+        ScheduleLifecycleInput::Delete { at_utc: Utc::now() },
+    )
+    .expect("delete should pass generated authority");
+    store
+        .commit_schedule_mutation(deleted.into_authorized_write(), Vec::new())
+        .await?;
     let conn = Connection::open(&path)?;
     conn.execute(
-        "UPDATE schedule_schedules SET phase = 'deleted' WHERE schedule_id = ?1",
+        "UPDATE schedule_schedules SET phase = 'active' WHERE schedule_id = ?1",
+        [schedule.schedule_id.to_string()],
+    )?;
+    // Re-arm the occurrence row the tombstone superseded so the prefilter
+    // would admit it if the canonical phase did not refuse first.
+    conn.execute(
+        "UPDATE schedule_occurrences SET phase = 'pending' WHERE schedule_id = ?1",
         [schedule.schedule_id.to_string()],
     )?;
     drop(conn);
@@ -258,7 +280,46 @@ async fn sqlite_claim_due_reads_canonical_schedule_phase() -> Result<(), Box<dyn
         })
         .await?;
 
-    assert_eq!(claimed.claimed.len(), 1);
-    assert_eq!(claimed.claimed[0].occurrence_id, occurrence.occurrence_id);
+    assert!(
+        claimed.claimed.is_empty(),
+        "a canonical tombstone must not claim even when its projection column reads active"
+    );
+    Ok(())
+}
+
+/// Every schedule write keeps the phase COLUMN coherent with the canonical
+/// JSON — the invariant that makes bounding the claim scan on the column a
+/// legitimate projection read.
+#[tokio::test]
+async fn sqlite_schedule_writes_keep_phase_column_coherent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("schedule.sqlite3");
+    let store = SqliteScheduleStore::open(&path)?;
+
+    let create_mutator = sample_schedule_mutator();
+    let schedule = create_mutator.schedule.clone();
+    store
+        .commit_schedule_write(create_mutator.into_authorized_write())
+        .await?;
+    let column_phase = |path: &std::path::Path| -> Result<String, Box<dyn std::error::Error>> {
+        let conn = Connection::open(path)?;
+        Ok(conn.query_row(
+            "SELECT phase FROM schedule_schedules WHERE schedule_id = ?1",
+            [schedule.schedule_id.to_string()],
+            |row| row.get(0),
+        )?)
+    };
+    assert_eq!(column_phase(&path)?, "active");
+
+    let deleted = meerkat_schedule::Schedule::apply(
+        Some(schedule.clone()),
+        ScheduleLifecycleInput::Delete { at_utc: Utc::now() },
+    )
+    .expect("delete should pass generated authority");
+    store
+        .commit_schedule_mutation(deleted.into_authorized_write(), Vec::new())
+        .await?;
+    assert_eq!(column_phase(&path)?, "deleted");
     Ok(())
 }

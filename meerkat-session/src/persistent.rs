@@ -5225,13 +5225,19 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(format!(
-            "interrupt for runtime-backed session {id} must route through MeerkatMachine::hard_cancel_current_run"
+            "interrupt for runtime-backed session {id} is machine-owned: callers interrupt through \
+             MeerkatMachine::hard_cancel_current_run; executor interrupt-handle implementations must \
+             apply the cancel to the live agent via interrupt_with_machine_authority and must never \
+             re-enter the machine"
         )))
     }
 
     async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(format!(
-            "cancel_after_boundary for runtime-backed session {id} must route through MeerkatMachine::cancel_after_boundary"
+            "cancel_after_boundary for runtime-backed session {id} is machine-owned: callers cancel \
+             through MeerkatMachine::cancel_after_boundary; executor boundary-handle implementations \
+             must apply the cancel to the live agent via cancel_after_boundary_with_machine_authority \
+             and must never re-enter the machine"
         )))
     }
 

@@ -513,6 +513,147 @@ mod tests {
             .expect("attached prompt should finish after release");
     }
 
+    /// M1 regression (meerkat-studio P0): `force_cancel_member` →
+    /// `interrupt_member` → `MeerkatMachine::cancel_after_boundary` used to
+    /// stack-overflow (SIGABRT) when the member's boundary handle re-entered
+    /// the machine mid-turn — the exact shape of an embedder session service
+    /// that routes its live cancel back through the machine. The machine's
+    /// `boundary_cancel_dispatch_pending` fact must bound the ring to one
+    /// dispatch and the interrupt must return Ok with the process alive.
+    #[tokio::test]
+    async fn local_bridge_interrupt_mid_turn_with_reentrant_boundary_handle_converges() {
+        struct ReentrantBoundaryHandle {
+            machine: Arc<MeerkatMachine>,
+            session_id: SessionId,
+            handle_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutorBoundaryHandle for ReentrantBoundaryHandle {
+            async fn cancel_after_boundary(
+                &self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                let laps = self.handle_calls.fetch_add(1, Ordering::SeqCst);
+                // Safety valve: an unfixed regression fails the assertion
+                // instead of overflowing the test worker's stack.
+                if laps >= 5 {
+                    return Ok(());
+                }
+                self.machine
+                    .cancel_after_boundary(&self.session_id)
+                    .await
+                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+            }
+        }
+
+        struct ReentrantExecutor {
+            machine: Arc<MeerkatMachine>,
+            session_id: SessionId,
+            handle_calls: Arc<AtomicUsize>,
+            apply_started: Arc<Notify>,
+            allow_finish: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for ReentrantExecutor {
+            fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+                Some(Arc::new(ReentrantBoundaryHandle {
+                    machine: Arc::clone(&self.machine),
+                    session_id: self.session_id.clone(),
+                    handle_calls: Arc::clone(&self.handle_calls),
+                }))
+            }
+
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                self.apply_started.notify_waiters();
+                self.allow_finish.notified().await;
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceiptDraft {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                    },
+                    session_snapshot: None,
+                    terminal: None,
+                })
+            }
+
+            async fn cancel_after_boundary(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let handle_calls = Arc::new(AtomicUsize::new(0));
+        let apply_started = Arc::new(Notify::new());
+        let allow_finish = Arc::new(Notify::new());
+
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(ReentrantExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    handle_calls: Arc::clone(&handle_calls),
+                    apply_started: Arc::clone(&apply_started),
+                    allow_finish: Arc::clone(&allow_finish),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let input =
+            meerkat_runtime::input::Input::Prompt(meerkat_runtime::input::PromptInput::new(
+                "member turn to force-cancel",
+                Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        handling_mode: Some(HandlingMode::Steer),
+                        ..Default::default()
+                    },
+                ),
+            ));
+        let (outcome, _completion) = machine
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("member prompt should be accepted");
+        assert!(outcome.is_accepted());
+        tokio::time::timeout(std::time::Duration::from_secs(1), apply_started.notified())
+            .await
+            .expect("member turn should start running");
+
+        let bridge = LocalMobRuntimeBridge::new(Arc::clone(&machine), session_id);
+        let ack = bridge
+            .interrupt_member()
+            .await
+            .expect("mid-turn interrupt must return without crashing the host");
+        assert!(ack.ok);
+        assert_eq!(
+            handle_calls.load(Ordering::SeqCst),
+            1,
+            "the machine must bound a re-entrant member boundary handle to exactly one dispatch"
+        );
+
+        allow_finish.notify_waiters();
+    }
+
     #[tokio::test]
     async fn local_bridge_authorize_is_noop() {
         let machine = Arc::new(MeerkatMachine::ephemeral());

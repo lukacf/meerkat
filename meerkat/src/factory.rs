@@ -364,6 +364,9 @@ pub struct AgentBuildConfig {
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     /// External tool dispatcher to compose with builtins (e.g., MCP callback tools).
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Declarative MCP server configs materialized by this build into a
+    /// session-owned MCP router composed with `external_tools` and builtins.
+    pub mcp_servers: Vec<meerkat_core::mcp_config::McpServerConfig>,
     /// Serializable tool definitions that can rebuild recoverable
     /// surface-owned dispatchers after persistence or runtime restart.
     pub recoverable_tool_defs: Option<Vec<meerkat_core::ToolDef>>,
@@ -644,6 +647,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
             .field("wait_for_mcp", &self.wait_for_mcp)
+            .field("mcp_servers", &self.mcp_servers)
             .field("runtime_build_mode", &self.runtime_build_mode)
             .field(
                 "initial_tool_visibility_state",
@@ -716,6 +720,7 @@ impl AgentBuildConfig {
             app_context: None,
             additional_instructions: None,
             wait_for_mcp: false,
+            mcp_servers: Vec::new(),
             shell_env: None,
             checkpointer: None,
             call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
@@ -794,6 +799,7 @@ impl AgentBuildConfig {
         self.budget_limits = build.budget_limits.clone();
         self.provider_params = build.provider_params.clone();
         self.external_tools = build.external_tools.clone();
+        self.mcp_servers = build.mcp_servers.clone();
         self.recoverable_tool_defs = build.recoverable_tool_defs.clone();
         self.blob_store_override = build.blob_store_override.clone();
         self.llm_client_override = build
@@ -861,6 +867,7 @@ impl AgentBuildConfig {
             budget_limits: self.budget_limits.clone(),
             provider_params: self.provider_params.clone(),
             external_tools: self.external_tools.clone(),
+            mcp_servers: self.mcp_servers.clone(),
             recoverable_tool_defs: self.recoverable_tool_defs.clone(),
             blob_store_override: self.blob_store_override.clone(),
             llm_client_override: self
@@ -954,6 +961,11 @@ pub enum BuildAgentError {
     /// Tool dispatcher creation failed.
     #[error("Tool dispatcher creation failed: {0}")]
     ToolDispatcher(#[from] CompositeDispatcherError),
+
+    /// Declarative MCP server materialization failed (staging, bring-up, or
+    /// `mcp_servers` requested without the `mcp` feature).
+    #[error("MCP setup failed: {0}")]
+    McpSetup(String),
 
     /// Comms runtime failed to initialize.
     #[error("Comms runtime failed: {0}")]
@@ -4644,6 +4656,58 @@ impl AgentFactory {
         // The feed is obtained from the ops lifecycle registry and consumed
         // directly by the agent boundary for background completion notices.
         let completion_feed = ops_lifecycle.completion_feed();
+
+        // 6d. Materialize declarative MCP servers into a session-owned
+        // router composed with any caller-supplied external tools. The
+        // router is constructed against the build mode's canonical
+        // external-tool surface authority, so the session-time
+        // bind_external_tool_surface_handle below is a ptr-eq no-op instead
+        // of a poisoning rebind; connection waits ride the unconditional
+        // `wait_for_mcp` poll loop like every other external dispatcher.
+        #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+        if !build_config.mcp_servers.is_empty() {
+            let surface_handle: Arc<dyn meerkat_core::ExternalToolSurfaceHandle> =
+                match resolved_mode {
+                    RuntimeBuildMode::SessionOwned(bindings) => {
+                        Arc::clone(bindings.external_tool_surface())
+                    }
+                    _ => Arc::new(
+                        meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
+                    ),
+                };
+            let mut router = meerkat_mcp::McpRouter::new_with_surface_handle(surface_handle);
+            for server in &build_config.mcp_servers {
+                router.stage_add(server.clone()).map_err(|error| {
+                    BuildAgentError::McpSetup(format!(
+                        "stage MCP server '{}': {error}",
+                        server.name
+                    ))
+                })?;
+            }
+            router.apply_staged().await.map_err(|error| {
+                BuildAgentError::McpSetup(format!("apply staged MCP servers: {error}"))
+            })?;
+            let adapter = meerkat_mcp::McpRouterAdapter::new(router);
+            adapter.refresh_tools().await.map_err(|error| {
+                BuildAgentError::McpSetup(format!("refresh MCP tools: {error}"))
+            })?;
+            let adapter: Arc<dyn AgentToolDispatcher> = Arc::new(adapter);
+            build_config.external_tools = Some(match build_config.external_tools.take() {
+                Some(existing) => Arc::new(meerkat_core::gateway::DynamicToolComposite::new(vec![
+                    existing, adapter,
+                ])) as Arc<dyn AgentToolDispatcher>,
+                None => adapter,
+            });
+        }
+        #[cfg(not(all(feature = "mcp", not(target_arch = "wasm32"))))]
+        if !build_config.mcp_servers.is_empty() {
+            // Fail closed: silently dropping requested MCP servers would be
+            // a capability downgrade the caller cannot observe.
+            return Err(BuildAgentError::McpSetup(
+                "mcp_servers were requested but this build lacks the 'mcp' feature (or targets wasm32)"
+                    .to_string(),
+            ));
+        }
 
         // Build the tool dispatcher. Wait-tool-specific binding was removed
         // along with the generic wait tool.

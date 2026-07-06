@@ -398,6 +398,8 @@ pub use meerkat_mcp::{
     McpApplyDelta, McpApplyResult, McpConnection, McpError, McpLifecycleAction, McpLifecyclePhase,
     McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
 };
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub mod mcp;
 
 // Skill types re-exports
 pub use meerkat_core::skills::{

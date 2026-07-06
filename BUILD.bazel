@@ -515,6 +515,7 @@ test_suite(
         "//meerkat-store:schedule_atomic_mutation_test",
         "//meerkat-store:schedule_machine_state_projection_test",
         "//meerkat-store:schedule_receipt_projection_test",
+        "//meerkat-store:schedule_row_fault_tolerance_test",
         "//meerkat-store:stress_high_concurrency_test",
         "//meerkat-tools:browse_load_surface_test",
         "//meerkat-tools:builtin_skill_canonical_key_test",

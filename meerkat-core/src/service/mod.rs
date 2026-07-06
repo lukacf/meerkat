@@ -250,6 +250,12 @@ pub struct SessionBuildOptions {
     /// the JSON bag is retired; surfaces parse fail-closed at their ingress).
     pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Declarative MCP server configs for this build. The factory
+    /// materializes them into a session-owned MCP router composed with
+    /// `external_tools` and builtins, constructed against the build mode's
+    /// canonical external-tool surface authority (no test-code ephemeral
+    /// handle incantation required from embedders).
+    pub mcp_servers: Vec<crate::mcp_config::McpServerConfig>,
     /// Serializable tool definitions used to reconstruct recoverable
     /// surface-owned dispatchers during session resume/rebuild.
     pub recoverable_tool_defs: Option<Vec<crate::ToolDef>>,
@@ -1063,6 +1069,7 @@ impl Default for SessionBuildOptions {
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,

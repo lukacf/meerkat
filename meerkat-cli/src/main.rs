@@ -9339,6 +9339,7 @@ async fn run_agent(
             budget_limits: Some(limits),
             provider_params,
             external_tools,
+            mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             llm_client_override: None,
             agent_llm_client_decorator: None,

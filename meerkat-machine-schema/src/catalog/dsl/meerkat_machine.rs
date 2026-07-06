@@ -2476,6 +2476,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             barrier_satisfied: bool,
             boundary_count: u64,
             cancel_after_boundary: bool,
+            // Machine-owned convergence fact for the control-plane
+            // CancelAfterBoundary dispatch: true while a boundary-cancel
+            // runtime-effect dispatch is outstanding. While set, further
+            // CancelAfterBoundary inputs take the AlreadyPending no-op
+            // transition (typed effect, NO RuntimeEffectFact), so an
+            // embedder boundary handle that re-enters
+            // MeerkatMachine::cancel_after_boundary converges after one lap
+            // instead of recursing to a stack overflow. Cleared wherever
+            // `cancel_after_boundary` clears (turn start and turn-terminal
+            // consumption).
+            boundary_cancel_dispatch_pending: bool,
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
             terminal_cause_kind: Option<Enum<TurnTerminalCauseKind>>,
             last_runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
@@ -2958,6 +2969,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             barrier_satisfied = false,
             boundary_count = 0,
             cancel_after_boundary = false,
+            boundary_cancel_dispatch_pending = false,
             terminal_outcome = None,
             terminal_cause_kind = None,
             last_runtime_apply_failure_cause = None,
@@ -4278,6 +4290,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             TurnRunCancelled { run_id: RunId, reason: Enum<TurnCancellationReason> },
             TurnCheckCompaction,
             RequestCancellationAtBoundary,
+            // Typed convergence outcome: a CancelAfterBoundary arrived while
+            // a boundary-cancel dispatch was already outstanding. No
+            // RuntimeEffectFact is emitted, so nothing re-dispatches.
+            BoundaryCancelAlreadyPending,
             WakeInterrupt,
             CommittedVisibleSetPublished { revision: u64 },
             // `kind` is a closed classifier of runtime lifecycle markers;
@@ -4883,6 +4899,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition TurnRunCancelled => local seam NoOwnerRealization,
         disposition TurnCheckCompaction => local seam NoOwnerRealization,
         disposition RequestCancellationAtBoundary => local seam NoOwnerRealization,
+        disposition BoundaryCancelAlreadyPending => local seam NoOwnerRealization,
         disposition WakeInterrupt => local seam NoOwnerRealization,
         disposition CommittedVisibleSetPublished => external seam SurfaceResultAlignment,
         disposition RuntimeNotice => external seam SurfaceResultAlignment,
@@ -6397,6 +6414,56 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
         }
+        // Stopped/Retired hydration: a durably-stopped (or retired-pending)
+        // session re-registered after a host restart still rebuilds its
+        // agent, and the build must mirror the resolved LLM identity /
+        // capability surface into the machine before public capability
+        // reads. Without these arms the resume build fails on the phase
+        // guard and background repair retries forever (same coverage as
+        // SetModelRoutingBaseline and PublishCommittedVisibleSet, which
+        // both admit Retired and Stopped).
+        transition HydrateSessionLlmStateStopped {
+            on input HydrateSessionLlmState {
+                current_identity, current_capability_surface,
+                current_capability_surface_status, current_capability_base_filter
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    current_capability_surface,
+                    current_capability_surface_status,
+                    current_capability_base_filter) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(current_identity);
+                self.current_session_capability_surface = current_capability_surface;
+                self.current_session_capability_surface_status = current_capability_surface_status;
+                self.current_session_capability_base_filter = current_capability_base_filter;
+            }
+            to Stopped
+        }
+        transition HydrateSessionLlmStateRetired {
+            on input HydrateSessionLlmState {
+                current_identity, current_capability_surface,
+                current_capability_surface_status, current_capability_base_filter
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    current_capability_surface,
+                    current_capability_surface_status,
+                    current_capability_base_filter) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(current_identity);
+                self.current_session_capability_surface = current_capability_surface;
+                self.current_session_capability_surface_status = current_capability_surface_status;
+                self.current_session_capability_base_filter = current_capability_base_filter;
+            }
+            to Retired
+        }
 
         transition ReconfigureSessionLlmIdentityAttached {
             on input ReconfigureSessionLlmIdentity {
@@ -7877,11 +7944,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // 11. CancelAfterBoundary: Attached + Running self-loops
+        // 11. CancelAfterBoundary: Attached + Running self-loops.
+        // The first cancel in a turn window dispatches (RuntimeEffectFact)
+        // and marks the dispatch outstanding; while outstanding, further
+        // cancels take the AlreadyPending no-op arms below — this is what
+        // bounds an embedder boundary handle that (wrongly) re-enters
+        // MeerkatMachine::cancel_after_boundary to exactly one extra lap.
         transition CancelAfterBoundaryAttached {
             on input CancelAfterBoundary { reason }
             guard { self.lifecycle_phase == Phase::Attached }
-            update {}
+            guard "no_dispatch_outstanding" { self.boundary_cancel_dispatch_pending == false }
+            update {
+                self.boundary_cancel_dispatch_pending = true;
+            }
             to Attached
             emit RequestCancellationAtBoundary
             emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
@@ -7889,10 +7964,29 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition CancelAfterBoundary {
             on input CancelAfterBoundary { reason }
             guard { self.lifecycle_phase == Phase::Running }
-            update {}
+            guard "no_dispatch_outstanding" { self.boundary_cancel_dispatch_pending == false }
+            update {
+                self.boundary_cancel_dispatch_pending = true;
+            }
             to Running
             emit RequestCancellationAtBoundary
             emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+        }
+        transition CancelAfterBoundaryAttachedAlreadyPending {
+            on input CancelAfterBoundary { reason }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "dispatch_outstanding" { self.boundary_cancel_dispatch_pending == true }
+            update {}
+            to Attached
+            emit BoundaryCancelAlreadyPending
+        }
+        transition CancelAfterBoundaryAlreadyPending {
+            on input CancelAfterBoundary { reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "dispatch_outstanding" { self.boundary_cancel_dispatch_pending == true }
+            update {}
+            to Running
+            emit BoundaryCancelAlreadyPending
         }
 
         // 12. BoundaryAppliedPublish: Running self-loop (signal)
@@ -12797,6 +12891,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -12843,6 +12938,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -12889,6 +12985,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -12934,6 +13031,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -12974,6 +13072,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -13013,6 +13112,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -13051,6 +13151,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -13091,6 +13192,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -13130,6 +13232,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -13168,6 +13271,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -13233,6 +13337,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
@@ -13359,6 +13464,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
@@ -13394,6 +13500,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
@@ -13639,6 +13746,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.barrier_satisfied = false;
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
+                self.boundary_cancel_dispatch_pending = false;
                 self.terminal_outcome = Some(outcome);
                 self.terminal_cause_kind = None;
                 self.extraction_attempts = 0;

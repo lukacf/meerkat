@@ -20,6 +20,44 @@ Meerkat publishes one source project across several consumer surfaces:
 The public release path is GitHub Actions. BuildBuddy release lanes are an
 owner-only acceleration path and use the same Make-level contract.
 
+## Versioning and Compatibility
+
+Meerkat is pre-1.0 and releases on a fast `0.x.y` patch train. The policy,
+stated plainly so downstream embedders can build against it:
+
+- **Patch releases may change public APIs.** A `0.7.x` → `0.7.(x+1)` bump can
+  add required fields, change function signatures, or remove items. Cargo's
+  default caret requirement (`meerkat = "0.7"`) treats the whole `0.7`
+  family as compatible, which is stronger than this project guarantees.
+- **Embedders must pin exact versions.** Libraries and applications that
+  build against Meerkat crates should declare `=0.7.19`-style exact pins and
+  move deliberately, reading the changelog for each hop.
+- **The only supported crate combination is exact version parity.** All
+  workspace crates (`meerkat`, `meerkat-core`, `meerkat-runtime`, …), the
+  Python/TypeScript/Web SDKs, and `ContractVersion::CURRENT` are lock-stepped
+  to one version per release. Mixing crate versions across releases is
+  unsupported.
+- **Breaking API changes are flagged in the changelog.** Public-signature
+  changes land under a `### Breaking` heading in `CHANGELOG.md` for the
+  release that ships them; observable default-behavior changes land under
+  `### Changed`. A release with neither heading is intended to be a drop-in
+  replacement for the previous patch version.
+
+### Downstream compatibility matrix
+
+Known downstream projects that embed Meerkat, and the exact versions they
+were built and verified against:
+
+| Downstream | Downstream version | Meerkat version |
+|------------|--------------------|-----------------|
+| meerkat-mobkit | 0.7.22 | =0.7.15 |
+| meerkat-mobkit | 0.7.23 | =0.7.17 |
+
+Downstream projects should declare their supported Meerkat version as an
+exact pin in their own `Cargo.toml` (not only in `Cargo.lock`), so consumers
+can read the supported combination without archaeologizing lockfiles at
+release tags.
+
 ## Release Checks
 
 Run the release gate before cutting a tag:

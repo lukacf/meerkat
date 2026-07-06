@@ -1295,8 +1295,29 @@ impl MeerkatMachine {
                 }
             };
             let projected_effect =
-                crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+                crate::effect::runtime_effect_projection_optional_from_dsl_effects(&staged.effects)
                     .map_err(RuntimeDriverError::Internal)?;
+            let Some(projected_effect) = projected_effect else {
+                // Machine-owned convergence: a boundary-cancel dispatch is
+                // already outstanding, so the machine took the typed
+                // AlreadyPending arm (no RuntimeEffectFact). The request is
+                // satisfied by the outstanding dispatch — and this bound is
+                // what stops a boundary handle that re-enters
+                // `cancel_after_boundary` from recursing unboundedly.
+                let already_pending = staged.effects.as_slice().iter().any(|effect| {
+                    matches!(
+                        effect,
+                        crate::meerkat_machine::dsl::MeerkatMachineEffect::BoundaryCancelAlreadyPending
+                    )
+                });
+                if !already_pending {
+                    return Err(RuntimeDriverError::Internal(
+                        "CancelAfterBoundary emitted neither a RuntimeEffectFact nor BoundaryCancelAlreadyPending"
+                            .to_string(),
+                    ));
+                }
+                return Ok(());
+            };
 
             let sessions = self.sessions.read().await;
             let entry = sessions

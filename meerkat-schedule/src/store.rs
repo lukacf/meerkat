@@ -30,6 +30,49 @@ pub struct ClaimDueRequest {
 pub struct ClaimDueResult {
     pub store_now_utc: DateTime<Utc>,
     pub claimed: Vec<Occurrence>,
+    /// Durable rows the claim scan skipped instead of failing wholesale:
+    /// each skip is a typed, attributable fault (per-row tolerance), never a
+    /// silent drop. The rows stay in the store for inspection and repair.
+    pub row_faults: Vec<ScheduleStoreRowFault>,
+}
+
+/// A durable schedule/occurrence row a tolerant store scan could not surface
+/// as a typed value. The scan skips the row so its neighbors stay
+/// serviceable and reports the skip so it is never silent: one poisoned row
+/// must not starve every schedule, and no skip may go unobserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleStoreRowFault {
+    /// Owning schedule id as stored in the row's indexed column (readable
+    /// even when the row payload itself cannot be deserialized).
+    pub schedule_id: Option<String>,
+    /// Occurrence id as stored in the row's indexed column, when the faulted
+    /// row is an occurrence row.
+    pub occurrence_id: Option<String>,
+    pub kind: ScheduleStoreRowFaultKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleStoreRowFaultKind {
+    /// The persisted row failed typed deserialization or generated-machine
+    /// recovery.
+    Deserialization,
+    /// The row deserialized but the machine-owned due classification (or the
+    /// lifecycle transition realizing its verdict) refused.
+    DueClassification,
+}
+
+impl std::fmt::Display for ScheduleStoreRowFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{kind:?} fault (schedule={schedule}, occurrence={occurrence}): {detail}",
+            kind = self.kind,
+            schedule = self.schedule_id.as_deref().unwrap_or("?"),
+            occurrence = self.occurrence_id.as_deref().unwrap_or("-"),
+            detail = self.detail,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -183,6 +226,18 @@ pub trait ScheduleStore: Send + Sync {
         &self,
         filter: ScheduleFilter,
     ) -> Result<Vec<Schedule>, ScheduleStoreError>;
+
+    /// List schedules with per-row tolerance: rows that fail typed
+    /// deserialization/recovery are skipped and surfaced as typed faults so
+    /// one poisoned row cannot fail the listing wholesale. The default keeps
+    /// the store's strict behavior (a wholesale error, zero faults); stores
+    /// with row-granular durable storage override it.
+    async fn list_schedules_with_row_faults(
+        &self,
+        filter: ScheduleFilter,
+    ) -> Result<(Vec<Schedule>, Vec<ScheduleStoreRowFault>), ScheduleStoreError> {
+        Ok((self.list_schedules(filter).await?, Vec::new()))
+    }
 
     async fn commit_occurrence_write(
         &self,
@@ -672,33 +727,82 @@ impl ScheduleStore for MemoryScheduleStore {
         occurrence_order.sort_by_key(|(key, _)| *key);
 
         let mut claimed = Vec::new();
+        let mut row_faults = Vec::new();
+        // Machine refusals are tolerated per row with the SAME typed-fault
+        // semantics as the sqlite backend (Rule 8: one semantic condition,
+        // one terminal shape across backends): a refusal skips only that
+        // occurrence and its neighbors still claim. In-memory rows are typed
+        // values already, so there is no durable-format parse boundary to
+        // fault on — only `DueClassification` faults can occur here.
+        let due_classification_fault =
+            |occurrence: &Occurrence, stage: &str, error: &OccurrenceLifecycleError| {
+                ScheduleStoreRowFault {
+                    schedule_id: Some(occurrence.schedule_id.to_string()),
+                    occurrence_id: Some(occurrence.occurrence_id.to_string()),
+                    kind: ScheduleStoreRowFaultKind::DueClassification,
+                    detail: format!("{stage}: {error}"),
+                }
+            };
         for (_, occurrence_id) in occurrence_order {
             let Some(existing) = state.occurrences.get(&occurrence_id).cloned() else {
                 continue;
             };
-            let action = existing
-                .classify_due_action(store_now_utc)
-                .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+            let action = match existing.classify_due_action(store_now_utc) {
+                Ok(action) => action,
+                Err(error) => {
+                    row_faults.push(due_classification_fault(
+                        &existing,
+                        "due classification",
+                        &error,
+                    ));
+                    continue;
+                }
+            };
             match action {
                 Some(OccurrenceDueAction::MisfireRequired) => {
                     let detail = Some(existing.due_misfire_detail_at(store_now_utc));
-                    let mut updated = existing
-                        .apply(OccurrenceLifecycleInput::ResolveDueMisfire {
-                            detail: detail.clone(),
-                            at_utc: store_now_utc,
-                        })
-                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                        .into_occurrence();
-                    let receipt = updated
-                        .delivery_receipt_from_authority(None)
-                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
-                    updated = updated
-                        .apply(OccurrenceLifecycleInput::RecordReceipt {
-                            runtime_outcome: receipt.runtime_outcome.clone(),
-                            receipt,
-                        })
-                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
-                        .into_occurrence();
+                    let mut updated =
+                        match existing
+                            .clone()
+                            .apply(OccurrenceLifecycleInput::ResolveDueMisfire {
+                                detail: detail.clone(),
+                                at_utc: store_now_utc,
+                            }) {
+                            Ok(mutator) => mutator.into_occurrence(),
+                            Err(error) => {
+                                row_faults.push(due_classification_fault(
+                                    &existing,
+                                    "misfire resolution",
+                                    &error,
+                                ));
+                                continue;
+                            }
+                        };
+                    let receipt = match updated.delivery_receipt_from_authority(None) {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            row_faults.push(due_classification_fault(
+                                &existing,
+                                "misfire receipt",
+                                &error,
+                            ));
+                            continue;
+                        }
+                    };
+                    updated = match updated.apply(OccurrenceLifecycleInput::RecordReceipt {
+                        runtime_outcome: receipt.runtime_outcome.clone(),
+                        receipt,
+                    }) {
+                        Ok(mutator) => mutator.into_occurrence(),
+                        Err(error) => {
+                            row_faults.push(due_classification_fault(
+                                &existing,
+                                "misfire receipt record",
+                                &error,
+                            ));
+                            continue;
+                        }
+                    };
                     let canonical_receipt = updated.last_receipt.clone().ok_or_else(|| {
                         ScheduleStoreError::Concurrency(
                             "generated occurrence authority did not produce a receipt".to_string(),
@@ -728,8 +832,18 @@ impl ScheduleStore for MemoryScheduleStore {
                     if claimed.len() >= request.limit {
                         continue;
                     }
-                    let lease_expired = expire_occurrence_lease(existing, store_now_utc)
-                        .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+                    let lease_expired =
+                        match expire_occurrence_lease(existing.clone(), store_now_utc) {
+                            Ok(lease_expired) => lease_expired,
+                            Err(error) => {
+                                row_faults.push(due_classification_fault(
+                                    &existing,
+                                    "lease expiry",
+                                    &error,
+                                ));
+                                continue;
+                            }
+                        };
                     state
                         .receipts
                         .entry(lease_expired.receipt.occurrence_id.clone())
@@ -739,11 +853,22 @@ impl ScheduleStore for MemoryScheduleStore {
                         lease_expired.occurrence.occurrence_id.clone(),
                         lease_expired.occurrence.clone(),
                     );
-                    let Ok(updated) =
-                        claim_occurrence(lease_expired.occurrence, &request, store_now_utc)
-                    else {
-                        continue;
-                    };
+                    // A machine refusal of the follow-up claim is this row's
+                    // typed fault, never a silent skip: the expiry above
+                    // stays applied and the row re-enters the scan on the
+                    // next tick.
+                    let updated =
+                        match claim_occurrence(lease_expired.occurrence, &request, store_now_utc) {
+                            Ok(updated) => updated,
+                            Err(error) => {
+                                row_faults.push(due_classification_fault(
+                                    &existing,
+                                    "lease-expiry reclaim",
+                                    &error,
+                                ));
+                                continue;
+                            }
+                        };
                     state
                         .occurrences
                         .insert(updated.occurrence_id.clone(), updated.clone());
@@ -756,6 +881,7 @@ impl ScheduleStore for MemoryScheduleStore {
         Ok(ClaimDueResult {
             store_now_utc,
             claimed,
+            row_faults,
         })
     }
 

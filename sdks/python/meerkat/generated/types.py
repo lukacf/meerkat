@@ -957,6 +957,24 @@ class ReadSessionTranscriptRevisionParams:
 
 
 @dataclass
+class SessionInputStateParams:
+    """Parameters for `session/input_status`."""
+    selector: dict[str, Any]
+    session_id: str
+
+
+@dataclass
+class SessionInputStateSelector:
+    """Typed selector for `session/input_status`: exactly one lookup key."""
+
+
+@dataclass
+class SessionInputStateResult:
+    """Result for `session/input_status`."""
+    state: Optional[dict[str, Any]] = None
+
+
+@dataclass
 class RealmIdParams:
     """Request payload for `auth/profile/list` and `realm/get`."""
     realm_id: str

@@ -224,6 +224,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `HydrateSessionLlmStateRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `HydrateSessionLlmStateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HydrateSessionLlmStateRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReconfigureSessionLlmIdentityAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -921,6 +927,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CancelAfterBoundary`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelAfterBoundaryAttachedAlreadyPending`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelAfterBoundaryAlreadyPending`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BoundaryAppliedPublish`
@@ -5066,6 +5078,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RequestCancellationAtBoundary`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BoundaryCancelAlreadyPending`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `WakeInterrupt`

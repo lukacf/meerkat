@@ -67,7 +67,8 @@ pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,
     InjectSystemContextParams, InjectSystemContextResult, InterruptParams, ListSessionsParams,
     ListSessionsResult, ReadSessionHistoryParams, ReadSessionParams, ScheduleToolCallParams,
-    ScheduleToolsResult, ServerCapabilities, ServerInfo, ToolsRegisterParams, ToolsRegisterResult,
+    ScheduleToolsResult, ServerCapabilities, ServerInfo, SessionInputStateParams,
+    SessionInputStateResult, SessionInputStateSelector, ToolsRegisterParams, ToolsRegisterResult,
 };
 
 pub use artifact::{

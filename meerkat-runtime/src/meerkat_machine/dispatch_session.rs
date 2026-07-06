@@ -601,6 +601,27 @@ impl MeerkatMachine {
                     driver.as_driver().stored_input_state(&input_id),
                 ))
             }
+            MeerkatMachineCommand::InputStateByIdempotencyKey {
+                session_id,
+                idempotency_key,
+            } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?;
+                    entry.driver.clone()
+                };
+                let driver = driver.lock().await;
+                let driver = driver.as_driver();
+                Ok(MeerkatMachineCommandResult::InputState(
+                    driver
+                        .input_id_for_idempotency_key(&idempotency_key)
+                        .and_then(|input_id| driver.stored_input_state(&input_id)),
+                ))
+            }
             MeerkatMachineCommand::ListActiveInputs { session_id } => {
                 let driver = {
                     let sessions = self.sessions.read().await;

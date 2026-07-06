@@ -1610,6 +1610,7 @@ impl MethodRouter {
                 handlers::event::handle_events_snapshot(id, params, self.runtime.clone()).await
             }
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
+            "session/input_status" => self.handle_session_input_state(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
             "schedule/create" => {
@@ -2733,6 +2734,82 @@ impl MethodRouter {
                     format!("Session not found: {session_id}"),
                 )
             }
+        }
+    }
+
+    async fn handle_session_input_state(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        let params: meerkat_contracts::SessionInputStateParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+        let adapter = self.runtime.runtime_adapter();
+        let stored = match &params.selector {
+            meerkat_contracts::SessionInputStateSelector::InputId(raw) => {
+                let input_id = match raw
+                    .parse::<uuid::Uuid>()
+                    .map(meerkat_core::lifecycle::InputId::from_uuid)
+                {
+                    Ok(input_id) => input_id,
+                    Err(error) => {
+                        return RpcResponse::error(
+                            id,
+                            crate::error::INVALID_PARAMS,
+                            format!("invalid input_id '{raw}': {error}"),
+                        );
+                    }
+                };
+                adapter.input_state(&session_id, &input_id).await
+            }
+            meerkat_contracts::SessionInputStateSelector::IdempotencyKey(key) => {
+                adapter
+                    .input_state_by_idempotency_key(&session_id, key)
+                    .await
+            }
+        };
+        match stored {
+            Ok(state) => {
+                let state = match state
+                    .map(handlers::runtime::to_wire_input_state)
+                    .transpose()
+                {
+                    Ok(state) => state,
+                    Err(error) => {
+                        return RpcResponse::error(
+                            id,
+                            crate::error::INTERNAL_ERROR,
+                            format!("input state projection failed: {error}"),
+                        );
+                    }
+                };
+                match serde_json::to_value(meerkat_contracts::SessionInputStateResult { state }) {
+                    Ok(value) => RpcResponse::success(id, value),
+                    Err(error) => RpcResponse::error(
+                        id,
+                        crate::error::INTERNAL_ERROR,
+                        format!("input state serialization failed: {error}"),
+                    ),
+                }
+            }
+            Err(error) => RpcResponse::error(
+                id,
+                crate::error::INTERNAL_ERROR,
+                format!("input state read failed: {error}"),
+            ),
         }
     }
 

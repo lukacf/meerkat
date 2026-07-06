@@ -857,6 +857,30 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
         None
     }
+
+    fn bind_mcp_server_lifecycle_handle(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>,
+    ) {
+        // The external child is the only nested dispatcher that owns MCP
+        // handshake lifecycle. Without this forwarding, the factory's
+        // session-time bind stops at the composite and the nested MCP
+        // adapter stays attached to its construction-time authority.
+        if let Some(ext) = self.external.as_ref() {
+            ext.bind_mcp_server_lifecycle_handle(handle);
+        }
+    }
+
+    fn bind_external_tool_surface_handle(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::ExternalToolSurfaceHandle>,
+    ) {
+        // Same forwarding rule as the MCP lifecycle bind: dynamic external
+        // tool surfaces live on the nested external dispatcher.
+        if let Some(ext) = self.external.as_ref() {
+            ext.bind_external_tool_surface_handle(handle);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1143,6 +1167,97 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "apply_patch"),
             "apply_patch must register once a concrete project root is resolved"
+        );
+    }
+
+    struct BindRecordingExternalDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        mcp_handles_bound: Arc<std::sync::atomic::AtomicUsize>,
+        surface_handles_bound: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl BindRecordingExternalDispatcher {
+        fn new(
+            mcp_handles_bound: Arc<std::sync::atomic::AtomicUsize>,
+            surface_handles_bound: Arc<std::sync::atomic::AtomicUsize>,
+        ) -> Self {
+            Self {
+                tools: Arc::from([]),
+                mcp_handles_bound,
+                surface_handles_bound,
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl AgentToolDispatcher for BindRecordingExternalDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools.clone()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+
+        fn bind_mcp_server_lifecycle_handle(
+            &self,
+            _handle: Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>,
+        ) {
+            self.mcp_handles_bound
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn bind_external_tool_surface_handle(
+            &self,
+            _handle: Arc<dyn meerkat_core::handles::ExternalToolSurfaceHandle>,
+        ) {
+            self.surface_handles_bound
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// M2 regression: the factory's session-time handle binds must reach the
+    /// nested external dispatcher when builtins compose it. Before this, the
+    /// composite swallowed both binds (only `bind_ops_lifecycle` forwarded),
+    /// so a nested MCP adapter stayed attached to its construction-time
+    /// authority and session-owned MCP wiring never worked with builtins.
+    #[test]
+    fn composite_forwards_handle_binds_to_external_dispatcher() {
+        let mcp_handles_bound = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let surface_handles_bound = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(BindRecordingExternalDispatcher::new(
+                Arc::clone(&mcp_handles_bound),
+                Arc::clone(&surface_handles_bound),
+            ));
+        let store = Arc::new(MemoryTaskStore::new());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            Some(test_project_root()),
+            None,
+            Some(external),
+            None,
+        )
+        .expect("composite dispatcher should build");
+
+        dispatcher.bind_mcp_server_lifecycle_handle(Arc::new(
+            meerkat_runtime::handles::RuntimeMcpServerLifecycleHandle::ephemeral(),
+        ));
+        dispatcher.bind_external_tool_surface_handle(Arc::new(
+            meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
+        ));
+
+        assert_eq!(
+            mcp_handles_bound.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "bind_mcp_server_lifecycle_handle must forward to the external dispatcher"
+        );
+        assert_eq!(
+            surface_handles_bound.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "bind_external_tool_surface_handle must forward to the external dispatcher"
         );
     }
 

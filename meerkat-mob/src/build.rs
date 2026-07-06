@@ -275,6 +275,10 @@ pub async fn build_agent_config(
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
 
+    // Declarative MCP servers ride the durable profile, so revival
+    // recomposes them without the lossy in-process spawn overlay.
+    config.mcp_servers = profile.tools.mcp_servers.clone();
+
     // Opaque application context passed through to the agent build pipeline
     config.app_context = context;
     config.additional_instructions = additional_instructions;
@@ -624,6 +628,7 @@ mod tests {
                     schedule: false,
                     image_generation: true,
                     mcp: vec![],
+                    mcp_servers: vec![],
                     rust_bundles: vec![],
                 },
                 peer_description: "Orchestrates the mob".into(),
@@ -655,6 +660,7 @@ mod tests {
                     schedule: false,
                     image_generation: false,
                     mcp: vec![],
+                    mcp_servers: vec![],
                     rust_bundles: vec![],
                 },
                 peer_description: "Does work".into(),
@@ -888,6 +894,47 @@ mod tests {
         .expect("build_agent_config");
 
         assert!(!config.keep_alive, "keep_alive must be false for mob spawn");
+    }
+
+    /// M2 (d): profile-declared MCP servers are DURABLE build inputs — they
+    /// must thread from `ProfileTools.mcp_servers` into
+    /// `AgentBuildConfig.mcp_servers` so member revival (which re-resolves
+    /// the same profile) recomposes the member's MCP tools instead of losing
+    /// them like the in-process-only per-spawn overlay did.
+    #[tokio::test]
+    async fn test_build_agent_config_threads_profile_mcp_servers() {
+        let def = sample_definition();
+        let mut profile = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap()
+            .clone();
+        profile.tools.mcp_servers = vec![meerkat_core::mcp_config::McpServerConfig::stdio(
+            "planner",
+            "/bin/echo",
+            Vec::<String>::new(),
+            std::collections::HashMap::new(),
+        )];
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("lead"),
+            agent_identity: &AgentIdentity::from("lead-1"),
+            profile: &profile,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            tool_access_policy: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "planner");
     }
 
     /// Spawn-site threading: the spec's `tool_access_policy` must reach

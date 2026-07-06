@@ -169,6 +169,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
             schedule: tools.schedule,
             image_generation: tools.image_generation,
             mcp: tools.mcp,
+            mcp_servers: vec![],
             rust_bundles: Vec::new(),
         },
         peer_description: profile.peer_description,

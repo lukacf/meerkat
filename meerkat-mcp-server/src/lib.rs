@@ -3483,6 +3483,7 @@ async fn handle_meerkat_run(
         provider_params: input.provider_params.clone(),
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
+        mcp_servers: Vec::new(),
         recoverable_tool_defs: (!input.tools.is_empty())
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
@@ -3908,6 +3909,7 @@ async fn handle_meerkat_resume(
             provider_params: input.provider_params.clone(),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools,
+            mcp_servers: Vec::new(),
             recoverable_tool_defs: (!input.tools.is_empty())
                 .then(|| recoverable_callback_tool_defs(&input.tools)),
             llm_client_override: None,

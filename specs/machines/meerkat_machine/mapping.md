@@ -224,6 +224,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `HydrateSessionLlmStateRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `HydrateSessionLlmStateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HydrateSessionLlmStateRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReconfigureSessionLlmIdentityAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

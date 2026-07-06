@@ -65,6 +65,11 @@ run-reconciliation query.
 - Strict schedule listing failures now name the poisoned row
   (`schedule row '<id>' failed typed recovery`) instead of an
   unattributable serialization error.
+- Resuming a durably-stopped session no longer fails on the LLM capability
+  hydration phase guard ("guard rejected transition from phase Stopped") —
+  the hydrate transitions now admit Stopped and Retired sessions like the
+  sibling baseline/visibility inputs already did, so restart-resume repair
+  converges instead of retrying the same guard forever.
 
 ### Added
 

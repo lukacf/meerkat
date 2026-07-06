@@ -3028,6 +3028,44 @@ async fn input_terminal_status_by_idempotency_key_survives_restart() {
     );
 }
 
+/// Resume regression: a durably-STOPPED session that re-registers after a
+/// host restart still rebuilds its agent, and the build hydrates the
+/// resolved LLM identity/capability surface into the machine. The hydrate
+/// transitions used to admit only Idle/Attached/Running, so the resume
+/// build failed on the phase guard ("guard rejected transition from phase
+/// Stopped") and background repair retried the same guard forever.
+#[tokio::test]
+async fn hydrate_llm_capability_surface_is_admitted_in_stopped_phase() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare bindings registers the session");
+
+    adapter
+        .stop_runtime_executor(&session_id, "host shutdown")
+        .await
+        .expect("stop should succeed");
+    let stopped = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist after stop");
+    assert_eq!(stopped.control.phase, RuntimeState::Stopped);
+
+    let identity = meerkat_core::SessionLlmIdentity {
+        model: "claude-sonnet-4-5".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    };
+    bindings
+        .model_routing()
+        .hydrate_llm_capability_surface(&identity, None, &meerkat_core::ToolFilter::All)
+        .expect("resume build hydration must be admitted while the session is Stopped");
+}
+
 #[tokio::test]
 async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

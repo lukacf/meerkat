@@ -14574,6 +14574,8 @@ pub enum TransitionId {
     HydrateSessionLlmStateIdle,
     HydrateSessionLlmStateAttached,
     HydrateSessionLlmStateRunning,
+    HydrateSessionLlmStateStopped,
+    HydrateSessionLlmStateRetired,
     ReconfigureSessionLlmIdentityAttached,
     ReconfigureSessionLlmIdentityRunning,
     ReconfigureSessionLlmIdentityIdle,

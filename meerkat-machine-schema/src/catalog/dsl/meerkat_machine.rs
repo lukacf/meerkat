@@ -6414,6 +6414,56 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
         }
+        // Stopped/Retired hydration: a durably-stopped (or retired-pending)
+        // session re-registered after a host restart still rebuilds its
+        // agent, and the build must mirror the resolved LLM identity /
+        // capability surface into the machine before public capability
+        // reads. Without these arms the resume build fails on the phase
+        // guard and background repair retries forever (same coverage as
+        // SetModelRoutingBaseline and PublishCommittedVisibleSet, which
+        // both admit Retired and Stopped).
+        transition HydrateSessionLlmStateStopped {
+            on input HydrateSessionLlmState {
+                current_identity, current_capability_surface,
+                current_capability_surface_status, current_capability_base_filter
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    current_capability_surface,
+                    current_capability_surface_status,
+                    current_capability_base_filter) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(current_identity);
+                self.current_session_capability_surface = current_capability_surface;
+                self.current_session_capability_surface_status = current_capability_surface_status;
+                self.current_session_capability_base_filter = current_capability_base_filter;
+            }
+            to Stopped
+        }
+        transition HydrateSessionLlmStateRetired {
+            on input HydrateSessionLlmState {
+                current_identity, current_capability_surface,
+                current_capability_surface_status, current_capability_base_filter
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    current_capability_surface,
+                    current_capability_surface_status,
+                    current_capability_base_filter) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(current_identity);
+                self.current_session_capability_surface = current_capability_surface;
+                self.current_session_capability_surface_status = current_capability_surface_status;
+                self.current_session_capability_base_filter = current_capability_base_filter;
+            }
+            to Retired
+        }
 
         transition ReconfigureSessionLlmIdentityAttached {
             on input ReconfigureSessionLlmIdentity {

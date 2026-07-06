@@ -1570,6 +1570,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `capability_base_filter_matches_surface`
 - To: `Running`
 
+### `HydrateSessionLlmStateStopped`
+- From: `Stopped`
+- On: `HydrateSessionLlmState`(current_identity, current_capability_surface, current_capability_surface_status, current_capability_base_filter)
+- Guards:
+  - `session_registered`
+  - `capability_base_filter_matches_surface`
+- To: `Stopped`
+
+### `HydrateSessionLlmStateRetired`
+- From: `Retired`
+- On: `HydrateSessionLlmState`(current_identity, current_capability_surface, current_capability_surface_status, current_capability_base_filter)
+- Guards:
+  - `session_registered`
+  - `capability_base_filter_matches_surface`
+- To: `Retired`
+
 ### `ReconfigureSessionLlmIdentityAttached`
 - From: `Attached`
 - On: `ReconfigureSessionLlmIdentity`(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, previous_capability_base_filter, view_image_tool_available, previous_view_image_visible, next_view_image_visible, previous_active_visibility_revision, previous_staged_visibility_revision, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta)

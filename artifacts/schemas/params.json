@@ -19658,51 +19658,61 @@
     "type": "object"
   },
   "SessionInputStateParams": {
+    "$defs": {
+      "SessionInputStateSelector": {
+        "description": "Typed selector for `session/input_status`: exactly one lookup key.",
+        "oneOf": [
+          {
+            "description": "Look up by the canonical runtime input id.",
+            "properties": {
+              "by": {
+                "const": "input_id",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Look up by the caller-supplied idempotency key (durable\nreconciliation: \"did the interaction I submitted under this key reach\na terminal state, and which?\").",
+            "properties": {
+              "by": {
+                "const": "idempotency_key",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Parameters for `session/input_status`.",
-    "oneOf": [
-      {
-        "description": "Look up by the canonical runtime input id.",
-        "properties": {
-          "by": {
-            "const": "input_id",
-            "type": "string"
-          },
-          "value": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "by",
-          "value"
-        ],
-        "type": "object"
-      },
-      {
-        "description": "Look up by the caller-supplied idempotency key (durable\nreconciliation: \"did the interaction I submitted under this key reach\na terminal state, and which?\").",
-        "properties": {
-          "by": {
-            "const": "idempotency_key",
-            "type": "string"
-          },
-          "value": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "by",
-          "value"
-        ],
-        "type": "object"
-      }
-    ],
     "properties": {
+      "selector": {
+        "$ref": "#/$defs/SessionInputStateSelector",
+        "description": "Exactly-one lookup key, carried as a tagged object (NOT flattened:\nthe SDK codegen path drops flattened tagged enums from generated\nparam types, which would leave raw SDK callers unable to express the\nrequired selector)."
+      },
       "session_id": {
         "type": "string"
       }
     },
     "required": [
-      "session_id"
+      "session_id",
+      "selector"
     ],
     "title": "SessionInputStateParams",
     "type": "object"

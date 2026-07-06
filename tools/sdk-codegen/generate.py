@@ -233,6 +233,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "ReadSessionParams",
     "ReadSessionTranscriptRevisionParams",
     "SessionInputStateParams",
+    "SessionInputStateSelector",
     "SessionInputStateResult",
     "RealmIdParams",
     "RestoreSessionTranscriptRevisionParams",

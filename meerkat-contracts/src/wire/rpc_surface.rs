@@ -103,7 +103,10 @@ pub enum SessionInputStateSelector {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionInputStateParams {
     pub session_id: String,
-    #[serde(flatten)]
+    /// Exactly-one lookup key, carried as a tagged object (NOT flattened:
+    /// the SDK codegen path drops flattened tagged enums from generated
+    /// param types, which would leave raw SDK callers unable to express the
+    /// required selector).
     pub selector: SessionInputStateSelector,
 }
 

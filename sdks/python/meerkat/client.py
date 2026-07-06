@@ -1235,11 +1235,9 @@ class MeerkatClient:
             )
         params: dict[str, Any] = {"session_id": session_id}
         if input_id is not None:
-            params["by"] = "input_id"
-            params["value"] = input_id
+            params["selector"] = {"by": "input_id", "value": input_id}
         else:
-            params["by"] = "idempotency_key"
-            params["value"] = idempotency_key
+            params["selector"] = {"by": "idempotency_key", "value": idempotency_key}
         result = await self._request("session/input_status", params)
         state = result.get("state")
         return state if isinstance(state, dict) else None

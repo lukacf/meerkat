@@ -1049,9 +1049,10 @@ export class MeerkatClient {
     type _RpcSignature = [RpcSessionInputStateParams, RpcSessionInputStateResult];
     const params: Record<string, unknown> = {
       session_id: sessionId,
-      ...("inputId" in selector
-        ? { by: "input_id", value: selector.inputId }
-        : { by: "idempotency_key", value: selector.idempotencyKey }),
+      selector:
+        "inputId" in selector
+          ? { by: "input_id", value: selector.inputId }
+          : { by: "idempotency_key", value: selector.idempotencyKey },
     };
     const result = await this.request("session/input_status", params);
     return (result.state as Record<string, unknown> | undefined) ?? null;
@@ -1996,14 +1997,21 @@ export class MeerkatClient {
       "result",
       "Invalid mob/snapshot response",
     );
+    if (!Array.isArray(result.members)) {
+      throw new Error("Invalid mob/snapshot response: missing members");
+    }
     return {
-      mobId: String(result.mob_id ?? mobId),
+      mobId: MeerkatClient.requireStringField(
+        result,
+        "mob_id",
+        "Invalid mob/snapshot response: missing mob_id",
+      ),
       status: MeerkatClient.requireStringField(
         snapshotRecord,
         "status",
         "Invalid mob/snapshot response: missing status",
       ),
-      members: Array.isArray(result.members) ? result.members : [],
+      members: result.members,
     };
   }
 
@@ -2019,14 +2027,23 @@ export class MeerkatClient {
     destroyReport: Record<string, unknown>;
   }> {
     const result = await this.request("mob/destroy", { mob_id: mobId });
-    const report =
-      result.destroy_report && typeof result.destroy_report === "object"
-        ? (result.destroy_report as Record<string, unknown>)
-        : {};
+    if (
+      typeof result.ok !== "boolean" ||
+      !result.destroy_report ||
+      typeof result.destroy_report !== "object"
+    ) {
+      throw new Error(
+        "Invalid mob/destroy response: missing ok or destroy_report",
+      );
+    }
     return {
-      mobId: String(result.mob_id ?? mobId),
-      ok: Boolean(result.ok ?? false),
-      destroyReport: report,
+      mobId: MeerkatClient.requireStringField(
+        result,
+        "mob_id",
+        "Invalid mob/destroy response: missing mob_id",
+      ),
+      ok: result.ok,
+      destroyReport: result.destroy_report as Record<string, unknown>,
     };
   }
 
@@ -2072,9 +2089,21 @@ export class MeerkatClient {
     }
     const result = await this.request("mob/submit_work", params);
     return {
-      mobId: String(result.mob_id ?? ""),
-      workRef: String(result.work_ref ?? ""),
-      memberRef: String(result.member_ref ?? args.memberRef),
+      mobId: MeerkatClient.requireStringField(
+        result,
+        "mob_id",
+        "Invalid mob/submit_work response: missing mob_id",
+      ),
+      workRef: MeerkatClient.requireStringField(
+        result,
+        "work_ref",
+        "Invalid mob/submit_work response: missing work_ref",
+      ),
+      memberRef: MeerkatClient.requireStringField(
+        result,
+        "member_ref",
+        "Invalid mob/submit_work response: missing member_ref",
+      ),
     };
   }
 
@@ -2087,7 +2116,10 @@ export class MeerkatClient {
       mob_id: mobId,
       work_ref: workRef,
     });
-    return { ok: Boolean(result.ok ?? false) };
+    if (typeof result.ok !== "boolean") {
+      throw new Error("Invalid mob/cancel_work response: missing ok");
+    }
+    return { ok: result.ok };
   }
 
   /**
@@ -2100,7 +2132,10 @@ export class MeerkatClient {
     const result = await this.request("mob/cancel_all_work", {
       member_ref: args.memberRef,
     });
-    return { ok: Boolean(result.ok ?? false) };
+    if (typeof result.ok !== "boolean") {
+      throw new Error("Invalid mob/cancel_all_work response: missing ok");
+    }
+    return { ok: result.ok };
   }
 
   async waitMobKickoff(
@@ -2439,9 +2474,14 @@ export class MeerkatClient {
       name,
       expected_revision: expectedRevision,
     });
+    if (typeof raw.name !== "string" || typeof raw.deleted_revision !== "number") {
+      throw new Error(
+        "Invalid mob/profile/delete response: missing name or deleted_revision",
+      );
+    }
     return {
-      name: String(raw.name ?? name),
-      deletedRevision: Number(raw.deleted_revision ?? expectedRevision),
+      name: raw.name,
+      deletedRevision: raw.deleted_revision,
     };
   }
 
@@ -2452,7 +2492,11 @@ export class MeerkatClient {
 
   async runMobFlow(mobId: string, flowId: string, params: Record<string, unknown> = {}): Promise<string> {
     const result = await this.request("mob/flow_run", { mob_id: mobId, flow_id: flowId, params });
-    return String(result.run_id ?? "");
+    return MeerkatClient.requireStringField(
+      result,
+      "run_id",
+      "Invalid mob/flow_run response: missing run_id",
+    );
   }
 
   async runMob(
@@ -2464,7 +2508,10 @@ export class MeerkatClient {
     if (options.prompt !== undefined) payload.prompt = options.prompt;
     if (options.flowId !== undefined) payload.flow_id = options.flowId;
     const result = (await this.request("mob/run", payload)) as MobFlowRunResult;
-    return String(result.run_id ?? "");
+    if (typeof result.run_id !== "string" || result.run_id.length === 0) {
+      throw new Error("Invalid mob/run response: missing run_id");
+    }
+    return result.run_id;
   }
 
   async getMobFlowStatus(mobId: string, runId: string): Promise<MobFlowStatus | null> {

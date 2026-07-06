@@ -740,7 +740,11 @@ export interface ReadSessionTranscriptRevisionParams {
 }
 
 export interface SessionInputStateParams {
+  selector: Record<string, unknown>;
   session_id: string;
+}
+
+export interface SessionInputStateSelector {
 }
 
 export interface SessionInputStateResult {

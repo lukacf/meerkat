@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.19] - 2026-07-06
+
 Meerkat 0.7.19 hardens the schedule subsystem against poisoned durable rows
 (HomeCore field incident: one bad row silently starved every schedule), makes
 member cancellation and retire/respawn real for embedders (meerkat-studio P0s),

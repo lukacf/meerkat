@@ -393,7 +393,7 @@ jobs:
       # what Linux runners get via overcommit.
       - name: Expand Windows pagefile
         if: runner.os == 'Windows'
-        uses: al-cheb/configure-pagefile-action@a3b6ebd6b634da88790d9c58d4b37a7f4a7b8708 # v1.4
+        uses: al-cheb/configure-pagefile-action@9b6da52fb72a3c6147c1aad2df22d8d905681adc # v1.5
         with:
           # Fixed size: Windows grows demand-sized pagefiles too slowly for
           # parallel rustc allocation bursts (the v0.7.16 tag run OOM-aborted

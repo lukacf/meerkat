@@ -54,7 +54,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -80,7 +80,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -114,7 +114,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -148,7 +148,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -200,7 +200,7 @@ jobs:
           wasm-pack --version
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -240,7 +240,7 @@ jobs:
           wasm-pack --version
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -266,7 +266,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1

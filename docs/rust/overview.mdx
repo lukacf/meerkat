@@ -30,7 +30,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "0.7.18"
+    meerkat = "0.7.19"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -39,17 +39,17 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     <CodeGroup>
     ```toml Default (all providers, no storage)
     [dependencies]
-    meerkat = "0.7.18"
+    meerkat = "0.7.19"
     ```
 
     ```toml Add persistence
     [dependencies]
-    meerkat = { version = "0.7.18", features = ["sqlite-store", "session-store"] }
+    meerkat = { version = "0.7.19", features = ["sqlite-store", "session-store"] }
     ```
 
     ```toml Full harness
     [dependencies]
-    meerkat = { version = "0.7.18", features = [
+    meerkat = { version = "0.7.19", features = [
         "sqlite-store", "session-store", "session-compaction",
         "memory-store-session", "comms", "mcp", "skills", "live"
     ] }
@@ -57,7 +57,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 
     ```toml Minimal (single provider)
     [dependencies]
-    meerkat = { version = "0.7.18", default-features = false, features = ["anthropic"] }
+    meerkat = { version = "0.7.19", default-features = false, features = ["anthropic"] }
     ```
     </CodeGroup>
   </Step>

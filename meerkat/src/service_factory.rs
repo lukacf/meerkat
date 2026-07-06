@@ -1891,6 +1891,42 @@ mod tests {
         Ok(())
     }
 
+    /// M2 acceptance: an embedder attaches an MCP stdio server to a
+    /// factory-built agent DECLARATIVELY (`mcp_servers` build option) — no
+    /// hand-wired router, no ephemeral-handle incantation — and the built
+    /// agent exposes the MCP surface through the composed dispatcher chain.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn factory_builds_declarative_mcp_servers_into_the_dispatcher() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let agent = build_factory_agent_with_mock(
+            &temp,
+            AgentBuildConfig {
+                mcp_servers: vec![meerkat_core::McpServerConfig::stdio(
+                    "planner",
+                    "/bin/echo",
+                    Vec::<String>::new(),
+                    std::collections::HashMap::new(),
+                )],
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+        )
+        .await?;
+
+        let snapshot = SessionAgent::external_tool_surface_snapshot(&agent).ok_or_else(|| {
+            "declarative mcp_servers must surface through the composed dispatcher".to_string()
+        })?;
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .any(|entry| entry.surface_id == "planner"),
+            "the declared MCP server must be staged on the session surface: {snapshot:?}"
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn test_session_build_options_preserve_keep_alive_flag() {
         let mut build = AgentBuildConfig::new("claude-sonnet-4-5");

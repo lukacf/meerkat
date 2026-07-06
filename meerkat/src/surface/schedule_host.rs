@@ -819,6 +819,127 @@ pub fn schedule_host_supported(kind: ScheduleStoreKind) -> bool {
     !matches!(kind, ScheduleStoreKind::Disabled | ScheduleStoreKind::Jsonl)
 }
 
+/// Tick-health bookkeeping for the schedule host loop: a driver that cannot
+/// claim is an incident, not a no-op, so tick errors and per-row faults are
+/// logged on first occurrence and on change at ERROR, with a rate-limited
+/// heartbeat (with the consecutive count) while the same condition persists,
+/// and an INFO recovery line when the loop is healthy again.
+struct TickHealthTracker {
+    fingerprint: Option<String>,
+    /// Ticks the CURRENT fingerprint has persisted (heartbeat counter).
+    consecutive: u64,
+    /// Total unhealthy ticks since the loop was last healthy, across
+    /// fingerprint changes — the outage length reported on recovery.
+    outage_ticks: u64,
+    last_logged: Option<meerkat_core::time_compat::Instant>,
+    heartbeat_every: std::time::Duration,
+}
+
+#[derive(Debug)]
+enum TickHealthLog {
+    Quiet,
+    /// A new or changed failure condition: log at ERROR.
+    Incident(String),
+    /// The same condition persists: rate-limited WARN heartbeat.
+    Heartbeat {
+        fingerprint: String,
+        consecutive: u64,
+    },
+    /// The loop recovered after `after` unhealthy ticks (counted across
+    /// fingerprint changes within the same outage).
+    Recovered {
+        after: u64,
+    },
+}
+
+impl TickHealthTracker {
+    fn new(heartbeat_every: std::time::Duration) -> Self {
+        Self {
+            fingerprint: None,
+            consecutive: 0,
+            outage_ticks: 0,
+            last_logged: None,
+            heartbeat_every,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        outcome: &Result<
+            meerkat_schedule::ScheduleTickReport,
+            meerkat_schedule::ScheduleDomainError,
+        >,
+        now: meerkat_core::time_compat::Instant,
+    ) -> TickHealthLog {
+        let fingerprint = match outcome {
+            Err(error) => Some(format!("tick failed: {error}")),
+            Ok(report) if report.fault_count() > 0 => Some(format!(
+                "tick degraded ({} row fault(s)):\n{}",
+                report.fault_count(),
+                report.fault_fingerprint()
+            )),
+            Ok(_) => None,
+        };
+        match fingerprint {
+            None => {
+                let after = self.outage_ticks;
+                self.fingerprint = None;
+                self.consecutive = 0;
+                self.outage_ticks = 0;
+                self.last_logged = None;
+                if after > 0 {
+                    TickHealthLog::Recovered { after }
+                } else {
+                    TickHealthLog::Quiet
+                }
+            }
+            Some(fingerprint) => {
+                self.outage_ticks += 1;
+                self.consecutive += 1;
+                if self.fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                    self.fingerprint = Some(fingerprint.clone());
+                    self.consecutive = 1;
+                    self.last_logged = Some(now);
+                    return TickHealthLog::Incident(fingerprint);
+                }
+                if self
+                    .last_logged
+                    .is_none_or(|last| now.duration_since(last) >= self.heartbeat_every)
+                {
+                    self.last_logged = Some(now);
+                    return TickHealthLog::Heartbeat {
+                        fingerprint,
+                        consecutive: self.consecutive,
+                    };
+                }
+                TickHealthLog::Quiet
+            }
+        }
+    }
+}
+
+fn log_tick_health(action: TickHealthLog) {
+    match action {
+        TickHealthLog::Quiet => {}
+        TickHealthLog::Incident(fingerprint) => {
+            tracing::error!(%fingerprint, "schedule driver tick is failing or degraded");
+        }
+        TickHealthLog::Heartbeat {
+            fingerprint,
+            consecutive,
+        } => {
+            tracing::warn!(
+                %fingerprint,
+                consecutive,
+                "schedule driver tick still failing or degraded"
+            );
+        }
+        TickHealthLog::Recovered { after } => {
+            tracing::info!(after, "schedule driver tick recovered");
+        }
+    }
+}
+
 pub fn spawn_schedule_host(
     schedule_service: ScheduleService,
     adapter: Arc<SharedScheduleTargetAdapter>,
@@ -852,11 +973,13 @@ pub fn spawn_schedule_host(
         }
         let mut interval = tokio::time::interval(poll_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut health = TickHealthTracker::new(std::time::Duration::from_secs(60));
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => break,
                 _ = interval.tick() => {
-                    let _ = driver.tick_once().await;
+                    let outcome = driver.tick_once().await;
+                    log_tick_health(health.observe(&outcome, meerkat_core::time_compat::Instant::now()));
                 }
             }
         }
@@ -870,11 +993,13 @@ pub fn spawn_schedule_host(
             tracing::warn!(%error, "failed to migrate recoverable schedule session targets");
         }
         let mut interval = tokio_with_wasm::alias::time::interval(poll_interval);
+        let mut health = TickHealthTracker::new(std::time::Duration::from_secs(60));
         loop {
             tokio_with_wasm::alias::select! {
                 _ = &mut shutdown_rx => break,
                 () = interval.tick() => {
-                    let _ = driver.tick_once().await;
+                    let outcome = driver.tick_once().await;
+                    log_tick_health(health.observe(&outcome, meerkat_core::time_compat::Instant::now()));
                 }
             }
         }
@@ -1116,6 +1241,351 @@ pub fn schedule_attempt_idempotency_key(occurrence: &Occurrence) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Ask 16: a driver that cannot claim is an incident, not a no-op. The
+    /// tracker logs a new/changed condition once at ERROR, heartbeats with
+    /// the consecutive count while it persists, and reports recovery.
+    #[test]
+    fn tick_health_tracker_logs_incident_heartbeat_and_recovery() {
+        let heartbeat = std::time::Duration::from_secs(60);
+        let mut tracker = TickHealthTracker::new(heartbeat);
+        let start = meerkat_core::time_compat::Instant::now();
+        let failure: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
+            meerkat_schedule::ScheduleDomainError::Internal("store unavailable".to_string()),
+        );
+        let ok: Result<_, meerkat_schedule::ScheduleDomainError> =
+            Ok(meerkat_schedule::ScheduleTickReport::default());
+
+        // Healthy ticks stay quiet.
+        assert!(matches!(tracker.observe(&ok, start), TickHealthLog::Quiet));
+
+        // First failure: incident at ERROR.
+        assert!(matches!(
+            tracker.observe(&failure, start),
+            TickHealthLog::Incident(_)
+        ));
+        // Same condition immediately after: quiet (rate limited).
+        assert!(matches!(
+            tracker.observe(&failure, start + std::time::Duration::from_millis(250)),
+            TickHealthLog::Quiet
+        ));
+        // Same condition past the heartbeat window: WARN heartbeat with the
+        // consecutive count.
+        match tracker.observe(
+            &failure,
+            start + heartbeat + std::time::Duration::from_secs(1),
+        ) {
+            TickHealthLog::Heartbeat { consecutive, .. } => assert_eq!(consecutive, 3),
+            other => panic!("expected heartbeat, got {other:?}"),
+        }
+
+        // A CHANGED condition logs immediately even inside the window.
+        let changed: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
+            meerkat_schedule::ScheduleDomainError::Internal("different failure".to_string()),
+        );
+        assert!(matches!(
+            tracker.observe(
+                &changed,
+                start + heartbeat + std::time::Duration::from_secs(2)
+            ),
+            TickHealthLog::Incident(_)
+        ));
+
+        // Recovery reports the FULL outage length (4 unhealthy ticks),
+        // not just the ticks since the condition last changed.
+        match tracker.observe(&ok, start + heartbeat + std::time::Duration::from_secs(3)) {
+            TickHealthLog::Recovered { after } => assert_eq!(after, 4),
+            other => panic!("expected recovery, got {other:?}"),
+        }
+        assert!(matches!(
+            tracker.observe(&ok, start + heartbeat + std::time::Duration::from_secs(4)),
+            TickHealthLog::Quiet
+        ));
+    }
+
+    /// A tick that SUCCEEDS but skipped rows as typed faults is degraded,
+    /// not healthy: the tracker treats the fault fingerprint like an error
+    /// condition (log on change, heartbeat while it persists).
+    #[test]
+    fn tick_health_tracker_treats_row_faults_as_degraded() {
+        let heartbeat = std::time::Duration::from_secs(60);
+        let mut tracker = TickHealthTracker::new(heartbeat);
+        let start = meerkat_core::time_compat::Instant::now();
+        let mut report = meerkat_schedule::ScheduleTickReport::default();
+        report
+            .occurrence_row_faults
+            .push(meerkat_schedule::ScheduleStoreRowFault {
+                schedule_id: Some("sched-1".to_string()),
+                occurrence_id: Some("occ-1".to_string()),
+                kind: meerkat_schedule::ScheduleStoreRowFaultKind::Deserialization,
+                detail: "poisoned row".to_string(),
+            });
+        let degraded: Result<_, meerkat_schedule::ScheduleDomainError> = Ok(report);
+
+        match tracker.observe(&degraded, start) {
+            TickHealthLog::Incident(fingerprint) => {
+                assert!(fingerprint.contains("occ-1"), "{fingerprint}");
+                assert!(fingerprint.contains("poisoned row"), "{fingerprint}");
+            }
+            other => panic!("expected incident, got {other:?}"),
+        }
+        assert!(matches!(
+            tracker.observe(&degraded, start + std::time::Duration::from_millis(250)),
+            TickHealthLog::Quiet
+        ));
+        let ok: Result<_, meerkat_schedule::ScheduleDomainError> =
+            Ok(meerkat_schedule::ScheduleTickReport::default());
+        assert!(matches!(
+            tracker.observe(&ok, start + std::time::Duration::from_secs(1)),
+            TickHealthLog::Recovered { after: 2 }
+        ));
+    }
+
+    /// A fingerprint change mid-outage restarts the heartbeat counter but
+    /// must NOT restart the outage counter: recovery reports the whole
+    /// unhealthy stretch.
+    #[test]
+    fn tick_health_tracker_reports_full_outage_across_fingerprint_changes() {
+        let heartbeat = std::time::Duration::from_secs(60);
+        let mut tracker = TickHealthTracker::new(heartbeat);
+        let start = meerkat_core::time_compat::Instant::now();
+        let failure_a: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
+            meerkat_schedule::ScheduleDomainError::Internal("failure a".to_string()),
+        );
+        let failure_b: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
+            meerkat_schedule::ScheduleDomainError::Internal("failure b".to_string()),
+        );
+        let ok: Result<_, meerkat_schedule::ScheduleDomainError> =
+            Ok(meerkat_schedule::ScheduleTickReport::default());
+
+        for tick in 0..5 {
+            let _ = tracker.observe(
+                &failure_a,
+                start + std::time::Duration::from_millis(250 * tick),
+            );
+        }
+        assert!(matches!(
+            tracker.observe(&failure_b, start + std::time::Duration::from_secs(2)),
+            TickHealthLog::Incident(_)
+        ));
+        match tracker.observe(&ok, start + std::time::Duration::from_secs(3)) {
+            TickHealthLog::Recovered { after } => assert_eq!(after, 6),
+            other => panic!("expected recovery, got {other:?}"),
+        }
+    }
+
+    /// Ask 16 regression, loop-level: the spawned schedule host loop must
+    /// FEED tick outcomes into the health tracker and log them. Reverting
+    /// the loop body to `let _ = driver.tick_once().await;` (the exact
+    /// silent-discard shape the field incident hit) fails this test.
+    #[tokio::test]
+    async fn spawn_schedule_host_logs_failing_ticks() {
+        use uuid::Uuid;
+
+        struct FailingScheduleStore;
+
+        #[async_trait]
+        impl ScheduleStore for FailingScheduleStore {
+            fn kind(&self) -> meerkat_schedule::ScheduleStoreKind {
+                meerkat_schedule::ScheduleStoreKind::Memory
+            }
+
+            async fn get_store_time_utc(
+                &self,
+            ) -> Result<chrono::DateTime<chrono::Utc>, meerkat_schedule::ScheduleStoreError>
+            {
+                Ok(chrono::Utc::now())
+            }
+
+            async fn commit_schedule_write(
+                &self,
+                _write: meerkat_schedule::AuthorizedScheduleWrite,
+            ) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn get_schedule(
+                &self,
+                _schedule_id: &meerkat_schedule::ScheduleId,
+            ) -> Result<Option<meerkat_schedule::Schedule>, meerkat_schedule::ScheduleStoreError>
+            {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn list_schedules(
+                &self,
+                _filter: meerkat_schedule::ScheduleFilter,
+            ) -> Result<Vec<meerkat_schedule::Schedule>, meerkat_schedule::ScheduleStoreError>
+            {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn commit_occurrence_write(
+                &self,
+                _write: meerkat_schedule::AuthorizedOccurrenceWrite,
+            ) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn commit_occurrence_writes(
+                &self,
+                _writes: Vec<meerkat_schedule::AuthorizedOccurrenceWrite>,
+            ) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn commit_schedule_mutation(
+                &self,
+                _schedule: meerkat_schedule::AuthorizedScheduleWrite,
+                _occurrences: Vec<meerkat_schedule::AuthorizedOccurrenceWrite>,
+            ) -> Result<meerkat_schedule::Schedule, meerkat_schedule::ScheduleStoreError>
+            {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn get_occurrence(
+                &self,
+                _occurrence_id: &meerkat_schedule::OccurrenceId,
+            ) -> Result<Option<Occurrence>, meerkat_schedule::ScheduleStoreError> {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn list_occurrences(
+                &self,
+                _filter: meerkat_schedule::OccurrenceFilter,
+            ) -> Result<Vec<Occurrence>, meerkat_schedule::ScheduleStoreError> {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn append_receipt(
+                &self,
+                _receipt: meerkat_schedule::DeliveryReceipt,
+            ) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn list_receipts(
+                &self,
+                _occurrence_id: &meerkat_schedule::OccurrenceId,
+            ) -> Result<Vec<meerkat_schedule::DeliveryReceipt>, meerkat_schedule::ScheduleStoreError>
+            {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn claim_due_occurrences(
+                &self,
+                _request: meerkat_schedule::ClaimDueRequest,
+            ) -> Result<meerkat_schedule::ClaimDueResult, meerkat_schedule::ScheduleStoreError>
+            {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn transition_occurrence_if_current(
+                &self,
+                _occurrence_id: &meerkat_schedule::OccurrenceId,
+                _expected_attempt: u32,
+                _expected_claim_token: Option<Uuid>,
+                _transition: meerkat_schedule::OccurrenceLifecycleInput,
+            ) -> Result<
+                Option<(Occurrence, Vec<meerkat_schedule::OccurrenceLifecycleEffect>)>,
+                meerkat_schedule::ScheduleStoreError,
+            > {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn transition_occurrence_with_receipt_if_current(
+                &self,
+                _occurrence_id: &meerkat_schedule::OccurrenceId,
+                _expected_attempt: u32,
+                _expected_claim_token: Option<Uuid>,
+                _transition: meerkat_schedule::OccurrenceLifecycleInput,
+                _runtime_outcome: Option<meerkat_schedule::RuntimeDeliveryOutcome>,
+            ) -> Result<Option<Occurrence>, meerkat_schedule::ScheduleStoreError> {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+        }
+
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log buffer lock")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer_buf = SharedBuf(Arc::clone(&buf));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(move || writer_buf.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let store = Arc::new(FailingScheduleStore) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
+            materialize_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = Arc::new(SharedScheduleTargetAdapter::new(
+            service.clone(),
+            session_host,
+            mob_host,
+        ));
+
+        let handle = spawn_schedule_host(service, adapter, "tick-health-test");
+        // cfg!(test) poll interval is 50ms; give the loop a few ticks.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.shutdown().await;
+
+        let logs = String::from_utf8(buf.lock().expect("log buffer lock").clone())
+            .expect("captured logs should be utf8");
+        assert!(
+            logs.contains("schedule driver tick is failing or degraded"),
+            "the host loop must log failing tick outcomes, got: {logs}"
+        );
+        assert!(
+            logs.contains("synthetic store outage"),
+            "the incident log must carry the tick failure detail, got: {logs}"
+        );
+    }
 
     use async_trait::async_trait;
     use meerkat_schedule::ScheduleStore;

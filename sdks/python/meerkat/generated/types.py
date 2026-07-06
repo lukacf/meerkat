@@ -957,6 +957,18 @@ class ReadSessionTranscriptRevisionParams:
 
 
 @dataclass
+class SessionInputStateParams:
+    """Parameters for `session/input_status`."""
+    session_id: str
+
+
+@dataclass
+class SessionInputStateResult:
+    """Result for `session/input_status`."""
+    state: Optional[dict[str, Any]] = None
+
+
+@dataclass
 class RealmIdParams:
     """Request payload for `auth/profile/list` and `realm/get`."""
     realm_id: str

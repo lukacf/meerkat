@@ -923,6 +923,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelAfterBoundary`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CancelAfterBoundaryAttachedAlreadyPending`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelAfterBoundaryAlreadyPending`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryAppliedPublish`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
@@ -5066,6 +5072,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RequestCancellationAtBoundary`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BoundaryCancelAlreadyPending`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `WakeInterrupt`

@@ -109,6 +109,7 @@ subset.
 | `session/external_event` | Session | `SessionExternalEventEnvelope` | `RuntimeAcceptResult` | Queue a runtime-backed external event |
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append runtime-backed system context to the next turn |
+| `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
 | `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live audio/text channel for a session |

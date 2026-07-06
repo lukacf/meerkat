@@ -2818,6 +2818,216 @@ async fn session_service_runtime_ext_write_side_follows_machine_control_surface(
     );
 }
 
+/// M4 (reconciliation query): an idempotency key resolves through the
+/// machine-owned admission map to its input's stored state; an unknown key
+/// resolves to `None`; a deduplicated resubmission resolves to the ORIGINAL
+/// input.
+#[tokio::test]
+async fn input_state_by_idempotency_key_resolves_machine_owned_binding() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+
+    let key = crate::identifiers::IdempotencyKey::new("interaction-42");
+    let mut prompt = make_prompt("keyed interaction");
+    let prompt_id = prompt.id().clone();
+    if let Input::Prompt(inner) = &mut prompt {
+        inner.header.idempotency_key = Some(key.clone());
+    }
+    let outcome =
+        <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&adapter, &session_id, prompt)
+            .await
+            .expect("keyed prompt should be accepted");
+    assert!(matches!(outcome, AcceptOutcome::Accepted { .. }));
+
+    let stored = <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
+        &adapter,
+        &session_id,
+        &key.to_string(),
+    )
+    .await
+    .expect("keyed lookup should route through the machine seam")
+    .expect("the admitted input must resolve from its idempotency key");
+    assert_eq!(stored.state.input_id, prompt_id);
+    assert_eq!(
+        stored.seed.phase,
+        crate::input_state::InputLifecycleState::Queued
+    );
+
+    let missing = <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
+        &adapter,
+        &session_id,
+        "no-such-key",
+    )
+    .await
+    .expect("unknown key lookup should still route through the machine seam");
+    assert!(
+        missing.is_none(),
+        "an unregistered key must resolve to None"
+    );
+
+    // A duplicate under the same key dedups; the key keeps resolving to the
+    // ORIGINAL input, read-only (the lookup itself never rebinds).
+    let mut duplicate = make_prompt("keyed interaction resubmitted");
+    if let Input::Prompt(inner) = &mut duplicate {
+        inner.header.idempotency_key = Some(key.clone());
+    }
+    let duplicate_outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        &adapter,
+        &session_id,
+        duplicate,
+    )
+    .await
+    .expect("duplicate keyed prompt should resolve");
+    assert!(matches!(
+        duplicate_outcome,
+        AcceptOutcome::Deduplicated { .. }
+    ));
+    let still_original =
+        <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
+            &adapter,
+            &session_id,
+            &key.to_string(),
+        )
+        .await
+        .expect("keyed lookup should still succeed after dedup")
+        .expect("the binding must still resolve");
+    assert_eq!(still_original.state.input_id, prompt_id);
+}
+
+/// M4 acceptance: the terminal status of a keyed interaction is queryable
+/// AFTER a host restart (new store handle, new machine, session
+/// re-registration) — embedders reconcile interrupted work without keeping
+/// their own run journal.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn input_terminal_status_by_idempotency_key_survives_restart() {
+    struct CompletingExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CompletingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let session_id = SessionId::new();
+    let key = crate::identifiers::IdempotencyKey::new("restart-reconcile-1");
+
+    {
+        let machine = Arc::new(MeerkatMachine::persistent(
+            Arc::clone(&store),
+            memory_blob_store(),
+        ));
+        machine
+            .register_session_with_executor(session_id.clone(), Box::new(CompletingExecutor))
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let mut prompt = make_prompt("keyed interaction to reconcile");
+        if let Input::Prompt(inner) = &mut prompt {
+            inner.header.idempotency_key = Some(key.clone());
+        }
+        let (outcome, completion) = machine
+            .accept_input_with_completion(&session_id, prompt)
+            .await
+            .expect("keyed prompt should be accepted");
+        assert!(outcome.is_accepted());
+        let completion = completion.expect("queued prompt should register completion");
+        tokio::time::timeout(Duration::from_secs(2), completion.wait_authorized())
+            .await
+            .expect("keyed prompt should reach a terminal outcome before restart");
+
+        // Wait until the terminal state is durably visible through the
+        // machine seam before simulating the restart.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let stored =
+                    <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
+                        &machine,
+                        &session_id,
+                        &key.to_string(),
+                    )
+                    .await
+                    .expect("keyed lookup should succeed pre-restart");
+                if stored
+                    .and_then(|stored| stored.seed.terminal_outcome)
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("keyed prompt should terminalize before restart");
+    }
+    drop(store);
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    restarted
+        .register_session(session_id.clone())
+        .await
+        .expect("session re-registration should recover persisted input states");
+
+    let stored = <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
+        &restarted,
+        &session_id,
+        &key.to_string(),
+    )
+    .await
+    .expect("keyed lookup should route through the machine seam after restart")
+    .expect("the recovered binding must resolve after restart");
+    assert_eq!(
+        stored.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Consumed),
+        "the restarted host must be able to read the interaction's terminal status"
+    );
+    assert!(
+        stored.seed.last_run_id.is_some(),
+        "the terminal status must carry the resolving run id"
+    );
+}
+
 #[tokio::test]
 async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -6045,8 +6255,180 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
     );
 }
 
+/// M1 regression (meerkat-studio P0): a boundary handle that (wrongly)
+/// re-enters `MeerkatMachine::cancel_after_boundary` from inside the
+/// machine's own dispatch used to recurse unboundedly — each lap re-staged
+/// the unguarded CancelAfterBoundary self-loop, re-emitted the
+/// RuntimeEffectFact, and re-dispatched to the handle until the tokio worker
+/// overflowed its stack (SIGABRT). The machine-owned
+/// `boundary_cancel_dispatch_pending` fact must bound the ring to exactly
+/// one dispatch, and a NEW turn must re-arm dispatching.
 #[tokio::test]
-async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake() {
+async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispatch() {
+    struct ReentrantBoundaryHandle {
+        machine: Arc<MeerkatMachine>,
+        session_id: SessionId,
+        handle_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for ReentrantBoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            let laps = self.handle_calls.fetch_add(1, Ordering::SeqCst);
+            // Safety valve so an unfixed regression fails the assertion
+            // instead of actually overflowing the test worker's stack.
+            if laps >= 5 {
+                return Ok(());
+            }
+            // The buggy embedder shape: re-enter the machine from inside its
+            // own boundary-cancel dispatch.
+            self.machine
+                .cancel_after_boundary(&self.session_id)
+                .await
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+        }
+    }
+
+    struct ReentrantExecutor {
+        machine: Arc<MeerkatMachine>,
+        session_id: SessionId,
+        handle_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for ReentrantExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(ReentrantBoundaryHandle {
+                machine: Arc::clone(&self.machine),
+                session_id: self.session_id.clone(),
+                handle_calls: Arc::clone(&self.handle_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let handle_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(ReentrantExecutor {
+                machine: Arc::clone(&adapter),
+                session_id: session_id.clone(),
+                handle_calls: Arc::clone(&handle_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+
+    // First turn: cancel mid-apply through a re-entrant handle.
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("first cancellable turn"))
+        .await
+        .expect("prompt should be accepted");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("prompt should register completion");
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("turn should start running");
+
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("mid-turn boundary cancel must return without crashing the host");
+    assert_eq!(
+        handle_calls.load(Ordering::SeqCst),
+        1,
+        "the machine must bound a re-entrant boundary handle to exactly one dispatch"
+    );
+
+    // A converged repeat within the same turn is an accepted no-op.
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("repeat boundary cancel while a dispatch is outstanding must be an accepted no-op");
+    assert_eq!(
+        handle_calls.load(Ordering::SeqCst),
+        1,
+        "an outstanding dispatch must absorb repeat cancels without re-dispatching"
+    );
+
+    allow_finish.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), completion.wait_authorized())
+        .await
+        .expect("first turn should settle");
+
+    // Second turn: run start must re-arm the dispatch (the pending fact is
+    // machine-cleared, not stuck forever).
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("second cancellable turn"))
+        .await
+        .expect("second prompt should be accepted");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("second prompt should register completion");
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("second turn should start running");
+
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("boundary cancel on the next turn must dispatch again");
+    assert_eq!(
+        handle_calls.load(Ordering::SeqCst),
+        2,
+        "a new turn must re-arm boundary-cancel dispatching"
+    );
+
+    allow_finish.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), completion.wait_authorized())
+        .await
+        .expect("second turn should settle");
+}
+
+#[tokio::test]
+async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
     struct BlockingExecutor {
         live_boundary_cancel_calls: Arc<AtomicUsize>,
         queued_boundary_cancel_calls: Arc<AtomicUsize>,
@@ -6158,60 +6540,64 @@ async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake
         .await
         .expect("attached steered prompt should request immediate processing");
 
+    // The first cancel dispatches: live wake first, one queued effect.
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("first boundary cancel should dispatch");
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        1,
+        "the dispatching boundary cancel should deliver the live wake first"
+    );
+
+    // Repeats while the dispatch is outstanding are machine-converged
+    // no-ops: they return immediately (no backpressure stall), deliver no
+    // additional live wake, and enqueue no additional effect — the public
+    // cancel surface can no longer saturate the effect channel at all
+    // (previously 16 repeats filled it and the 17th blocked).
     for _ in 0..16 {
         adapter
             .cancel_after_boundary(&session_id)
             .await
-            .expect("boundary cancel should enqueue until the effect channel is full");
+            .expect("repeat boundary cancels while a dispatch is outstanding are accepted no-ops");
     }
     assert_eq!(
         live_boundary_cancel_calls.load(Ordering::SeqCst),
-        16,
-        "each queued boundary cancel should deliver the live wake first"
+        1,
+        "converged repeat cancels must not re-deliver the live wake"
     );
     assert_eq!(
         queued_boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "runtime loop is still blocked inside apply, so queued effects have not drained"
+        "runtime loop is still blocked inside apply, so the queued effect has not drained"
     );
 
-    let mut saturated_cancel = tokio::spawn({
-        let adapter = Arc::clone(&adapter);
-        let session_id = session_id.clone();
-        async move { adapter.cancel_after_boundary(&session_id).await }
-    });
+    allow_finish_tx
+        .send(())
+        .expect("blocking executor should still be awaiting release");
+    match completion_handle.wait_authorized().await {
+        CompletionOutcome::CompletedWithoutResult => {}
+        other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
+    }
+
+    // Exactly one queued effect was committed for the whole burst; it
+    // drains once the loop is released.
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if live_boundary_cancel_calls.load(Ordering::SeqCst) == 17 {
+            if queued_boundary_cancel_calls.load(Ordering::SeqCst) == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("saturated boundary cancel should still apply the live cooperative wake");
-    let premature = tokio::time::timeout(Duration::from_millis(100), &mut saturated_cancel).await;
-    assert!(
-        premature.is_err(),
-        "full effect channel must backpressure committed runtime effects instead of failing fast"
-    );
+    .expect("the single committed boundary-cancel effect should drain after release");
     assert_eq!(
-        live_boundary_cancel_calls.load(Ordering::SeqCst),
-        17,
-        "saturated effect channel backpressures after attempting the live cooperative wake"
+        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        1,
+        "the converged burst must commit exactly one queued boundary-cancel effect"
     );
-
-    allow_finish_tx
-        .send(())
-        .expect("blocking executor should still be awaiting release");
-    saturated_cancel
-        .await
-        .expect("saturated cancel task should not panic")
-        .expect("saturated cancel should complete once runtime effect capacity opens");
-    match completion_handle.wait_authorized().await {
-        CompletionOutcome::CompletedWithoutResult => {}
-        other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
-    }
 }
 
 #[tokio::test]

@@ -145,9 +145,11 @@ async fn sqlite_schedule_with_unrecoverable_machine_state_fails_closed() {
     let path = dir.path().join("schedule.sqlite3");
     let store = SqliteScheduleStore::open(&path).expect("open");
     let schedule = commit_sample_schedule(&store).await;
-    let cursor = Utc::now();
-    let cursor_ms = u64::try_from(cursor.timestamp_millis()).expect("positive cursor millis");
 
+    // A zero revision violates the generated `revision_is_positive`
+    // invariant and has no durable-format healing (unlike the legacy
+    // Deleted-with-cursor tombstone shape, which normalizes at the parse
+    // boundary — see schedule_row_fault_tolerance.rs).
     corrupt_json_blob(
         &path,
         "schedule_schedules",
@@ -156,20 +158,12 @@ async fn sqlite_schedule_with_unrecoverable_machine_state_fails_closed() {
         &schedule.schedule_id.to_string(),
         |value| {
             let object = value.as_object_mut().expect("schedule json object");
-            object.insert("phase".to_string(), serde_json::json!("deleted"));
-            object.insert(
-                "planning_cursor_utc".to_string(),
-                serde_json::to_value(cursor).expect("cursor json"),
-            );
+            object.insert("revision".to_string(), serde_json::json!(0));
             let machine = object
                 .get_mut("machine_state")
                 .and_then(serde_json::Value::as_object_mut)
                 .expect("schedule machine_state object");
-            machine.insert("lifecycle_phase".to_string(), serde_json::json!("deleted"));
-            machine.insert(
-                "planning_cursor_utc_ms".to_string(),
-                serde_json::json!(cursor_ms),
-            );
+            machine.insert("revision".to_string(), serde_json::json!(0));
         },
     );
 

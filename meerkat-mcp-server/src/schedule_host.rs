@@ -225,6 +225,7 @@ impl McpScheduleContext {
             provider_params: create.provider_params.clone(),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools,
+            mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             llm_client_override: None,
             agent_llm_client_decorator: None,

@@ -1226,6 +1226,7 @@ struct MockSessionService {
     missing_comms_sessions: RwLock<HashSet<SessionId>>,
     /// Sessions whose archive() call should fail.
     archive_fail_sessions: RwLock<HashSet<SessionId>>,
+    archive_not_found_sessions: RwLock<HashSet<SessionId>>,
     /// Comms names whose created sessions should fail archive().
     archive_fail_comms_names: RwLock<HashSet<String>>,
     /// Sent intents for sessions that were archived and removed.
@@ -1316,6 +1317,7 @@ impl MockSessionService {
             comms_behaviors: RwLock::new(HashMap::new()),
             missing_comms_sessions: RwLock::new(HashSet::new()),
             archive_fail_sessions: RwLock::new(HashSet::new()),
+            archive_not_found_sessions: RwLock::new(HashSet::new()),
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
             archived_peer_lifecycle_max_in_flight: RwLock::new(HashMap::new()),
@@ -1537,6 +1539,15 @@ impl MockSessionService {
 
     async fn set_archive_failure(&self, session_id: &SessionId) {
         self.archive_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+    }
+
+    /// Mirror PersistentSessionService for a session absent from the durable
+    /// store: archive returns `SessionError::NotFound`.
+    async fn set_archive_not_found(&self, session_id: &SessionId) {
+        self.archive_not_found_sessions
             .write()
             .await
             .insert(session_id.clone());
@@ -2335,6 +2346,9 @@ impl SessionService for MockSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        if self.archive_not_found_sessions.read().await.contains(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
         if self.archive_fail_sessions.read().await.contains(id) {
             return Err(SessionError::Store(Box::new(std::io::Error::other(
                 "mock archive failure",
@@ -2719,6 +2733,22 @@ impl MobSessionService for MockSessionService {
             return Ok(None);
         }
         Ok(self.persisted_session_clone(session_id).await)
+    }
+
+    async fn session_known_to_archive_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        // Mirror PersistentSessionService: any session with a record —
+        // live, persisted, or already archived — is authority-owned; only a
+        // session this service never saw is host-owned.
+        if self.archived_session_ids.read().await.contains(session_id) {
+            return Ok(true);
+        }
+        if self.sessions.read().await.contains_key(session_id) {
+            return Ok(true);
+        }
+        Ok(self.persisted_session_clone(session_id).await.is_some())
     }
 
     async fn apply_runtime_turn(
@@ -3588,6 +3618,7 @@ fn sample_definition() -> MobDefinition {
                 schedule: false,
                 image_generation: false,
                 mcp: vec![],
+                mcp_servers: vec![],
                 rust_bundles: vec![],
             },
             peer_description: "The lead".into(),
@@ -22829,6 +22860,72 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
             .await
             .expect("read live service state"),
         "successful cleanup should archive the session projection"
+    );
+}
+
+/// K1 regression (meerkat-studio P0): retire on a SESSION-OWNED member — a
+/// runtime-registered session the mob archive authority never had a record
+/// for (e.g. materialized by an embedder's session service) — used to fail
+/// deterministically with "mob archive authority returned NotFound for
+/// registered runtime session", leaving the runtime registered so every
+/// retry failed identically and the member could be neither respawned nor
+/// removed. Authority-NotFound must complete the disposal pipeline instead:
+/// retire the runtime session and drop the binding.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_retire_session_owned_member_completes_disposal_on_archive_authority_not_found() {
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        runtime_store_for_machine,
+    ));
+    service.set_runtime_adapter(adapter.clone());
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+
+    // The session exists ONLY in the runtime adapter — never created through
+    // the mob session service, so the archive authority has no durable
+    // record (`load_persisted_session` -> None) and archiving it would
+    // return NotFound, exactly the field shape.
+    let session_id = SessionId::new();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+    service.set_archive_not_found(&session_id).await;
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session-owned runtime session");
+
+    // The member itself was provisioned normally (owner ops binding exists);
+    // only the archive authority record is missing.
+    let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
+    let bindings = adapter
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect("prepare generated runtime bindings");
+    provisioner
+        .bind_member_owner_context(
+            &member_ref,
+            session_id.clone(),
+            Arc::clone(bindings.ops_lifecycle()),
+        )
+        .await
+        .expect("bind generated owner context");
+
+    provisioner.retire_member(&member_ref).await.expect(
+        "retire of a session-owned member must complete disposal, not escalate authority NotFound",
+    );
+
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "disposal must unregister the runtime session (a registered leftover made every retry fail identically)"
+    );
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "the runtime lifecycle must be durably retired even though the archive authority had no record"
     );
 }
 

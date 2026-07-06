@@ -9,7 +9,7 @@ use meerkat_schedule::{
     OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
     OccurrenceSupersessionAck, PendingSupersession, RuntimeDeliveryOutcome, Schedule,
     ScheduleFilter, SchedulePhase, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
-    apply_supersession_feedback,
+    ScheduleStoreRowFault, ScheduleStoreRowFaultKind, apply_supersession_feedback,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -128,15 +128,26 @@ impl SqliteScheduleStore {
             let conn = open_connection(&path)?;
             ensure_schedule_schema(&conn)?;
             let mut stmt = conn.prepare(
-                "SELECT schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
+                "SELECT schedule_id, schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
             )?;
-            let rows =
-                stmt.query_map([], |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()))?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                ))
+            })?;
             let mut schedules = Vec::new();
             for row in rows {
-                let bytes = row?;
-                let schedule: Schedule =
-                    serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
+                let (schedule_id, bytes) = row?;
+                // Strict listing fails wholesale on a poisoned row (the
+                // tolerant `list_schedules_with_row_faults` is the skipping
+                // read), but the failure names the row so the operator can
+                // find it without bisecting the table.
+                let schedule: Schedule = serde_json::from_slice(&bytes).map_err(|error| {
+                    StoreError::Internal(format!(
+                        "schedule row '{schedule_id}' failed typed recovery: {error}"
+                    ))
+                })?;
                 if !filter.include_deleted
                     && schedule.phase == meerkat_schedule::SchedulePhase::Deleted
                 {
@@ -151,6 +162,62 @@ impl SqliteScheduleStore {
                 }
             }
             Ok(schedules)
+        })
+        .await
+        .map_err(StoreError::Join)?
+    }
+
+    async fn list_schedules_with_row_faults_impl(
+        &self,
+        filter: ScheduleFilter,
+    ) -> Result<(Vec<Schedule>, Vec<ScheduleStoreRowFault>), StoreError> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_connection(&path)?;
+            ensure_schedule_schema(&conn)?;
+            let mut stmt = conn.prepare(
+                "SELECT schedule_id, schedule_json FROM schedule_schedules ORDER BY created_at_ms ASC, schedule_id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                ))
+            })?;
+            let mut schedules = Vec::new();
+            let mut row_faults = Vec::new();
+            for row in rows {
+                let (schedule_id, bytes) = row?;
+                // Per-row tolerance: one row that fails typed recovery is
+                // surfaced as an attributable fault instead of failing the
+                // whole listing — a single poisoned row (e.g. a legacy
+                // tombstone) must not take down every schedule.
+                let schedule: Schedule = match serde_json::from_slice(&bytes) {
+                    Ok(schedule) => schedule,
+                    Err(error) => {
+                        row_faults.push(ScheduleStoreRowFault {
+                            schedule_id: Some(schedule_id),
+                            occurrence_id: None,
+                            kind: ScheduleStoreRowFaultKind::Deserialization,
+                            detail: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if !filter.include_deleted
+                    && schedule.phase == meerkat_schedule::SchedulePhase::Deleted
+                {
+                    continue;
+                }
+                if filter.phase.is_some_and(|phase| schedule.phase != phase) {
+                    continue;
+                }
+                schedules.push(schedule);
+                if filter.limit.is_some_and(|limit| schedules.len() >= limit) {
+                    break;
+                }
+            }
+            Ok((schedules, row_faults))
         })
         .await
         .map_err(StoreError::Join)?
@@ -329,67 +396,101 @@ impl SqliteScheduleStore {
 
             let limit = request.limit;
             let mut occurrences = Vec::new();
+            let mut row_faults = Vec::new();
             {
-                let mut stmt = tx.prepare(
+                // The scan is bounded in SQL, not in Rust: only live-phase
+                // occurrences of active schedules whose due time (or claim
+                // lease) has passed enter deserialization, so terminal rows
+                // never pay the parse cost and a poisoned terminal row can
+                // never poison the claim path. The live-phase set is built
+                // from the exhaustive `occurrence_phase_live_for_claim`
+                // match (a new `OccurrencePhase` variant fails to compile
+                // until it is classified); `classify_due_action` remains
+                // the machine-owned eligibility authority for every row that
+                // passes the prefilter.
+                let mut stmt = tx.prepare(&format!(
                     r"
-                    SELECT o.occurrence_json, s.schedule_json
+                    SELECT o.occurrence_id, o.schedule_id, o.occurrence_json, s.schedule_json
                     FROM schedule_occurrences o
                     JOIN schedule_schedules s ON s.schedule_id = o.schedule_id
+                    WHERE s.phase = 'active'
+                      AND o.phase IN ({live_phases})
+                      AND (
+                        o.due_at_ms <= ?1
+                        OR (o.lease_expires_at_ms IS NOT NULL AND o.lease_expires_at_ms <= ?1)
+                      )
                     ORDER BY o.due_at_ms ASC, o.schedule_revision ASC, o.occurrence_ordinal ASC
                     ",
-                )?;
-                let rows = stmt.query_map([], |row| {
+                    live_phases = live_occurrence_phase_sql_list(),
+                ))?;
+                let rows = stmt.query_map(params![store_now_ms], |row| {
                     Ok((
-                        row.get::<_, JsonColumnBytes>(0)?.into_bytes(),
-                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, JsonColumnBytes>(2)?.into_bytes(),
+                        row.get::<_, JsonColumnBytes>(3)?.into_bytes(),
                     ))
                 })?;
                 for row in rows {
-                    let (occurrence_bytes, schedule_bytes) = row?;
-                    let schedule: Schedule = serde_json::from_slice(&schedule_bytes)
-                        .map_err(StoreError::Serialization)?;
+                    let (occurrence_id, schedule_id, occurrence_bytes, schedule_bytes) = row?;
+                    // Per-row tolerance: a row that fails typed recovery is
+                    // skipped with an attributable fault instead of aborting
+                    // the whole claim transaction — one poisoned row must
+                    // not starve every schedule.
+                    let schedule: Schedule = match serde_json::from_slice(&schedule_bytes) {
+                        Ok(schedule) => schedule,
+                        Err(error) => {
+                            row_faults.push(ScheduleStoreRowFault {
+                                schedule_id: Some(schedule_id),
+                                occurrence_id: Some(occurrence_id),
+                                kind: ScheduleStoreRowFaultKind::Deserialization,
+                                detail: format!("schedule row: {error}"),
+                            });
+                            continue;
+                        }
+                    };
                     if schedule.phase != SchedulePhase::Active {
                         continue;
                     }
-                    let occurrence: Occurrence = serde_json::from_slice(&occurrence_bytes)
-                        .map_err(StoreError::Serialization)?;
+                    let occurrence: Occurrence = match serde_json::from_slice(&occurrence_bytes) {
+                        Ok(occurrence) => occurrence,
+                        Err(error) => {
+                            row_faults.push(ScheduleStoreRowFault {
+                                schedule_id: Some(schedule_id),
+                                occurrence_id: Some(occurrence_id),
+                                kind: ScheduleStoreRowFaultKind::Deserialization,
+                                detail: format!("occurrence row: {error}"),
+                            });
+                            continue;
+                        }
+                    };
                     occurrences.push(occurrence);
                 }
             }
 
             let mut claimed = Vec::new();
             for occurrence in occurrences {
-                let action = occurrence.classify_due_action(store_now_utc).map_err(
-                    |error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()),
-                )?;
+                // Machine-owned due classification, tolerated per row: a
+                // refusal skips only this occurrence (typed fault) and the
+                // remaining rows still claim.
+                let action = match occurrence.classify_due_action(store_now_utc) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        row_faults.push(claim_row_fault(
+                            &occurrence,
+                            ScheduleStoreRowFaultKind::DueClassification,
+                            format!("due classification: {error}"),
+                        ));
+                        continue;
+                    }
+                };
                 match action {
                     Some(OccurrenceDueAction::MisfireRequired) => {
-                        let detail = Some(occurrence.due_misfire_detail_at(store_now_utc));
-                        let mut updated = occurrence
-                            .apply(OccurrenceLifecycleInput::ResolveDueMisfire {
-                                detail: detail.clone(),
-                                at_utc: store_now_utc,
-                            })
-                            .map_err(|error: OccurrenceLifecycleError| {
-                                StoreError::Internal(error.to_string())
-                            })?
-                            .into_occurrence();
-                        let receipt = updated.delivery_receipt_from_authority(None).map_err(
-                            |error: OccurrenceLifecycleError| {
-                                StoreError::Internal(error.to_string())
-                            },
-                        )?;
-                        updated = updated
-                            .apply(OccurrenceLifecycleInput::RecordReceipt {
-                                runtime_outcome: receipt.runtime_outcome.clone(),
-                                receipt: receipt.clone(),
-                            })
-                            .map_err(|error: OccurrenceLifecycleError| {
-                                StoreError::Internal(error.to_string())
-                            })?
-                            .into_occurrence();
-                        write_receipt_in_txn(&tx, &receipt)?;
-                        write_occurrence_in_txn(&tx, &updated)?;
+                        if let Some(fault) =
+                            resolve_due_misfire_in_txn(&tx, &occurrence, store_now_utc)?
+                        {
+                            row_faults.push(fault);
+                        }
                     }
                     Some(OccurrenceDueAction::ClaimEligible) => {
                         if claimed.len() >= limit {
@@ -404,15 +505,38 @@ impl SqliteScheduleStore {
                         if claimed.len() >= limit {
                             continue;
                         }
-                        let (expired, receipt) =
-                            expire_occurrence_lease_for_sqlite(occurrence, store_now_utc)?;
+                        let (expired, receipt) = match expire_occurrence_lease_for_sqlite(
+                            occurrence.clone(),
+                            store_now_utc,
+                        ) {
+                            Ok(expired) => expired,
+                            Err(error) => {
+                                row_faults.push(claim_row_fault(
+                                    &occurrence,
+                                    ScheduleStoreRowFaultKind::DueClassification,
+                                    format!("lease expiry: {error}"),
+                                ));
+                                continue;
+                            }
+                        };
                         write_receipt_in_txn(&tx, &receipt)?;
                         write_occurrence_in_txn(&tx, &expired)?;
-                        let Ok(claimed_occurrence) =
-                            claim_occurrence_for_sqlite(expired, &request, store_now_utc)
-                        else {
-                            continue;
-                        };
+                        // A machine refusal of the follow-up claim is this
+                        // row's typed fault, never a silent skip: the expiry
+                        // above stays committed and the row re-enters the
+                        // scan on the next tick.
+                        let claimed_occurrence =
+                            match claim_occurrence_for_sqlite(expired, &request, store_now_utc) {
+                                Ok(claimed_occurrence) => claimed_occurrence,
+                                Err(error) => {
+                                    row_faults.push(claim_row_fault(
+                                        &occurrence,
+                                        ScheduleStoreRowFaultKind::DueClassification,
+                                        format!("lease-expiry reclaim: {error}"),
+                                    ));
+                                    continue;
+                                }
+                            };
                         write_occurrence_in_txn(&tx, &claimed_occurrence)?;
                         claimed.push(claimed_occurrence);
                     }
@@ -424,6 +548,7 @@ impl SqliteScheduleStore {
             Ok(ClaimDueResult {
                 store_now_utc,
                 claimed,
+                row_faults,
             })
         })
         .await
@@ -473,6 +598,15 @@ impl ScheduleStore for SqliteScheduleStore {
         filter: ScheduleFilter,
     ) -> Result<Vec<Schedule>, ScheduleStoreError> {
         self.list_schedules_impl(filter)
+            .await
+            .map_err(into_schedule_store_error)
+    }
+
+    async fn list_schedules_with_row_faults(
+        &self,
+        filter: ScheduleFilter,
+    ) -> Result<(Vec<Schedule>, Vec<ScheduleStoreRowFault>), ScheduleStoreError> {
+        self.list_schedules_with_row_faults_impl(filter)
             .await
             .map_err(into_schedule_store_error)
     }
@@ -841,6 +975,73 @@ fn write_occurrence_in_txn(
     Ok(())
 }
 
+fn claim_row_fault(
+    occurrence: &Occurrence,
+    kind: ScheduleStoreRowFaultKind,
+    detail: String,
+) -> ScheduleStoreRowFault {
+    ScheduleStoreRowFault {
+        schedule_id: Some(occurrence.schedule_id.to_string()),
+        occurrence_id: Some(occurrence.occurrence_id.to_string()),
+        kind,
+        detail,
+    }
+}
+
+/// Realize a machine-classified due misfire for one row. A machine refusal
+/// anywhere in the row's own transition chain surfaces as `Ok(Some(fault))`
+/// (nothing is written for the row); a store WRITE failure returns `Err` so
+/// the whole claim transaction aborts — a half-written misfire (receipt
+/// committed, occurrence row not terminalized) must never commit.
+fn resolve_due_misfire_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    occurrence: &Occurrence,
+    store_now_utc: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ScheduleStoreRowFault>, StoreError> {
+    let detail = Some(occurrence.due_misfire_detail_at(store_now_utc));
+    let mut updated = match occurrence
+        .clone()
+        .apply(OccurrenceLifecycleInput::ResolveDueMisfire {
+            detail,
+            at_utc: store_now_utc,
+        }) {
+        Ok(mutator) => mutator.into_occurrence(),
+        Err(error) => {
+            return Ok(Some(claim_row_fault(
+                occurrence,
+                ScheduleStoreRowFaultKind::DueClassification,
+                format!("misfire resolution: {error}"),
+            )));
+        }
+    };
+    let receipt = match updated.delivery_receipt_from_authority(None) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return Ok(Some(claim_row_fault(
+                occurrence,
+                ScheduleStoreRowFaultKind::DueClassification,
+                format!("misfire receipt: {error}"),
+            )));
+        }
+    };
+    updated = match updated.apply(OccurrenceLifecycleInput::RecordReceipt {
+        runtime_outcome: receipt.runtime_outcome.clone(),
+        receipt: receipt.clone(),
+    }) {
+        Ok(mutator) => mutator.into_occurrence(),
+        Err(error) => {
+            return Ok(Some(claim_row_fault(
+                occurrence,
+                ScheduleStoreRowFaultKind::DueClassification,
+                format!("misfire receipt record: {error}"),
+            )));
+        }
+    };
+    write_receipt_in_txn(tx, &receipt)?;
+    write_occurrence_in_txn(tx, &updated)?;
+    Ok(None)
+}
+
 fn write_receipt_in_txn(
     tx: &rusqlite::Transaction<'_>,
     receipt: &DeliveryReceipt,
@@ -1007,6 +1208,56 @@ fn occurrence_phase_label(phase: meerkat_schedule::OccurrencePhase) -> &'static 
         meerkat_schedule::OccurrencePhase::Superseded => "superseded",
         meerkat_schedule::OccurrencePhase::DeliveryFailed => "delivery_failed",
     }
+}
+
+/// Every `OccurrencePhase` variant, in declaration order. A new variant
+/// fails the exhaustiveness ratchet in `occurrence_phase_live_for_claim`
+/// (and `occurrence_phase_label` above) before it can be forgotten here.
+const ALL_OCCURRENCE_PHASES: [meerkat_schedule::OccurrencePhase; 9] = [
+    meerkat_schedule::OccurrencePhase::Pending,
+    meerkat_schedule::OccurrencePhase::Claimed,
+    meerkat_schedule::OccurrencePhase::Dispatching,
+    meerkat_schedule::OccurrencePhase::AwaitingCompletion,
+    meerkat_schedule::OccurrencePhase::Completed,
+    meerkat_schedule::OccurrencePhase::Skipped,
+    meerkat_schedule::OccurrencePhase::Misfired,
+    meerkat_schedule::OccurrencePhase::Superseded,
+    meerkat_schedule::OccurrencePhase::DeliveryFailed,
+];
+
+/// Whether a phase can still owe claim-path work (claim, misfire, or lease
+/// expiry). The exhaustive match is the compile-time ratchet for the claim
+/// scan's SQL prefilter: adding an `OccurrencePhase` variant refuses to
+/// compile until the new phase is classified live-or-terminal here.
+fn occurrence_phase_live_for_claim(phase: meerkat_schedule::OccurrencePhase) -> bool {
+    match phase {
+        meerkat_schedule::OccurrencePhase::Pending
+        | meerkat_schedule::OccurrencePhase::Claimed
+        | meerkat_schedule::OccurrencePhase::Dispatching
+        | meerkat_schedule::OccurrencePhase::AwaitingCompletion => true,
+        meerkat_schedule::OccurrencePhase::Completed
+        | meerkat_schedule::OccurrencePhase::Skipped
+        | meerkat_schedule::OccurrencePhase::Misfired
+        | meerkat_schedule::OccurrencePhase::Superseded
+        | meerkat_schedule::OccurrencePhase::DeliveryFailed => false,
+    }
+}
+
+/// SQL `IN (...)` list of live-phase labels for the claim scan prefilter,
+/// derived from the same label + liveness ratchets the write path uses.
+fn live_occurrence_phase_sql_list() -> String {
+    let mut out = String::new();
+    for phase in ALL_OCCURRENCE_PHASES {
+        if occurrence_phase_live_for_claim(phase) {
+            if !out.is_empty() {
+                out.push_str(", ");
+            }
+            out.push('\'');
+            out.push_str(occurrence_phase_label(phase));
+            out.push('\'');
+        }
+    }
+    out
 }
 
 fn select_store_now_ms(conn: &Connection) -> Result<i64, StoreError> {

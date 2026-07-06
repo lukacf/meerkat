@@ -1827,6 +1827,26 @@ impl EphemeralRuntimeDriver {
         Some(StoredInputState { state, seed })
     }
 
+    /// Resolve the machine-owned idempotency-key binding to its input id.
+    ///
+    /// Authoritative map, mechanical mirror: the generated machine's
+    /// `admission_idempotency_inputs` is the sole owner of idempotency
+    /// bindings (registered on accepted admission, re-entered on recovery).
+    /// This read decides nothing and never registers a binding — the
+    /// accept-path `ResolveAdmissionIdempotency` input remains the only
+    /// dedup authority. Hosts use it to reconcile interrupted work after a
+    /// restart ("did the input I submitted under this key reach a terminal
+    /// state, and which?").
+    pub fn input_id_for_idempotency_key(&self, idempotency_key: &str) -> Option<InputId> {
+        let raw = self.with_dsl_state(|state| {
+            state
+                .admission_idempotency_inputs
+                .get(idempotency_key)
+                .cloned()
+        })?;
+        raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid)
+    }
+
     /// Snapshot of every ledger entry paired with its DSL seed.
     pub fn stored_input_states_snapshot(
         &self,
@@ -3456,6 +3476,9 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     }
     fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
         EphemeralRuntimeDriver::stored_input_state(self, input_id)
+    }
+    fn input_id_for_idempotency_key(&self, idempotency_key: &str) -> Option<InputId> {
+        EphemeralRuntimeDriver::input_id_for_idempotency_key(self, idempotency_key)
     }
     fn active_input_ids(&self) -> Vec<InputId> {
         self.ledger

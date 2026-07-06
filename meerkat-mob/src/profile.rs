@@ -41,6 +41,16 @@ pub struct ToolConfig {
     /// MCP server names this profile connects to.
     #[serde(default)]
     pub mcp: Vec<String>,
+    /// Declarative MCP server configs for members built from this profile.
+    ///
+    /// Durable on the profile (unlike the in-process-only per-spawn
+    /// `SpawnMemberSpec.external_tools` overlay), so revival recomposes the
+    /// member's MCP tools from the same profile that built it. These are
+    /// already profile-scoped; the `mcp` name allowlist above gates only the
+    /// mob-wide default external-tools provider (where an empty list means
+    /// the full host surface).
+    #[serde(default)]
+    pub mcp_servers: Vec<meerkat_core::mcp_config::McpServerConfig>,
     /// Named Rust tool bundles wired by the mob runtime.
     ///
     /// String names referencing `Arc<dyn AgentToolDispatcher>` instances
@@ -302,6 +312,7 @@ mod tests {
             schedule: true,
             image_generation: true,
             mcp: vec!["server-a".to_string(), "server-b".to_string()],
+            mcp_servers: vec![],
             rust_bundles: vec!["custom-tools".to_string()],
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -321,6 +332,7 @@ mod tests {
             schedule: false,
             image_generation: false,
             mcp: vec!["mcp-server".to_string()],
+            mcp_servers: vec![],
             rust_bundles: Vec::new(),
         };
         let toml_str = toml::to_string(&config).unwrap();
@@ -348,6 +360,7 @@ mod tests {
                 schedule: false,
                 image_generation: false,
                 mcp: vec![],
+                mcp_servers: vec![],
                 rust_bundles: vec![],
             },
             peer_description: "Orchestrates worker agents".to_string(),
@@ -383,6 +396,7 @@ mod tests {
                 schedule: false,
                 image_generation: false,
                 mcp: vec!["code-server".to_string()],
+                mcp_servers: vec![],
                 rust_bundles: vec!["custom".to_string()],
             },
             peer_description: "Writes code".to_string(),

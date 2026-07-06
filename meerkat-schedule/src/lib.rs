@@ -21,7 +21,8 @@ mod types;
 
 pub use driver::{
     DeliveryCompletion, DeliveryDispatch, DeliveryTerminal, ScheduleDriver, ScheduleDriverConfig,
-    ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleTickReport, TargetProbeOutcome,
+    ScheduleRefillFault, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleTickReport,
+    TargetProbeOutcome,
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{
@@ -40,8 +41,8 @@ pub use runnable::{
 pub use service::ScheduleService;
 pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,
-    PendingSupersession, ScheduleFilter, ScheduleStore, ScheduleStoreKind,
-    apply_supersession_feedback,
+    PendingSupersession, ScheduleFilter, ScheduleStore, ScheduleStoreKind, ScheduleStoreRowFault,
+    ScheduleStoreRowFaultKind, apply_supersession_feedback,
 };
 pub use surface::wire_schedule_tools;
 pub use tool_surface::ScheduleToolSurface;

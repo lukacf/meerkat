@@ -77,6 +77,22 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         input_id: &InputId,
     ) -> Result<Option<StoredInputState>, RuntimeDriverError>;
 
+    /// Resolve a caller-supplied idempotency key to its admitted input and
+    /// return that input's stored state (terminal outcome, last run id,
+    /// boundary sequence).
+    ///
+    /// This is the durable reconciliation query for interrupted work: the
+    /// machine-owned idempotency binding and the input's terminal facts
+    /// survive restart (persistent runtimes re-enter them on recovery), so
+    /// after re-registering a session a host can ask "did the interaction I
+    /// submitted under this key reach a terminal state, and which?" without
+    /// keeping its own run journal. Read-only: never registers a binding.
+    async fn input_state_by_idempotency_key(
+        &self,
+        session_id: &SessionId,
+        idempotency_key: &str,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError>;
+
     /// List all active (non-terminal) inputs for a session.
     async fn list_active_inputs(
         &self,

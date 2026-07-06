@@ -385,6 +385,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "InjectSystemContextResult",
             ),
             RpcMethodDescriptor::typed(
+                "session/input_status",
+                "Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key",
+                "SessionInputStateParams",
+                "SessionInputStateResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "events/latest_cursor",
                 "Read the latest replay cursor for an event source",
                 "EventsLatestCursorParams",

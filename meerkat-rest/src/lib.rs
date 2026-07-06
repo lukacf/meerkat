@@ -4408,6 +4408,7 @@ async fn create_session_inner(
         budget_limits: req.budget_limits,
         provider_params: req.provider_params.clone().map(Into::into),
         external_tools: mcp_external_tools,
+        mcp_servers: Vec::new(),
         recoverable_tool_defs: None,
         llm_client_override: state
             .llm_client_override
@@ -5468,6 +5469,7 @@ async fn continue_session_inner(
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             llm_client_override: state
                 .llm_client_override

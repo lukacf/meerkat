@@ -301,6 +301,16 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         input_id: InputId,
     },
+    // Read-only reconciliation lookup: resolve the machine-owned
+    // idempotency-key binding to its input and return that input's stored
+    // state. Same authority read as `InputState`; the key resolution is a
+    // mechanical mirror of the generated admission map (never a dedup
+    // decision — `ResolveAdmissionIdempotency` on the accept path stays the
+    // only mutator).
+    InputStateByIdempotencyKey {
+        session_id: SessionId,
+        idempotency_key: String,
+    },
     ListActiveInputs {
         session_id: SessionId,
     },
@@ -1275,6 +1285,9 @@ impl MeerkatMachineCommandVariant {
             Self::OpsLifecycleRegistry => Some(MeerkatMachineCatalogInput::OpsLifecycleRegistry),
             Self::PrepareBindings => Some(MeerkatMachineCatalogInput::PrepareBindings),
             Self::InputState => Some(MeerkatMachineCatalogInput::InputState),
+            // Same machine-owned read route as `InputState` (the key
+            // resolves through the generated admission map first).
+            Self::InputStateByIdempotencyKey => Some(MeerkatMachineCatalogInput::InputState),
             Self::ListActiveInputs => Some(MeerkatMachineCatalogInput::ListActiveInputs),
             Self::ReconfigureSessionLlmIdentity => {
                 Some(MeerkatMachineCatalogInput::ReconfigureSessionLlmIdentity)
@@ -1443,6 +1456,14 @@ const fn meerkat_machine_command_classification(
             )
         }
         MeerkatMachineCommandVariant::InputState => {
+            MeerkatMachineCommandClassification::CatalogInput(
+                MeerkatMachineCatalogInput::InputState,
+            )
+        }
+        // Same machine-owned read route as `InputState`: the idempotency
+        // key resolves through the generated admission map, then the stored
+        // input state is read identically.
+        MeerkatMachineCommandVariant::InputStateByIdempotencyKey => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::InputState,
             )

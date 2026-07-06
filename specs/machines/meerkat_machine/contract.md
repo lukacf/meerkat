@@ -27,6 +27,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `barrier_satisfied`: `Bool`
 - `boundary_count`: `u64`
 - `cancel_after_boundary`: `Bool`
+- `boundary_cancel_dispatch_pending`: `Bool`
 - `terminal_outcome`: `Option<TurnTerminalOutcome>`
 - `terminal_cause_kind`: `Option<TurnTerminalCauseKind>`
 - `last_runtime_apply_failure_cause`: `Option<RuntimeApplyFailureCause>`
@@ -590,6 +591,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TurnRunCancelled`(run_id: RunId, reason: TurnCancellationReason)
 - `TurnCheckCompaction`
 - `RequestCancellationAtBoundary`
+- `BoundaryCancelAlreadyPending`
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)
 - `RuntimeNotice`(kind: RuntimeNoticeKind, detail: String)
@@ -3866,13 +3868,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `CancelAfterBoundaryAttached`
 - From: `Attached`
 - On: `CancelAfterBoundary`(reason)
+- Guards:
+  - `no_dispatch_outstanding`
 - Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
 - To: `Attached`
 
 ### `CancelAfterBoundary`
 - From: `Running`
 - On: `CancelAfterBoundary`(reason)
+- Guards:
+  - `no_dispatch_outstanding`
 - Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
+- To: `Running`
+
+### `CancelAfterBoundaryAttachedAlreadyPending`
+- From: `Attached`
+- On: `CancelAfterBoundary`(reason)
+- Guards:
+  - `dispatch_outstanding`
+- Emits: `BoundaryCancelAlreadyPending`
+- To: `Attached`
+
+### `CancelAfterBoundaryAlreadyPending`
+- From: `Running`
+- On: `CancelAfterBoundary`(reason)
+- Guards:
+  - `dispatch_outstanding`
+- Emits: `BoundaryCancelAlreadyPending`
 - To: `Running`
 
 ### `BoundaryAppliedPublish`

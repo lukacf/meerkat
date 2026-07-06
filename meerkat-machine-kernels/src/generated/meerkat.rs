@@ -10204,6 +10204,7 @@ pub struct State {
     pub barrier_satisfied: bool,
     pub boundary_count: u64,
     pub cancel_after_boundary: bool,
+    pub boundary_cancel_dispatch_pending: bool,
     pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub last_runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
@@ -13029,6 +13030,8 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestCancellationAtBoundary {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BoundaryCancelAlreadyPending {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WakeInterrupt {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommittedVisibleSetPublished {
@@ -13815,6 +13818,7 @@ pub enum Effect {
     TurnRunCancelled(effects::TurnRunCancelled),
     TurnCheckCompaction(effects::TurnCheckCompaction),
     RequestCancellationAtBoundary(effects::RequestCancellationAtBoundary),
+    BoundaryCancelAlreadyPending(effects::BoundaryCancelAlreadyPending),
     WakeInterrupt(effects::WakeInterrupt),
     CommittedVisibleSetPublished(effects::CommittedVisibleSetPublished),
     RuntimeNotice(effects::RuntimeNotice),
@@ -13977,6 +13981,7 @@ pub enum EffectKind {
     TurnRunCancelled,
     TurnCheckCompaction,
     RequestCancellationAtBoundary,
+    BoundaryCancelAlreadyPending,
     WakeInterrupt,
     CommittedVisibleSetPublished,
     RuntimeNotice,
@@ -14802,6 +14807,8 @@ pub enum TransitionId {
     ResolveUserInterruptPublicResultNotInterruptibleConflictStopped,
     CancelAfterBoundaryAttached,
     CancelAfterBoundary,
+    CancelAfterBoundaryAttachedAlreadyPending,
+    CancelAfterBoundaryAlreadyPending,
     BoundaryAppliedPublish,
     PublishCommittedVisibleSetIdle,
     PublishCommittedVisibleSetAttached,
@@ -16265,6 +16272,7 @@ pub fn initial_state() -> State {
         barrier_satisfied: false,
         boundary_count: 0,
         cancel_after_boundary: false,
+        boundary_cancel_dispatch_pending: false,
         terminal_outcome: None,
         terminal_cause_kind: None,
         last_runtime_apply_failure_cause: None,

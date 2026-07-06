@@ -127,6 +127,8 @@ import type {
   InjectSystemContextResult as RpcInjectSystemContextResult,
   InterruptParams as RpcInterruptParams,
   ListSessionTranscriptRevisionsParams as RpcListSessionTranscriptRevisionsParams,
+  SessionInputStateParams as RpcSessionInputStateParams,
+  SessionInputStateResult as RpcSessionInputStateResult,
   ListSessionsParams as RpcListSessionsParams,
   ListSessionsResult as RpcListSessionsResult,
   LiveCommitInputResult as RpcLiveCommitInputResult,
@@ -1032,6 +1034,27 @@ export class MeerkatClient {
     }
     const result = await this.request("session/inject_context", params);
     return { status: String(result.status ?? "") };
+  }
+
+  /**
+   * Read an input's stored runtime state (terminal outcome, run
+   * association) by canonical input id or by the caller-supplied
+   * idempotency key. Returns `null` when no input matches — the durable
+   * reconciliation query for interrupted work after a host restart.
+   */
+  async inputState(
+    sessionId: string,
+    selector: { inputId: string } | { idempotencyKey: string },
+  ): Promise<Record<string, unknown> | null> {
+    type _RpcSignature = [RpcSessionInputStateParams, RpcSessionInputStateResult];
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      ...("inputId" in selector
+        ? { by: "input_id", value: selector.inputId }
+        : { by: "idempotency_key", value: selector.idempotencyKey }),
+    };
+    const result = await this.request("session/input_status", params);
+    return (result.state as Record<string, unknown> | undefined) ?? null;
   }
 
   async readSessionHistory(

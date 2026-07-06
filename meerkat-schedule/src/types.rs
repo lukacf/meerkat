@@ -2233,9 +2233,36 @@ impl TryFrom<ScheduleMachineStateWire> for sched_dsl::ScheduleLifecycleMachineSt
 
     fn try_from(wire: ScheduleMachineStateWire) -> Result<Self, Self::Error> {
         validate_schedule_machine_wire_header(&wire.machine, wire.schema_version)?;
+        let lifecycle_phase = schedule_lifecycle_state_from_wire(&wire.lifecycle_phase)?;
+        // Durable-format healing: tombstones written before the Delete
+        // transition cleared the planning cursor persist
+        // `Deleted`-with-cursor, which the generated machine's
+        // `deleted_has_no_planning_cursor` invariant rejects on recovery —
+        // one such legacy row used to fail every `list()` (and with it every
+        // driver tick) wholesale. The Delete transitions clear the cursor
+        // today, so the exact legacy shape re-derives to the canonical form
+        // at the parse boundary; every other shape still fails closed
+        // through recovery validation.
+        let planning_cursor_utc_ms = if lifecycle_phase
+            == sched_dsl::ScheduleLifecycleState::Deleted
+        {
+            if wire.planning_cursor_utc_ms.is_some() {
+                // The heal is observable: a dropped cursor is a legacy
+                // row being normalized, and any future writer that
+                // regresses into producing Deleted-with-cursor shows up
+                // here instead of dying silently.
+                tracing::warn!(
+                    schedule_id = %wire.schedule_id,
+                    "healing legacy Deleted schedule tombstone: dropping persisted machine planning cursor"
+                );
+            }
+            None
+        } else {
+            wire.planning_cursor_utc_ms
+        };
         Ok(Self {
             schedule_id: sched_dsl::ScheduleId(wire.schedule_id),
-            lifecycle_phase: schedule_lifecycle_state_from_wire(&wire.lifecycle_phase)?,
+            lifecycle_phase,
             revision: wire.revision,
             trigger_key: wire.trigger_key.into(),
             target_binding_key: wire.target_binding_key.into(),
@@ -2246,7 +2273,7 @@ impl TryFrom<ScheduleMachineStateWire> for sched_dsl::ScheduleLifecycleMachineSt
             )?,
             planning_horizon_days: wire.planning_horizon_days,
             planning_horizon_occurrences: wire.planning_horizon_occurrences,
-            planning_cursor_utc_ms: wire.planning_cursor_utc_ms,
+            planning_cursor_utc_ms,
             next_occurrence_ordinal: wire.next_occurrence_ordinal,
             superseded_ack_ids: wire
                 .superseded_ack_ids
@@ -2298,6 +2325,20 @@ impl<'de> Deserialize<'de> for Schedule {
             .ok_or_else(|| D::Error::missing_field("machine_state"))?
             .try_into()
             .map_err(D::Error::custom)?;
+        // Mirror the machine-state tombstone healing on the projection
+        // field: legacy Deleted rows persisted the planning cursor on both
+        // sides, and projection parity is validated below.
+        let planning_cursor_utc = if wire.phase == SchedulePhase::Deleted {
+            if wire.planning_cursor_utc.is_some() {
+                tracing::warn!(
+                    schedule_id = %wire.schedule_id,
+                    "healing legacy Deleted schedule tombstone: dropping persisted projection planning cursor"
+                );
+            }
+            None
+        } else {
+            wire.planning_cursor_utc
+        };
         let schedule = Self {
             schedule_id: wire.schedule_id,
             phase: wire.phase,
@@ -2309,7 +2350,7 @@ impl<'de> Deserialize<'de> for Schedule {
             overlap_policy: wire.overlap_policy,
             missing_target_policy: wire.missing_target_policy,
             next_occurrence_ordinal: wire.next_occurrence_ordinal,
-            planning_cursor_utc: wire.planning_cursor_utc,
+            planning_cursor_utc,
             superseded_ack_ids: wire.superseded_ack_ids,
             config: wire.config,
         };

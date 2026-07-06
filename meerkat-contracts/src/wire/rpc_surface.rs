@@ -85,6 +85,37 @@ pub struct InjectSystemContextParams {
     pub idempotency_key: Option<String>,
 }
 
+/// Typed selector for `session/input_status`: exactly one lookup key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", tag = "by", content = "value")]
+pub enum SessionInputStateSelector {
+    /// Look up by the canonical runtime input id.
+    InputId(String),
+    /// Look up by the caller-supplied idempotency key (durable
+    /// reconciliation: "did the interaction I submitted under this key reach
+    /// a terminal state, and which?").
+    IdempotencyKey(String),
+}
+
+/// Parameters for `session/input_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionInputStateParams {
+    pub session_id: String,
+    #[serde(flatten)]
+    pub selector: SessionInputStateSelector,
+}
+
+/// Result for `session/input_status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionInputStateResult {
+    /// `None` when no input matches the selector (unknown id or key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<super::runtime::WireInputState>,
+}
+
 /// Result for `session/inject_context`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

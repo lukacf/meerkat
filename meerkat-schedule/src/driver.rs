@@ -130,6 +130,49 @@ pub struct ScheduleTickReport {
     pub planned_occurrences: usize,
     pub claimed_occurrences: usize,
     pub terminalized_occurrences: usize,
+    /// Schedule rows the listing scan skipped as typed per-row faults
+    /// (poisoned durable rows) instead of failing the tick wholesale.
+    pub schedule_row_faults: Vec<crate::ScheduleStoreRowFault>,
+    /// Occurrence rows the claim scan skipped as typed per-row faults.
+    pub occurrence_row_faults: Vec<crate::ScheduleStoreRowFault>,
+    /// Per-schedule horizon-refill failures. A schedule whose planning
+    /// refill errors is reported and skipped so its neighbors still plan
+    /// and claim.
+    pub refill_faults: Vec<ScheduleRefillFault>,
+}
+
+impl ScheduleTickReport {
+    /// Total typed faults this tick surfaced (rows skipped or schedules
+    /// whose refill failed). Non-zero means an operator-visible incident
+    /// even though the tick itself succeeded for healthy rows.
+    pub fn fault_count(&self) -> usize {
+        self.schedule_row_faults.len() + self.occurrence_row_faults.len() + self.refill_faults.len()
+    }
+
+    /// Stable fingerprint of the fault set, used by hosts to log on change
+    /// and heartbeat while the same faults persist instead of spamming
+    /// every tick.
+    pub fn fault_fingerprint(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for fault in &self.schedule_row_faults {
+            let _ = writeln!(out, "schedule-row: {fault}");
+        }
+        for fault in &self.occurrence_row_faults {
+            let _ = writeln!(out, "occurrence-row: {fault}");
+        }
+        for fault in &self.refill_faults {
+            let _ = writeln!(out, "refill {}: {}", fault.schedule_id, fault.detail);
+        }
+        out
+    }
+}
+
+/// A schedule whose horizon refill failed during a driver tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleRefillFault {
+    pub schedule_id: crate::ScheduleId,
+    pub detail: String,
 }
 
 enum ClaimedOccurrenceDispatchState {
@@ -195,12 +238,23 @@ impl ScheduleDriver {
     pub async fn tick_once(&self) -> Result<ScheduleTickReport, ScheduleDomainError> {
         let mut report = ScheduleTickReport::default();
 
-        for schedule in self.service.list().await? {
+        // Per-row tolerance end to end: a poisoned schedule row, a poisoned
+        // occurrence row, or one schedule whose refill fails must not starve
+        // every other schedule. Every skip is a typed fault in the report —
+        // never a silent drop.
+        let (schedules, schedule_row_faults) = self.service.list_with_row_faults().await?;
+        report.schedule_row_faults = schedule_row_faults;
+        for schedule in schedules {
             if schedule.phase != SchedulePhase::Active {
                 continue;
             }
-            let planned = self.service.refill_horizon(&schedule.schedule_id).await?;
-            report.planned_occurrences += planned.len();
+            match self.service.refill_horizon(&schedule.schedule_id).await {
+                Ok(planned) => report.planned_occurrences += planned.len(),
+                Err(error) => report.refill_faults.push(ScheduleRefillFault {
+                    schedule_id: schedule.schedule_id.clone(),
+                    detail: error.to_string(),
+                }),
+            }
         }
 
         let claimed = self
@@ -212,6 +266,7 @@ impl ScheduleDriver {
             })
             .await?;
         report.claimed_occurrences = claimed.claimed.len();
+        report.occurrence_row_faults = claimed.row_faults;
 
         for occurrence in claimed.claimed {
             if self
@@ -1095,6 +1150,295 @@ mod tests {
                 completion: Box::pin(async { Ok(DeliveryTerminal::completed(None)) }),
             })
         }
+    }
+
+    /// Wrapper store for the per-row-tolerance driver test: injects typed
+    /// row faults into the tolerant listing and the claim result, and fails
+    /// `get_schedule` for one schedule id so its horizon refill errors.
+    struct RowFaultInjectingStore {
+        inner: Arc<dyn ScheduleStore>,
+        refill_poisoned: crate::ScheduleId,
+    }
+
+    #[async_trait]
+    impl ScheduleStore for RowFaultInjectingStore {
+        fn kind(&self) -> crate::ScheduleStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn commit_schedule_write(
+            &self,
+            write: crate::AuthorizedScheduleWrite,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner.commit_schedule_write(write).await
+        }
+
+        async fn get_schedule(
+            &self,
+            schedule_id: &crate::ScheduleId,
+        ) -> Result<Option<crate::Schedule>, ScheduleStoreError> {
+            if schedule_id == &self.refill_poisoned {
+                return Err(ScheduleStoreError::Internal(
+                    "injected refill poison".to_string(),
+                ));
+            }
+            self.inner.get_schedule(schedule_id).await
+        }
+
+        async fn list_schedules(
+            &self,
+            filter: crate::ScheduleFilter,
+        ) -> Result<Vec<crate::Schedule>, ScheduleStoreError> {
+            self.inner.list_schedules(filter).await
+        }
+
+        async fn list_schedules_with_row_faults(
+            &self,
+            filter: crate::ScheduleFilter,
+        ) -> Result<(Vec<crate::Schedule>, Vec<crate::ScheduleStoreRowFault>), ScheduleStoreError>
+        {
+            let (schedules, mut faults) = self.inner.list_schedules_with_row_faults(filter).await?;
+            faults.push(crate::ScheduleStoreRowFault {
+                schedule_id: Some("poisoned-schedule-row".to_string()),
+                occurrence_id: None,
+                kind: crate::ScheduleStoreRowFaultKind::Deserialization,
+                detail: "injected schedule row fault".to_string(),
+            });
+            Ok((schedules, faults))
+        }
+
+        async fn commit_occurrence_write(
+            &self,
+            write: crate::AuthorizedOccurrenceWrite,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner.commit_occurrence_write(write).await
+        }
+
+        async fn commit_schedule_mutation(
+            &self,
+            schedule: crate::AuthorizedScheduleWrite,
+            occurrences: Vec<crate::AuthorizedOccurrenceWrite>,
+        ) -> Result<crate::Schedule, ScheduleStoreError> {
+            self.inner
+                .commit_schedule_mutation(schedule, occurrences)
+                .await
+        }
+
+        async fn get_occurrence(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+            self.inner.get_occurrence(occurrence_id).await
+        }
+
+        async fn list_occurrences(
+            &self,
+            filter: crate::OccurrenceFilter,
+        ) -> Result<Vec<Occurrence>, ScheduleStoreError> {
+            self.inner.list_occurrences(filter).await
+        }
+
+        async fn append_receipt(&self, receipt: DeliveryReceipt) -> Result<(), ScheduleStoreError> {
+            self.inner.append_receipt(receipt).await
+        }
+
+        async fn list_receipts(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+        ) -> Result<Vec<DeliveryReceipt>, ScheduleStoreError> {
+            self.inner.list_receipts(occurrence_id).await
+        }
+
+        async fn claim_due_occurrences(
+            &self,
+            request: ClaimDueRequest,
+        ) -> Result<crate::ClaimDueResult, ScheduleStoreError> {
+            let mut result = self.inner.claim_due_occurrences(request).await?;
+            result.row_faults.push(crate::ScheduleStoreRowFault {
+                schedule_id: Some("poisoned-schedule-row".to_string()),
+                occurrence_id: Some("poisoned-occurrence-row".to_string()),
+                kind: crate::ScheduleStoreRowFaultKind::Deserialization,
+                detail: "injected occurrence row fault".to_string(),
+            });
+            Ok(result)
+        }
+
+        async fn transition_occurrence_if_current(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+            expected_attempt: u32,
+            expected_claim_token: Option<Uuid>,
+            transition: OccurrenceLifecycleInput,
+        ) -> Result<Option<(Occurrence, Vec<OccurrenceLifecycleEffect>)>, ScheduleStoreError>
+        {
+            self.inner
+                .transition_occurrence_if_current(
+                    occurrence_id,
+                    expected_attempt,
+                    expected_claim_token,
+                    transition,
+                )
+                .await
+        }
+
+        async fn transition_occurrence_with_receipt_if_current(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+            expected_attempt: u32,
+            expected_claim_token: Option<Uuid>,
+            transition: OccurrenceLifecycleInput,
+            runtime_outcome: Option<crate::RuntimeDeliveryOutcome>,
+        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+            self.inner
+                .transition_occurrence_with_receipt_if_current(
+                    occurrence_id,
+                    expected_attempt,
+                    expected_claim_token,
+                    transition,
+                    runtime_outcome,
+                )
+                .await
+        }
+    }
+
+    /// Asks 16+17: one poisoned schedule row, one poisoned occurrence row,
+    /// and one schedule whose refill errors must each surface as typed
+    /// faults in the tick report while every healthy neighbor still plans
+    /// and claims — the tick itself succeeds.
+    #[tokio::test]
+    async fn tick_reports_row_faults_and_still_services_healthy_schedules() {
+        let memory = Arc::new(MemoryScheduleStore::default());
+        let bootstrap_service = ScheduleService::new(memory.clone());
+        let row_fault_create_request = |name: &str, start_at_utc| CreateScheduleRequest {
+            name: Some(name.into()),
+            description: None,
+            trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                start_at_utc,
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: materialize_on_demand_target("scheduled prompt"),
+            misfire_policy: MisfirePolicy::Skip,
+            overlap_policy: OverlapPolicy::AllowConcurrent,
+            missing_target_policy: MissingTargetPolicy::MarkMisfired,
+            labels: BTreeMap::new(),
+            planning_horizon_days: Some(1),
+            planning_horizon_occurrences: Some(1),
+        };
+        let healthy = bootstrap_service
+            .create(row_fault_create_request("healthy", Utc::now()))
+            .await
+            .expect("create healthy schedule");
+        let refill_poisoned = bootstrap_service
+            // A future trigger: this schedule exists to fail its refill, so it
+            // must have nothing claimable that would reach the dispatch path.
+            .create(row_fault_create_request(
+                "refill-poisoned",
+                Utc::now() + Duration::hours(1),
+            ))
+            .await
+            .expect("create refill-poisoned schedule");
+
+        let store: Arc<dyn ScheduleStore> = Arc::new(RowFaultInjectingStore {
+            inner: memory,
+            refill_poisoned: refill_poisoned.schedule_id.clone(),
+        });
+        let service = ScheduleService::new(store.clone());
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = ScheduleDriver::new(
+            service,
+            store,
+            Arc::new(ReadyProbe),
+            delivery,
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        let report = driver
+            .tick_once()
+            .await
+            .expect("tick must succeed despite per-row faults");
+        assert_eq!(
+            report.claimed_occurrences, 1,
+            "the healthy schedule's due occurrence must still claim: {report:?}"
+        );
+        assert_eq!(report.schedule_row_faults.len(), 1);
+        assert_eq!(
+            report.schedule_row_faults[0].schedule_id.as_deref(),
+            Some("poisoned-schedule-row")
+        );
+        assert_eq!(report.occurrence_row_faults.len(), 1);
+        assert_eq!(
+            report.occurrence_row_faults[0].occurrence_id.as_deref(),
+            Some("poisoned-occurrence-row")
+        );
+        assert_eq!(report.refill_faults.len(), 1);
+        assert_eq!(
+            report.refill_faults[0].schedule_id,
+            refill_poisoned.schedule_id
+        );
+        assert!(
+            report
+                .refill_faults
+                .iter()
+                .all(|fault| fault.schedule_id != healthy.schedule_id),
+            "the healthy schedule must not fault"
+        );
+        assert!(report.fault_count() == 3);
+        assert!(!report.fault_fingerprint().is_empty());
+    }
+
+    /// The host tracker's anti-spam design (log on change, heartbeat while
+    /// the same condition persists) rests on the fingerprint being
+    /// byte-stable tick-to-tick for the same fault set: pin equality for
+    /// identical fault sets and inequality once the set changes.
+    #[test]
+    fn fault_fingerprint_is_stable_for_identical_fault_sets() {
+        let fault = crate::ScheduleStoreRowFault {
+            schedule_id: Some("sched-1".to_string()),
+            occurrence_id: Some("occ-1".to_string()),
+            kind: crate::ScheduleStoreRowFaultKind::Deserialization,
+            detail: "poisoned row".to_string(),
+        };
+        let refill = ScheduleRefillFault {
+            schedule_id: crate::ScheduleId::new(),
+            detail: "refill failed".to_string(),
+        };
+        let report_a = ScheduleTickReport {
+            schedule_row_faults: vec![fault.clone()],
+            occurrence_row_faults: vec![fault.clone()],
+            refill_faults: vec![refill.clone()],
+            ..ScheduleTickReport::default()
+        };
+        let report_b = ScheduleTickReport {
+            schedule_row_faults: vec![fault.clone()],
+            occurrence_row_faults: vec![fault.clone()],
+            refill_faults: vec![refill],
+            ..ScheduleTickReport::default()
+        };
+        assert_eq!(
+            report_a.fault_fingerprint(),
+            report_b.fault_fingerprint(),
+            "identical fault sets must fingerprint identically across ticks"
+        );
+
+        let mut changed = ScheduleTickReport {
+            schedule_row_faults: vec![fault],
+            ..ScheduleTickReport::default()
+        };
+        changed.schedule_row_faults[0].detail = "different failure".to_string();
+        assert_ne!(
+            report_a.fault_fingerprint(),
+            changed.fault_fingerprint(),
+            "a changed fault set must change the fingerprint"
+        );
     }
 
     struct StandaloneReceiptFailingStore {

@@ -129,6 +129,8 @@ from .generated.types import (
     InjectSystemContextResult as RpcInjectSystemContextResult,
     InterruptParams as RpcInterruptParams,
     ListSessionTranscriptRevisionsParams as RpcListSessionTranscriptRevisionsParams,
+    SessionInputStateParams as RpcSessionInputStateParams,
+    SessionInputStateResult as RpcSessionInputStateResult,
     ListSessionsParams as RpcListSessionsParams,
     ListSessionsResult as RpcListSessionsResult,
     LoginCompleteParams as RpcLoginCompleteParams,
@@ -1209,6 +1211,38 @@ class MeerkatClient:
         if idempotency_key:
             params["idempotency_key"] = idempotency_key
         return await self._request("session/inject_context", params)
+
+    async def input_state(
+        self,
+        session_id: str,
+        *,
+        input_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read an input's stored runtime state by input id or idempotency key.
+
+        Returns ``None`` when no input matches the selector — the durable
+        reconciliation query for interrupted work after a host restart
+        (terminal outcome, resolving run id, boundary sequence).
+        """
+        _rpc_signature: (
+            RpcSessionInputStateParams
+            | RpcSessionInputStateResult
+        )
+        if (input_id is None) == (idempotency_key is None):
+            raise ValueError(
+                "exactly one of input_id or idempotency_key must be provided"
+            )
+        params: dict[str, Any] = {"session_id": session_id}
+        if input_id is not None:
+            params["by"] = "input_id"
+            params["value"] = input_id
+        else:
+            params["by"] = "idempotency_key"
+            params["value"] = idempotency_key
+        result = await self._request("session/input_status", params)
+        state = result.get("state")
+        return state if isinstance(state, dict) else None
 
     async def read_session_history(
         self,

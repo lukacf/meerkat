@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Meerkat 0.7.19 hardens the schedule subsystem against poisoned durable rows
+(HomeCore field incident: one bad row silently starved every schedule), makes
+member cancellation and retire/respawn real for embedders (meerkat-studio P0s),
+and gives library embedders first-class MCP wiring and a durable
+run-reconciliation query.
+
+### Fixed
+
+- Mid-turn member cancellation no longer crashes the host process
+  (meerkat-studio M1, P0). A boundary handle that re-entered
+  `MeerkatMachine::cancel_after_boundary` from inside the machine's own
+  dispatch — the shape meerkat's own blocked-method error text steered
+  embedders into — recursed unboundedly until the tokio worker overflowed
+  its stack (SIGABRT). The machine now owns a
+  `boundary_cancel_dispatch_pending` fact: the first cancel in a turn window
+  dispatches, repeats converge as typed no-ops, and a new turn re-arms
+  dispatching. The misleading contract text on
+  `PersistentSessionService::interrupt`/`cancel_after_boundary` and the
+  `MobSessionService` cancel seams now states that implementations apply
+  the cancel to the live agent and must never re-enter the machine.
+- Retire/respawn no longer fails deterministically for session-owned mob
+  members (meerkat-studio K1, P0). Members adopted from a host-owned session
+  service (e.g. embedder console sessions via `ensure_member`) have no
+  record in the mob archive authority; disposal escalated that to a fatal
+  "authority returned NotFound for registered runtime session" while
+  leaving the runtime registered, so every retry failed identically and
+  the member could be neither respawned nor removed. Disposal now reads the
+  typed ownership fact from the authority itself
+  (`session_known_to_archive_authority`) before archiving: host-owned
+  members retire their runtime session and release the binding; the
+  fail-closed split-state escalation is preserved verbatim for
+  authority-owned sessions.
+- One poisoned schedule row no longer starves every schedule (upstream asks
+  16–19, HomeCore field incident). The sqlite claim scan and driver tick are
+  now per-row tolerant: rows that fail typed recovery, due classification,
+  or per-schedule horizon refill are skipped as typed, attributable faults
+  (`ScheduleStoreRowFault`, `ScheduleRefillFault` on `ScheduleTickReport`)
+  while healthy neighbors keep claiming; the in-memory store mirrors the
+  same per-row semantics. Store write failures inside the claim transaction
+  still abort wholesale — a committed misfire receipt without its
+  terminalized occurrence row can never split-commit.
+- Schedule host ticks are no longer silent: tick failures and degraded
+  (row-fault) ticks log an ERROR incident on change, a rate-limited WARN
+  heartbeat while the same condition persists, and an INFO recovery line
+  with the full outage length. The tracker uses the wasm-safe clock
+  (`std::time::Instant` panics on wasm32-unknown-unknown and would have
+  killed the browser schedule host on its first tick).
+- Legacy `Deleted` schedule tombstones that persisted a planning cursor
+  (written before the Delete transitions cleared it) heal at the
+  durable-format parse boundary instead of failing every strict `list()`
+  wholesale; each healed drop is logged. The claim scan is bounded in SQL
+  (active schedules, live-phase occurrences, due/lease-expired only), so
+  multi-GB terminal history never pays per-tick deserialization and a
+  poisoned terminal row cannot poison the claim path; the live-phase list
+  is compile-time ratcheted against `OccurrencePhase`.
+- Strict schedule listing failures now name the poisoned row
+  (`schedule row '<id>' failed typed recovery`) instead of an
+  unattributable serialization error.
+
+### Added
+
+- Declarative MCP for library embedders (meerkat-studio M2):
+  `SessionBuildOptions::mcp_servers` / `AgentBuildConfig::mcp_servers`
+  materialize MCP stdio/HTTP servers into a session-owned router bound to
+  the build mode's canonical external-tool surface authority — composing
+  with builtins, no test-code ephemeral-handle incantation. Mob profiles
+  gain the durable `tools.mcp_servers`, so revived members recompose their
+  MCP tools from the profile instead of losing the in-process spawn
+  overlay. `CompositeDispatcher` now forwards
+  `bind_external_tool_surface_handle`/`bind_mcp_server_lifecycle_handle` to
+  its external child, making session-time late binding reach nested MCP
+  adapters. `meerkat::mcp::standalone_router()` is the supported
+  constructor for raw-router hosts.
+- Durable run reconciliation (meerkat-studio M4): the machine-owned
+  idempotency binding is queryable read-only —
+  `SessionServiceRuntimeExt::input_state_by_idempotency_key` returns the
+  input's stored state (terminal outcome, resolving run id, boundary
+  sequence) and survives host restart via session re-registration recovery.
+  Exposed over JSON-RPC as `session/input_state` (by input id or
+  idempotency key) with Python (`client.input_state`) and TypeScript
+  (`client.inputState`) SDK wrappers, so embedders can delete hand-rolled
+  run journals.
+- Versioning and compatibility policy (meerkat-studio M3): documented in
+  `docs/guides/cd-and-distribution.md` — pre-1.0 patch releases may change
+  public APIs, embedders pin exact versions, the only supported crate
+  combination is exact version parity, breaking changes land under a
+  `### Breaking` changelog heading — plus a downstream compatibility
+  matrix.
+
+### Changed
+
+- Repeat `cancel_after_boundary` calls while a dispatch is outstanding are
+  accepted no-ops (previously each call re-dispatched and could saturate
+  the runtime effect channel); the next turn re-arms dispatching.
+
 ## [0.7.18] - 2026-07-06
 
 Meerkat 0.7.18 fixes the resume regression that stranded idle mob members

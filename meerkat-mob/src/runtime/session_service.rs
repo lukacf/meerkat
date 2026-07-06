@@ -85,7 +85,7 @@ fn cached_runtime_adapter(
 }
 
 #[cfg(feature = "runtime-adapter")]
-async fn retire_runtime_session_for_archive(
+pub(crate) async fn retire_runtime_session_for_archive(
     runtime_adapter: &meerkat_runtime::MeerkatMachine,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
@@ -176,6 +176,13 @@ pub trait MobSessionService:
     }
 
     /// Apply a live hard cancel after `MeerkatMachine` accepts the cancel command.
+    ///
+    /// The machine has ALREADY admitted the interrupt when this runs — the
+    /// implementation applies it to the LIVE agent (e.g. the ephemeral
+    /// session task's interrupt slot) and returns. It must NOT call back
+    /// into `MeerkatMachine::hard_cancel_current_run`: this method executes
+    /// inside the machine's interrupt dispatch, so re-entering the machine
+    /// forms a dispatch ring (deadlock or unbounded recursion).
     #[cfg(feature = "runtime-adapter")]
     async fn interrupt_with_machine_authority(
         &self,
@@ -188,6 +195,15 @@ pub trait MobSessionService:
     }
 
     /// Apply a live cooperative boundary cancel after `MeerkatMachine` accepts the command.
+    ///
+    /// The machine has ALREADY admitted the cancel when this runs — the
+    /// implementation applies it to the LIVE agent (e.g. the ephemeral
+    /// session task's cancel-after-boundary channel) and returns. It must
+    /// NOT call back into `MeerkatMachine::cancel_after_boundary`: this
+    /// method executes inside the machine's boundary-cancel dispatch, so
+    /// re-entering the machine forms a dispatch ring (the machine's
+    /// `boundary_cancel_dispatch_pending` fact bounds it to one extra lap,
+    /// but the re-entrant lap is still a contract violation).
     #[cfg(feature = "runtime-adapter")]
     async fn cancel_after_boundary_with_machine_authority(
         &self,
@@ -225,6 +241,26 @@ pub trait MobSessionService:
         _session_id: &SessionId,
     ) -> Result<Option<PeerIngressRuntimeSnapshot>, SessionError> {
         Ok(None)
+    }
+
+    /// Whether the mob archive authority owns this session's durable record.
+    ///
+    /// Disposal routes on this fact: owned sessions archive through the mob
+    /// authority (where a mid-archive record loss stays a fail-closed
+    /// split-state error), while sessions adopted from a host-owned store
+    /// (`MemberLaunchMode::Resume` over a service the mob does not own, e.g.
+    /// an embedder's console sessions) retire their runtime and release the
+    /// binding without touching the authority — archiving a session the mob
+    /// never owned is not this mob's to perform.
+    ///
+    /// Default `true`: a service without a durable read seam claims every
+    /// session it is asked about, preserving the fail-closed archive path.
+    /// Persistent services override this with a real store read.
+    async fn session_known_to_archive_authority(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(true)
     }
 
     /// Whether a listed session belongs to the given mob for reconciliation.
@@ -697,6 +733,17 @@ where
             return Ok(None);
         }
         Ok(Some(session))
+    }
+
+    async fn session_known_to_archive_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        // Authoritative store read, deliberately NOT the archived-filtered
+        // `load_persisted_session`: an already-archived session is still
+        // OWNED by this authority (the archive path handles idempotence);
+        // only a session with no record at all is host-owned.
+        Ok(self.load_authoritative_session(session_id).await?.is_some())
     }
 
     async fn archive_with_mob_lifecycle_authority(

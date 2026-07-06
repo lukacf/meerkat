@@ -739,6 +739,14 @@ export interface ReadSessionTranscriptRevisionParams {
   session_id: string;
 }
 
+export interface SessionInputStateParams {
+  session_id: string;
+}
+
+export interface SessionInputStateResult {
+  state?: Record<string, unknown>;
+}
+
 export interface RealmIdParams {
   realm_id: string;
 }

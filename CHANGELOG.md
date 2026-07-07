@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.22] - 2026-07-07
+
+Meerkat 0.7.22 fixes the runtime-loop self-deadlock that was the root
+producer of the never-run-member disposal failures (upstream asks 20, 21,
+21b) and, on 0.7.21, wedged entire mobs (ask 21c). This is the release for
+downstream pins.
+
+### Fixed
+
+- Runtime-loop stop paths never run executor cleanup under the session
+  mutation gate (upstream ask 21c, P0). The loop task acquired the
+  per-session gate for terminal/effect handling and, still holding it,
+  entered stop realization — whose cleanup re-enters the machine (the mob
+  executor unregisters its session), and unregister's first await is the
+  same non-reentrant gate: the task parked forever, leaking a permanently
+  registered session (the state asks 20/21/21b kept hitting) and, on
+  0.7.21, deadlocking the whole single-task mob actor behind the gate.
+  Stops are now guard-free by construction: the effect drain surfaces stop
+  effects instead of applying them (callers apply after releasing their
+  authority guard), every stop call site drops its live guard first, and
+  `retire_runtime_control_plane` acquires the gate with a 30s bound and a
+  typed error naming the deadlock class so future regressions fast-fail
+  instead of wedging mobs. Defensive class tests drive a machine-re-entrant
+  executor through three distinct stop entry paths under hard timeouts —
+  red-verified to deadlock on the unfixed code.
+- With unregister completing, never-run member disposal converges through
+  the 0.7.20/0.7.21 archive arms instead of manufacturing the
+  permanently-registered state.
+
 ## [0.7.21] - 2026-07-07
 
 Meerkat 0.7.21 fixes the 0.7.19/0.7.20 external-tool poison regression

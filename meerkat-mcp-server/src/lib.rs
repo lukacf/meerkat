@@ -7200,9 +7200,11 @@ mod tests {
         let interrupted_payload = unwrap_payload(interrupted);
         assert_eq!(interrupted_payload["interrupted"], true);
 
-        // Archive requires runtime authority; store-only sessions are
-        // rejected. Verify archive produces a typed error rather than
-        // silently succeeding on a store-only projection.
+        // Ask 21: archive is a lifecycle terminal, not a projection
+        // promotion. A created-but-never-run session (durable record, no
+        // runtime snapshot) is the complete session truth and MUST archive
+        // — the old rejection permanently stranded never-prompted mob
+        // members in `retiring`.
         let archive_result = Box::pin(handle_tools_call(
             &state,
             "meerkat_archive",
@@ -7210,8 +7212,8 @@ mod tests {
         ))
         .await;
         assert!(
-            archive_result.is_err(),
-            "store-only session archive should require runtime authority"
+            archive_result.is_ok(),
+            "archiving a never-run persisted session must succeed: {archive_result:?}"
         );
     }
 

@@ -921,6 +921,41 @@ impl SessionBackend {
                     if let Some(adapter) = &self.runtime_adapter
                         && adapter.contains_session(session_id).await
                     {
+                        // Ask 21d: the escalation below exists to protect a
+                        // LIVE runtime the archive authority cannot see (a
+                        // genuine split-state). A runtime in a TERMINAL
+                        // lifecycle phase — the pre-archive retire has
+                        // already run by this point — has no live
+                        // obligations left to protect: registration is
+                        // un-unregistered residue, and failing here strands
+                        // the member in `retiring` on wirings whose archive
+                        // authority genuinely never owned the session
+                        // (identity-first gateway mob-plane workers).
+                        // Complete the disposal instead.
+                        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+                        let runtime_state = adapter.runtime_state(session_id).await;
+                        // Retired ONLY: Stopped is documented as
+                        // recoverable (a stopped session re-registers and
+                        // resumes), and the durable-retire helper
+                        // early-returns for Stopped without retiring — so
+                        // tolerating it here would discard a recoverable
+                        // runtime with neither an archived document nor a
+                        // durable retire. Stopped keeps the fail-closed
+                        // escalation.
+                        if matches!(runtime_state, Ok(meerkat_runtime::RuntimeState::Retired)) {
+                            tracing::info!(
+                                session_id = %session_id,
+                                state = ?runtime_state,
+                                "mob archive authority returned NotFound for a terminal-phase registered runtime; completing disposal"
+                            );
+                            crate::runtime::session_service::retire_runtime_session_for_archive(
+                                adapter.as_ref(),
+                                session_id,
+                            )
+                            .await?;
+                            self.unregister_runtime_session_binding(session_id).await;
+                            return Ok(());
+                        }
                         return Err(SessionError::Agent(
                             meerkat_core::error::AgentError::InternalError(format!(
                                 "mob archive authority returned NotFound for registered runtime session {session_id}"

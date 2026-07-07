@@ -22863,6 +22863,82 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
     );
 }
 
+/// Ask 21d regression (meerkat-studio, identity-first construction): the
+/// archive authority CLAIMS the session (ownership probe true) yet the
+/// archive itself resolves NotFound, and the runtime is already RETIRED by
+/// the pre-archive retire. The old escalation ("NotFound for registered
+/// runtime session") fired on the mere registration — but a terminal-phase
+/// registration has no live obligations to protect; it is un-unregistered
+/// residue. Disposal must complete instead of stranding the member.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_retire_completes_when_archive_notfounds_a_terminal_registered_runtime() {
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        runtime_store_for_machine,
+    ));
+    service.set_runtime_adapter(adapter.clone());
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+
+    // The session is persisted (the ownership probe claims it) but the
+    // archive authority NotFounds — the identity-first wiring disagreement.
+    let session = Session::new();
+    let session_id = session.id().clone();
+    service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "identity-first worker".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(session),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create identity-first worker session");
+    service.set_archive_not_found(&session_id).await;
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register runtime session");
+    let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
+    let bindings = adapter
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect("prepare generated runtime bindings");
+    provisioner
+        .bind_member_owner_context(
+            &member_ref,
+            session_id.clone(),
+            Arc::clone(bindings.ops_lifecycle()),
+        )
+        .await
+        .expect("bind generated owner context");
+
+    provisioner
+        .retire_member(&member_ref)
+        .await
+        .expect(
+            "archive-NotFound on a terminal-phase registered runtime must complete disposal, not escalate",
+        );
+
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "disposal must unregister the terminal runtime session"
+    );
+}
+
 /// K1 regression (meerkat-studio P0): retire on a SESSION-OWNED member — a
 /// runtime-registered session the mob archive authority never had a record
 /// for (e.g. materialized by an embedder's session service) — used to fail

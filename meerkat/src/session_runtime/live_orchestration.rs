@@ -141,6 +141,11 @@ pub fn live_channel_requires_close_for_identity_change(
         || bound_identity.auth_binding != new_identity.auth_binding
 }
 
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
 fn live_channel_identity_swap_reason(
     bound_identity: &SessionLlmIdentity,
     new_identity: &SessionLlmIdentity,
@@ -154,6 +159,11 @@ fn live_channel_identity_swap_reason(
     }
 }
 
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
 fn live_channel_identity_swap_context(
     bound_identity: &SessionLlmIdentity,
     new_identity: &SessionLlmIdentity,

@@ -5,9 +5,8 @@ use std::num::NonZeroU32;
 use meerkat_contracts::wire::{
     WireAssistantBlock, WireGenerateImageExecutionPlan, WireGenerateImageRequest,
     WireImageGenerationToolResult, WireImageOperationPhase, WireModelRoutingApprovalPhase,
-    WireModelRoutingApprovalRequest, WireScopedModelOverride, WireSessionHistory,
-    WireSessionMessage, WireSessionModelRoutingStatus, WireSwitchTurnControlResult,
-    WireSwitchTurnIntent, WireSwitchTurnPhase,
+    WireScopedModelOverride, WireSessionHistory, WireSessionMessage, WireSessionModelRoutingStatus,
+    WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::{
@@ -17,14 +16,14 @@ use meerkat_core::{
     ImageGenerationTargetCapabilities, ImageGenerationTargetPreference, ImageGenerationToolResult,
     ImageOperationApprovalReason, ImageOperationDenialReason, ImageOperationId,
     ImageOperationPhase, ImageOperationTerminalClass, ImageQualityPreference, ImageSizePreference,
-    MediaType, Message, ModelRoutingApprovalPhase, ModelRoutingApprovalRequest,
-    ModelRoutingApprovalTerminalClass, PromptSource, PromptText, ProviderId, ProviderImageMetadata,
-    ProviderTextDisposition, RevisedPromptDisposition, ScopedModelOverride, ScopedModelOverrideId,
-    ScopedModelOverrideKind, ScopedModelOverrideSummary, SessionHistoryPage, StopReason,
-    SwitchTurnApprovalReason, SwitchTurnControlResult, SwitchTurnDenialReason, SwitchTurnDuration,
-    SwitchTurnIntent, SwitchTurnOrigin, SwitchTurnPhase, SwitchTurnPolicyReason,
-    SwitchTurnReasonText, SwitchTurnReasonTextDisposition, SwitchTurnRequestId,
-    SwitchTurnTerminalClass, TextArtifactRef, ToolCallId, TopologyEpoch,
+    MediaType, Message, ModelRoutingApprovalPhase, ModelRoutingApprovalTerminalClass, PromptSource,
+    PromptText, ProviderId, ProviderImageMetadata, ProviderTextDisposition,
+    RevisedPromptDisposition, ScopedModelOverride, ScopedModelOverrideId, ScopedModelOverrideKind,
+    ScopedModelOverrideSummary, SessionHistoryPage, StopReason, SwitchTurnApprovalReason,
+    SwitchTurnControlResult, SwitchTurnDenialReason, SwitchTurnDuration, SwitchTurnIntent,
+    SwitchTurnOrigin, SwitchTurnPhase, SwitchTurnPolicyReason, SwitchTurnReasonText,
+    SwitchTurnReasonTextDisposition, SwitchTurnRequestId, SwitchTurnTerminalClass, TextArtifactRef,
+    ToolCallId, TopologyEpoch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -247,14 +246,6 @@ fn model_routing_wire_aliases_roundtrip() {
     };
     roundtrip(denied);
 
-    let approval: WireModelRoutingApprovalRequest = ModelRoutingApprovalRequest::SwitchTurn {
-        request_id: SwitchTurnRequestId::new(uuid(5)),
-        reason: meerkat_core::SwitchTurnApprovalReason::CrossProvider,
-    };
-    let encoded = serde_json::to_string(&approval).unwrap();
-    let decoded: WireModelRoutingApprovalRequest = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, approval);
-
     let phase: WireSwitchTurnPhase = SwitchTurnPhase::PendingForBoundary;
     let encoded = serde_json::to_string(&phase).unwrap();
     let decoded: WireSwitchTurnPhase = serde_json::from_str(&encoded).unwrap();
@@ -403,33 +394,6 @@ fn wire_declared_variant_families_roundtrip() {
     }
     roundtrip::<WireModelRoutingApprovalPhase>(ModelRoutingApprovalPhase::Pending);
     roundtrip::<WireModelRoutingApprovalPhase>(ModelRoutingApprovalPhase::PresentedToUser);
-
-    for reason in [
-        SwitchTurnApprovalReason::CrossProvider,
-        SwitchTurnApprovalReason::CostExceedsThreshold,
-        SwitchTurnApprovalReason::SafetyHold,
-        SwitchTurnApprovalReason::UntilChangedFromModelOrigin,
-        SwitchTurnApprovalReason::RealtimeDetachRequired,
-    ] {
-        let request: WireModelRoutingApprovalRequest = ModelRoutingApprovalRequest::SwitchTurn {
-            request_id: SwitchTurnRequestId::new(uuid(20)),
-            reason,
-        };
-        roundtrip(request);
-    }
-    for reason in [
-        ImageOperationApprovalReason::CrossProvider,
-        ImageOperationApprovalReason::CostExceedsThreshold,
-        ImageOperationApprovalReason::SafetyHold,
-        ImageOperationApprovalReason::RealtimeDetachRequired,
-    ] {
-        let request: WireModelRoutingApprovalRequest =
-            ModelRoutingApprovalRequest::ImageOperation {
-                operation_id: ImageOperationId::new(uuid(21)),
-                reason,
-            };
-        roundtrip(request);
-    }
 
     for policy in [
         SwitchTurnPolicyReason::BudgetDowngrade,

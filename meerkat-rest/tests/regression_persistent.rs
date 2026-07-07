@@ -63,14 +63,27 @@ fn build_state(
     let provider_registry = factory.provider_runtime_registry();
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
-    let persistence = PersistenceBundle::new(
+    let persistence = PersistenceBundle::new_with_subsystem_stores(
         store,
         runtime_store,
         Arc::new(meerkat_store::MemoryBlobStore::new()),
+        Arc::new(meerkat::MemoryScheduleStore::default()),
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
     );
     let runtime_adapter = persistence.runtime_adapter();
     let workgraph_store = persistence.workgraph_store();
+    let workgraph_service = meerkat::WorkGraphService::with_scope(
+        workgraph_store,
+        "test-realm",
+        meerkat::WorkNamespace::default(),
+    );
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));
+    meerkat::surface::set_default_workgraph_tools(
+        &builder,
+        Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+            workgraph_service.clone(),
+        ))),
+    );
     #[cfg(feature = "mob")]
     let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
     let (session_store_inner, runtime_store, blob_store) = persistence.into_parts();
@@ -112,11 +125,7 @@ fn build_state(
         schedule_service: meerkat::ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::default(),
         )),
-        workgraph_service: meerkat::WorkGraphService::with_scope(
-            workgraph_store,
-            "test-realm",
-            meerkat::WorkNamespace::default(),
-        ),
+        workgraph_service,
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
         realm_config_source: empty_realm_config_source(store_path),
@@ -235,13 +244,19 @@ async fn create_session(state: AppState, payload: Value) -> (String, Value) {
         .await
         .expect("create timed out")
         .expect("create request");
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response
         .into_body()
         .collect()
         .await
         .expect("read body")
         .to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create session failed: {}",
+        String::from_utf8_lossy(&body)
+    );
     let json: Value = serde_json::from_slice(&body).expect("parse response");
     let session_id = json["session_id"]
         .as_str()

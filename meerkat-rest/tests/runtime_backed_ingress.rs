@@ -196,13 +196,19 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         .expect("build request");
 
     let response = app.clone().oneshot(request).await.expect("run request");
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = response
         .into_body()
         .collect()
         .await
         .expect("read body")
         .to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create-session failed: {}",
+        String::from_utf8_lossy(&body)
+    );
     let payload: Value = serde_json::from_slice(&body).expect("json body");
     let session_id = payload["session_id"]
         .as_str()

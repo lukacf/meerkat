@@ -793,7 +793,7 @@ In `autonomous_host` mode, agents run a continuous loop: wake on inbox → proce
 Tool visibility can change during a session without restarting the agent. All changes are staged then atomically applied at the turn boundary.
 
 - **External filters** — allow-list or deny-list staged via `ToolScopeHandle`, applied at `CallingLlm` boundary. Persisted in session metadata (`tool_scope_external_filter`).
-- **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.flow_tool_overlay`. Ephemeral, used by mob flow steps to restrict tools per step.
+- **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.turn_tool_overlay`. Ephemeral, used by mob flow steps and attention producers to restrict tools per turn.
 - **Configured MCP servers** — CLI `rkat mcp add/remove/list/get` edits `.rkat/mcp.toml` or `~/.rkat/mcp.toml`. New `rkat run` and `rkat run --resume` sessions load that config.
 - **MCP HTTP OAuth** — streamable HTTP servers can require OAuth without any auth schema in MCP config. Stored mode (`rkat run --mcp-auth stored`, the default) uses persisted tokens only and reports `rkat mcp login <server>` when auth is missing. Interactive mode (`--mcp-auth interactive`) may open a browser from a TTY, store tokens, reconnect, and continue the run.
 - **Live MCP mutation** — JSON-RPC `mcp/add`, `mcp/remove`, `mcp/reload`, REST `POST /sessions/{id}/mcp/*`, MCP-server tools, and SDK helpers stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.

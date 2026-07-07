@@ -165,6 +165,12 @@ fn counting_agent_llm_client_decorator(
     })
 }
 
+fn test_workgraph_tools() -> Arc<dyn AgentToolDispatcher> {
+    Arc::new(meerkat::WorkGraphToolSurface::new(
+        meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new())),
+    ))
+}
+
 #[cfg(feature = "comms")]
 async fn add_trusted_peer_with_generated_authority(
     runtime: Arc<CommsRuntime>,
@@ -1221,6 +1227,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         resume_session: Some(session),
         provider: Some(Provider::OpenAI),
         max_tokens: Some(1024),
+        workgraph_tools: Some(test_workgraph_tools()),
         provider_params: Some(
             meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
                 temperature: Some(0.1),

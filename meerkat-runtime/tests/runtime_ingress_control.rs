@@ -247,7 +247,7 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
                 text: "attention turn".to_string(),
             },
         });
-        continuation.flow_tool_overlay = Some(TurnToolOverlay {
+        continuation.turn_tool_overlay = Some(TurnToolOverlay {
             dispatch_context: [(
                 "workgraph.attention_projection".to_string(),
                 serde_json::json!(true),

@@ -253,7 +253,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         step_id: &StepId,
         target: &AgentIdentity,
         message: ContentInput,
-        flow_tool_overlay: Option<TurnToolOverlay>,
+        turn_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError> {
         let entry = self
             .handle
@@ -272,9 +272,9 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         };
         let bridge_handle = match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
-                if flow_tool_overlay.is_some() {
+                if turn_tool_overlay.is_some() {
                     return Err(MobError::Internal(format!(
-                        "flow tool overlay cannot be enforced for autonomous host member '{target}'; \
+                        "turn tool overlay cannot be enforced for autonomous host member '{target}'; \
                          use turn_driven runtime mode for steps with allowed_tools/blocked_tools"
                     )));
                 }
@@ -352,7 +352,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             event_tx: Some(event_tx),
                             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                                 meerkat_core::types::HandlingMode::Queue,
-                                flow_tool_overlay,
+                                turn_tool_overlay,
                                 Vec::new(),
                                 None,
                             ),

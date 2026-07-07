@@ -2347,7 +2347,7 @@ class MeerkatClient:
         prompt: WireContentInput,
         *,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: PublicTurnToolOverlay | None = None,
+        turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         injected_context: list[WireContentInput] | None = None,
         keep_alive: bool | None = None,
@@ -2378,7 +2378,7 @@ class MeerkatClient:
             agent_identity=agent_identity,
             prompt=prompt,
             skill_refs=_skill_refs_to_wire(skill_refs),
-            flow_tool_overlay=flow_tool_overlay,
+            turn_tool_overlay=turn_tool_overlay,
             additional_instructions=additional_instructions,
             injected_context=injected_context,
             keep_alive=keep_alive,
@@ -3120,7 +3120,7 @@ class MeerkatClient:
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: PublicTurnToolOverlay | None = None,
+        turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -3137,8 +3137,8 @@ class MeerkatClient:
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
-        if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = _wire_value(flow_tool_overlay)
+        if turn_tool_overlay is not None:
+            params["turn_tool_overlay"] = _wire_value(turn_tool_overlay)
         if additional_instructions is not None:
             params["additional_instructions"] = additional_instructions
         if keep_alive is not None:
@@ -3167,7 +3167,7 @@ class MeerkatClient:
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
         skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: PublicTurnToolOverlay | None = None,
+        turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
@@ -3191,8 +3191,8 @@ class MeerkatClient:
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
-        if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = _wire_value(flow_tool_overlay)
+        if turn_tool_overlay is not None:
+            params["turn_tool_overlay"] = _wire_value(turn_tool_overlay)
         if additional_instructions is not None:
             params["additional_instructions"] = additional_instructions
         if keep_alive is not None:

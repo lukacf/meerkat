@@ -1291,7 +1291,7 @@ pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_tool_overlay: Option<meerkat_core::TurnToolOverlay>,
+    pub turn_tool_overlay: Option<meerkat_core::TurnToolOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<WireTurnInstruction>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1382,7 +1382,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
         Self {
             handling_mode: value.handling_mode.map(Into::into),
             skill_references: value.skill_references,
-            flow_tool_overlay: value.flow_tool_overlay,
+            turn_tool_overlay: value.turn_tool_overlay,
             additional_instructions: value
                 .additional_instructions
                 .map(|v| v.into_iter().map(Into::into).collect()),
@@ -1406,7 +1406,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
         Self {
             handling_mode: value.handling_mode.map(Into::into),
             skill_references: value.skill_references,
-            flow_tool_overlay: value.flow_tool_overlay,
+            turn_tool_overlay: value.turn_tool_overlay,
             additional_instructions: value
                 .additional_instructions
                 .map(|v| v.into_iter().map(Into::into).collect()),

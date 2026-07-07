@@ -33,6 +33,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CreateOpen`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
 - `CreateBlocked`(due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
 - `Update`(expected_revision: u64, due_at_utc_ms: Option<u64>, not_before_utc_ms: Option<u64>, snoozed_until_utc_ms: Option<u64>, completion_policy: WorkCompletionPolicy, completion_supervisor_owner_key: Option<WorkOwnerKey>, completion_reviewer_quorum_threshold: Option<u64>, unresolved_blocker_count: u64)
+- `PolicyEscalate`(expected_revision: u64, requested_completion_policy: WorkCompletionPolicy, requested_completion_supervisor_owner_key: Option<WorkOwnerKey>, requested_completion_reviewer_quorum_threshold: Option<u64>)
 - `Claim`(expected_revision: u64, owner_key: WorkOwnerKey, now_utc_ms: u64, lease_expires_at_utc_ms: Option<u64>)
 - `Release`(expected_revision: u64)
 - `Block`(expected_revision: u64)
@@ -72,12 +73,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CloseStatusAdmissionClassified`(admission: WorkCloseStatusAdmissionKind)
 - `PublicConfirmationAdmissionClassified`(admission: WorkPublicConfirmationAdmissionKind)
 - `CompletionPolicyMutationAdmissionClassified`(admission: WorkCompletionPolicyMutationAdmissionKind)
+- `PolicyEscalationAdmissionClassified`(admission: WorkPolicyEscalationAdmissionKind)
 - `ConfirmationAdmissionClassified`(admission: WorkConfirmationAdmissionKind)
 - `WorkItemReadinessClassified`(ready: Bool)
 
 ## Helpers
 - `completion_policy_payload_valid`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>) -> `Bool`
 - `completion_policy_is_satisfied`(policy: WorkCompletionPolicy, supervisor_owner_key: Option<WorkOwnerKey>, reviewer_quorum_threshold: Option<u64>, host_confirmation_count: u64, principal_confirmation_count: u64, supervisor_confirmation_owner_keys: Set<WorkOwnerKey>, reviewer_confirmation_owner_keys: Set<WorkOwnerKey>) -> `Bool`
+- `completion_policy_escalation_admissible`(current_policy: WorkCompletionPolicy, current_reviewer_quorum_threshold: Option<u64>, requested_policy: WorkCompletionPolicy, requested_supervisor_owner_key: Option<WorkOwnerKey>, requested_reviewer_quorum_threshold: Option<u64>) -> `Bool`
 - `evidence_kind_owner_key_present`(evidence_kind: WorkEvidenceKind, confirming_owner_key: Option<WorkOwnerKey>) -> `Bool`
 - `confirmation_denies_principal_required`(completion_policy: WorkCompletionPolicy, requested_principal_owner_key: Option<WorkOwnerKey>) -> `Bool`
 - `confirmation_denies_principal_kind_mismatch`(completion_policy: WorkCompletionPolicy, requested_principal_owner_key: Option<WorkOwnerKey>, requested_principal_kind: Option<WorkOwnerKind>) -> `Bool`
@@ -123,6 +126,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
   - `completion_policy_payload_valid`
+  - `completion_policy_unchanged`
 - Emits: `Updated`
 - To: `Open`
 
@@ -132,6 +136,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
   - `completion_policy_payload_valid`
+  - `completion_policy_unchanged`
 - Emits: `Updated`
 - To: `InProgress`
 
@@ -141,7 +146,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
   - `completion_policy_payload_valid`
+  - `completion_policy_unchanged`
 - Emits: `Updated`
+- To: `Blocked`
+
+### `PolicyEscalateOpenAdmitted`
+- From: `Open`
+- On: `PolicyEscalate`(expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - ``
+  - `completion_policy_escalation_admissible`
+- Emits: `Updated`, `PolicyEscalationAdmissionClassified`
+- To: `Open`
+
+### `PolicyEscalateOpenDenied`
+- From: `Open`
+- On: `PolicyEscalate`(expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - ``
+  - `completion_policy_escalation_denied`
+- Emits: `PolicyEscalationAdmissionClassified`
+- To: `Open`
+
+### `PolicyEscalateInProgressAdmitted`
+- From: `InProgress`
+- On: `PolicyEscalate`(expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - ``
+  - `completion_policy_escalation_admissible`
+- Emits: `Updated`, `PolicyEscalationAdmissionClassified`
+- To: `InProgress`
+
+### `PolicyEscalateInProgressDenied`
+- From: `InProgress`
+- On: `PolicyEscalate`(expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - ``
+  - `completion_policy_escalation_denied`
+- Emits: `PolicyEscalationAdmissionClassified`
+- To: `InProgress`
+
+### `PolicyEscalateBlockedAdmitted`
+- From: `Blocked`
+- On: `PolicyEscalate`(expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - ``
+  - `completion_policy_escalation_admissible`
+- Emits: `Updated`, `PolicyEscalationAdmissionClassified`
+- To: `Blocked`
+
+### `PolicyEscalateBlockedDenied`
+- From: `Blocked`
+- On: `PolicyEscalate`(expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold)
+- Guards:
+  - ``
+  - `completion_policy_escalation_denied`
+- Emits: `PolicyEscalationAdmissionClassified`
 - To: `Blocked`
 
 ### `ClaimOpen`

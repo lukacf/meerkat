@@ -1054,7 +1054,7 @@ pub struct RuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_references: Option<Vec<SkillKey>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    pub turn_tool_overlay: Option<TurnToolOverlay>,
     /// Additional instructions for this turn, typed by role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<TurnInstruction>>,
@@ -1107,7 +1107,7 @@ impl RuntimeTurnMetadata {
     pub fn is_empty(&self) -> bool {
         self.handling_mode.is_none()
             && self.skill_references.is_none()
-            && self.flow_tool_overlay.is_none()
+            && self.turn_tool_overlay.is_none()
             && self.additional_instructions.is_none()
             && self.model.is_none()
             && self.provider.is_none()
@@ -1136,9 +1136,9 @@ impl RuntimeTurnMetadata {
             "handling_mode",
         )?;
         merge_scalar(
-            &mut self.flow_tool_overlay,
-            other.flow_tool_overlay,
-            "flow_tool_overlay",
+            &mut self.turn_tool_overlay,
+            other.turn_tool_overlay,
+            "turn_tool_overlay",
         )?;
         merge_scalar(&mut self.model, other.model, "model")?;
         merge_scalar(&mut self.provider, other.provider, "provider")?;

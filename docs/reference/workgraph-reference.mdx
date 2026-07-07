@@ -129,9 +129,9 @@ Evidence refs are pointers. WorkGraph does not own the artifact content.
 | `workgraph/goal/status` | Read goal and attention status |
 | `workgraph/attention/list` | List attention bindings |
 
-General WorkGraph item mutation remains tool-owned. The goal and attention
-mutation methods are trusted host-control methods and are not part of the public
-REST or JSON-RPC catalog.
+General WorkGraph item mutation remains tool-owned. Attention reassignment and
+policy escalation are authority-bearing WorkGraph tool operations injected into
+turns with active attention, not public RPC methods.
 
 ## REST
 

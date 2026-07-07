@@ -342,6 +342,7 @@ pub trait MobProvisioner: Send + Sync {
 pub struct SessionBackend {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<MeerkatMachine>>,
+    workgraph_service: Option<meerkat::WorkGraphService>,
     ops_adapter: Arc<super::ops_adapter::MobOpsAdapter>,
     // Capability index for runtime bridge sidecars keyed by registered runtime
     // session identity. This map is never lifecycle truth; canonical
@@ -367,10 +368,12 @@ impl SessionBackend {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<MeerkatMachine>>,
+        workgraph_service: Option<meerkat::WorkGraphService>,
     ) -> Self {
         Self {
             session_service,
             runtime_adapter,
+            workgraph_service,
             ops_adapter: Arc::new(super::ops_adapter::MobOpsAdapter::new()),
             runtime_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -476,6 +479,7 @@ impl SessionBackend {
             let executor = Box::new(MobSessionRuntimeExecutor::new(
                 self.session_service.clone(),
                 Arc::clone(adapter),
+                self.workgraph_service.clone(),
                 session_id.clone(),
                 state.clone(),
                 Arc::clone(&self.runtime_sessions),
@@ -520,6 +524,7 @@ impl SessionBackend {
         let executor = Box::new(MobSessionRuntimeExecutor::new(
             self.session_service.clone(),
             Arc::clone(adapter),
+            self.workgraph_service.clone(),
             session_id.clone(),
             state.clone(),
             Arc::clone(&self.runtime_sessions),
@@ -1085,8 +1090,8 @@ impl SessionBackend {
                 .handling_mode
                 .unwrap_or(req.runtime.handling_mode),
         );
-        if turn_metadata.flow_tool_overlay.is_none() {
-            turn_metadata.flow_tool_overlay = req.runtime.flow_tool_overlay.clone();
+        if turn_metadata.turn_tool_overlay.is_none() {
+            turn_metadata.turn_tool_overlay = req.runtime.turn_tool_overlay.clone();
         }
         let prompt = req.prompt.clone();
         Input::Prompt(PromptInput {
@@ -1594,6 +1599,7 @@ mod tests {
 pub(super) struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Arc<MeerkatMachine>,
+    workgraph_service: Option<meerkat::WorkGraphService>,
     bridge_session_id: SessionId,
     state: Arc<RuntimeSessionState>,
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
@@ -1604,6 +1610,7 @@ impl MobSessionRuntimeExecutor {
     pub(super) fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Arc<MeerkatMachine>,
+        workgraph_service: Option<meerkat::WorkGraphService>,
         bridge_session_id: SessionId,
         state: Arc<RuntimeSessionState>,
         runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
@@ -1611,6 +1618,7 @@ impl MobSessionRuntimeExecutor {
         Self {
             session_service,
             runtime_adapter,
+            workgraph_service,
             bridge_session_id,
             state,
             runtime_sessions,
@@ -1811,7 +1819,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             m.render_metadata = None;
             m
         });
-        let req = StartTurnRequest {
+        let mut req = StartTurnRequest {
             injected_context: Vec::new(),
             prompt: primitive.extract_content_input(),
             system_prompt: None,
@@ -1820,12 +1828,20 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 meerkat_core::types::HandlingMode::Queue,
                 primitive
                     .turn_metadata()
-                    .and_then(|meta| meta.flow_tool_overlay.clone()),
+                    .and_then(|meta| meta.turn_tool_overlay.clone()),
                 pre_turn_context_appends,
                 executor_turn_metadata,
             )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
         };
+        meerkat::surface::inject_workgraph_attention_turn_overlay(
+            self.session_service.as_ref(),
+            self.workgraph_service.as_ref(),
+            &self.bridge_session_id,
+            &mut req,
+        )
+        .await
+        .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))?;
 
         self.session_service
             .apply_runtime_turn(
@@ -2447,8 +2463,8 @@ impl MobProvisioner for SessionBackend {
                             .handling_mode
                             .unwrap_or(req.runtime.handling_mode),
                     );
-                    if turn_metadata.flow_tool_overlay.is_none() {
-                        turn_metadata.flow_tool_overlay = req.runtime.flow_tool_overlay.clone();
+                    if turn_metadata.turn_tool_overlay.is_none() {
+                        turn_metadata.turn_tool_overlay = req.runtime.turn_tool_overlay.clone();
                     }
                     turn_metadata
                 }),
@@ -2662,10 +2678,12 @@ impl MultiBackendProvisioner {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<MeerkatMachine>>,
+        workgraph_service: Option<meerkat::WorkGraphService>,
         external: Option<ExternalBackendConfig>,
         supervisor_bridge: Arc<super::MobSupervisorBridge>,
     ) -> Self {
-        let session = SessionBackend::new(session_service.clone(), runtime_adapter);
+        let session =
+            SessionBackend::new(session_service.clone(), runtime_adapter, workgraph_service);
         let external = external.map(|cfg| ExternalBackend::new(session_service, cfg));
         Self {
             session,

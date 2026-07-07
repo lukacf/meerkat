@@ -14,6 +14,5 @@ pub type WireSwitchTurnIntent = meerkat_core::SwitchTurnIntent;
 pub type WireSwitchTurnControlResult = meerkat_core::SwitchTurnControlResult;
 pub type WireSwitchTurnPhase = meerkat_core::SwitchTurnPhase;
 pub type WireModelRoutingApprovalPhase = meerkat_core::ModelRoutingApprovalPhase;
-pub type WireModelRoutingApprovalRequest = meerkat_core::ModelRoutingApprovalRequest;
 pub type WireScopedModelOverride = meerkat_core::ScopedModelOverride;
 pub type WireSessionModelRoutingStatus = meerkat_core::SessionModelRoutingStatus;

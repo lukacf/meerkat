@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 #[cfg(not(target_arch = "wasm32"))]
 use rusqlite::{
-    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+    Connection, Error, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 
 use crate::WorkGraphError;
@@ -17,6 +19,9 @@ use crate::types::{
     WorkNamespace,
 };
 use crate::{WorkAttentionMachine, WorkGraphMachine};
+
+#[cfg(not(target_arch = "wasm32"))]
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 5000;
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::sync::RwLock;
@@ -112,6 +117,17 @@ pub trait WorkGraphStore: Send + Sync {
         _expected_previous_revision: u64,
         _event: WorkGraphEvent,
     ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn reassign_attention_cas(
+        &self,
+        _previous: WorkAttentionBinding,
+        _expected_previous_revision: u64,
+        _previous_event: WorkGraphEvent,
+        _replacement: WorkAttentionBinding,
+        _replacement_event: WorkGraphEvent,
+    ) -> Result<(WorkAttentionBinding, WorkAttentionBinding), WorkGraphError> {
         Err(unsupported(self.kind()))
     }
 
@@ -454,6 +470,52 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         Ok(attention)
     }
 
+    async fn reassign_attention_cas(
+        &self,
+        previous: WorkAttentionBinding,
+        expected_previous_revision: u64,
+        previous_event: WorkGraphEvent,
+        replacement: WorkAttentionBinding,
+        replacement_event: WorkGraphEvent,
+    ) -> Result<(WorkAttentionBinding, WorkAttentionBinding), WorkGraphError> {
+        let mut guard = self.inner.write().await;
+        let previous_key = attention_key(
+            &previous.work_ref.realm_id,
+            &previous.work_ref.namespace,
+            &previous.binding_id,
+        );
+        let Some(current) = guard.attention.get(&previous_key) else {
+            return Err(WorkGraphError::attention_not_found(
+                previous.work_ref.realm_id.clone(),
+                previous.work_ref.namespace.clone(),
+                previous.binding_id.clone(),
+            ));
+        };
+        if current.machine_state.revision != expected_previous_revision {
+            return Err(WorkGraphError::StaleRevision {
+                id: previous.work_ref.item_id.clone(),
+                expected: expected_previous_revision,
+                actual: current.machine_state.revision,
+            });
+        }
+        let replacement_key = attention_key(
+            &replacement.work_ref.realm_id,
+            &replacement.work_ref.namespace,
+            &replacement.binding_id,
+        );
+        if guard.attention.contains_key(&replacement_key) {
+            return Err(WorkGraphError::Conflict(format!(
+                "work attention binding {} already exists",
+                replacement.binding_id
+            )));
+        }
+        guard.attention.insert(previous_key, previous.clone());
+        guard.attention.insert(replacement_key, replacement.clone());
+        guard.append_event(previous_event);
+        guard.append_event(replacement_event);
+        Ok((previous, replacement))
+    }
+
     async fn update_item_and_attention_cas(
         &self,
         item: WorkItem,
@@ -760,8 +822,11 @@ impl SqliteWorkGraphStore {
 
     pub fn rebuild_projection_from_events(&self) -> Result<(), WorkGraphError> {
         self.with_connection(|conn| {
+            // Rebuild is a whole-projection writer: it must acquire the write
+            // lock before deleting projected rows so concurrent writers either
+            // wait on busy_timeout or proceed after the rebuild commits.
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             tx.execute("DELETE FROM workgraph_items", [])
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
@@ -803,9 +868,11 @@ impl SqliteWorkGraphStore {
         }
         let mut conn =
             Connection::open(&self.path).map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
+        conn.pragma_update(None, "synchronous", "FULL")
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         init_sqlite_schema(&conn)?;
         f(&mut conn)
@@ -831,7 +898,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             insert_item_tx(&tx, &item)?;
             insert_event_tx(&tx, &event)?;
@@ -850,7 +917,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             let changed = update_item_tx(&tx, &item, expected_previous_revision)?;
             if changed == 0 {
@@ -898,7 +965,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             insert_item_tx(&tx, &item)?;
             insert_attention_tx(&tx, &attention)?;
@@ -918,7 +985,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
     ) -> Result<WorkAttentionBinding, WorkGraphError> {
         self.with_connection(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             let changed = update_attention_tx(&tx, &attention, expected_previous_revision)?;
             if changed == 0 {
@@ -948,6 +1015,48 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         })
     }
 
+    async fn reassign_attention_cas(
+        &self,
+        previous: WorkAttentionBinding,
+        expected_previous_revision: u64,
+        previous_event: WorkGraphEvent,
+        replacement: WorkAttentionBinding,
+        replacement_event: WorkGraphEvent,
+    ) -> Result<(WorkAttentionBinding, WorkAttentionBinding), WorkGraphError> {
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let changed = update_attention_tx(&tx, &previous, expected_previous_revision)?;
+            if changed == 0 {
+                let actual = current_attention_revision_tx(
+                    &tx,
+                    &previous.work_ref.realm_id,
+                    &previous.work_ref.namespace,
+                    &previous.binding_id,
+                )?;
+                return match actual {
+                    Some(actual) => Err(WorkGraphError::StaleRevision {
+                        id: previous.work_ref.item_id,
+                        expected: expected_previous_revision,
+                        actual,
+                    }),
+                    None => Err(WorkGraphError::attention_not_found(
+                        previous.work_ref.realm_id,
+                        previous.work_ref.namespace,
+                        previous.binding_id,
+                    )),
+                };
+            }
+            insert_attention_tx(&tx, &replacement)?;
+            insert_event_tx(&tx, &previous_event)?;
+            insert_event_tx(&tx, &replacement_event)?;
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok((previous, replacement))
+        })
+    }
+
     async fn update_item_and_attention_cas(
         &self,
         item: WorkItem,
@@ -958,7 +1067,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             let changed = update_item_tx(&tx, &item, expected_previous_revision)?;
             if changed == 0 {
@@ -1030,7 +1139,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
     ) -> Result<WorkEdge, WorkGraphError> {
         self.with_connection(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
             insert_edge_tx(&tx, &edge)?;
             insert_event_tx(&tx, &event)?;
@@ -1153,7 +1262,7 @@ fn insert_item_tx(tx: &Transaction<'_>, item: &WorkItem) -> Result<(), WorkGraph
             json,
         ],
     )
-    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    .map_err(|err| map_sqlite_insert_item_error(err, item))?;
     Ok(())
 }
 
@@ -1206,6 +1315,37 @@ fn upsert_item_tx(tx: &Transaction<'_>, item: &WorkItem) -> Result<(), WorkGraph
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn map_sqlite_insert_item_error(err: Error, item: &WorkItem) -> WorkGraphError {
+    if sqlite_constraint_violation(&err) {
+        return WorkGraphError::Conflict(format!("work item {} already exists", item.id));
+    }
+    WorkGraphError::Store(err.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_sqlite_insert_attention_error(
+    err: Error,
+    attention: &WorkAttentionBinding,
+) -> WorkGraphError {
+    if sqlite_constraint_violation(&err) {
+        return WorkGraphError::Conflict(format!(
+            "work attention binding {} already exists",
+            attention.binding_id
+        ));
+    }
+    WorkGraphError::Store(err.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sqlite_constraint_violation(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::SqliteFailure(sqlite_error, _)
+            if sqlite_error.code == ErrorCode::ConstraintViolation
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn current_revision_tx(
     tx: &Transaction<'_>,
     realm_id: &str,
@@ -1241,7 +1381,7 @@ fn insert_attention_tx(
             json,
         ],
     )
-    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    .map_err(|err| map_sqlite_insert_attention_error(err, attention))?;
     Ok(())
 }
 

@@ -5,9 +5,9 @@ use strum::IntoEnumIterator;
 
 use crate::store::WorkGraphEventFilter;
 use crate::types::{
-    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, LinkWorkItemsRequest,
-    ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkGraphSnapshotFilter,
-    WorkItemFilter, WorkItemId, WorkNamespace,
+    AddEvidenceRequest, AttentionReassignRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
+    LinkWorkItemsRequest, PolicyEscalateRequest, ReadyWorkFilter, ReleaseWorkItemRequest,
+    UpdateWorkItemRequest, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
 };
 use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
 
@@ -87,10 +87,12 @@ enum WorkGraphToolContract {
     Claim,
     Release,
     Update,
+    PolicyEscalate,
     Block,
     Close,
     Link,
     AddEvidence,
+    AttentionReassign,
 }
 
 impl WorkGraphToolContract {
@@ -105,10 +107,12 @@ impl WorkGraphToolContract {
             Self::Claim => "workgraph_claim",
             Self::Release => "workgraph_release",
             Self::Update => "workgraph_update",
+            Self::PolicyEscalate => "workgraph_policy_escalate",
             Self::Block => "workgraph_block",
             Self::Close => "workgraph_close",
             Self::Link => "workgraph_link",
             Self::AddEvidence => "workgraph_add_evidence",
+            Self::AttentionReassign => "workgraph_attention_reassign",
         }
     }
 
@@ -123,10 +127,12 @@ impl WorkGraphToolContract {
             Self::Claim => "Claim a ready WorkGraph item with CAS revision checking.",
             Self::Release => "Release a claimed WorkGraph item.",
             Self::Update => "Update non-terminal WorkGraph item fields.",
+            Self::PolicyEscalate => "Monotonically tighten a WorkGraph completion policy.",
             Self::Block => "Mark a WorkGraph item blocked.",
             Self::Close => "Close a WorkGraph item with a terminal status.",
             Self::Link => "Create a dependency or relationship edge.",
             Self::AddEvidence => "Attach a typed evidence reference to a WorkGraph item.",
+            Self::AttentionReassign => "Reassign a WorkGraph attention binding.",
         }
     }
 
@@ -141,10 +147,16 @@ impl WorkGraphToolContract {
             Self::Claim => claim_schema(),
             Self::Release | Self::Block => revision_id_schema(),
             Self::Update => update_schema(),
+            Self::PolicyEscalate => policy_escalate_schema(),
             Self::Close => close_schema(),
             Self::Link => link_schema(),
             Self::AddEvidence => evidence_schema(),
+            Self::AttentionReassign => attention_reassign_schema(),
         }
+    }
+
+    const fn is_unscoped_surface_allowed(self) -> bool {
+        !matches!(self, Self::AttentionReassign | Self::PolicyEscalate)
     }
 
     fn parse(name: &str) -> Result<Self, WorkGraphToolError> {
@@ -163,6 +175,34 @@ pub fn workgraph_tools_list() -> Vec<Value> {
     WorkGraphToolContract::iter()
         .map(|contract| tool(contract.name(), contract.description(), contract.schema()))
         .collect()
+}
+
+/// Public WorkGraph MCP/default surface.
+///
+/// Attention-only operations require a runtime-injected attention projection
+/// witness before dispatch, so they are advertised only by
+/// [`WorkGraphToolSurface::with_attention_projection`](crate::WorkGraphToolSurface::with_attention_projection)
+/// and rejected by [`handle_unscoped_workgraph_tools_call`].
+pub fn unscoped_workgraph_tools_list() -> Vec<Value> {
+    WorkGraphToolContract::iter()
+        .filter(|contract| contract.is_unscoped_surface_allowed())
+        .map(|contract| tool(contract.name(), contract.description(), contract.schema()))
+        .collect()
+}
+
+pub async fn handle_unscoped_workgraph_tools_call(
+    service: &WorkGraphService,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, WorkGraphToolError> {
+    let contract = WorkGraphToolContract::parse(name)?;
+    if !contract.is_unscoped_surface_allowed() {
+        return Err(WorkGraphToolError::new(
+            WorkGraphToolErrorCode::NotFound,
+            format!("unknown WorkGraph tool '{name}'"),
+        ));
+    }
+    handle_workgraph_tools_call(service, name, arguments).await
 }
 
 pub async fn handle_workgraph_tools_call(
@@ -235,6 +275,14 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
+        WorkGraphToolContract::PolicyEscalate => {
+            let request: PolicyEscalateRequest = parse(arguments)?;
+            service
+                .escalate_policy(request)
+                .await
+                .map(|item| json!({ "item": item }))
+                .map_err(map_error)
+        }
         WorkGraphToolContract::Block => {
             let request: RevisionIdParams = parse(arguments)?;
             service
@@ -270,6 +318,14 @@ pub async fn handle_workgraph_tools_call(
                 .add_evidence(request)
                 .await
                 .map(|item| json!({ "item": item }))
+                .map_err(map_error)
+        }
+        WorkGraphToolContract::AttentionReassign => {
+            let request: AttentionReassignRequest = parse(arguments)?;
+            service
+                .reassign_attention(request)
+                .await
+                .map(|result| json!({ "previous": result.previous, "attention": result.attention }))
                 .map_err(map_error)
         }
         WorkGraphToolContract::Events => {
@@ -397,6 +453,46 @@ fn evidence_ref_schema() -> Value {
     })
 }
 
+fn owner_key_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["principal", "agent", "session", "mob", "label"]
+            },
+            "id": { "type": "string" }
+        },
+        "required": ["kind", "id"],
+        "additionalProperties": false
+    })
+}
+
+fn goal_attention_target_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "session" },
+                    "session_id": { "type": "string" }
+                },
+                "required": ["kind", "session_id"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "owner" },
+                    "owner_key": owner_key_schema()
+                },
+                "required": ["kind", "owner_key"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
 fn object(properties: serde_json::Map<String, Value>, required: &[&str]) -> Value {
     json!({
         "type": "object",
@@ -422,6 +518,19 @@ fn id_schema(include_revision: bool) -> Value {
 
 fn revision_id_schema() -> Value {
     id_schema(true)
+}
+
+fn attention_reassign_schema() -> Value {
+    let mut properties = base_properties();
+    properties.extend([
+        ("binding_id".to_string(), json!({ "type": "string" })),
+        (
+            "expected_revision".to_string(),
+            json!({ "type": "integer", "minimum": 0 }),
+        ),
+        ("target".to_string(), goal_attention_target_schema()),
+    ]);
+    object(properties, &["binding_id", "expected_revision", "target"])
 }
 
 fn create_schema() -> Value {
@@ -602,6 +711,65 @@ fn update_schema() -> Value {
     object(properties, &["id", "expected_revision"])
 }
 
+fn completion_policy_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": { "kind": { "const": "self_attest" } },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": { "kind": { "const": "host_confirmed" } },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": { "kind": { "const": "principal_confirmed" } },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "supervisor" },
+                    "owner_key": owner_key_schema()
+                },
+                "required": ["kind", "owner_key"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "reviewer_quorum" },
+                    "threshold": { "type": "integer", "minimum": 1, "maximum": 64 }
+                },
+                "required": ["kind", "threshold"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn policy_escalate_schema() -> Value {
+    let mut properties = base_properties();
+    properties.extend([
+        ("id".to_string(), json!({ "type": "string" })),
+        (
+            "expected_revision".to_string(),
+            json!({ "type": "integer", "minimum": 0 }),
+        ),
+        ("completion_policy".to_string(), completion_policy_schema()),
+    ]);
+    object(
+        properties,
+        &["id", "expected_revision", "completion_policy"],
+    )
+}
+
 fn close_schema() -> Value {
     let mut properties = base_properties();
     properties.extend([
@@ -701,6 +869,24 @@ mod tests {
         "workgraph_close",
         "workgraph_link",
         "workgraph_add_evidence",
+        "workgraph_policy_escalate",
+        "workgraph_attention_reassign",
+    ];
+
+    const UNSCOPED_WORKGRAPH_TOOL_NAMES: &[&str] = &[
+        "workgraph_create",
+        "workgraph_get",
+        "workgraph_list",
+        "workgraph_ready",
+        "workgraph_snapshot",
+        "workgraph_events",
+        "workgraph_claim",
+        "workgraph_release",
+        "workgraph_update",
+        "workgraph_block",
+        "workgraph_close",
+        "workgraph_link",
+        "workgraph_add_evidence",
     ];
 
     #[test]
@@ -756,6 +942,52 @@ mod tests {
         let unknown = WorkGraphToolContract::parse("workgraph_not_a_real_tool")
             .expect_err("dispatch must reject operations outside the catalog");
         assert_eq!(unknown.code, WorkGraphToolErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn unscoped_workgraph_tools_exclude_attention_only_operations() {
+        let unscoped = unscoped_workgraph_tools_list()
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(ToString::to_string))
+            .collect::<BTreeSet<_>>();
+        let expected = UNSCOPED_WORKGRAPH_TOOL_NAMES
+            .iter()
+            .copied()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(unscoped, expected);
+        assert!(!unscoped.contains("workgraph_attention_reassign"));
+        assert!(!unscoped.contains("workgraph_policy_escalate"));
+
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        let err = handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_attention_reassign",
+            &json!({
+                "binding_id": "attn_1",
+                "expected_revision": 1,
+                "target": {
+                    "kind": "owner",
+                    "owner_key": { "kind": "agent", "id": "agent:mob/demo/agent/member" }
+                }
+            }),
+        )
+        .await
+        .expect_err("attention-only tool is not dispatchable from the unscoped surface");
+        assert_eq!(err.code, WorkGraphToolErrorCode::NotFound);
+
+        let err = handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_policy_escalate",
+            &json!({
+                "id": "item-1",
+                "expected_revision": 1,
+                "completion_policy": { "kind": "host_confirmed" }
+            }),
+        )
+        .await
+        .expect_err("policy escalation is not dispatchable from the unscoped surface");
+        assert_eq!(err.code, WorkGraphToolErrorCode::NotFound);
     }
 
     #[test]

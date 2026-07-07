@@ -242,6 +242,7 @@ impl RealmProfileStoreSelection {
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    workgraph_service: Option<meerkat::WorkGraphService>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
@@ -276,6 +277,7 @@ impl MobMcpState {
         Self {
             session_service,
             runtime_adapter,
+            workgraph_service: None,
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
@@ -328,6 +330,11 @@ impl MobMcpState {
             }
             mob_root
         });
+        self
+    }
+
+    pub fn with_workgraph_service(mut self, service: Option<meerkat::WorkGraphService>) -> Self {
+        self.workgraph_service = service;
         self
     }
 
@@ -442,7 +449,8 @@ impl MobMcpState {
         builder = builder
             .with_session_service(self.session_service.clone())
             .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
-            .with_default_external_tools_provider(self.external_tools_provider.clone());
+            .with_default_external_tools_provider(self.external_tools_provider.clone())
+            .with_workgraph_service(self.workgraph_service.clone());
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
         }

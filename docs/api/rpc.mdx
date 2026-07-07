@@ -210,8 +210,10 @@ subset.
 | `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
 | `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |
 
-WorkGraph goal and attention mutation methods require trusted in-process
-host/session authority and are not part of the public JSON-RPC catalog.
+WorkGraph goal and attention mutation methods require trusted host/session
+authority. JSON-RPC exposes observability reads; goal creation, reassignment,
+policy escalation, confirmation, and closure stay on trusted in-process host and
+agent-tool surfaces.
 
 <Note>
 Generated assistant images use the same surface-neutral history and blob APIs as other blob-backed artifacts. Read `session/history`, find assistant blocks with `block_type: "image"`, then call `blob/get` with `data.blob_ref.blob_id` to retrieve the base64 payload.
@@ -230,11 +232,12 @@ RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycl
 </Note>
 
 <Note>
-WorkGraph RPC methods are observability only. Programmatic hosts should inspect
+WorkGraph RPC methods are observability reads. Programmatic hosts inspect
 WorkGraph through `workgraph/get`, `list`, `ready`, `snapshot`, `events`,
-`goal/status`, and `attention/list`; agents mutate WorkGraph through the
-`workgraph_*` tools. Goal and attention mutators stay on trusted in-process host
-authority, not the public RPC catalog.
+`goal/status`, and `attention/list`; agents mutate ordinary WorkGraph state
+through the `workgraph_*` tools. Authority-bearing attention reassignment and
+policy escalation are runtime-injected WorkGraph tool operations, not public
+JSON-RPC methods.
 </Note>
 
 ## Protocol

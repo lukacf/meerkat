@@ -141,6 +141,7 @@ fn wrap_mcp_runtime_pre_admission_cleanup(
 pub(crate) struct McpRuntimeIngressResources {
     pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     pub runtime_adapter: Arc<MeerkatMachine>,
+    pub workgraph_service: meerkat::WorkGraphService,
     pub config_runtime: Arc<ConfigRuntime>,
     pub realm_id: meerkat_core::connection::RealmId,
     pub instance_id: Option<String>,
@@ -155,6 +156,7 @@ pub(crate) struct McpRuntimeIngressResources {
 pub(crate) struct McpRuntimeIngressContext {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
+    workgraph_service: meerkat::WorkGraphService,
     config_runtime: Arc<ConfigRuntime>,
     realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
@@ -170,6 +172,7 @@ impl McpRuntimeIngressContext {
         Self {
             service: resources.service,
             runtime_adapter: resources.runtime_adapter,
+            workgraph_service: resources.workgraph_service,
             config_runtime: resources.config_runtime,
             realm_id: resources.realm_id,
             instance_id: resources.instance_id,
@@ -1242,7 +1245,7 @@ async fn apply_runtime_turn(
         .as_ref()
         .map(|context| context.event_tx.clone());
 
-    let turn_request = StartTurnRequest {
+    let mut turn_request = StartTurnRequest {
         injected_context: Vec::new(),
         prompt: prompt.clone(),
         system_prompt: None,
@@ -1251,12 +1254,22 @@ async fn apply_runtime_turn(
             HandlingMode::Queue,
             primitive
                 .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
+                .and_then(|meta| meta.turn_tool_overlay.clone()),
             pre_turn_context_appends.clone(),
             primitive.turn_metadata().cloned(),
         )
         .with_typed_turn_appends(typed_turn_appends.clone()),
     };
+    meerkat::surface::inject_workgraph_attention_turn_overlay(
+        context.service.as_ref(),
+        Some(&context.workgraph_service),
+        session_id,
+        &mut turn_request,
+    )
+    .await
+    .map_err(|error| {
+        SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
+    })?;
 
     let mut pre_admission = context
         .take_runtime_pre_admission(session_id, &contributing_input_ids)
@@ -1318,26 +1331,37 @@ async fn apply_runtime_turn(
                 }
                 return Err(error);
             }
+            let mut recovered_turn_request = StartTurnRequest {
+                injected_context: Vec::new(),
+                prompt,
+                system_prompt: None,
+                event_tx,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                    HandlingMode::Queue,
+                    primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.turn_tool_overlay.clone()),
+                    pre_turn_context_appends,
+                    primitive.turn_metadata().cloned(),
+                )
+                .with_typed_turn_appends(typed_turn_appends),
+            };
+            meerkat::surface::inject_workgraph_attention_turn_overlay(
+                context.service.as_ref(),
+                Some(&context.workgraph_service),
+                session_id,
+                &mut recovered_turn_request,
+            )
+            .await
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
+            })?;
             let output = context
                 .service
                 .apply_runtime_turn_outcome(
                     session_id,
                     run_id,
-                    StartTurnRequest {
-                        injected_context: Vec::new(),
-                        prompt,
-                        system_prompt: None,
-                        event_tx,
-                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            HandlingMode::Queue,
-                            primitive
-                                .turn_metadata()
-                                .and_then(|meta| meta.flow_tool_overlay.clone()),
-                            pre_turn_context_appends,
-                            primitive.turn_metadata().cloned(),
-                        )
-                        .with_typed_turn_appends(typed_turn_appends),
-                    },
+                    recovered_turn_request,
                     boundary,
                     contributing_input_ids,
                 )
@@ -1497,6 +1521,11 @@ mod tests {
         McpRuntimeIngressContext::new(McpRuntimeIngressResources {
             service: Arc::new(service),
             runtime_adapter,
+            workgraph_service: meerkat::WorkGraphService::with_scope(
+                Arc::new(meerkat::MemoryWorkGraphStore::new()),
+                "mcp-runtime-test".to_string(),
+                meerkat::WorkNamespace::default(),
+            ),
             config_runtime: Arc::new(ConfigRuntime::new(
                 config_store,
                 temp.path().join("config-state.json"),

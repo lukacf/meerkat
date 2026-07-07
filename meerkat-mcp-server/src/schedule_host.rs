@@ -49,6 +49,7 @@ struct McpScheduleContext {
     runtime_sessions: runtime_ingress::SharedMcpRuntimeSessions,
     runtime_pre_admissions: runtime_ingress::SharedMcpRuntimePreAdmissions,
     runtime_registration_locks: runtime_ingress::SharedMcpRuntimeRegistrationLocks,
+    workgraph_service: meerkat::WorkGraphService,
 }
 
 impl McpScheduleContext {
@@ -64,6 +65,7 @@ impl McpScheduleContext {
             runtime_sessions: Arc::clone(&state.runtime_sessions),
             runtime_pre_admissions: Arc::clone(&state.runtime_pre_admissions),
             runtime_registration_locks: Arc::clone(&state.runtime_registration_locks),
+            workgraph_service: state.workgraph_service.clone(),
         }
     }
 
@@ -80,6 +82,7 @@ impl McpScheduleContext {
                 runtime_sessions: Arc::clone(&self.runtime_sessions),
                 runtime_pre_admissions: Arc::clone(&self.runtime_pre_admissions),
                 runtime_registration_locks: Arc::clone(&self.runtime_registration_locks),
+                workgraph_service: self.workgraph_service.clone(),
             },
         )
     }

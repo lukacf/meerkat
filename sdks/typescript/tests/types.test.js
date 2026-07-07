@@ -1324,6 +1324,53 @@ describe("WorkGraph parsers", () => {
       created_at: timestamp,
       updated_at: timestamp,
     };
+    const reassignedAttention = {
+      ...attention,
+      binding_id: "attention-2",
+      target: {
+        kind: "lowered_owner",
+        owner_key: {
+          kind: "agent",
+          id: "mob/family-dentist/agent/planner",
+        },
+      },
+      machine_state: { revision: 2 },
+    };
+    const supersededAttention = {
+      ...attention,
+      status: { state: "superseded" },
+      machine_state: { revision: 2 },
+    };
+    const authorityProjection = {
+      binding_id: "attention-1",
+      work_ref: {
+        realm_id: "homecore",
+        namespace: "family/appointments",
+        item_id: "prep-dentist-ride",
+      },
+      mode: "coordinate",
+      binding_revision: 1,
+      item_revision: 1,
+      authority: {
+        can_get: true,
+        can_add_evidence: true,
+        can_release: false,
+        can_update: true,
+        can_block: false,
+        can_create: true,
+        can_link: true,
+        can_link_parent: false,
+        can_link_related: true,
+        can_link_derived_from: true,
+        can_close_if_policy_allows: false,
+        can_close_own_review_item: false,
+      },
+      text: {
+        title: "Prep A for non-preferred dentist car",
+        rendered: "projection",
+        truncated: false,
+      },
+    };
 
     const clientFor = (entry) => {
       const client = new MeerkatClient();
@@ -2684,7 +2731,7 @@ describe("Parity wrappers", () => {
       [{ type: "text", text: "continue" }],
       {
         skillRefs: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
-        flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
+        turnToolOverlay: { allowedTools: ["read"], blockedTools: [] },
         additionalInstructions: ["stay concise"],
         keepAlive: true,
         model: "gpt-test",
@@ -2775,7 +2822,7 @@ describe("Parity wrappers", () => {
           skill_name: "read",
         },
       ],
-      flow_tool_overlay: { allowed_tools: ["read"], blocked_tools: [] },
+      turn_tool_overlay: { allowed_tools: ["read"], blocked_tools: [] },
       additional_instructions: ["stay concise"],
       keep_alive: true,
       model: "gpt-test",

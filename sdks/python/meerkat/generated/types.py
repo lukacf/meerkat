@@ -1725,7 +1725,6 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     prompt: WireContentInput
     additional_instructions: Optional[list[str]] = None
     auth_binding: Optional[dict[str, Any]] = None
-    flow_tool_overlay: Optional[PublicTurnToolOverlay] = None
     injected_context: Optional[list[WireContentInput]] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
@@ -1736,6 +1735,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     skill_refs: Optional[list[SkillKey]] = None
     structured_output_retries: Optional[int] = None
     system_prompt: Optional[str] = None
+    turn_tool_overlay: Optional[PublicTurnToolOverlay] = None
 
 
 @dataclass
@@ -2186,21 +2186,6 @@ class AttentionBindingResult:
 
 
 @dataclass
-class AttentionContextProjection:
-    """Wire payload for AttentionContextProjection."""
-    authority: ProjectedAttentionAuthority
-    binding_id: str
-    binding_revision: int
-    item_revision: int
-    mode: WorkAttentionMode
-    text: AttentionProjectionText
-    work_ref: WorkItemRef
-    evidence_refs: Optional[list[WorkEvidenceRef]] = None
-    parent_context: Optional[list[dict[str, Any]]] = None
-    parent_refs: Optional[list[WorkItemRef]] = None
-
-
-@dataclass
 class AttentionListRequest:
     """Wire payload for AttentionListRequest."""
     namespace: Optional[str] = None
@@ -2244,37 +2229,6 @@ class AttentionProjectionPolicy:
 
 
 @dataclass
-class AttentionProjectionRequest:
-    """Wire payload for AttentionProjectionRequest."""
-    binding_id: str
-    namespace: Optional[str] = None
-    realm_id: Optional[str] = None
-
-
-@dataclass
-class AttentionProjectionResult:
-    """Wire payload for AttentionProjectionResult."""
-    projection: AttentionContextProjection
-
-
-@dataclass
-class AttentionProjectionText:
-    """Wire payload for AttentionProjectionText."""
-    rendered: str
-    title: str
-    truncated: bool
-
-
-@dataclass
-class AttentionReassignRequest:
-    """Wire payload for AttentionReassignRequest."""
-    binding_id: str
-    target: GoalAttentionTarget
-    namespace: Optional[str] = None
-    realm_id: Optional[str] = None
-
-
-@dataclass
 class GoalStatusRequest:
     """Wire payload for GoalStatusRequest."""
     binding_id: str
@@ -2298,23 +2252,6 @@ class GoalStatusResult:
             attention=WorkAttentionBinding.from_wire(_require_wire_field(data, 'attention', 'GoalStatusResult')),
             item=WorkItem.from_wire(_require_wire_field(data, 'item', 'GoalStatusResult')),
         )
-
-
-@dataclass
-class ProjectedAttentionAuthority:
-    """Wire payload for ProjectedAttentionAuthority."""
-    can_add_evidence: bool
-    can_block: bool
-    can_close_if_policy_allows: bool
-    can_create: bool
-    can_get: bool
-    can_link: bool
-    can_link_derived_from: bool
-    can_link_parent: bool
-    can_link_related: bool
-    can_release: bool
-    can_update: bool
-    can_close_own_review_item: Optional[bool] = None
 
 
 @dataclass
@@ -4480,7 +4417,11 @@ class GoalAttentionTargetSession(TypedDict, total=False):
     kind: Required[Literal['session']]
     session_id: Required[str]
 
-GoalAttentionTarget = GoalAttentionTargetSession
+class GoalAttentionTargetOwner(TypedDict, total=False):
+    kind: Required[Literal['owner']]
+    owner_key: Required[WorkOwnerKey]
+
+GoalAttentionTarget = GoalAttentionTargetSession | GoalAttentionTargetOwner
 
 # WorkGraph RPC helper wire type for WorkAttentionMode.
 WorkAttentionMode = Literal['pursue', 'coordinate', 'review', 'falsify', 'judge', 'observe']

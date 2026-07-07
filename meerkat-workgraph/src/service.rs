@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::WorkGraphError;
 use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
 use crate::machines::workgraph_lifecycle as wg_dsl;
 use crate::store::{WorkGraphEventFilter, WorkGraphStore};
@@ -11,18 +10,21 @@ use crate::types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
     AttentionContextProjection, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
     AttentionProjectionParentContext, AttentionProjectionRequest, AttentionProjectionResult,
-    AttentionProjectionText, AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
-    CreateWorkItemRequest, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
-    GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
-    GoalStatusResult, LinkWorkItemsRequest, ProjectedAttentionAuthority, ReadyWorkFilter,
+    AttentionProjectionText, AttentionReassignRequest, AttentionReassignResult,
+    AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
+    GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
+    LinkWorkItemsRequest, PolicyEscalateRequest, ProjectedAttentionAuthority, ReadyWorkFilter,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionBindingId,
     WorkAttentionMode, WorkAttentionStatus, WorkCompletionPolicy, WorkEdge, WorkEdgeKind,
     WorkEvidenceKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphSnapshot,
     WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
     WorkOwnerKey, WorkStatus,
 };
+use crate::{WorkGraphError, validate_workgraph_attention_projection_current};
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
+const MAX_REVIEWER_QUORUM_THRESHOLD: u16 = 64;
 
 #[derive(Clone)]
 pub struct WorkGraphService {
@@ -261,6 +263,100 @@ impl WorkGraphService {
             .update_attention_cas(resumed, expected_previous_revision, event)
             .await?;
         Ok(AttentionBindingResult { attention })
+    }
+
+    pub async fn reassign_attention(
+        &self,
+        request: AttentionReassignRequest,
+    ) -> Result<AttentionReassignResult, WorkGraphError> {
+        let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
+        if request.authority_projection.binding_id != request.binding_id {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "attention reassignment projection is scoped to binding {}, got {}",
+                request.authority_projection.binding_id, request.binding_id
+            )));
+        }
+        if request.authority_projection.work_ref.realm_id != realm_id
+            || request.authority_projection.work_ref.namespace != namespace
+        {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "attention reassignment projection is scoped to realm '{}' namespace '{}', got realm '{}' namespace '{}'",
+                request.authority_projection.work_ref.realm_id,
+                request.authority_projection.work_ref.namespace,
+                realm_id,
+                namespace
+            )));
+        }
+        validate_workgraph_attention_projection_current(self, &request.authority_projection)
+            .await?;
+        if !request.authority_projection.authority.can_link_derived_from {
+            return Err(WorkGraphError::InvalidInput(
+                "attention reassignment requires derived_from link authority".to_string(),
+            ));
+        }
+        let now = self.store.get_store_time_utc().await?;
+        let current = self
+            .attention_binding(AttentionBindingRequest {
+                binding_id: request.binding_id,
+                realm_id: Some(realm_id),
+                namespace: Some(namespace),
+            })
+            .await?
+            .attention;
+        let item = self
+            .get(
+                Some(current.work_ref.realm_id.clone()),
+                Some(current.work_ref.namespace.clone()),
+                current.work_ref.item_id.clone(),
+            )
+            .await?;
+        if WorkGraphMachine::classify_terminality(&item)? {
+            return Err(WorkGraphError::InvalidTransition(format!(
+                "work attention binding {} targets terminal item {}",
+                current.binding_id, item.id
+            )));
+        }
+        let replacement = WorkAttentionBinding {
+            binding_id: WorkAttentionBindingId::generated(),
+            work_ref: current.work_ref.clone(),
+            target: request.target.to_attention_target(),
+            mode: current.mode,
+            status: WorkAttentionStatus::Active,
+            machine_state: Default::default(),
+            delegated_authority: current.delegated_authority,
+            projection_policy: current.projection_policy.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let expected_previous_revision = request.expected_revision;
+        let previous = WorkAttentionMachine::supersede(
+            current,
+            expected_previous_revision,
+            &replacement.binding_id,
+            now,
+        )?;
+        let previous_event = attention_updated_event(&previous, now);
+        let replacement_event = WorkGraphEvent::graph(
+            replacement.work_ref.realm_id.clone(),
+            replacement.work_ref.namespace.clone(),
+            WorkGraphEventKind::AttentionCreated,
+            now,
+            json!({ "attention": replacement.clone() }),
+        );
+        let (previous, attention) = self
+            .store
+            .reassign_attention_cas(
+                previous,
+                expected_previous_revision,
+                previous_event,
+                replacement,
+                replacement_event,
+            )
+            .await?;
+        Ok(AttentionReassignResult {
+            previous,
+            attention,
+        })
     }
 
     pub async fn attention_projection(
@@ -660,6 +756,47 @@ impl WorkGraphService {
         }
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::update_item(item, request, now)?;
+        self.store
+            .update_item_cas(item, expected_previous_revision, event)
+            .await
+    }
+
+    pub async fn escalate_policy(
+        &self,
+        request: PolicyEscalateRequest,
+    ) -> Result<WorkItem, WorkGraphError> {
+        validate_completion_policy(&request.completion_policy)?;
+        let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
+        if request.authority_projection.work_ref.realm_id != realm_id
+            || request.authority_projection.work_ref.namespace != namespace
+        {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "policy escalation projection is scoped to realm '{}' namespace '{}', got realm '{}' namespace '{}'",
+                request.authority_projection.work_ref.realm_id,
+                request.authority_projection.work_ref.namespace,
+                realm_id,
+                namespace
+            )));
+        }
+        if request.authority_projection.work_ref.item_id != request.id {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "policy escalation projection is scoped to item {}, got {}",
+                request.authority_projection.work_ref.item_id, request.id
+            )));
+        }
+        validate_workgraph_attention_projection_current(self, &request.authority_projection)
+            .await?;
+        if !request.authority_projection.authority.can_update {
+            return Err(WorkGraphError::InvalidInput(
+                "policy escalation requires update authority".to_string(),
+            ));
+        }
+        let now = self.store.get_store_time_utc().await?;
+        let item = self
+            .get(Some(realm_id), Some(namespace), request.id.clone())
+            .await?;
+        let expected_previous_revision = item.revision;
+        let (item, event) = WorkGraphMachine::escalate_policy(item, request, now)?;
         self.store
             .update_item_cas(item, expected_previous_revision, event)
             .await
@@ -1351,6 +1488,13 @@ fn validate_completion_policy(policy: &WorkCompletionPolicy) -> Result<(), WorkG
             "reviewer_quorum threshold must be greater than zero".to_string(),
         ));
     }
+    if let WorkCompletionPolicy::ReviewerQuorum { threshold } = policy
+        && *threshold > MAX_REVIEWER_QUORUM_THRESHOLD
+    {
+        return Err(WorkGraphError::InvalidInput(format!(
+            "reviewer_quorum threshold must be at most {MAX_REVIEWER_QUORUM_THRESHOLD}"
+        )));
+    }
     Ok(())
 }
 
@@ -1690,6 +1834,72 @@ mod tests {
             .create(create_req("self-attest"))
             .await
             .expect("self-attest create admitted");
+    }
+
+    #[tokio::test]
+    async fn reviewer_quorum_threshold_is_bounded() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+
+        let mut create = create_req("too-large-create");
+        create.completion_policy =
+            crate::types::WorkCompletionPolicy::ReviewerQuorum { threshold: 65 };
+        let err = service
+            .create(create)
+            .await
+            .expect_err("oversized quorum threshold must be rejected at create");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if msg == "reviewer_quorum threshold must be at most 64"),
+            "unexpected error: {err:?}"
+        );
+
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-000000000065")
+            .expect("valid session id");
+        let goal = service
+            .create_goal(crate::types::GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "self-attest".to_string(),
+                description: None,
+                target: crate::types::GoalAttentionTarget::Session { session_id },
+                mode: crate::types::WorkAttentionMode::Pursue,
+                completion_policy: crate::types::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: crate::types::AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: crate::types::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create baseline goal");
+        let projection = service
+            .attention_projection(crate::types::AttentionProjectionRequest {
+                binding_id: goal.attention.binding_id,
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("projection")
+            .projection;
+        let err = service
+            .escalate_policy(crate::PolicyEscalateRequest {
+                id: goal.item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: goal.item.revision,
+                authority_projection: projection,
+                completion_policy: crate::types::WorkCompletionPolicy::ReviewerQuorum {
+                    threshold: 65,
+                },
+            })
+            .await
+            .expect_err("oversized quorum threshold must be rejected at escalation");
+        assert!(
+            matches!(&err, WorkGraphError::InvalidInput(msg)
+                if msg == "reviewer_quorum threshold must be at most 64"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[tokio::test]

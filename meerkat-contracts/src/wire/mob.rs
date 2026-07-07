@@ -1945,7 +1945,7 @@ pub struct MobTurnStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_tool_overlay: Option<meerkat_core::service::PublicTurnToolOverlay>,
+    pub turn_tool_overlay: Option<meerkat_core::service::PublicTurnToolOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

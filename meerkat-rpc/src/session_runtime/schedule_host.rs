@@ -371,7 +371,7 @@ impl SessionRuntime {
                         .map(|skill_ref| skill_ref.key().clone())
                         .collect()
                 }),
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: (!dispatch.additional_instructions.is_empty()).then(
                     || {
                         dispatch

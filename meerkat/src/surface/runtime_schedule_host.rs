@@ -7,20 +7,22 @@ use super::configure_peer_ingress;
 use super::{
     AcceptedScheduledInput, NoopScheduleMobHost, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
-    build_dispatch_from_accepted, default_persistent_executor, immediate_delivery_failure,
+    build_dispatch_from_accepted, default_persistent_executor,
+    default_persistent_executor_with_workgraph_service, immediate_delivery_failure,
     materialize_session, recover_mob_member_identity_from_session_target,
     schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, PersistentSessionService, ScheduleDomainError, ScheduleService,
     Session, SessionAgentBuilder, SessionMaterializationSpec, SessionService, SessionTargetBinding,
-    TargetProbeOutcome,
+    TargetProbeOutcome, WorkGraphService,
 };
 use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::MeerkatMachine;
 use meerkat_schedule::{DeliveryFailureReason, IdentityTargetBinding, ScheduleRunnableHost};
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
     service: Arc<PersistentSessionService<B>>,
     runtime_adapter: Arc<MeerkatMachine>,
@@ -28,6 +30,7 @@ pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
     schedule_service: ScheduleService,
     build_template: SessionBuildOptions,
     runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
+    workgraph_service: Option<WorkGraphService>,
     owner_id: impl Into<String>,
 ) -> Option<super::ScheduleHostHandle> {
     let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
@@ -41,6 +44,7 @@ pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
         build_template,
         mob_host,
         runnable_host,
+        workgraph_service,
         owner_id,
     )
 }
@@ -66,15 +70,20 @@ pub fn spawn_runtime_backed_schedule_host_with_mobs<B: SessionAgentBuilder + 'st
     build_template: SessionBuildOptions,
     mob_host: Arc<dyn SurfaceScheduleMobHost>,
     runnable_host: Option<Arc<dyn ScheduleRunnableHost>>,
+    workgraph_service: Option<WorkGraphService>,
     owner_id: impl Into<String>,
 ) -> Option<super::ScheduleHostHandle> {
     if !schedule_host_supported(schedule_service.store().kind()) {
         return None;
     }
 
-    let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(
-        RuntimeBackedScheduleSessionHost::new(service, runtime_adapter, build_template),
-    );
+    let session_host: Arc<dyn SurfaceScheduleSessionHost> =
+        Arc::new(RuntimeBackedScheduleSessionHost::new(
+            service,
+            runtime_adapter,
+            build_template,
+            workgraph_service,
+        ));
     let adapter =
         SharedScheduleTargetAdapter::new(schedule_service.clone(), session_host, mob_host);
     let adapter = match runnable_host {
@@ -92,6 +101,7 @@ struct RuntimeBackedScheduleSessionHost<B: SessionAgentBuilder> {
     service: Arc<PersistentSessionService<B>>,
     runtime_adapter: Arc<MeerkatMachine>,
     build_template: SessionBuildOptions,
+    workgraph_service: Option<WorkGraphService>,
 }
 
 fn materialized_build_options(
@@ -205,11 +215,29 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
         service: Arc<PersistentSessionService<B>>,
         runtime_adapter: Arc<MeerkatMachine>,
         build_template: SessionBuildOptions,
+        workgraph_service: Option<WorkGraphService>,
     ) -> Self {
         Self {
             service,
             runtime_adapter,
             build_template,
+            workgraph_service,
+        }
+    }
+
+    fn runtime_executor(&self, session_id: SessionId) -> Box<dyn meerkat_core::CoreExecutor> {
+        match &self.workgraph_service {
+            Some(workgraph_service) => default_persistent_executor_with_workgraph_service(
+                Arc::clone(&self.service),
+                Arc::clone(&self.runtime_adapter),
+                session_id,
+                workgraph_service.clone(),
+            ),
+            None => default_persistent_executor(
+                Arc::clone(&self.service),
+                Arc::clone(&self.runtime_adapter),
+                session_id,
+            ),
         }
     }
 
@@ -222,11 +250,7 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
         self.runtime_adapter
             .ensure_session_with_executor(
                 session_id.clone(),
-                default_persistent_executor(
-                    Arc::clone(&self.service),
-                    Arc::clone(&self.runtime_adapter),
-                    session_id.clone(),
-                ),
+                self.runtime_executor(session_id.clone()),
             )
             .await
             .map_err(schedule_internal)?;
@@ -463,7 +487,20 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             {
                 let service = Arc::clone(&self.service);
                 let runtime_adapter = Arc::clone(&self.runtime_adapter);
-                move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+                let workgraph_service = self.workgraph_service.clone();
+                move |session_id| match workgraph_service.clone() {
+                    Some(workgraph_service) => default_persistent_executor_with_workgraph_service(
+                        Arc::clone(&service),
+                        Arc::clone(&runtime_adapter),
+                        session_id,
+                        workgraph_service,
+                    ),
+                    None => default_persistent_executor(
+                        Arc::clone(&service),
+                        Arc::clone(&runtime_adapter),
+                        session_id,
+                    ),
+                }
             },
         ))
         .await
@@ -490,44 +527,49 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
 
-        let turn_metadata = Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: None,
-                keep_alive: None,
-                skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
-                    dispatch
-                        .skill_refs
-                        .iter()
-                        .map(|skill_ref| skill_ref.key().clone())
-                        .collect()
-                }),
-                flow_tool_overlay: None,
-                additional_instructions: (!dispatch.additional_instructions.is_empty()).then(
-                    || {
-                        dispatch
-                            .additional_instructions
-                            .iter()
-                            .map(|body| {
-                                meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
-                                    body: body.clone(),
-                                }
-                            })
-                            .collect()
-                    },
-                ),
-                model: None,
-                provider: None,
-                provider_params: None,
-                render_metadata: dispatch.render_metadata.clone(),
-                execution_kind: None,
-                peer_response_terminal_apply_intent: None,
-                auth_binding: None,
-                transcript_identity: Default::default(),
-            },
-        );
+        let mut turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            handling_mode: None,
+            keep_alive: None,
+            skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
+                dispatch
+                    .skill_refs
+                    .iter()
+                    .map(|skill_ref| skill_ref.key().clone())
+                    .collect()
+            }),
+            turn_tool_overlay: None,
+            additional_instructions: (!dispatch.additional_instructions.is_empty()).then(|| {
+                dispatch
+                    .additional_instructions
+                    .iter()
+                    .map(
+                        |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                            kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                            body: body.clone(),
+                        },
+                    )
+                    .collect()
+            }),
+            model: None,
+            provider: None,
+            provider_params: None,
+            render_metadata: dispatch.render_metadata.clone(),
+            execution_kind: None,
+            peer_response_terminal_apply_intent: None,
+            auth_binding: None,
+            transcript_identity: Default::default(),
+        };
+        turn_metadata.turn_tool_overlay =
+            super::compose_workgraph_attention_turn_overlay_for_session(
+                self.service.as_ref(),
+                self.workgraph_service.as_ref(),
+                session_id,
+                turn_metadata.turn_tool_overlay.take(),
+            )
+            .await
+            .map_err(schedule_internal)?;
         let mut prompt_input =
-            meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, turn_metadata);
+            meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
         prompt_input.header.source = meerkat_runtime::InputOrigin::System;
         prompt_input.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
             schedule_attempt_idempotency_key(occurrence),
@@ -786,6 +828,7 @@ mod tests {
             Arc::clone(&service),
             Arc::clone(&runtime_adapter),
             SessionBuildOptions::default(),
+            None,
         );
         let occurrence = sample_occurrence();
         let dispatch = host
@@ -873,6 +916,7 @@ mod tests {
             Arc::clone(&service),
             Arc::clone(&runtime_adapter),
             SessionBuildOptions::default(),
+            None,
         );
         let occurrence = sample_occurrence();
         let dispatch = host

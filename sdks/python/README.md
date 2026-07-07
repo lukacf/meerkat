@@ -74,7 +74,7 @@ Both use integer unix timestamps for `created_at` and `updated_at`.
 
 `Session.turn(...)` and `Session.stream(...)` now expose full turn overrides:
 
-- `skill_refs`, `skill_references`, `flow_tool_overlay`
+- `skill_refs`, `skill_references`, `turn_tool_overlay`
 - `additional_instructions`
 - `keep_alive`, `model`, `provider`, `max_tokens`, `system_prompt`
 - `output_schema`, `structured_output_retries`, `provider_params`

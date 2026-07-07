@@ -2877,7 +2877,6 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         "created_at": timestamp,
         "updated_at": timestamp,
     }
-
     async def fake_request(method, params):
         calls.append((method, params))
         if method == "workgraph/get":
@@ -3130,7 +3129,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
                 skill_name="read",
             )
         ],
-        flow_tool_overlay={"allowed_tools": ["read"], "blocked_tools": []},
+        turn_tool_overlay={"allowed_tools": ["read"], "blocked_tools": []},
         additional_instructions=["stay concise"],
         keep_alive=True,
         model="gpt-test",
@@ -3160,7 +3159,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
                         "skill_name": "read",
                     }
                 ],
-                "flow_tool_overlay": {
+                "turn_tool_overlay": {
                     "allowed_tools": ["read"],
                     "blocked_tools": [],
                 },

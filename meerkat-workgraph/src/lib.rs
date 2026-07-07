@@ -45,26 +45,27 @@ pub use tool_surface::{
     workgraph_attention_supersession_key, workgraph_attention_turn_append,
 };
 pub use tools::{
-    WorkGraphToolError, WorkGraphToolErrorCode, handle_workgraph_tools_call, workgraph_tools_list,
+    WorkGraphToolError, WorkGraphToolErrorCode, handle_unscoped_workgraph_tools_call,
+    handle_workgraph_tools_call, unscoped_workgraph_tools_list, workgraph_tools_list,
 };
 pub use types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
     AttentionContextProjection, AttentionContinueOutcome, AttentionContinueResult,
     AttentionDelegatedAuthority, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
     AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionResult,
-    AttentionProjectionText, AttentionReassignRequest, AttentionResumeRequest,
-    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, ExternalWorkRef,
-    GoalAttentionTarget, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
+    AttentionProjectionText, AttentionReassignRequest, AttentionReassignResult,
+    AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    ExternalWorkRef, GoalAttentionTarget, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
     GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
-    GoalStatusResult, GoalTerminalStatus, LinkWorkItemsRequest, ProjectedAttentionAuthority,
-    PublicGoalCompletionPolicy, PublicGoalCreateRequest, PublicGoalRequestCloseRequest,
-    ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding,
-    WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus,
-    WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind,
-    WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse,
-    WorkGraphIdParams, WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot,
-    WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
-    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
+    GoalStatusResult, GoalTerminalStatus, LinkWorkItemsRequest, PolicyEscalateRequest,
+    ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
+    PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode,
+    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
+    WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphEventsResponse, WorkGraphIdParams, WorkGraphItemsResponse, WorkGraphMachineState,
+    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef,
+    WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =

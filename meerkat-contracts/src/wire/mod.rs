@@ -95,8 +95,8 @@ pub use host::{
 pub use image_generation::{
     WireAssistantImageRef, WireGenerateImageExecutionPlan, WireGenerateImageRequest,
     WireImageGenerationToolResult, WireImageOperationPhase, WireModelRoutingApprovalPhase,
-    WireModelRoutingApprovalRequest, WireScopedModelOverride, WireSessionModelRoutingStatus,
-    WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
+    WireScopedModelOverride, WireSessionModelRoutingStatus, WireSwitchTurnControlResult,
+    WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
 pub use live::{
     LiveChannelParams, LiveCloseResult, LiveCloseStatus, LiveCommitInputParams,

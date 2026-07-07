@@ -4900,41 +4900,27 @@ impl AgentFactory {
             let workgraph_dispatcher = match build_config.workgraph_tools.take() {
                 Some(dispatcher) => dispatcher,
                 None => {
-                    // No supplied dispatcher: fail closed unless the build
-                    // carries a typed realm identity. The WorkGraph store scope
-                    // must come from the typed RealmId owner — never an invented
-                    // "default" slug.
-                    let Some(realm_id) = build_config.realm_id.as_ref() else {
-                        return Err(BuildAgentError::Config(
-                            "WorkGraph tools enabled with no supplied dispatcher and no realm \
-                             identity; supply a WorkGraph dispatcher or a realm-scoped build"
-                                .to_string(),
-                        ));
-                    };
-                    // RealmId::as_str() is the typed owner's projection at the
-                    // store-scope boundary, not a factory-invented key.
-                    let realm_scope = realm_id.as_str().to_string();
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        let root = self.realm_scope_root(&build_config);
-                        let store = Arc::new(
-                            meerkat_workgraph::SqliteWorkGraphStore::open(
-                                root.join("workgraph.sqlite3"),
-                            )
-                            .map_err(|err| {
-                                BuildAgentError::Config(format!("WorkGraph store: {err}"))
-                            })?,
-                        );
-                        meerkat_workgraph::wire_workgraph_tools(
-                            meerkat_workgraph::WorkGraphService::with_scope(
-                                store,
-                                realm_scope,
-                                meerkat_workgraph::WorkNamespace::default(),
-                            ),
-                        )
+                        return Err(BuildAgentError::Config(
+                            "WorkGraph tools enabled without a supplied dispatcher; non-wasm \
+                             surfaces must install WorkGraph tools from the persistence bundle"
+                                .to_string(),
+                        ));
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
+                        // Wasm has no host SQLite persistence bundle; keep the
+                        // explicitly documented in-memory fallback scoped by the
+                        // typed realm identity.
+                        let Some(realm_id) = build_config.realm_id.as_ref() else {
+                            return Err(BuildAgentError::Config(
+                                "WorkGraph tools enabled with no supplied dispatcher and no realm \
+                                 identity; supply a WorkGraph dispatcher or a realm-scoped build"
+                                    .to_string(),
+                            ));
+                        };
+                        let realm_scope = realm_id.as_str().to_string();
                         meerkat_workgraph::wire_workgraph_tools(
                             meerkat_workgraph::WorkGraphService::with_scope(
                                 Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),

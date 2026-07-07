@@ -5094,6 +5094,7 @@
         ]
       },
       "PublicTurnToolOverlay": {
+        "additionalProperties": false,
         "description": "Public caller-safe per-turn tool overlay.",
         "properties": {
           "allowed_tools": {
@@ -5350,17 +5351,6 @@
               "null"
             ]
           },
-          "flow_tool_overlay": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PublicTurnToolOverlay"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Optional per-turn flow tool overlay (caller-safe public shape;\nruntime-owned dispatch metadata is not accepted at this boundary)."
-          },
           "hooks_override": {
             "anyOf": [
               {
@@ -5465,6 +5455,17 @@
               "string",
               "null"
             ]
+          },
+          "turn_tool_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicTurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional per-turn tool overlay (caller-safe public shape;\nruntime-owned dispatch metadata is not accepted at this boundary)."
           },
           "verbose": {
             "default": false,
@@ -11405,8 +11406,8 @@
                   },
                   "threshold": {
                     "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
+                    "maximum": 64,
+                    "minimum": 1,
                     "type": "integer"
                   }
                 },

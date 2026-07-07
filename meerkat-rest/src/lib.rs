@@ -196,6 +196,7 @@ struct RestRuntimeExecutorContext {
     llm_client_override: Option<Arc<dyn LlmClient>>,
     event_tx: broadcast::Sender<SessionEvent>,
     session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    workgraph_service: WorkGraphService,
     realm: meerkat_core::RealmId,
     instance_id: Option<String>,
     backend: String,
@@ -574,6 +575,12 @@ impl AppState {
                 schedule_service.clone(),
             ))),
         );
+        meerkat::surface::set_default_workgraph_tools(
+            &builder,
+            Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+                workgraph_service.clone(),
+            ))),
+        );
         let (session_service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
         let auth_lease = runtime_adapter.generated_auth_lease_handle();
@@ -596,7 +603,7 @@ impl AppState {
             event_tx,
             session_service,
             schedule_service,
-            workgraph_service,
+            workgraph_service: workgraph_service.clone(),
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm,
             realm_config_source,
@@ -615,7 +622,8 @@ impl AppState {
             mob_state: {
                 let state = Arc::new(
                     meerkat_mob_mcp::MobMcpState::new(mob_session_service)
-                        .with_persistent_storage_root(Some(realm_paths.root.clone())),
+                        .with_persistent_storage_root(Some(realm_paths.root.clone()))
+                        .with_workgraph_service(Some(workgraph_service.clone())),
                 );
                 *mob_tools_slot
                     .write()
@@ -646,6 +654,7 @@ impl AppState {
             llm_client_override: self.llm_client_override.clone(),
             event_tx: self.event_tx.clone(),
             session_service: self.session_service.clone(),
+            workgraph_service: self.workgraph_service.clone(),
             realm: self.realm.clone(),
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
@@ -1479,7 +1488,7 @@ async fn apply_runtime_turn(
         }
     };
 
-    let svc_req = SvcStartTurnRequest {
+    let mut svc_req = SvcStartTurnRequest {
         injected_context: Vec::new(),
         prompt: prompt.clone(),
         system_prompt: None,
@@ -1488,12 +1497,22 @@ async fn apply_runtime_turn(
             meerkat_core::types::HandlingMode::Queue,
             primitive
                 .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
+                .and_then(|meta| meta.turn_tool_overlay.clone()),
             pre_turn_context_appends.clone(),
             primitive.turn_metadata().cloned(),
         )
         .with_typed_turn_appends(typed_turn_appends.clone()),
     };
+    meerkat::surface::inject_workgraph_attention_turn_overlay(
+        context.session_service.as_ref(),
+        Some(&context.workgraph_service),
+        session_id,
+        &mut svc_req,
+    )
+    .await
+    .map_err(|error| {
+        SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
+    })?;
 
     let session_identity = context
         .session_service
@@ -1650,12 +1669,49 @@ async fn apply_runtime_turn(
                     ));
                 }
             };
+            let recovered_create_req = recovered.into_deferred_create_request();
+            let mut recovered_turn_req = SvcStartTurnRequest {
+                injected_context: Vec::new(),
+                prompt,
+                system_prompt: None,
+                event_tx: Some(event_tx.clone()),
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                    meerkat_core::types::HandlingMode::Queue,
+                    primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.turn_tool_overlay.clone()),
+                    pre_turn_context_appends,
+                    primitive.turn_metadata().cloned(),
+                )
+                .with_typed_turn_appends(typed_turn_appends),
+            };
+            let empty_labels = BTreeMap::new();
+            let attention_labels = recovered_create_req
+                .labels
+                .as_ref()
+                .unwrap_or(&empty_labels);
+            if let Err(error) =
+                meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
+                    &context.workgraph_service,
+                    session_id,
+                    attention_labels,
+                    &mut recovered_turn_req,
+                )
+                .await
+            {
+                unregister_runtime_adapter_if_new(
+                    &context.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                )
+                .await;
+                return Err(SessionError::Agent(
+                    meerkat_core::AgentError::InternalError(error.to_string()),
+                ));
+            }
             let create_result = context
                 .session_service
-                .create_session_with_reserved_admission(
-                    recovered.into_deferred_create_request(),
-                    recovery_admission,
-                )
+                .create_session_with_reserved_admission(recovered_create_req, recovery_admission)
                 .await;
             if let Err(error) = create_result {
                 unregister_runtime_adapter_if_new(
@@ -1671,21 +1727,7 @@ async fn apply_runtime_turn(
                 .apply_runtime_turn_outcome(
                     session_id,
                     run_id,
-                    SvcStartTurnRequest {
-                        injected_context: Vec::new(),
-                        prompt,
-                        system_prompt: None,
-                        event_tx: Some(event_tx.clone()),
-                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            meerkat_core::types::HandlingMode::Queue,
-                            primitive
-                                .turn_metadata()
-                                .and_then(|meta| meta.flow_tool_overlay.clone()),
-                            pre_turn_context_appends,
-                            primitive.turn_metadata().cloned(),
-                        )
-                        .with_typed_turn_appends(typed_turn_appends),
-                    },
+                    recovered_turn_req,
                     boundary,
                     contributing_input_ids,
                 )
@@ -4566,7 +4608,7 @@ async fn create_session_inner(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                     skill_references,
-                    flow_tool_overlay: None,
+                    turn_tool_overlay: None,
                     additional_instructions: None,
                     ..Default::default()
                 },
@@ -5687,8 +5729,8 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req
-                            .flow_tool_overlay
+                        turn_tool_overlay: req
+                            .turn_tool_overlay
                             .clone()
                             .map(meerkat_core::service::TurnToolOverlay::from),
                         additional_instructions: resolve_turn_additional_instructions(
@@ -5985,8 +6027,8 @@ async fn continue_session_inner(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: resolve_turn_keep_alive_policy(keep_alive_override),
                         skill_references: skill_references.clone(),
-                        flow_tool_overlay: req
-                            .flow_tool_overlay
+                        turn_tool_overlay: req
+                            .turn_tool_overlay
                             .clone()
                             .map(meerkat_core::service::TurnToolOverlay::from),
                         additional_instructions: resolve_turn_additional_instructions(
@@ -8197,7 +8239,7 @@ mod tests {
                     hooks_override: None,
                     enable_web_search: None,
                     skill_refs: None,
-                    flow_tool_overlay: None,
+                    turn_tool_overlay: None,
                     additional_instructions: None,
                 },
                 None,
@@ -8397,7 +8439,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -8461,7 +8503,7 @@ mod tests {
                     hooks_override: None,
                     enable_web_search: None,
                     skill_refs: None,
-                    flow_tool_overlay: None,
+                    turn_tool_overlay: None,
                     additional_instructions: None,
                 },
                 None,
@@ -8606,7 +8648,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -8707,7 +8749,7 @@ mod tests {
                     hooks_override: None,
                     enable_web_search: None,
                     skill_refs: None,
-                    flow_tool_overlay: None,
+                    turn_tool_overlay: None,
                     additional_instructions: None,
                 },
                 Some(ctx),
@@ -8837,7 +8879,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -8910,7 +8952,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -11138,7 +11180,7 @@ mod tests {
             hooks_override: None,
             enable_web_search: None,
             skill_refs: None,
-            flow_tool_overlay: None,
+            turn_tool_overlay: None,
             additional_instructions: None,
         };
         assert!(!rest_continue_requires_rebuild(&req));
@@ -11155,12 +11197,12 @@ mod tests {
         assert!(rest_continue_requires_rebuild(&req));
         req.auth_binding = None;
 
-        req.flow_tool_overlay = Some(meerkat_core::service::PublicTurnToolOverlay::default());
+        req.turn_tool_overlay = Some(meerkat_core::service::PublicTurnToolOverlay::default());
         assert!(
             !rest_continue_requires_rebuild(&req),
-            "flow tool overlay stays on the live path"
+            "turn tool overlay stays on the live path"
         );
-        req.flow_tool_overlay = None;
+        req.turn_tool_overlay = None;
 
         req.additional_instructions = Some(vec!["extra".to_string()]);
         assert!(
@@ -11320,7 +11362,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -11402,7 +11444,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -11495,7 +11537,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -11588,7 +11630,7 @@ mod tests {
                 hooks_override: None,
                 enable_web_search: None,
                 skill_refs: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -11671,7 +11713,7 @@ mod tests {
                     hooks_override: None,
                     enable_web_search: None,
                     skill_refs: None,
-                    flow_tool_overlay: None,
+                    turn_tool_overlay: None,
                     additional_instructions: None,
                 },
                 None,

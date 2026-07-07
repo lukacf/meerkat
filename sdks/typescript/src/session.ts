@@ -248,7 +248,7 @@ export class Session {
 /** Turn-time override options for deferred sessions. */
 export interface DeferredTurnOptions {
   skillRefs?: SkillRef[];
-  flowToolOverlay?: TurnOptions["flowToolOverlay"];
+  turnToolOverlay?: TurnOptions["turnToolOverlay"];
   additionalInstructions?: TurnOptions["additionalInstructions"];
   keepAlive?: TurnOptions["keepAlive"];
   model?: TurnOptions["model"];

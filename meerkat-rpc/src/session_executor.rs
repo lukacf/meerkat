@@ -376,7 +376,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 event_tx,
                 primitive
                     .turn_metadata()
-                    .and_then(|meta| meta.flow_tool_overlay.clone()),
+                    .and_then(|meta| meta.turn_tool_overlay.clone()),
                 turn_overrides,
                 pre_admission,
             ),
@@ -504,9 +504,9 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         });
 
         let turn_metadata = primitive.turn_metadata().cloned();
-        let flow_tool_overlay = turn_metadata
+        let turn_tool_overlay = turn_metadata
             .as_ref()
-            .and_then(|meta| meta.flow_tool_overlay.clone());
+            .and_then(|meta| meta.turn_tool_overlay.clone());
         let pre_admission = self.runtime.as_ref().and_then(|runtime| {
             runtime.take_runtime_pre_admission(&self.session_id, primitive.contributing_input_ids())
         });
@@ -523,7 +523,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         &primitive,
                         prompt,
                         event_tx,
-                        flow_tool_overlay,
+                        turn_tool_overlay,
                         turn_overrides,
                         Some(pre_admission),
                     )
@@ -539,7 +539,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                     event_tx: Some(event_tx),
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         meerkat_core::types::HandlingMode::Queue,
-                        flow_tool_overlay,
+                        turn_tool_overlay,
                         pre_turn_context_appends,
                         turn_metadata,
                     )

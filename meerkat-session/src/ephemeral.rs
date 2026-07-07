@@ -579,8 +579,8 @@ pub trait SessionAgent: Send {
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
 
-    /// Apply or clear a per-turn flow tool overlay.
-    fn set_flow_tool_overlay(
+    /// Apply or clear a per-turn tool overlay.
+    fn set_turn_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError>;
@@ -2850,12 +2850,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .as_ref()
             .and_then(|metadata| metadata.handling_mode)
             .unwrap_or(meerkat_core::types::HandlingMode::Queue);
-        let initial_flow_tool_overlay = initial_turn_metadata
+        let initial_turn_tool_overlay = initial_turn_metadata
             .as_ref()
-            .and_then(|metadata| metadata.flow_tool_overlay.clone());
+            .and_then(|metadata| metadata.turn_tool_overlay.clone());
         let initial_runtime = meerkat_core::service::StartTurnRuntimeSemantics::new(
             initial_handling_mode,
-            initial_flow_tool_overlay,
+            initial_turn_tool_overlay,
             Vec::new(),
             initial_turn_metadata,
         );
@@ -3883,10 +3883,10 @@ async fn session_task<A: SessionAgent>(
                 let skill_references = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.skill_references.clone());
-                let flow_tool_overlay = metadata
+                let turn_tool_overlay = metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.flow_tool_overlay.clone())
-                    .or(runtime.flow_tool_overlay);
+                    .and_then(|metadata| metadata.turn_tool_overlay.clone())
+                    .or(runtime.turn_tool_overlay);
                 // #345 / dogma K13: forward the full typed keep-alive
                 // tri-state to the machine. The metadata carrier is
                 // `Option<KeepAliveDirective>`: Enable(policy) -> Enable,
@@ -4092,7 +4092,7 @@ async fn session_task<A: SessionAgent>(
                 }
 
                 agent.set_skill_references(skill_references);
-                if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
+                if let Err(error) = agent.set_turn_tool_overlay(turn_tool_overlay) {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
@@ -4152,7 +4152,7 @@ async fn session_task<A: SessionAgent>(
                     Err(error) => Err(error),
                 };
                 if let Err(error) = apply_result {
-                    let _ = agent.set_flow_tool_overlay(None);
+                    let _ = agent.set_turn_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(error));
@@ -4187,7 +4187,7 @@ async fn session_task<A: SessionAgent>(
                         // Machine entered ShuttingDown between keep-alive and
                         // begin: archive yanked the admitted window just before
                         // the run would have started.
-                        let _ = agent.set_flow_tool_overlay(None);
+                        let _ = agent.set_turn_tool_overlay(None);
                         restore_deferred_turn_inputs(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
@@ -4196,7 +4196,7 @@ async fn session_task<A: SessionAgent>(
                         continue;
                     }
                     Err(error) => {
-                        let _ = agent.set_flow_tool_overlay(None);
+                        let _ = agent.set_turn_tool_overlay(None);
                         restore_deferred_turn_inputs(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
@@ -4367,10 +4367,10 @@ async fn session_task<A: SessionAgent>(
 
                 // Release the turn lock AFTER setting state to Idle and
                 // updating the summary, so the next caller sees consistent state.
-                let result = if let Err(error) = agent.set_flow_tool_overlay(None) {
+                let result = if let Err(error) = agent.set_turn_tool_overlay(None) {
                     tracing::error!(
                         error = %error,
-                        "failed to clear flow tool overlay; failing turn to avoid stale scope"
+                        "failed to clear turn tool overlay; failing turn to avoid stale scope"
                     );
                     Err(error)
                 } else if let Some(error) = discard_active_context_error {
@@ -4840,7 +4840,7 @@ mod runtime_turn_metadata_tests {
                 .push(refs);
         }
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
@@ -5015,7 +5015,7 @@ mod runtime_turn_metadata_tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
@@ -5144,7 +5144,7 @@ mod runtime_turn_metadata_tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
@@ -6325,7 +6325,7 @@ mod injected_context_turn_tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
@@ -6526,11 +6526,11 @@ mod injected_context_turn_tests {
             self.0.set_skill_references(refs);
         }
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
-            self.0.set_flow_tool_overlay(overlay)
+            self.0.set_turn_tool_overlay(overlay)
         }
 
         fn hot_swap_llm_identity(
@@ -6749,7 +6749,7 @@ mod admission_window_tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
@@ -7180,7 +7180,7 @@ mod archive_shutdown_drain_tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
@@ -7769,7 +7769,7 @@ mod inline_video_admission_tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {

@@ -49,7 +49,7 @@ pub(crate) fn for_input(
         },
         Input::Continuation(continuation) => RuntimeTurnMetadata {
             handling_mode: Some(continuation.handling_mode),
-            flow_tool_overlay: continuation.flow_tool_overlay.clone(),
+            turn_tool_overlay: continuation.turn_tool_overlay.clone(),
             ..Default::default()
         },
         Input::Peer(peer) => RuntimeTurnMetadata {

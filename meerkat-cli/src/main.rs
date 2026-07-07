@@ -7156,13 +7156,14 @@ async fn handle_workgraph_command(
         } => {
             let session_id = resolve_scoped_session_id(&session_id, scope)?;
             let completion_policy = work_completion_policy_from_args(completion_policy);
+            let target = workgraph_goal_attention_target_for_session(scope, session_id).await?;
             let result = service
                 .create_goal(meerkat::GoalCreateRequest {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     title,
                     description,
-                    target: meerkat::GoalAttentionTarget::Session { session_id },
+                    target,
                     mode: mode.into(),
                     completion_policy,
                     delegated_authority: Default::default(),
@@ -7287,6 +7288,27 @@ async fn handle_workgraph_command(
 async fn open_workgraph_service(scope: &RuntimeScope) -> anyhow::Result<meerkat::WorkGraphService> {
     let (_manifest, persistence) = create_persistence_bundle(scope).await?;
     Ok(scoped_workgraph_service(scope, &persistence))
+}
+
+async fn workgraph_goal_attention_target_for_session(
+    scope: &RuntimeScope,
+    session_id: SessionId,
+) -> anyhow::Result<meerkat::GoalAttentionTarget> {
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    {
+        let (_manifest, persistence) = create_persistence_bundle(scope).await?;
+        if let Some(session) = persistence.session_store().load(&session_id).await?
+            && let Some(binding) = session
+                .session_metadata()
+                .and_then(|metadata| metadata.mob_member_binding)
+        {
+            return Ok(meerkat_mob::lower_agent_identity_attention_target(
+                &meerkat_mob::MobId::from(binding.mob_id),
+                &meerkat_mob::AgentIdentity::from(binding.member),
+            )?);
+        }
+    }
+    Ok(meerkat::GoalAttentionTarget::Session { session_id })
 }
 
 fn scoped_workgraph_service(
@@ -8034,24 +8056,20 @@ fn cli_terminal_pre_turn_context_appends(
         .collect()
 }
 
-async fn validate_cli_workgraph_attention_primitive(
+async fn validate_cli_workgraph_attention_overlay(
     workgraph_service: Option<&meerkat::WorkGraphService>,
-    primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive,
+    overlay: Option<&meerkat_core::service::TurnToolOverlay>,
 ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
     let Some(workgraph_service) = workgraph_service else {
         return Ok(());
     };
-    let projection = match primitive.turn_metadata() {
-        Some(metadata) => meerkat::workgraph_attention_projection_from_overlay(
-            metadata.flow_tool_overlay.as_ref(),
-        )
-        .map_err(|error| {
+    let projection = meerkat::workgraph_attention_projection_from_overlay(overlay).map_err(
+        |error| {
             meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_primitive_rejected(
                 error.to_string(),
             )
-        })?,
-        None => None,
-    };
+        },
+    )?;
     let Some(projection) = projection else {
         return Ok(());
     };
@@ -8192,12 +8210,10 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
-        validate_cli_workgraph_attention_primitive(self.workgraph_service.as_ref(), &primitive)
-            .await?;
         // Forward the primitive metadata carrier as the single runtime-authored
         // source for per-turn policy.
         let pre_turn_context_appends = cli_terminal_pre_turn_context_appends(&primitive);
-        let turn_req = StartTurnRequest {
+        let mut turn_req = StartTurnRequest {
             injected_context: Vec::new(),
             prompt: primitive.extract_content_input(),
             system_prompt: None,
@@ -8206,12 +8222,31 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 meerkat_core::types::HandlingMode::Queue,
                 primitive
                     .turn_metadata()
-                    .and_then(|meta| meta.flow_tool_overlay.clone()),
+                    .and_then(|meta| meta.turn_tool_overlay.clone()),
                 pre_turn_context_appends,
                 primitive.turn_metadata().cloned(),
             )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
         };
+        meerkat::surface::inject_workgraph_attention_turn_overlay(
+            self.service.as_ref(),
+            self.workgraph_service.as_ref(),
+            &self.session_id,
+            &mut turn_req,
+        )
+        .await
+        .map_err(|error| {
+            meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_primitive_rejected(
+                error.to_string(),
+            )
+        })?;
+        let overlay = turn_req
+            .runtime
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.turn_tool_overlay.as_ref())
+            .or(turn_req.runtime.turn_tool_overlay.as_ref());
+        validate_cli_workgraph_attention_overlay(self.workgraph_service.as_ref(), overlay).await?;
 
         // Persistent path: use apply_runtime_turn for real receipt + snapshot.
         #[cfg(feature = "session-store")]
@@ -8816,6 +8851,7 @@ fn build_cli_runtime_backed_service_with_defaults(
     config: Config,
     persistence: PersistenceBundle,
     default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    default_workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> (
     meerkat::PersistentSessionService<FactoryAgentBuilder>,
     Arc<meerkat_runtime::MeerkatMachine>,
@@ -8823,6 +8859,7 @@ fn build_cli_runtime_backed_service_with_defaults(
     let max_sessions = config.max_sessions();
     let builder = FactoryAgentBuilder::new(factory, config);
     meerkat::surface::set_default_schedule_tools(&builder, default_schedule_tools);
+    meerkat::surface::set_default_workgraph_tools(&builder, default_workgraph_tools);
     let (service, runtime_adapter) =
         meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
     (service, runtime_adapter)
@@ -9022,7 +9059,7 @@ fn short_session_id(sid: &SessionId) -> String {
     s[len.saturating_sub(8)..].to_string()
 }
 
-fn build_flow_tool_overlay(
+fn build_turn_tool_overlay(
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
 ) -> Option<TurnToolOverlay> {
@@ -9146,7 +9183,7 @@ async fn run_agent(
         let keep_alive = resolve_keep_alive(keep_alive)?;
         let effective_workgraph = enable_workgraph || config.tools.workgraph_enabled;
         let effective_mob = cfg!(feature = "mob") && (enable_mob || config.tools.mob_enabled);
-        let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
+        let turn_tool_overlay = build_turn_tool_overlay(allow_tools, block_tools);
         // Wave-c C-12: the canonical runtime identity for a skill is
         // `SkillKey { source_uuid, skill_name }` (C-1 / C-4 upstream retype).
         // CLI `--skill NAME` arguments default to the builtin (inventory)
@@ -9251,11 +9288,15 @@ async fn run_agent(
         let default_schedule_tools =
             Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
                 as Arc<dyn AgentToolDispatcher>);
+        let default_workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+            scoped_workgraph_service(scope, &persistence),
+        )) as Arc<dyn AgentToolDispatcher>);
         let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             config.clone(),
             persistence.clone(),
             default_schedule_tools,
+            default_workgraph_tools,
         );
 
         if keep_alive {
@@ -9496,7 +9537,7 @@ async fn run_agent(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: None,
                         skill_references: None,
-                        flow_tool_overlay,
+                        turn_tool_overlay,
                         additional_instructions: None,
                         ..Default::default()
                     },
@@ -9817,7 +9858,7 @@ async fn resume_session_with_llm_override(
         // Resolve session identifier (full UUID, short prefix, or relative alias).
         log_stage("resolve_session_id");
         let session_id = resolve_flexible_session_id(session_id, scope, &config).await?;
-        let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
+        let turn_tool_overlay = build_turn_tool_overlay(allow_tools, block_tools);
         log_stage("create_session_store");
         let (manifest, persistence) = create_persistence_bundle(scope).await?;
         let store = persistence.session_store();
@@ -10164,7 +10205,7 @@ async fn resume_session_with_llm_override(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: None,
                         skill_references: None,
-                        flow_tool_overlay,
+                        turn_tool_overlay,
                         additional_instructions,
                         ..Default::default()
                     },
@@ -10344,11 +10385,15 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         schedule_service.clone(),
     )) as Arc<dyn AgentToolDispatcher>);
     let workgraph_service = scoped_workgraph_service(scope, &persistence);
+    let default_workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+        workgraph_service.clone(),
+    )) as Arc<dyn AgentToolDispatcher>);
     let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
         factory,
         config,
         persistence,
         default_schedule_tools,
+        default_workgraph_tools,
     );
     let service = Arc::new(service);
     #[cfg(all(feature = "mob", feature = "session-store"))]
@@ -10868,41 +10913,48 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         let mut scheduled_instructions = dispatch.additional_instructions.clone();
         scheduled_instructions.push(SCHEDULED_PROMPT_VISIBLE_COMPLETION_INSTRUCTION.to_string());
 
-        let mut prompt_input = PromptInput::from_content_input(
-            dispatch.prompt,
-            Some(
-                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    handling_mode: None,
-                    keep_alive: None,
-                    skill_references: scheduled_skill_keys(&dispatch.skill_refs)?,
-                    flow_tool_overlay: None,
-                    // Post-wave-a: `RuntimeTurnMetadata.additional_instructions`
-                    // is typed `Vec<TurnInstruction>`; project the scheduled
-                    // dispatch's `Vec<String>` into typed instructions with
-                    // `System` kind (scheduled prompts originate from the
-                    // runtime's schedule driver, not the user).
-                    additional_instructions: Some(
-                        scheduled_instructions
-                            .into_iter()
-                            .map(|body| {
-                                meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System,
-                                    body,
-                                }
-                            })
-                            .collect::<Vec<_>>(),
-                    ),
-                    model: None,
-                    provider: None,
-                    provider_params: None,
-                    render_metadata: dispatch.render_metadata.clone(),
-                    execution_kind: None,
-                    peer_response_terminal_apply_intent: None,
-                    auth_binding: None,
-                    transcript_identity: Default::default(),
-                },
+        let mut turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            handling_mode: None,
+            keep_alive: None,
+            skill_references: scheduled_skill_keys(&dispatch.skill_refs)?,
+            turn_tool_overlay: None,
+            // Post-wave-a: `RuntimeTurnMetadata.additional_instructions`
+            // is typed `Vec<TurnInstruction>`; project the scheduled
+            // dispatch's `Vec<String>` into typed instructions with
+            // `System` kind (scheduled prompts originate from the
+            // runtime's schedule driver, not the user).
+            additional_instructions: Some(
+                scheduled_instructions
+                    .into_iter()
+                    .map(
+                        |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                            kind:
+                                meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System,
+                            body,
+                        },
+                    )
+                    .collect::<Vec<_>>(),
             ),
-        );
+            model: None,
+            provider: None,
+            provider_params: None,
+            render_metadata: dispatch.render_metadata.clone(),
+            execution_kind: None,
+            peer_response_terminal_apply_intent: None,
+            auth_binding: None,
+            transcript_identity: Default::default(),
+        };
+        turn_metadata.turn_tool_overlay =
+            meerkat::surface::compose_workgraph_attention_turn_overlay_for_session(
+                self.service.as_ref(),
+                Some(&self.workgraph_service),
+                session_id,
+                turn_metadata.turn_tool_overlay.take(),
+            )
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        let mut prompt_input =
+            PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
         prompt_input.header.source = InputOrigin::System;
         prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
             schedule_attempt_idempotency_key(occurrence),
@@ -12438,12 +12490,14 @@ async fn hydrate_mob_state(
     seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
 ) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
     let runtime_adapter = runtime_adapter.or_else(|| session_service.runtime_adapter());
+    let workgraph_service = open_workgraph_service(scope).await?;
     let state = Arc::new(
         meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
             session_service.clone(),
             runtime_adapter.clone(),
         )
         .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
+        .with_workgraph_service(Some(workgraph_service))
         .with_default_llm_client_provider(default_llm_client_provider)
         .with_external_tools_provider(external_tools_provider.clone()),
     );
@@ -13780,7 +13834,8 @@ async fn execute_mob_run_pack(
         meerkat_mob::MobStorage::in_memory(),
     )
     .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?
-    .with_session_service(session_service.clone());
+    .with_session_service(session_service.clone())
+    .with_workgraph_service(Some(open_workgraph_service(scope).await?));
     if let Some(adapter) = session_service.runtime_adapter() {
         builder = builder.with_runtime_adapter(adapter);
     }
@@ -13963,7 +14018,8 @@ async fn execute_mob_deploy_internal(
             meerkat_mob::MobStorage::in_memory(),
         )
         .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-        .with_session_service(session_service.clone());
+        .with_session_service(session_service.clone())
+        .with_workgraph_service(Some(open_workgraph_service(scope).await?));
         if let Some(adapter) = session_service.runtime_adapter() {
             builder = builder.with_runtime_adapter(adapter);
         }
@@ -14474,6 +14530,7 @@ where
     )
     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
     .with_session_service(session_service.clone())
+    .with_workgraph_service(Some(open_workgraph_service(scope).await?))
     .with_default_external_tools_provider(external_tools_provider.clone());
     builder = builder.with_runtime_adapter(runtime_adapter.clone());
     let handle = builder
@@ -18379,13 +18436,13 @@ default_model = "gemma"
     }
 
     #[test]
-    fn test_build_flow_tool_overlay_empty_is_none() {
-        assert!(build_flow_tool_overlay(Vec::new(), Vec::new()).is_none());
+    fn test_build_turn_tool_overlay_empty_is_none() {
+        assert!(build_turn_tool_overlay(Vec::new(), Vec::new()).is_none());
     }
 
     #[test]
-    fn test_build_flow_tool_overlay_populates_lists() {
-        let overlay = build_flow_tool_overlay(
+    fn test_build_turn_tool_overlay_populates_lists() {
+        let overlay = build_turn_tool_overlay(
             vec!["search".to_string(), "read_file".to_string()],
             vec!["shell".to_string()],
         )
@@ -20942,6 +20999,7 @@ capabilities = ["rpc"]
             Config::default(),
             persistence,
             None,
+            None,
         );
         let service = Arc::new(service);
         let wrapper = MobCliSessionService::new(Arc::clone(&service));
@@ -21241,6 +21299,7 @@ capabilities = ["rpc"]
             Config::default(),
             persistence,
             None,
+            None,
         );
         let flow = runtime_adapter
             .oauth_flow_authority()
@@ -21270,6 +21329,7 @@ capabilities = ["rpc"]
             factory,
             Config::default(),
             persistence,
+            None,
             None,
         );
         let auth_lease = runtime_adapter.auth_lease_handle();
@@ -21368,6 +21428,7 @@ capabilities = ["rpc"]
             factory,
             Config::default(),
             persistence,
+            None,
             None,
         );
         let service = Arc::new(service);

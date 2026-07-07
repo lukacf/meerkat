@@ -304,7 +304,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
       "params": {
         "session_id": "01936f8a-...",
         "prompt": "Execute the next step",
-        "flow_tool_overlay": {
+        "turn_tool_overlay": {
           "allowed_tools": ["shell", "read_file"],
           "blocked_tools": ["task_create"]
         }
@@ -319,7 +319,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
       -d '{
         "session_id": "01936f8a-...",
         "prompt": "Execute the next step",
-        "flow_tool_overlay": {
+        "turn_tool_overlay": {
           "allowed_tools": ["shell", "read_file"],
           "blocked_tools": ["task_create"]
         }
@@ -331,7 +331,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
     {"name": "meerkat_resume", "arguments": {
       "session_id": "01936f8a-...",
       "prompt": "Continue with restricted tools",
-      "flow_tool_overlay": {
+      "turn_tool_overlay": {
         "allowed_tools": ["shell", "task_create"],
         "blocked_tools": []
       }
@@ -342,7 +342,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
     ```python
     result = await session.turn(
         "Execute the next step",
-        flow_tool_overlay={
+        turn_tool_overlay={
             "allowed_tools": ["shell", "read_file"],
             "blocked_tools": ["task_create"],
         },
@@ -352,7 +352,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
   <Tab title="TypeScript">
     ```typescript
     const result = await session.turn("Execute the next step", {
-      flowToolOverlay: {
+      turnToolOverlay: {
         allowedTools: ["shell", "read_file"],
         blockedTools: ["task_create"],
       },

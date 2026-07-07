@@ -8,8 +8,8 @@ use crate::{AgentIdentity, MobId};
 pub fn lower_agent_identity_attention_target(
     mob_id: &MobId,
     identity: &AgentIdentity,
-) -> Result<meerkat::WorkAttentionTarget, meerkat::WorkGraphError> {
-    Ok(meerkat::WorkAttentionTarget::LoweredOwner {
+) -> Result<meerkat::GoalAttentionTarget, meerkat::WorkGraphError> {
+    Ok(meerkat::GoalAttentionTarget::Owner {
         owner_key: lower_agent_identity_owner_key(mob_id, identity)?,
     })
 }
@@ -18,11 +18,22 @@ pub fn lower_agent_identity_owner_key(
     mob_id: &MobId,
     identity: &AgentIdentity,
 ) -> Result<meerkat::WorkOwnerKey, meerkat::WorkGraphError> {
+    reject_owner_key_segment("mob_id", mob_id.as_str())?;
+    reject_owner_key_segment("agent_identity", identity.as_str())?;
     meerkat::WorkOwnerKey::agent(format!(
         "mob/{}/agent/{}",
         mob_id.as_str(),
         identity.as_str()
     ))
+}
+
+fn reject_owner_key_segment(label: &str, value: &str) -> Result<(), meerkat::WorkGraphError> {
+    if value.is_empty() || value.contains('/') {
+        return Err(meerkat::WorkGraphError::InvalidInput(format!(
+            "mob attention owner key {label} must be non-empty and must not contain '/'"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -36,7 +47,7 @@ mod tests {
         let target =
             lower_agent_identity_attention_target(&mob_id, &identity).expect("lower identity");
 
-        let meerkat::WorkAttentionTarget::LoweredOwner { owner_key } = target else {
+        let meerkat::GoalAttentionTarget::Owner { owner_key } = target else {
             panic!("mob identities must lower to owner keys");
         };
         assert_eq!(owner_key.kind, meerkat::WorkOwnerKind::Agent);
@@ -55,5 +66,20 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(first.canonical(), "agent:mob/mob-a/agent/reviewer");
         assert_eq!(second.canonical(), "agent:mob/mob-b/agent/reviewer");
+    }
+
+    #[test]
+    fn owner_key_lowering_rejects_ambiguous_separator_segments() {
+        let err =
+            lower_agent_identity_owner_key(&MobId::from("mob/a"), &AgentIdentity::from("reviewer"))
+                .expect_err("mob ids with separators must fail closed");
+        assert!(matches!(err, meerkat::WorkGraphError::InvalidInput(_)));
+
+        let err = lower_agent_identity_owner_key(
+            &MobId::from("mob-a"),
+            &AgentIdentity::from("reviewer/a"),
+        )
+        .expect_err("agent identities with separators must fail closed");
+        assert!(matches!(err, meerkat::WorkGraphError::InvalidInput(_)));
     }
 }

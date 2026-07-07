@@ -409,7 +409,6 @@ pub use wire::{
     WireModelBetaHeader,
     WireModelProfile,
     WireModelRoutingApprovalPhase,
-    WireModelRoutingApprovalRequest,
     WireModelTier,
     WirePeerConnectivity,
     WirePeerConnectivitySnapshot,

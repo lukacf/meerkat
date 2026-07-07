@@ -35,7 +35,8 @@ pub use runtime_backed::configure_peer_ingress;
 pub use runtime_backed::{
     PersistentRuntimeExecutor, RuntimeBackedInitialTurn, SurfaceRuntimeMaterializeError,
     build_runtime_backed_service, build_runtime_backed_service_with_capacities,
-    default_persistent_executor, install_prepared_runtime_interrupt_handle, materialize_session,
+    default_persistent_executor, default_persistent_executor_with_workgraph_service,
+    install_prepared_runtime_interrupt_handle, materialize_session,
     materialize_session_with_reserved_admission, run_runtime_backed_initial_turn_with_machine,
     split_runtime_backed_eager_create_request,
 };
@@ -64,7 +65,7 @@ use meerkat_contracts::{
 use meerkat_core::ConfigStoreMetadata;
 use meerkat_core::{AgentEvent, Config, PeerMeta};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 #[cfg(target_arch = "wasm32")]
@@ -82,6 +83,336 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(feature = "mcp")]
 use std::sync::{Mutex, OnceLock};
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkGraphAttentionTurnOverlayError {
+    #[error("failed to read session {session_id} for WorkGraph attention overlay: {source}")]
+    SessionRead {
+        session_id: meerkat_core::SessionId,
+        source: meerkat_core::SessionError,
+    },
+    #[error("{0}")]
+    WorkGraph(#[from] crate::WorkGraphError),
+    #[error(
+        "multiple active WorkGraph attention bindings resolve to session {session_id}; pause or reassign all but one before starting a scoped turn"
+    )]
+    MultipleActiveBindings { session_id: meerkat_core::SessionId },
+    #[error("conflicting turn tool overlay dispatch context for {key}")]
+    ConflictingDispatchContext { key: String },
+}
+
+pub async fn inject_workgraph_attention_turn_overlay(
+    session_service: &dyn meerkat_core::SessionService,
+    workgraph_service: Option<&crate::WorkGraphService>,
+    session_id: &meerkat_core::SessionId,
+    request: &mut meerkat_core::StartTurnRequest,
+) -> Result<(), WorkGraphAttentionTurnOverlayError> {
+    let Some(workgraph_service) = workgraph_service else {
+        return Ok(());
+    };
+    let session = session_service.read(session_id).await.map_err(|source| {
+        WorkGraphAttentionTurnOverlayError::SessionRead {
+            session_id: session_id.clone(),
+            source,
+        }
+    })?;
+    inject_workgraph_attention_turn_overlay_from_labels(
+        workgraph_service,
+        session_id,
+        &session.state.labels,
+        request,
+    )
+    .await
+}
+
+pub async fn compose_workgraph_attention_turn_overlay_for_session(
+    session_service: &dyn meerkat_core::SessionService,
+    workgraph_service: Option<&crate::WorkGraphService>,
+    session_id: &meerkat_core::SessionId,
+    existing_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+) -> Result<Option<meerkat_core::service::TurnToolOverlay>, WorkGraphAttentionTurnOverlayError> {
+    let Some(workgraph_service) = workgraph_service else {
+        return Ok(existing_overlay);
+    };
+    if workgraph_service.store().kind() == crate::WorkGraphStoreKind::Disabled {
+        return Ok(existing_overlay);
+    }
+    let session = session_service.read(session_id).await.map_err(|source| {
+        WorkGraphAttentionTurnOverlayError::SessionRead {
+            session_id: session_id.clone(),
+            source,
+        }
+    })?;
+    compose_workgraph_attention_turn_overlay_from_labels(
+        workgraph_service,
+        Some(session_service),
+        session_id,
+        &session.state.labels,
+        existing_overlay,
+    )
+    .await
+}
+
+pub async fn inject_workgraph_attention_turn_overlay_from_labels(
+    workgraph_service: &crate::WorkGraphService,
+    session_id: &meerkat_core::SessionId,
+    labels: &BTreeMap<String, String>,
+    request: &mut meerkat_core::StartTurnRequest,
+) -> Result<(), WorkGraphAttentionTurnOverlayError> {
+    let existing_overlay = request
+        .runtime
+        .turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.turn_tool_overlay.clone())
+        .or_else(|| request.runtime.turn_tool_overlay.clone());
+    let Some(overlay) = compose_workgraph_attention_turn_overlay_from_labels(
+        workgraph_service,
+        None,
+        session_id,
+        labels,
+        existing_overlay,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    if let Some(metadata) = request.runtime.turn_metadata.as_mut() {
+        metadata.turn_tool_overlay = Some(overlay.clone());
+    }
+    request.runtime.turn_tool_overlay = Some(overlay);
+    Ok(())
+}
+
+async fn compose_workgraph_attention_turn_overlay_from_labels(
+    workgraph_service: &crate::WorkGraphService,
+    session_service: Option<&dyn meerkat_core::SessionService>,
+    session_id: &meerkat_core::SessionId,
+    labels: &BTreeMap<String, String>,
+    existing_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+) -> Result<Option<meerkat_core::service::TurnToolOverlay>, WorkGraphAttentionTurnOverlayError> {
+    if workgraph_service.store().kind() == crate::WorkGraphStoreKind::Disabled {
+        return Ok(existing_overlay);
+    }
+    let Some(projection) = resolve_workgraph_attention_projection_for_session(
+        workgraph_service,
+        session_service,
+        session_id,
+        labels,
+    )
+    .await?
+    else {
+        return Ok(existing_overlay);
+    };
+    let attention_overlay =
+        crate::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection)?;
+    let overlay = compose_turn_tool_overlay(existing_overlay, attention_overlay)?;
+    Ok(Some(overlay))
+}
+
+async fn resolve_workgraph_attention_projection_for_session(
+    workgraph_service: &crate::WorkGraphService,
+    session_service: Option<&dyn meerkat_core::SessionService>,
+    session_id: &meerkat_core::SessionId,
+    labels: &BTreeMap<String, String>,
+) -> Result<Option<crate::AttentionContextProjection>, WorkGraphAttentionTurnOverlayError> {
+    let active = workgraph_service
+        .list_attention(crate::AttentionListRequest {
+            realm_id: None,
+            namespace: None,
+            target: None,
+            status: Some(crate::WorkAttentionStatus::Active),
+        })
+        .await?;
+    let matching = active
+        .attention
+        .into_iter()
+        .filter(|binding| attention_target_matches_session(&binding.target, session_id, labels))
+        .collect::<Vec<_>>();
+    let binding = match matching.as_slice() {
+        [] => return Ok(None),
+        [binding] => binding,
+        _ => {
+            return Err(WorkGraphAttentionTurnOverlayError::MultipleActiveBindings {
+                session_id: session_id.clone(),
+            });
+        }
+    };
+    if !attention_binding_resolves_to_session(binding, session_service, session_id, labels).await? {
+        return Ok(None);
+    }
+    workgraph_service
+        .attention_projection(crate::AttentionProjectionRequest {
+            binding_id: binding.binding_id.clone(),
+            realm_id: Some(binding.work_ref.realm_id.clone()),
+            namespace: Some(binding.work_ref.namespace.clone()),
+        })
+        .await
+        .map(|result| Some(result.projection))
+        .map_err(Into::into)
+}
+
+async fn attention_binding_resolves_to_session(
+    binding: &crate::WorkAttentionBinding,
+    session_service: Option<&dyn meerkat_core::SessionService>,
+    session_id: &meerkat_core::SessionId,
+    labels: &BTreeMap<String, String>,
+) -> Result<bool, WorkGraphAttentionTurnOverlayError> {
+    let crate::WorkAttentionTarget::LoweredOwner { owner_key } = &binding.target else {
+        return Ok(true);
+    };
+    let Some(session_service) = session_service else {
+        return Ok(true);
+    };
+    let Some((mob_id, agent_identity)) = mob_agent_owner_key_parts(&owner_key.id) else {
+        return Ok(true);
+    };
+    let filter = BTreeMap::from([
+        ("mob_id".to_string(), mob_id.to_string()),
+        ("agent_identity".to_string(), agent_identity.to_string()),
+    ]);
+    if labels.get("mob_id").is_none_or(|value| value != mob_id)
+        || labels
+            .get("agent_identity")
+            .is_none_or(|value| value != agent_identity)
+    {
+        return Ok(false);
+    }
+    let mut summaries = session_service
+        .list(meerkat_core::service::SessionQuery {
+            limit: None,
+            offset: None,
+            labels: Some(filter),
+        })
+        .await
+        .map_err(|source| WorkGraphAttentionTurnOverlayError::SessionRead {
+            session_id: session_id.clone(),
+            source,
+        })?;
+    summaries.sort_by(|left, right| {
+        right.created_at.cmp(&left.created_at).then_with(|| {
+            right
+                .session_id
+                .to_string()
+                .cmp(&left.session_id.to_string())
+        })
+    });
+    Ok(summaries
+        .first()
+        .is_none_or(|summary| summary.session_id == *session_id))
+}
+
+fn attention_target_matches_session(
+    target: &crate::WorkAttentionTarget,
+    session_id: &meerkat_core::SessionId,
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    match target {
+        crate::WorkAttentionTarget::Session {
+            session_id: target_session_id,
+        } => target_session_id == session_id,
+        crate::WorkAttentionTarget::LoweredOwner { owner_key } => {
+            if owner_key.kind == crate::WorkOwnerKind::Session
+                && owner_key.id == session_id.to_string()
+            {
+                return true;
+            }
+            if owner_key.kind != crate::WorkOwnerKind::Agent {
+                return false;
+            }
+            let Some((mob_id, agent_identity)) = mob_agent_owner_key_parts(&owner_key.id) else {
+                return false;
+            };
+            labels.get("mob_id").is_some_and(|label| label == mob_id)
+                && labels
+                    .get("agent_identity")
+                    .is_some_and(|label| label == agent_identity)
+        }
+    }
+}
+
+fn mob_agent_owner_key_parts(owner_id: &str) -> Option<(&str, &str)> {
+    let rest = owner_id.strip_prefix("mob/")?;
+    let (mob_id, agent_identity) = rest.split_once("/agent/")?;
+    if mob_id.is_empty()
+        || agent_identity.is_empty()
+        || mob_id.contains('/')
+        || agent_identity.contains('/')
+    {
+        return None;
+    }
+    Some((mob_id, agent_identity))
+}
+
+fn compose_turn_tool_overlay(
+    existing: Option<meerkat_core::service::TurnToolOverlay>,
+    attention: meerkat_core::service::TurnToolOverlay,
+) -> Result<meerkat_core::service::TurnToolOverlay, WorkGraphAttentionTurnOverlayError> {
+    let Some(existing) = existing else {
+        return Ok(attention);
+    };
+    let allowed_tools = intersect_allowed_tools(existing.allowed_tools, attention.allowed_tools);
+    let blocked_tools = union_blocked_tools(existing.blocked_tools, attention.blocked_tools);
+    let dispatch_context =
+        merge_turn_dispatch_context(existing.dispatch_context, attention.dispatch_context)?;
+    Ok(meerkat_core::service::TurnToolOverlay {
+        allowed_tools,
+        blocked_tools,
+        dispatch_context,
+    })
+}
+
+fn intersect_allowed_tools(
+    left: Option<Vec<meerkat_core::types::ToolName>>,
+    right: Option<Vec<meerkat_core::types::ToolName>>,
+) -> Option<Vec<meerkat_core::types::ToolName>> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let right = right.into_iter().collect::<BTreeSet<_>>();
+            Some(
+                left.into_iter()
+                    .filter(|name| right.contains(name))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            )
+        }
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn union_blocked_tools(
+    left: Option<Vec<meerkat_core::types::ToolName>>,
+    right: Option<Vec<meerkat_core::types::ToolName>>,
+) -> Option<Vec<meerkat_core::types::ToolName>> {
+    let blocked = left
+        .into_iter()
+        .flatten()
+        .chain(right.into_iter().flatten())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    (!blocked.is_empty()).then_some(blocked)
+}
+
+fn merge_turn_dispatch_context(
+    mut existing: BTreeMap<String, serde_json::Value>,
+    attention: BTreeMap<String, serde_json::Value>,
+) -> Result<BTreeMap<String, serde_json::Value>, WorkGraphAttentionTurnOverlayError> {
+    for (key, value) in attention {
+        match existing.get(&key) {
+            Some(current) if current != &value => {
+                return Err(WorkGraphAttentionTurnOverlayError::ConflictingDispatchContext { key });
+            }
+            Some(_) => {}
+            None => {
+                existing.insert(key, value);
+            }
+        }
+    }
+    Ok(existing)
+}
 
 /// Surface-specific facts used to build a read-only runtime host projection.
 #[derive(Debug, Clone)]
@@ -660,6 +991,98 @@ pub async fn emit_mcp_lifecycle_events(
 mod tests {
     use super::*;
     use meerkat_core::Config;
+
+    #[test]
+    fn mob_owner_key_matches_session_by_mob_labels() {
+        let session_id = meerkat_core::SessionId::new();
+        let target = crate::WorkAttentionTarget::LoweredOwner {
+            owner_key: crate::WorkOwnerKey::agent("mob/alpha/agent/reviewer").expect("owner key"),
+        };
+        let labels = BTreeMap::from([
+            ("mob_id".to_string(), "alpha".to_string()),
+            ("agent_identity".to_string(), "reviewer".to_string()),
+        ]);
+
+        assert!(attention_target_matches_session(
+            &target,
+            &session_id,
+            &labels
+        ));
+    }
+
+    #[test]
+    fn mob_owner_key_rejects_ambiguous_separator_round_trips() {
+        assert_eq!(
+            mob_agent_owner_key_parts("mob/alpha/agent/reviewer"),
+            Some(("alpha", "reviewer"))
+        );
+        assert_eq!(
+            mob_agent_owner_key_parts("mob/alpha/agent/reviewer/2"),
+            None
+        );
+        assert_eq!(
+            mob_agent_owner_key_parts("mob/alpha/extra/agent/reviewer"),
+            None
+        );
+
+        let session_id = meerkat_core::SessionId::new();
+        let target = crate::WorkAttentionTarget::LoweredOwner {
+            owner_key: crate::WorkOwnerKey::agent("mob/alpha/agent/reviewer/2").expect("owner key"),
+        };
+        let labels = BTreeMap::from([
+            ("mob_id".to_string(), "alpha".to_string()),
+            ("agent_identity".to_string(), "reviewer/2".to_string()),
+        ]);
+        assert!(!attention_target_matches_session(
+            &target,
+            &session_id,
+            &labels
+        ));
+    }
+
+    #[test]
+    fn attention_overlay_intersects_existing_turn_overlay() {
+        let existing = meerkat_core::service::TurnToolOverlay {
+            allowed_tools: Some(vec![
+                meerkat_core::types::ToolName::from("workgraph_get"),
+                meerkat_core::types::ToolName::from("non_workgraph"),
+            ]),
+            blocked_tools: Some(vec![meerkat_core::types::ToolName::from("blocked_by_flow")]),
+            dispatch_context: BTreeMap::from([("turn".to_string(), serde_json::json!(true))]),
+        };
+        let attention = meerkat_core::service::TurnToolOverlay {
+            allowed_tools: Some(vec![
+                meerkat_core::types::ToolName::from("workgraph_get"),
+                meerkat_core::types::ToolName::from("workgraph_update"),
+            ]),
+            blocked_tools: Some(vec![meerkat_core::types::ToolName::from(
+                "workgraph_update",
+            )]),
+            dispatch_context: BTreeMap::from([(
+                "workgraph.attention_projection".to_string(),
+                serde_json::json!({"binding_id": "b"}),
+            )]),
+        };
+
+        let overlay = compose_turn_tool_overlay(Some(existing), attention).expect("compose");
+
+        assert_eq!(
+            overlay.allowed_tools,
+            Some(vec![meerkat_core::types::ToolName::from("workgraph_get")])
+        );
+        assert_eq!(
+            overlay.blocked_tools,
+            Some(vec![
+                meerkat_core::types::ToolName::from("blocked_by_flow"),
+                meerkat_core::types::ToolName::from("workgraph_update")
+            ])
+        );
+        assert_eq!(overlay.dispatch_context["turn"], serde_json::json!(true));
+        assert_eq!(
+            overlay.dispatch_context["workgraph.attention_projection"],
+            serde_json::json!({"binding_id": "b"})
+        );
+    }
 
     #[test]
     fn validate_public_peer_meta_rejects_reserved_labels() {

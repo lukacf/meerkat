@@ -143,7 +143,7 @@ impl SessionAgent for MockAgent {
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         _overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
@@ -243,7 +243,7 @@ impl SessionAgent for SnapshotAgent {
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         _overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
@@ -493,7 +493,7 @@ impl SessionAgent for RecordingTurnAgent {
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         _overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {

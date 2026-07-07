@@ -28,7 +28,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
     RuntimeTurnMetadata {
         handling_mode: Some(HandlingMode::Steer),
         skill_references: Some(vec![skill_key]),
-        flow_tool_overlay: Some(TurnToolOverlay::default()),
+        turn_tool_overlay: Some(TurnToolOverlay::default()),
         additional_instructions: Some(vec![
             TurnInstruction {
                 kind: TurnInstructionKind::User,

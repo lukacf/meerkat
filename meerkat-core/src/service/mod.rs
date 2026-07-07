@@ -1195,8 +1195,8 @@ pub struct StartTurnRuntimeSemantics {
     /// to the `SessionAgent` but does not act on it. Non-Queue handling
     /// only works correctly on runtime-backed surfaces.
     pub handling_mode: HandlingMode,
-    /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Optional per-turn tool overlay (ephemeral, non-persistent).
+    pub turn_tool_overlay: Option<TurnToolOverlay>,
     /// Runtime-owned system-context appends that must be applied at this
     /// turn boundary before the model run starts.
     pub pre_turn_context_appends: Vec<PendingSystemContextAppend>,
@@ -1220,7 +1220,7 @@ impl Default for StartTurnRuntimeSemantics {
     fn default() -> Self {
         Self {
             handling_mode: HandlingMode::Queue,
-            flow_tool_overlay: None,
+            turn_tool_overlay: None,
             pre_turn_context_appends: Vec::new(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
@@ -1232,13 +1232,13 @@ impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn new(
         handling_mode: HandlingMode,
-        flow_tool_overlay: Option<TurnToolOverlay>,
+        turn_tool_overlay: Option<TurnToolOverlay>,
         pre_turn_context_appends: Vec<PendingSystemContextAppend>,
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
         Self {
             handling_mode,
-            flow_tool_overlay,
+            turn_tool_overlay,
             pre_turn_context_appends,
             typed_turn_appends: Vec::new(),
             turn_metadata,
@@ -1399,6 +1399,7 @@ impl TurnToolOverlay {
 
 /// Public caller-safe per-turn tool overlay.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PublicTurnToolOverlay {
     /// Optional allow-list for this turn.

@@ -104,7 +104,7 @@ impl SessionAgent for MockAgent {
         // No-op for mock
     }
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
@@ -449,7 +449,7 @@ struct RealSessionAgent {
     provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     delay_ms: Option<u64>,
     hook_engine: Option<Arc<dyn HookEngine>>,
-    flow_tool_overlay: Option<TurnToolOverlay>,
+    turn_tool_overlay: Option<TurnToolOverlay>,
     system_context_state: meerkat_core::SystemContextStateHandle,
     cancel_after_boundary_tx: CancelAfterBoundarySender,
 }
@@ -520,7 +520,7 @@ impl SessionAgent for RealSessionAgent {
         self.provider_visible_tools
             .lock()
             .expect("provider_visible_tools lock poisoned")
-            .push(filtered_tool_names(&self.flow_tool_overlay));
+            .push(filtered_tool_names(&self.turn_tool_overlay));
         self.provider_visible_system_prompts
             .lock()
             .expect("provider_visible_system_prompts lock poisoned")
@@ -550,11 +550,11 @@ impl SessionAgent for RealSessionAgent {
         // is admitted and does not alter provider-visible tool/system context.
     }
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        self.flow_tool_overlay = overlay;
+        self.turn_tool_overlay = overlay;
         Ok(())
     }
 
@@ -671,7 +671,7 @@ impl SessionAgent for CompactionSessionAgent {
         // No-op for the compaction-focused test agent.
     }
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         _overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
@@ -841,7 +841,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
             provider_visible_system_prompts: Arc::clone(&self.provider_visible_system_prompts),
             delay_ms: self.llm_delay_ms,
             hook_engine: self.hook_engine.as_ref().map(Arc::clone),
-            flow_tool_overlay: None,
+            turn_tool_overlay: None,
             system_context_state: system_context_handle_for_test(Default::default()),
             cancel_after_boundary_tx,
         })
@@ -1346,7 +1346,7 @@ async fn test_cancel_after_boundary_is_accepted_for_real_inflight_turn() {
 }
 
 #[tokio::test]
-async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
+async fn test_turn_tool_overlay_is_cleared_after_canceled_turn() {
     let overlay_updates = Arc::new(std::sync::Mutex::new(Vec::new()));
     let service = Arc::new(EphemeralSessionService::new(
         MockAgentBuilder {
@@ -1412,7 +1412,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
 }
 
 #[tokio::test]
-async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
+async fn test_turn_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
     let provider_visible_tools = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
     let service = Arc::new(EphemeralSessionService::new(
         RealAgentBuilder {

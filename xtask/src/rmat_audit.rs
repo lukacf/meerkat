@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -228,10 +228,240 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
     findings.extend(collect_terminal_mapping_constraint_findings(root, policy));
     findings.extend(collect_runtime_comms_bridge_projection_findings(root));
     findings.extend(collect_runtime_external_event_projection_findings(root));
+    findings.extend(collect_schema_emitted_request_consumption_findings(root)?);
 
     findings.sort_by(|a, b| a.key.cmp(&b.key));
     findings.dedup_by(|a, b| a.key == b.key);
     Ok(findings)
+}
+
+fn collect_schema_emitted_request_consumption_findings(root: &Path) -> Result<Vec<Finding>> {
+    let emit_path = root.join("meerkat-contracts/src/emit.rs");
+    if !emit_path.exists() {
+        return Ok(Vec::new());
+    }
+    let emit_source =
+        fs::read_to_string(&emit_path).with_context(|| format!("read {}", emit_path.display()))?;
+    let request_names = schema_emitted_request_names_from_source(&emit_source);
+    let global_aliases = schema_request_global_aliases(root, &request_names)?;
+    let mut production_uses: BTreeMap<String, BTreeSet<String>> = request_names
+        .iter()
+        .cloned()
+        .map(|name| (name, BTreeSet::new()))
+        .collect();
+
+    for file in collect_repo_rs_files(root)? {
+        let relative = file
+            .strip_prefix(root)
+            .with_context(|| format!("strip repo root from {}", file.display()))?
+            .to_string_lossy()
+            .to_string();
+        if is_schema_request_consumption_excluded_path(&relative) {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
+        let mut parsed =
+            syn::parse_file(&source).with_context(|| format!("parse {}", file.display()))?;
+        strip_cfg_test_items(&mut parsed.items);
+        let mut aliases = global_aliases.clone();
+        aliases.extend(schema_request_use_aliases_in_file(&parsed, &request_names));
+        for request_name in schema_request_uses_in_file(&parsed, &request_names, &aliases) {
+            production_uses
+                .entry(request_name)
+                .or_default()
+                .insert(relative.clone());
+        }
+    }
+
+    let mut findings = Vec::new();
+    for request_name in request_names {
+        if production_uses
+            .get(&request_name)
+            .is_none_or(BTreeSet::is_empty)
+        {
+            findings.push(error_finding(
+                "SchemaEmittedRequestHasProducer",
+                "meerkat-contracts/src/emit.rs",
+                &request_name,
+                format!(
+                    "`{request_name}` is emitted as a public request schema but has no non-test production AST consumption path outside contract emission; wire the operation or stop emitting the schema"
+                ),
+                false,
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+fn schema_emitted_request_names_from_source(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter(|line| line.contains("schema_for!"))
+        .filter_map(|line| {
+            let start = line.find('"')?;
+            let rest = &line[start + 1..];
+            let end = rest.find('"')?;
+            let name = &rest[..end];
+            name.ends_with("Request").then(|| name.to_string())
+        })
+        .collect()
+}
+
+fn is_schema_request_consumption_excluded_path(relative: &str) -> bool {
+    relative == "meerkat-contracts/src/emit.rs"
+        || relative.starts_with("xtask/")
+        || relative.starts_with("tests/")
+        || relative.contains("/tests/")
+        || relative.ends_with("/tests.rs")
+        || relative.ends_with("_test.rs")
+}
+
+fn schema_request_global_aliases(
+    root: &Path,
+    request_names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut aliases = BTreeMap::new();
+    for file in collect_repo_rs_files(root)? {
+        let relative = file
+            .strip_prefix(root)
+            .with_context(|| format!("strip repo root from {}", file.display()))?
+            .to_string_lossy()
+            .to_string();
+        if is_schema_request_consumption_excluded_path(&relative) {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
+        let mut parsed =
+            syn::parse_file(&source).with_context(|| format!("parse {}", file.display()))?;
+        strip_cfg_test_items(&mut parsed.items);
+        collect_schema_request_type_aliases(&parsed, request_names, &mut aliases);
+    }
+    Ok(aliases)
+}
+
+fn collect_schema_request_type_aliases(
+    parsed: &syn::File,
+    request_names: &BTreeSet<String>,
+    aliases: &mut BTreeMap<String, String>,
+) {
+    for item in &parsed.items {
+        let Item::Type(item_type) = item else {
+            continue;
+        };
+        let request_name = item_type.ident.to_string();
+        if !request_names.contains(&request_name) {
+            continue;
+        }
+        let Some(target_name) = type_ident(&item_type.ty) else {
+            continue;
+        };
+        if target_name != request_name {
+            aliases.insert(target_name, request_name);
+        }
+    }
+}
+
+fn schema_request_use_aliases_in_file(
+    parsed: &syn::File,
+    request_names: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for item in &parsed.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_schema_request_use_aliases(&item_use.tree, request_names, &mut aliases);
+    }
+    aliases
+}
+
+fn collect_schema_request_use_aliases(
+    tree: &syn::UseTree,
+    request_names: &BTreeSet<String>,
+    aliases: &mut BTreeMap<String, String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            collect_schema_request_use_aliases(&path.tree, request_names, aliases);
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_schema_request_use_aliases(tree, request_names, aliases);
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            let request_name = rename.ident.to_string();
+            if request_names.contains(&request_name) {
+                aliases.insert(rename.rename.to_string(), request_name);
+            }
+        }
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn schema_request_uses_in_file(
+    parsed: &syn::File,
+    request_names: &BTreeSet<String>,
+    aliases: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut visitor = SchemaRequestUseVisitor {
+        request_names,
+        aliases,
+        uses: BTreeSet::new(),
+    };
+    visitor.visit_file(parsed);
+    visitor.uses
+}
+
+struct SchemaRequestUseVisitor<'a> {
+    request_names: &'a BTreeSet<String>,
+    aliases: &'a BTreeMap<String, String>,
+    uses: BTreeSet<String>,
+}
+
+impl SchemaRequestUseVisitor<'_> {
+    fn record_path(&mut self, path: &syn::Path) {
+        let Some(segment) = path.segments.last() else {
+            return;
+        };
+        let name = segment.ident.to_string();
+        if self.request_names.contains(&name) {
+            self.uses.insert(name);
+        } else if let Some(request_name) = self.aliases.get(&name) {
+            self.uses.insert(request_name.clone());
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for SchemaRequestUseVisitor<'_> {
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        if self.request_names.contains(&node.ident.to_string()) {
+            return;
+        }
+        visit::visit_item_type(self, node);
+    }
+
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        self.record_path(&node.path);
+        visit::visit_type_path(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        self.record_path(&node.path);
+        visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.record_path(&node.path);
+        visit::visit_expr_path(self, node);
+    }
+
+    fn visit_pat_struct(&mut self, node: &'ast syn::PatStruct) {
+        self.record_path(&node.path);
+        visit::visit_pat_struct(self, node);
+    }
 }
 
 fn read_baseline(path: &Path) -> Result<Baseline> {
@@ -2357,6 +2587,90 @@ mod tests {
         };
         visitor.visit_file(&parsed);
         visitor.found
+    }
+
+    #[test]
+    fn schema_emitted_request_names_ignore_non_requests_and_tests() {
+        let source = r#"
+            "GoalCreateRequest": schema_for!(meerkat_workgraph::GoalCreateRequest),
+            "GoalCreateResult": schema_for!(meerkat_workgraph::GoalCreateResult),
+            assert!(schemas.contains_key("TestOnlyRequest"));
+        "#;
+        let names = schema_emitted_request_names_from_source(source);
+        assert_eq!(names, BTreeSet::from(["GoalCreateRequest".to_string()]));
+    }
+
+    #[test]
+    fn schema_request_use_detection_ignores_imports_strings_and_cfg_test() {
+        let mut names = BTreeSet::new();
+        names.insert("AttentionReassignRequest".to_string());
+        names.insert("DeadRequest".to_string());
+        let mut parsed = syn::parse_file(
+            r#"
+                use crate::{AttentionReassignRequest, DeadRequest};
+                fn handle(request: AttentionReassignRequest) {
+                    let _again = AttentionReassignRequest { binding_id: todo!() };
+                    let _literal = "DeadRequest";
+                }
+                #[cfg(test)]
+                fn test_only(_: DeadRequest) {}
+            "#,
+        )
+        .expect("test source parses");
+        strip_cfg_test_items(&mut parsed.items);
+        let uses = schema_request_uses_in_file(&parsed, &names, &BTreeMap::new());
+        assert_eq!(
+            uses,
+            BTreeSet::from(["AttentionReassignRequest".to_string()])
+        );
+    }
+
+    #[test]
+    fn schema_request_use_detection_follows_rest_and_wire_aliases() {
+        let mut names = BTreeSet::new();
+        names.insert("RestCreateSessionRequest".to_string());
+        names.insert("WireGenerateImageRequest".to_string());
+
+        let parsed = syn::parse_file(
+            r"
+                use meerkat_contracts::wire::RestCreateSessionRequest as CreateSessionRequest;
+                pub type WireGenerateImageRequest = meerkat_core::GenerateImageRequest;
+
+                fn rest(req: CreateSessionRequest) {}
+                fn tool(req: GenerateImageRequest) {}
+            ",
+        )
+        .expect("test source parses");
+        let mut aliases = BTreeMap::new();
+        collect_schema_request_type_aliases(&parsed, &names, &mut aliases);
+        aliases.extend(schema_request_use_aliases_in_file(&parsed, &names));
+        let uses = schema_request_uses_in_file(&parsed, &names, &aliases);
+        assert_eq!(
+            uses,
+            BTreeSet::from([
+                "RestCreateSessionRequest".to_string(),
+                "WireGenerateImageRequest".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn schema_request_consumption_path_filter_excludes_tests() {
+        assert!(is_schema_request_consumption_excluded_path(
+            "meerkat-workgraph/tests/attention_contracts.rs"
+        ));
+        assert!(is_schema_request_consumption_excluded_path(
+            "meerkat-workgraph/src/tests.rs"
+        ));
+        assert!(is_schema_request_consumption_excluded_path(
+            "meerkat-workgraph/src/store/tests/helpers.rs"
+        ));
+        assert!(is_schema_request_consumption_excluded_path(
+            "meerkat-workgraph/src/attention_test.rs"
+        ));
+        assert!(!is_schema_request_consumption_excluded_path(
+            "meerkat-workgraph/src/service.rs"
+        ));
     }
 
     #[test]

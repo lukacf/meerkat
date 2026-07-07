@@ -284,6 +284,12 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
         let projection = context_projection
             .as_ref()
             .or(self.attention_projection.as_ref());
+        if projection.is_none()
+            && (call.name == "workgraph_attention_reassign"
+                || call.name == "workgraph_policy_escalate")
+        {
+            return Err(ToolError::access_denied(call.name));
+        }
         let mut scoped_close = None;
         if let Some(projection) = projection {
             let allowed = allowed_tools_for_projection(projection);
@@ -414,6 +420,7 @@ fn allowed_tools_for_projection(projection: &AttentionContextProjection) -> BTre
     }
     if authority.can_update {
         allowed.insert("workgraph_update");
+        allowed.insert("workgraph_policy_escalate");
     }
     if authority.can_block {
         allowed.insert("workgraph_block");
@@ -423,6 +430,9 @@ fn allowed_tools_for_projection(projection: &AttentionContextProjection) -> BTre
     }
     if authority.can_link {
         allowed.insert("workgraph_link");
+    }
+    if authority.can_link_derived_from {
+        allowed.insert("workgraph_attention_reassign");
     }
     if authority.can_close_own_review_item || authority.can_close_if_policy_allows {
         allowed.insert("workgraph_close");
@@ -463,6 +473,7 @@ fn validate_attention_scoped_call(
         "workgraph_get"
             | "workgraph_release"
             | "workgraph_update"
+            | "workgraph_policy_escalate"
             | "workgraph_block"
             | "workgraph_close"
             | "workgraph_add_evidence"
@@ -504,6 +515,29 @@ fn validate_attention_scoped_call(
                 message: format!(
                     "{name} must link from or to attention work item {}",
                     projection.work_ref.item_id
+                ),
+            });
+        }
+        if name == "workgraph_attention_reassign" {
+            if !projection.authority.can_link_derived_from {
+                return Err(ToolError::ExecutionFailed {
+                    message:
+                        "attention-scoped workgraph_attention_reassign requires derived_from link authority"
+                            .to_string(),
+                });
+            }
+            let binding_matches = args
+                .get("binding_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == projection.binding_id.as_str());
+            if binding_matches {
+                return Ok(());
+            }
+            return Err(ToolError::ExecutionFailed {
+                message: format!(
+                    "{name} is scoped to attention binding {}, got {:?}",
+                    projection.binding_id,
+                    args.get("binding_id")
                 ),
             });
         }
@@ -554,6 +588,15 @@ fn normalize_attention_scoped_args(
         "namespace".to_string(),
         Value::String(projection.work_ref.namespace.as_str().to_string()),
     );
+    if name == "workgraph_attention_reassign" || name == "workgraph_policy_escalate" {
+        let projection_value = serde_json::to_value(projection).map_err(|error| {
+            ToolError::invalid_arguments(
+                name,
+                format!("failed to encode WorkGraph attention projection: {error}"),
+            )
+        })?;
+        object.insert("authority_projection".to_string(), projection_value);
+    }
     Ok(())
 }
 
@@ -677,6 +720,7 @@ mod tests {
                 "workgraph_get",
                 "workgraph_release",
                 "workgraph_update",
+                "workgraph_policy_escalate",
                 "workgraph_block",
                 "workgraph_add_evidence",
             ]),
@@ -688,6 +732,7 @@ mod tests {
                 "workgraph_get",
                 "workgraph_release",
                 "workgraph_update",
+                "workgraph_policy_escalate",
                 "workgraph_block",
                 "workgraph_add_evidence",
                 "workgraph_close",
@@ -702,8 +747,10 @@ mod tests {
                 "workgraph_get",
                 "workgraph_create",
                 "workgraph_update",
+                "workgraph_policy_escalate",
                 "workgraph_link",
                 "workgraph_add_evidence",
+                "workgraph_attention_reassign",
             ])
         );
 
@@ -825,6 +872,35 @@ mod tests {
             .expect("dispatch");
         let value: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert_eq!(value["item"]["title"].as_str(), Some("surface item"));
+    }
+
+    #[tokio::test]
+    async fn default_workgraph_tool_surface_denies_attention_only_operations_without_projection() {
+        let surface =
+            WorkGraphToolSurface::new(WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new())));
+        let tools = surface.tools();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(names.contains("workgraph_attention_reassign"));
+        assert!(names.contains("workgraph_policy_escalate"));
+
+        for name in ["workgraph_attention_reassign", "workgraph_policy_escalate"] {
+            let args = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+            let err = surface
+                .dispatch(ToolCallView {
+                    id: "call-attention-only",
+                    name,
+                    args: &args,
+                })
+                .await
+                .expect_err("attention-only tool must not dispatch without projection");
+            assert!(
+                matches!(err, ToolError::AccessDenied { .. }),
+                "unexpected error for {name}: {err:?}"
+            );
+        }
     }
 
     /// Non-object tool args must fail closed as `InvalidArguments` instead of
@@ -1072,6 +1148,99 @@ mod tests {
             .await
             .expect_err("attention context must deny mutating another item");
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn broad_surface_dispatches_attention_reassign_with_turn_context_only() {
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-00000000002a")
+            .expect("valid session id");
+        let replacement_session_id =
+            meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-00000000002b")
+                .expect("valid session id");
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "Coordinate reassignment".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session { session_id },
+                mode: WorkAttentionMode::Coordinate,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+        let projection = service
+            .attention_projection(crate::AttentionProjectionRequest {
+                binding_id: goal.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("projection")
+            .projection;
+        assert!(projection.authority.can_link_derived_from);
+        let overlay = WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection)
+            .expect("attention projection must produce a turn overlay");
+        assert!(overlay.allowed_tools.as_ref().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool == "workgraph_attention_reassign")
+        }));
+
+        let surface = WorkGraphToolSurface::new(service);
+        assert!(
+            surface
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "workgraph_attention_reassign"),
+            "base dispatcher catalog must include attention-only tools so turn overlays can expose them"
+        );
+        let args = serde_json::value::RawValue::from_string(
+            json!({
+                "binding_id": goal.attention.binding_id,
+                "expected_revision": goal.attention.machine_state.revision,
+                "target": {
+                    "kind": "session",
+                    "session_id": replacement_session_id
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let unscoped_err = surface
+            .dispatch(ToolCallView {
+                id: "call-unscoped-reassign",
+                name: "workgraph_attention_reassign",
+                args: &args,
+            })
+            .await
+            .expect_err("attention-only reassignment requires a turn projection");
+        assert!(matches!(unscoped_err, ToolError::AccessDenied { .. }));
+
+        let context = ToolDispatchContext::default().with_turn_metadata(overlay.dispatch_context);
+        let outcome = surface
+            .dispatch_with_context(
+                ToolCallView {
+                    id: "call-scoped-reassign",
+                    name: "workgraph_attention_reassign",
+                    args: &args,
+                },
+                &context,
+            )
+            .await
+            .expect("attention context should inject authority projection and dispatch");
+        let value: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(
+            value["previous"]["binding_id"].as_str(),
+            Some(projection.binding_id.as_str())
+        );
+        assert_ne!(
+            value["attention"]["binding_id"].as_str(),
+            Some(projection.binding_id.as_str())
+        );
     }
 
     #[tokio::test]

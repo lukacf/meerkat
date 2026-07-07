@@ -2108,7 +2108,7 @@ impl SessionService for MockSessionService {
         self.flow_turn_overlays
             .write()
             .await
-            .push((id.clone(), req.runtime.flow_tool_overlay.clone()));
+            .push((id.clone(), req.runtime.turn_tool_overlay.clone()));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
         self.start_turn_prompts
             .write()
@@ -5172,7 +5172,7 @@ impl FlowTurnExecutor for UnusedFlowTurnExecutor {
         _step_id: &crate::StepId,
         _target: &AgentIdentity,
         _message: ContentInput,
-        _flow_tool_overlay: Option<TurnToolOverlay>,
+        _turn_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError> {
         Err(MobError::Internal(
             "unused flow turn executor dispatch called".into(),
@@ -5777,7 +5777,7 @@ impl SessionAgent for PersistentMockAgent {
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         _overlay: Option<meerkat_core::service::TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
@@ -6302,7 +6302,8 @@ fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<meerkat
 struct OverlayProbeSessionAgent {
     session: Session,
     provider_visible_tools: Arc<Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
-    flow_tool_overlay: Option<TurnToolOverlay>,
+    provider_turn_overlays: Arc<Mutex<Vec<Option<TurnToolOverlay>>>>,
+    turn_tool_overlay: Option<TurnToolOverlay>,
     system_context_state: meerkat_core::SystemContextStateHandle,
 }
 
@@ -6313,11 +6314,15 @@ impl SessionAgent for OverlayProbeSessionAgent {
         _prompt: meerkat_core::types::ContentInput,
         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        let visible_tools = overlay_probe_visible_tools(self.flow_tool_overlay.as_ref());
+        let visible_tools = overlay_probe_visible_tools(self.turn_tool_overlay.as_ref());
         self.provider_visible_tools
             .lock()
             .expect("provider_visible_tools lock poisoned")
             .push(visible_tools);
+        self.provider_turn_overlays
+            .lock()
+            .expect("provider_turn_overlays lock poisoned")
+            .push(self.turn_tool_overlay.clone());
         let session_id = self.session.id().clone();
         let result = mock_run_result(session_id.clone(), "{}".to_string());
         let _ = event_tx
@@ -6354,11 +6359,11 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        self.flow_tool_overlay = overlay;
+        self.turn_tool_overlay = overlay;
         Ok(())
     }
 
@@ -6419,6 +6424,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
 struct OverlayProbeSessionAgentBuilder {
     provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
+    provider_turn_overlays: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
 }
 
 #[async_trait]
@@ -6440,7 +6446,8 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         Ok(OverlayProbeSessionAgent {
             session,
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
-            flow_tool_overlay: None,
+            provider_turn_overlays: Arc::clone(&self.provider_turn_overlays),
+            turn_tool_overlay: None,
             system_context_state: system_context_handle_for_test(
                 SessionSystemContextState::default(),
             ),
@@ -6454,24 +6461,41 @@ async fn create_test_mob_with_overlay_probe_service(
     MobHandle,
     Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
 ) {
+    let (handle, provider_visible_tools, _) =
+        create_test_mob_with_overlay_probe_service_and_workgraph(definition, None).await;
+    (handle, provider_visible_tools)
+}
+
+async fn create_test_mob_with_overlay_probe_service_and_workgraph(
+    definition: MobDefinition,
+    workgraph_service: Option<meerkat::WorkGraphService>,
+) -> (
+    MobHandle,
+    Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
+    Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
+) {
     let provider_visible_tools = Arc::new(std::sync::Mutex::new(
         Vec::<Vec<meerkat_core::ToolName>>::new(),
     ));
+    let provider_turn_overlays =
+        Arc::new(std::sync::Mutex::new(Vec::<Option<TurnToolOverlay>>::new()));
     let session_service = Arc::new(meerkat_session::EphemeralSessionService::new(
         OverlayProbeSessionAgentBuilder {
             provider_visible_tools: Arc::clone(&provider_visible_tools),
+            provider_turn_overlays: Arc::clone(&provider_turn_overlays),
         },
         16,
     ));
 
     let handle = MobBuilder::new(definition, MobStorage::in_memory())
         .with_session_service(session_service)
+        .with_workgraph_service(workgraph_service)
         .allow_ephemeral_sessions(true)
         .create()
         .await
         .expect("create mob with overlay probe session service");
 
-    (handle, provider_visible_tools)
+    (handle, provider_visible_tools, provider_turn_overlays)
 }
 
 // -----------------------------------------------------------------------
@@ -13871,6 +13895,137 @@ async fn test_flow_step_tool_overlay_changes_runtime_visible_tools_and_restores_
         seen[1],
         vec!["alpha".to_string(), "beta".to_string()],
         "next non-flow turn should restore baseline visible tools"
+    );
+}
+
+#[tokio::test]
+async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn() {
+    let definition = sample_definition();
+    let identity = AgentIdentity::from("w-attention");
+    let workgraph_service = meerkat::WorkGraphService::with_scope(
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
+        "mob-attention-realm",
+        meerkat::WorkNamespace::new("goals").expect("namespace"),
+    );
+    let goal = workgraph_service
+        .create_goal(meerkat::GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Keep reviewer focused after respawn".to_string(),
+            description: None,
+            target: crate::lower_agent_identity_attention_target(&definition.id, &identity)
+                .expect("lower mob identity to owner target"),
+            mode: meerkat::WorkAttentionMode::Coordinate,
+            completion_policy: meerkat::WorkCompletionPolicy::SelfAttest,
+            delegated_authority: meerkat::AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: meerkat::AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create owner-bound goal");
+
+    let (handle, provider_visible_tools, provider_turn_overlays) =
+        create_test_mob_with_overlay_probe_service_and_workgraph(
+            definition,
+            Some(workgraph_service.clone()),
+        )
+        .await;
+    let original_session = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .respawn(identity.clone(), None)
+        .await
+        .expect("respawn worker");
+    let member = handle.member(&identity).await.expect("member handle");
+    let respawned_session = member
+        .current_bridge_session_id()
+        .await
+        .expect("bridge lookup")
+        .expect("respawned bridge session");
+    assert_ne!(
+        respawned_session, original_session,
+        "respawn must rotate the mortal session id"
+    );
+
+    member
+        .internal_turn("continue under owner-bound goal attention")
+        .await
+        .expect("deliver respawned member turn");
+
+    let seen_tools = provider_visible_tools
+        .lock()
+        .expect("provider_visible_tools lock poisoned")
+        .clone();
+    let scoped_tools = seen_tools.last().expect("provider call recorded");
+    assert!(
+        scoped_tools
+            .iter()
+            .all(|name| name.starts_with("workgraph_")),
+        "attention turn should replace baseline tools with WorkGraph-scoped tools: {scoped_tools:?}"
+    );
+    for expected in [
+        "workgraph_get",
+        "workgraph_create",
+        "workgraph_update",
+        "workgraph_link",
+        "workgraph_add_evidence",
+        "workgraph_attention_reassign",
+    ] {
+        assert!(
+            scoped_tools.iter().any(|name| name == expected),
+            "attention-scoped turn should expose {expected}: {scoped_tools:?}"
+        );
+    }
+
+    let overlay = provider_turn_overlays
+        .lock()
+        .expect("provider_turn_overlays lock poisoned")
+        .last()
+        .cloned()
+        .flatten()
+        .expect("attention turn overlay");
+    let projection = meerkat::workgraph_attention_projection_from_overlay(Some(&overlay))
+        .expect("decode attention projection from overlay")
+        .expect("attention projection present");
+    assert_eq!(projection.binding_id, goal.attention.binding_id);
+    assert_eq!(projection.work_ref.item_id, goal.item.id);
+
+    workgraph_service
+        .pause_attention(meerkat::AttentionPauseRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
+            until: None,
+        })
+        .await
+        .expect("revise binding mid-flight");
+    let stale_surface =
+        meerkat::WorkGraphToolSurface::with_attention_projection(workgraph_service, projection);
+    let raw = RawValue::from_string(serde_json::json!({ "id": goal.item.id }).to_string())
+        .expect("raw workgraph_get args");
+    let stale_error = stale_surface
+        .dispatch(ToolCallView {
+            id: "stale-get",
+            name: "workgraph_get",
+            args: &raw,
+        })
+        .await
+        .expect_err("stale projection must fail closed");
+    assert!(
+        format!("{stale_error:?}").contains("stale or inactive WorkGraph attention projection"),
+        "unexpected stale projection error: {stale_error:?}"
     );
 }
 
@@ -22804,7 +22959,7 @@ async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unreg
     ));
     service.set_runtime_adapter(adapter.clone());
     let provisioner =
-        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
     let session = Session::new();
     let session_id = session.id().clone();
     let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
@@ -22881,7 +23036,7 @@ async fn test_retire_completes_when_archive_notfounds_a_terminal_registered_runt
     ));
     service.set_runtime_adapter(adapter.clone());
     let provisioner =
-        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
 
     // The session is persisted (the ownership probe claims it) but the
     // archive authority NotFounds — the identity-first wiring disagreement.
@@ -22958,7 +23113,7 @@ async fn test_retire_session_owned_member_completes_disposal_on_archive_authorit
     ));
     service.set_runtime_adapter(adapter.clone());
     let provisioner =
-        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
 
     // The session exists ONLY in the runtime adapter — never created through
     // the mob session service, so the archive authority has no durable
@@ -23075,6 +23230,7 @@ async fn cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_s
     let mut executor = super::provisioner::MobSessionRuntimeExecutor::new(
         service.clone(),
         adapter.clone(),
+        None,
         session_id.clone(),
         state.clone(),
         runtime_sessions.clone(),
@@ -23123,7 +23279,7 @@ async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_r
     ));
     service.set_runtime_adapter(adapter.clone());
     let provisioner =
-        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
     let session = Session::new();
     let session_id = session.id().clone();
     let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
@@ -23240,7 +23396,7 @@ async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
     let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
     service.set_runtime_adapter(adapter.clone());
     let provisioner =
-        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
     let session = Session::new();
     let session_id = session.id().clone();
     let apply_started = Arc::new(tokio::sync::Notify::new());
@@ -23774,7 +23930,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
     )
     .with_consumer(signal_surface.clone());
     adapter.set_composition_signal_dispatcher(Arc::new(dispatcher));
-    let provisioner = super::provisioner::SessionBackend::new(service, Some(adapter.clone()));
+    let provisioner = super::provisioner::SessionBackend::new(service, Some(adapter.clone()), None);
     let bridge_session = Session::new();
     let bridge_session_id = bridge_session.id().clone();
 
@@ -23839,7 +23995,7 @@ async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_inte
         })
         .await
         .expect("create session-backed member");
-    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None, None);
     let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
     let wake = service
         .keep_alive_notifiers
@@ -23896,7 +24052,7 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
         })
         .await
         .expect("create session-backed member");
-    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None, None);
     let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
     let baseline_boundary = service.cancel_after_boundary_call_count();
     let baseline_interrupts = service.interrupt_call_count();
@@ -23948,7 +24104,7 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
         })
         .await
         .expect("create session-backed member");
-    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None);
+    let provisioner = super::provisioner::SessionBackend::new(service.clone(), None, None);
     let member_ref = MemberRef::from_bridge_session_id(session.session_id.clone());
     let baseline_boundary = service.cancel_after_boundary_call_count();
     let baseline_interrupts = service.interrupt_call_count();

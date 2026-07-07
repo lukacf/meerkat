@@ -26,7 +26,7 @@ use meerkat_contracts::{
     WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
 };
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
-use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
+use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::{
     AgentIdentity, FlowId, MemberRespawnReceipt, MobBackendKind, MobError, MobId, MobMemberStatus,
@@ -2201,7 +2201,7 @@ pub async fn handle_mob_turn_start(
         // field; older clients that still send it are rejected at the contract
         // serde boundary (`deny_unknown_fields`). Nothing to thread here.
         skill_references: None,
-        flow_tool_overlay: mob_params.flow_tool_overlay.map(TurnToolOverlay::from),
+        turn_tool_overlay: mob_params.turn_tool_overlay,
         additional_instructions: mob_params.additional_instructions,
         keep_alive: mob_params.keep_alive,
         model: mob_params.model,
@@ -3034,7 +3034,7 @@ mod tests {
             "mob_id": "m1",
             "agent_identity": "w1",
             "prompt": [{"type": "text", "text": "continue"}],
-            "flow_tool_overlay": {
+            "turn_tool_overlay": {
                 "allowed_tools": ["read"],
                 "blocked_tools": []
             },
@@ -3061,7 +3061,7 @@ mod tests {
         ));
         assert_eq!(
             params
-                .flow_tool_overlay
+                .turn_tool_overlay
                 .as_ref()
                 .and_then(|overlay| overlay.allowed_tools.as_ref())
                 .expect("allowed tools"),
@@ -3142,7 +3142,7 @@ mod tests {
             prompt,
             skill_refs: mob_params.skill_refs,
             skill_references: None,
-            flow_tool_overlay: mob_params.flow_tool_overlay.map(TurnToolOverlay::from),
+            turn_tool_overlay: mob_params.turn_tool_overlay,
             additional_instructions: mob_params.additional_instructions,
             keep_alive: mob_params.keep_alive,
             model: mob_params.model,

@@ -47,6 +47,7 @@ pub struct MobBuilder {
     session_service: Option<Arc<dyn MobSessionService>>,
     #[cfg(feature = "runtime-adapter")]
     runtime_adapter: RuntimeAdapterOption,
+    workgraph_service: Option<meerkat::WorkGraphService>,
     allow_ephemeral_sessions: bool,
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -1838,6 +1839,7 @@ impl MobBuilder {
             session_service: None,
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter: None,
+            workgraph_service: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
@@ -1892,6 +1894,7 @@ impl MobBuilder {
             session_service: None,
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter: None,
+            workgraph_service: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
@@ -1943,6 +1946,11 @@ impl MobBuilder {
     #[cfg(feature = "runtime-adapter")]
     pub fn with_runtime_adapter(mut self, adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
         self.runtime_adapter = Some(adapter);
+        self
+    }
+
+    pub fn with_workgraph_service(mut self, service: Option<meerkat::WorkGraphService>) -> Self {
+        self.workgraph_service = service;
         self
     }
 
@@ -2023,6 +2031,7 @@ impl MobBuilder {
             session_service,
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
+            workgraph_service,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume: _,
             tool_bundles,
@@ -2172,6 +2181,7 @@ impl MobBuilder {
             supervisor_bridge,
             session_service,
             runtime_adapter,
+            workgraph_service,
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
@@ -2195,6 +2205,7 @@ impl MobBuilder {
             session_service,
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
+            workgraph_service,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume,
             tool_bundles,
@@ -2414,6 +2425,7 @@ impl MobBuilder {
                 &mut roster,
                 &session_service,
                 runtime_adapter.clone(),
+                workgraph_service.clone(),
                 supervisor_bridge.clone(),
                 notify_orchestrator_on_resume,
                 default_llm_client.clone(),
@@ -2453,6 +2465,7 @@ impl MobBuilder {
             storage.runs.clone(),
             session_service,
             runtime_adapter,
+            workgraph_service,
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
@@ -2609,6 +2622,7 @@ impl MobBuilder {
         roster: &mut Roster,
         session_service: &Arc<dyn MobSessionService>,
         runtime_adapter: RuntimeAdapterOption,
+        workgraph_service: Option<meerkat::WorkGraphService>,
         supervisor_bridge: Arc<MobSupervisorBridge>,
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -2632,6 +2646,7 @@ impl MobBuilder {
         let provisioner = MultiBackendProvisioner::new(
             session_service.clone(),
             runtime_adapter.clone(),
+            workgraph_service,
             definition.backend.external.clone(),
             supervisor_bridge,
         );
@@ -3587,6 +3602,7 @@ impl MobBuilder {
         supervisor_bridge: Arc<MobSupervisorBridge>,
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: RuntimeAdapterOption,
+        workgraph_service: Option<meerkat::WorkGraphService>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
@@ -3632,6 +3648,7 @@ impl MobBuilder {
             run_store,
             session_service,
             runtime_adapter,
+            workgraph_service,
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
@@ -3650,6 +3667,7 @@ impl MobBuilder {
         run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: RuntimeAdapterOption,
+        workgraph_service: Option<meerkat::WorkGraphService>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
@@ -3694,6 +3712,7 @@ impl MobBuilder {
             MultiBackendProvisioner::new(
                 session_service,
                 runtime_adapter.clone(),
+                workgraph_service,
                 external_backend,
                 supervisor_bridge.clone(),
             )

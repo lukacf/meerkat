@@ -6205,6 +6205,103 @@
   },
   "AttentionReassignRequest": {
     "$defs": {
+      "AttentionContextProjection": {
+        "properties": {
+          "authority": {
+            "$ref": "#/$defs/ProjectedAttentionAuthority"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "binding_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/$defs/WorkEvidenceRef"
+            },
+            "type": "array"
+          },
+          "item_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "parent_context": {
+            "items": {
+              "$ref": "#/$defs/AttentionProjectionParentContext"
+            },
+            "type": "array"
+          },
+          "parent_refs": {
+            "items": {
+              "$ref": "#/$defs/WorkItemRef"
+            },
+            "type": "array"
+          },
+          "text": {
+            "$ref": "#/$defs/AttentionProjectionText"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "mode",
+          "binding_revision",
+          "item_revision",
+          "authority",
+          "text"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionParentContext": {
+        "properties": {
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkStatus"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "work_ref",
+          "status",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionText": {
+        "properties": {
+          "rendered": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "title",
+          "rendered",
+          "truncated"
+        ],
+        "type": "object"
+      },
       "GoalAttentionTarget": {
         "oneOf": [
           {
@@ -6222,18 +6319,232 @@
               "session_id"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
           }
         ]
       },
+      "ProjectedAttentionAuthority": {
+        "properties": {
+          "can_add_evidence": {
+            "type": "boolean"
+          },
+          "can_block": {
+            "type": "boolean"
+          },
+          "can_close_if_policy_allows": {
+            "type": "boolean"
+          },
+          "can_close_own_review_item": {
+            "default": false,
+            "type": "boolean"
+          },
+          "can_create": {
+            "type": "boolean"
+          },
+          "can_get": {
+            "type": "boolean"
+          },
+          "can_link": {
+            "type": "boolean"
+          },
+          "can_link_derived_from": {
+            "type": "boolean"
+          },
+          "can_link_parent": {
+            "type": "boolean"
+          },
+          "can_link_related": {
+            "type": "boolean"
+          },
+          "can_release": {
+            "type": "boolean"
+          },
+          "can_update": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "can_get",
+          "can_add_evidence",
+          "can_release",
+          "can_update",
+          "can_block",
+          "can_create",
+          "can_link",
+          "can_link_parent",
+          "can_link_related",
+          "can_link_derived_from",
+          "can_close_if_policy_allows"
+        ],
+        "type": "object"
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
+      "WorkEvidenceRef": {
+        "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "Opaque provenance/display label for the evidence. It is parsed into the\ntyped confirmation classification at the ingress boundary only (see\n[`WorkEvidenceRef::confirmation_classification`]); no completion-policy\nsatisfaction decision re-reads this string. The typed\n[`WorkEvidenceRef::confirmation_kind`] is the authoritative carrier.",
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      },
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
         "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
+      "authority_projection": {
+        "$ref": "#/$defs/AttentionContextProjection"
+      },
       "binding_id": {
         "type": "string"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "namespace": {
         "type": [
@@ -6253,9 +6564,305 @@
     },
     "required": [
       "binding_id",
+      "expected_revision",
+      "authority_projection",
       "target"
     ],
     "title": "AttentionReassignRequest",
+    "type": "object"
+  },
+  "AttentionReassignResult": {
+    "$defs": {
+      "AttentionDelegatedAuthority": {
+        "enum": [
+          "add_evidence",
+          "close_own_review_item",
+          "request_closure",
+          "close_if_policy_allows"
+        ],
+        "type": "string"
+      },
+      "AttentionProjectionPolicy": {
+        "properties": {
+          "include_parent_context": {
+            "default": true,
+            "type": "boolean"
+          },
+          "max_text_chars": {
+            "default": 4096,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "WorkAttentionBinding": {
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegated_authority": {
+            "$ref": "#/$defs/AttentionDelegatedAuthority"
+          },
+          "machine_state": {
+            "$ref": "#/$defs/WorkAttentionMachineStateSchema",
+            "default": {
+              "lifecycle_phase": "active",
+              "paused_until_utc_ms": null,
+              "revision": 1,
+              "superseded_by_binding_key": null,
+              "terminal_at_utc_ms": null
+            }
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "projection_policy": {
+            "$ref": "#/$defs/AttentionProjectionPolicy",
+            "default": {
+              "include_parent_context": true,
+              "max_text_chars": 4096
+            }
+          },
+          "status": {
+            "$ref": "#/$defs/WorkAttentionStatus"
+          },
+          "target": {
+            "$ref": "#/$defs/WorkAttentionTarget"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "target",
+          "mode",
+          "status",
+          "delegated_authority",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMachineStateSchema": {
+        "properties": {
+          "lifecycle_phase": {
+            "type": "string"
+          },
+          "paused_until_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_binding_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_at_utc_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "lifecycle_phase",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkAttentionStatus": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "paused",
+                "type": "string"
+              },
+              "until": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkAttentionTarget": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "lowered_owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "attention": {
+        "$ref": "#/$defs/WorkAttentionBinding"
+      },
+      "previous": {
+        "$ref": "#/$defs/WorkAttentionBinding"
+      }
+    },
+    "required": [
+      "previous",
+      "attention"
+    ],
+    "title": "AttentionReassignResult",
     "type": "object"
   },
   "AttentionResumeRequest": {
@@ -17286,6 +17893,31 @@
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17303,6 +17935,22 @@
         "required": [
           "kind",
           "session_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "owner",
+            "type": "string"
+          },
+          "owner_key": {
+            "$ref": "#/$defs/WorkOwnerKey"
+          }
+        },
+        "required": [
+          "kind",
+          "owner_key"
         ],
         "type": "object"
       }
@@ -17819,8 +18467,8 @@
                   },
                   "threshold": {
                     "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
+                    "maximum": 64,
+                    "minimum": 1,
                     "type": "integer"
                   }
                 },
@@ -18191,6 +18839,22 @@
               "session_id"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -18271,8 +18935,8 @@
               },
               "threshold": {
                 "format": "uint16",
-                "maximum": 65535,
-                "minimum": 0,
+                "maximum": 64,
+                "minimum": 1,
                 "type": "integer"
               }
             },
@@ -18744,8 +19408,8 @@
                   },
                   "threshold": {
                     "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
+                    "maximum": 64,
+                    "minimum": 1,
                     "type": "integer"
                   }
                 },
@@ -19497,8 +20161,8 @@
                   },
                   "threshold": {
                     "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
+                    "maximum": 64,
+                    "minimum": 1,
                     "type": "integer"
                   }
                 },
@@ -20230,8 +20894,8 @@
                   },
                   "threshold": {
                     "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
+                    "maximum": 64,
+                    "minimum": 1,
                     "type": "integer"
                   }
                 },
@@ -29423,6 +30087,409 @@
     ],
     "title": "PeerTransport"
   },
+  "PolicyEscalateRequest": {
+    "$defs": {
+      "AttentionContextProjection": {
+        "properties": {
+          "authority": {
+            "$ref": "#/$defs/ProjectedAttentionAuthority"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "binding_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/$defs/WorkEvidenceRef"
+            },
+            "type": "array"
+          },
+          "item_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/$defs/WorkAttentionMode"
+          },
+          "parent_context": {
+            "items": {
+              "$ref": "#/$defs/AttentionProjectionParentContext"
+            },
+            "type": "array"
+          },
+          "parent_refs": {
+            "items": {
+              "$ref": "#/$defs/WorkItemRef"
+            },
+            "type": "array"
+          },
+          "text": {
+            "$ref": "#/$defs/AttentionProjectionText"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "binding_id",
+          "work_ref",
+          "mode",
+          "binding_revision",
+          "item_revision",
+          "authority",
+          "text"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionParentContext": {
+        "properties": {
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkStatus"
+          },
+          "work_ref": {
+            "$ref": "#/$defs/WorkItemRef"
+          }
+        },
+        "required": [
+          "work_ref",
+          "status",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "AttentionProjectionText": {
+        "properties": {
+          "rendered": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "title",
+          "rendered",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "ProjectedAttentionAuthority": {
+        "properties": {
+          "can_add_evidence": {
+            "type": "boolean"
+          },
+          "can_block": {
+            "type": "boolean"
+          },
+          "can_close_if_policy_allows": {
+            "type": "boolean"
+          },
+          "can_close_own_review_item": {
+            "default": false,
+            "type": "boolean"
+          },
+          "can_create": {
+            "type": "boolean"
+          },
+          "can_get": {
+            "type": "boolean"
+          },
+          "can_link": {
+            "type": "boolean"
+          },
+          "can_link_derived_from": {
+            "type": "boolean"
+          },
+          "can_link_parent": {
+            "type": "boolean"
+          },
+          "can_link_related": {
+            "type": "boolean"
+          },
+          "can_release": {
+            "type": "boolean"
+          },
+          "can_update": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "can_get",
+          "can_add_evidence",
+          "can_release",
+          "can_update",
+          "can_block",
+          "can_create",
+          "can_link",
+          "can_link_parent",
+          "can_link_related",
+          "can_link_derived_from",
+          "can_close_if_policy_allows"
+        ],
+        "type": "object"
+      },
+      "WorkAttentionMode": {
+        "enum": [
+          "pursue",
+          "coordinate",
+          "review",
+          "falsify",
+          "judge",
+          "observe"
+        ],
+        "type": "string"
+      },
+      "WorkCompletionPolicy": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "self_attest",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "host_confirmed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "principal_confirmed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "supervisor",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "reviewer_quorum",
+                "type": "string"
+              },
+              "threshold": {
+                "format": "uint16",
+                "maximum": 64,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "threshold"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkEvidenceKind": {
+        "description": "Typed classification of confirmation evidence.\n\nThis is the canonical signal the `WorkGraphLifecycleMachine` consumes to\ndecide completion-policy satisfaction. The producer\n(`confirmation_evidence_for_policy`) sets this field; the raw\n[`WorkEvidenceRef::kind`] string remains only as opaque provenance/display\nand is never re-read to classify evidence for the satisfaction decision.",
+        "oneOf": [
+          {
+            "enum": [
+              "host_confirmation",
+              "principal_confirmation",
+              "supervisor_confirmation",
+              "reviewer_confirmation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "self_attest",
+            "description": "Generic / self-attested evidence that does not satisfy any\nconfirmation policy on its own.",
+            "type": "string"
+          }
+        ]
+      },
+      "WorkEvidenceRef": {
+        "properties": {
+          "confirmation_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkEvidenceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed confirmation classification set by the trusted producer. Drives the\nmachine-owned completion-policy satisfaction decision. Generic evidence\nleaves this unset (treated as `SelfAttest`)."
+          },
+          "confirming_owner_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkOwnerKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed identity of the confirming owner for supervisor/reviewer\nconfirmations. Set by the trusted producer; the machine records distinct\nowners per confirmation kind."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "Opaque provenance/display label for the evidence. It is parsed into the\ntyped confirmation classification at the ingress boundary only (see\n[`WorkEvidenceRef::confirmation_classification`]); no completion-policy\nsatisfaction decision re-reads this string. The typed\n[`WorkEvidenceRef::confirmation_kind`] is the authoritative carrier.",
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkItemRef": {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "namespace",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
+        ],
+        "type": "string"
+      },
+      "WorkStatus": {
+        "enum": [
+          "open",
+          "in_progress",
+          "blocked",
+          "completed",
+          "cancelled",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "authority_projection": {
+        "$ref": "#/$defs/AttentionContextProjection"
+      },
+      "completion_policy": {
+        "$ref": "#/$defs/WorkCompletionPolicy"
+      },
+      "expected_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "id": {
+        "type": "string"
+      },
+      "namespace": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "id",
+      "expected_revision",
+      "authority_projection",
+      "completion_policy"
+    ],
+    "title": "PolicyEscalateRequest",
+    "type": "object"
+  },
   "ProjectedAttentionAuthority": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
@@ -29541,6 +30608,22 @@
               "session_id"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "owner",
+                "type": "string"
+              },
+              "owner_key": {
+                "$ref": "#/$defs/WorkOwnerKey"
+              }
+            },
+            "required": [
+              "kind",
+              "owner_key"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -29572,6 +30655,31 @@
           "falsify",
           "judge",
           "observe"
+        ],
+        "type": "string"
+      },
+      "WorkOwnerKey": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WorkOwnerKind"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "WorkOwnerKind": {
+        "enum": [
+          "principal",
+          "agent",
+          "session",
+          "mob",
+          "label"
         ],
         "type": "string"
       }
@@ -48695,79 +49803,6 @@
     ],
     "title": "ModelRoutingApprovalPhase"
   },
-  "WireModelRoutingApprovalRequest": {
-    "$defs": {
-      "ImageOperationApprovalReason": {
-        "enum": [
-          "cross_provider",
-          "cost_exceeds_threshold",
-          "safety_hold",
-          "realtime_detach_required"
-        ],
-        "type": "string"
-      },
-      "ImageOperationId": {
-        "type": "string"
-      },
-      "SwitchTurnApprovalReason": {
-        "enum": [
-          "cross_provider",
-          "cost_exceeds_threshold",
-          "safety_hold",
-          "until_changed_from_model_origin",
-          "realtime_detach_required"
-        ],
-        "type": "string"
-      },
-      "SwitchTurnRequestId": {
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "oneOf": [
-      {
-        "properties": {
-          "parent": {
-            "const": "switch_turn",
-            "type": "string"
-          },
-          "reason": {
-            "$ref": "#/$defs/SwitchTurnApprovalReason"
-          },
-          "request_id": {
-            "$ref": "#/$defs/SwitchTurnRequestId"
-          }
-        },
-        "required": [
-          "parent",
-          "request_id",
-          "reason"
-        ],
-        "type": "object"
-      },
-      {
-        "properties": {
-          "operation_id": {
-            "$ref": "#/$defs/ImageOperationId"
-          },
-          "parent": {
-            "const": "image_operation",
-            "type": "string"
-          },
-          "reason": {
-            "$ref": "#/$defs/ImageOperationApprovalReason"
-          }
-        },
-        "required": [
-          "parent",
-          "operation_id",
-          "reason"
-        ],
-        "type": "object"
-      }
-    ],
-    "title": "ModelRoutingApprovalRequest"
-  },
   "WirePeerConnectivity": {
     "$defs": {
       "WirePeerConnectivitySnapshot": {
@@ -58931,8 +59966,8 @@
           },
           "threshold": {
             "format": "uint16",
-            "maximum": 65535,
-            "minimum": 0,
+            "maximum": 64,
+            "minimum": 1,
             "type": "integer"
           }
         },
@@ -59179,8 +60214,8 @@
                   },
                   "threshold": {
                     "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
+                    "maximum": 64,
+                    "minimum": 1,
                     "type": "integer"
                   }
                 },
@@ -59884,8 +60919,8 @@
                   },
                   "threshold": {
                     "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
+                    "maximum": 64,
+                    "minimum": 1,
                     "type": "integer"
                   }
                 },
@@ -60406,8 +61441,8 @@
               },
               "threshold": {
                 "format": "uint16",
-                "maximum": 65535,
-                "minimum": 0,
+                "maximum": 64,
+                "minimum": 1,
                 "type": "integer"
               }
             },

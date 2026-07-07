@@ -1290,7 +1290,6 @@ export interface MobTurnStartParams {
   additional_instructions?: string[];
   agent_identity: string;
   auth_binding?: Record<string, unknown>;
-  flow_tool_overlay?: PublicTurnToolOverlay;
   injected_context?: WireContentInput[];
   keep_alive?: boolean;
   max_tokens?: number;
@@ -1303,6 +1302,7 @@ export interface MobTurnStartParams {
   skill_refs?: SkillKey[];
   structured_output_retries?: number;
   system_prompt?: string;
+  turn_tool_overlay?: PublicTurnToolOverlay;
 }
 
 export interface MobMemberStatusResult {
@@ -1630,19 +1630,6 @@ export interface AttentionBindingResult {
   attention: WorkAttentionBinding;
 }
 
-export interface AttentionContextProjection {
-  authority: ProjectedAttentionAuthority;
-  binding_id: string;
-  binding_revision: number;
-  evidence_refs?: WorkEvidenceRef[];
-  item_revision: number;
-  mode: WorkAttentionMode;
-  parent_context?: Record<string, unknown>[];
-  parent_refs?: WorkItemRef[];
-  text: AttentionProjectionText;
-  work_ref: WorkItemRef;
-}
-
 export interface AttentionListRequest {
   namespace?: string;
   realm_id?: string;
@@ -1659,29 +1646,6 @@ export interface AttentionProjectionPolicy {
   max_text_chars?: number;
 }
 
-export interface AttentionProjectionRequest {
-  binding_id: string;
-  namespace?: string;
-  realm_id?: string;
-}
-
-export interface AttentionProjectionResult {
-  projection: AttentionContextProjection;
-}
-
-export interface AttentionProjectionText {
-  rendered: string;
-  title: string;
-  truncated: boolean;
-}
-
-export interface AttentionReassignRequest {
-  binding_id: string;
-  namespace?: string;
-  realm_id?: string;
-  target: GoalAttentionTarget;
-}
-
 export interface GoalStatusRequest {
   binding_id: string;
   namespace?: string;
@@ -1691,21 +1655,6 @@ export interface GoalStatusRequest {
 export interface GoalStatusResult {
   attention: WorkAttentionBinding;
   item: WorkItem;
-}
-
-export interface ProjectedAttentionAuthority {
-  can_add_evidence: boolean;
-  can_block: boolean;
-  can_close_if_policy_allows: boolean;
-  can_close_own_review_item?: boolean;
-  can_create: boolean;
-  can_get: boolean;
-  can_link: boolean;
-  can_link_derived_from: boolean;
-  can_link_parent: boolean;
-  can_link_related: boolean;
-  can_release: boolean;
-  can_update: boolean;
 }
 
 export interface ReadyWorkFilter {
@@ -2297,7 +2246,12 @@ export interface GoalAttentionTargetSession {
   session_id: string;
 }
 
-export type GoalAttentionTarget = GoalAttentionTargetSession;
+export interface GoalAttentionTargetOwner {
+  kind: "owner";
+  owner_key: WorkOwnerKey;
+}
+
+export type GoalAttentionTarget = GoalAttentionTargetSession | GoalAttentionTargetOwner;
 
 export type WorkAttentionMode = "pursue" | "coordinate" | "review" | "falsify" | "judge" | "observe";
 

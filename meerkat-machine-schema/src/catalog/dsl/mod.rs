@@ -3398,6 +3398,10 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 &["Denied", "Admitted"],
             ),
             NamedTypeBinding::string_enum(
+                "WorkPolicyEscalationAdmissionKind",
+                &["Denied", "Admitted"],
+            ),
+            NamedTypeBinding::string_enum(
                 "WorkConfirmationEvidenceObservation",
                 &[
                     "Empty",

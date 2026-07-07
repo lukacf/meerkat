@@ -7420,7 +7420,7 @@ mod tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), meerkat_core::error::AgentError> {
@@ -7686,11 +7686,11 @@ mod tests {
             self.inner.set_skill_references(refs);
         }
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), meerkat_core::error::AgentError> {
-            self.inner.set_flow_tool_overlay(overlay)
+            self.inner.set_turn_tool_overlay(overlay)
         }
 
         fn cancel(&mut self) {
@@ -7859,11 +7859,11 @@ mod tests {
             self.inner.set_skill_references(refs);
         }
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), meerkat_core::error::AgentError> {
-            self.inner.set_flow_tool_overlay(overlay)
+            self.inner.set_turn_tool_overlay(overlay)
         }
 
         fn cancel(&mut self) {
@@ -8265,11 +8265,11 @@ mod tests {
             self.inner.set_skill_references(refs);
         }
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), meerkat_core::error::AgentError> {
-            self.inner.set_flow_tool_overlay(overlay)
+            self.inner.set_turn_tool_overlay(overlay)
         }
 
         fn cancel(&mut self) {
@@ -8493,7 +8493,7 @@ mod tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), meerkat_core::error::AgentError> {
@@ -8755,7 +8755,7 @@ mod tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), meerkat_core::error::AgentError> {

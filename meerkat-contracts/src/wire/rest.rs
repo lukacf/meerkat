@@ -181,10 +181,10 @@ pub struct RestContinueSessionRequest {
     /// Structured refs for per-turn skill injection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_refs: Option<Vec<SkillRef>>,
-    /// Optional per-turn flow tool overlay (caller-safe public shape;
+    /// Optional per-turn tool overlay (caller-safe public shape;
     /// runtime-owned dispatch metadata is not accepted at this boundary).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_tool_overlay: Option<PublicTurnToolOverlay>,
+    pub turn_tool_overlay: Option<PublicTurnToolOverlay>,
     /// Additional instruction sections prepended as system notices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,

@@ -976,6 +976,7 @@ impl MethodRouter {
                     Some(runtime_adapter.clone()),
                 )
                 .with_persistent_storage_root(persistent_mob_root)
+                .with_workgraph_service(runtime.workgraph_service().ok())
                 .with_default_llm_client_provider(Some(llm_provider))
                 .with_external_tools_provider(Some(tools_provider))
             });
@@ -8250,7 +8251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_start_accepts_flow_tool_overlay() {
+    async fn turn_start_accepts_turn_tool_overlay() {
         let (router, _notif_rx) = test_router().await;
         let create_req = make_request("session/create", serde_json::json!({"prompt":"Hello"}));
         let create_resp = router.dispatch(create_req).await.unwrap();
@@ -8265,7 +8266,7 @@ mod tests {
             serde_json::json!({
                 "session_id": session_id,
                 "prompt": "continue with overlay",
-                "flow_tool_overlay": {
+                "turn_tool_overlay": {
                     "allowed_tools": [],
                     "blocked_tools": []
                 }
@@ -8277,6 +8278,36 @@ mod tests {
             turned["session_id"].as_str().expect("session id"),
             created["session_id"].as_str().expect("session id")
         );
+    }
+
+    #[tokio::test]
+    async fn turn_start_rejects_dispatch_context_in_turn_tool_overlay() {
+        let (router, _notif_rx) = test_router().await;
+        let create_req = make_request("session/create", serde_json::json!({"prompt":"Hello"}));
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let turn_req = make_request(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "continue with overlay",
+                "turn_tool_overlay": {
+                    "allowed_tools": [],
+                    "dispatch_context": {
+                        "workgraph.attention_projection": {
+                            "binding_id": "attention-1"
+                        }
+                    }
+                }
+            }),
+        );
+        let turn_resp = router.dispatch(turn_req).await.unwrap();
+        assert_eq!(error_code(&turn_resp), error::INVALID_PARAMS);
     }
 
     /// 2. Unknown method returns METHOD_NOT_FOUND error.

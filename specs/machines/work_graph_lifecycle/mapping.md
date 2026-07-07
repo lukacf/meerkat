@@ -32,6 +32,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `UpdateBlocked`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`
+- `PolicyEscalateOpenAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PolicyEscalateOpenDenied`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PolicyEscalateInProgressAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PolicyEscalateInProgressDenied`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PolicyEscalateBlockedAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PolicyEscalateBlockedDenied`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClaimOpen`
   - anchors: `workgraph_lifecycle`
   - scenarios: `workgraph_create_update_ready_claim`
@@ -1017,6 +1035,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `CompletionPolicyMutationAdmissionClassified`
   - anchors: `workgraph_lifecycle`
+  - scenarios: (unclaimed)
+- `PolicyEscalationAdmissionClassified`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ConfirmationAdmissionClassified`
   - anchors: `workgraph_lifecycle`

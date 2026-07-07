@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for workgraph_attention_bundle.
 
-CONSTANTS AttentionDelegatedAuthorityValues, BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkAttentionModeValues, WorkCloseStatusAdmissionKindValues, WorkCompletionPolicyMutationAdmissionKindValues, WorkCompletionPolicyValues, WorkConfirmationAdmissionKindValues, WorkConfirmationEvidenceObservationValues, WorkCreateCompletionPolicyAdmissionKindValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkOwnerKindValues, WorkPublicConfirmationAdmissionKindValues
+CONSTANTS AttentionDelegatedAuthorityValues, BooleanValues, NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, SetOfWorkOwnerKeyValues, WorkAttentionBindingKeyValues, WorkAttentionModeValues, WorkCloseStatusAdmissionKindValues, WorkCompletionPolicyMutationAdmissionKindValues, WorkCompletionPolicyValues, WorkConfirmationAdmissionKindValues, WorkConfirmationEvidenceObservationValues, WorkCreateCompletionPolicyAdmissionKindValues, WorkCreateStatusAdmissionKindValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkEvidenceKindValues, WorkGraphErrorKindValues, WorkGraphPublicErrorClassValues, WorkItemKeyValues, WorkLifecycleStateValues, WorkOwnerKeyValues, WorkOwnerKindValues, WorkPolicyEscalationAdmissionKindValues, WorkPublicConfirmationAdmissionKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -166,6 +166,8 @@ workgraph__completion_policy_payload_valid(policy, supervisor_owner_key, reviewe
 
 workgraph__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == (IF (arg_completion_policy = "HostConfirmed") THEN (supplied_evidence_kind # "HostConfirmation") ELSE (IF (arg_completion_policy = "PrincipalConfirmed") THEN ((workgraph__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (supplied_evidence_kind # "PrincipalConfirmation")) ELSE (IF (arg_completion_policy = "Supervisor") THEN ((workgraph__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (supplied_evidence_kind # "SupervisorConfirmation")) ELSE (IF (arg_completion_policy = "ReviewerQuorum") THEN ((workgraph__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (supplied_evidence_kind # "ReviewerConfirmation")) ELSE FALSE))))
 
+workgraph__completion_policy_escalation_admissible(current_policy, current_reviewer_quorum_threshold, requested_policy, requested_supervisor_owner_key, requested_reviewer_quorum_threshold) == (workgraph__completion_policy_payload_valid(requested_policy, requested_supervisor_owner_key, requested_reviewer_quorum_threshold) /\ (IF ((current_policy = "SelfAttest") /\ (requested_policy # "SelfAttest")) THEN TRUE ELSE ((current_policy = "ReviewerQuorum") /\ (requested_policy = "ReviewerQuorum") /\ (current_reviewer_quorum_threshold # None) /\ (requested_reviewer_quorum_threshold # None) /\ ((IF "value" \in DOMAIN requested_reviewer_quorum_threshold THEN requested_reviewer_quorum_threshold["value"] ELSE None) > (IF "value" \in DOMAIN current_reviewer_quorum_threshold THEN current_reviewer_quorum_threshold["value"] ELSE None)))))
+
 workgraph__confirmation_admits(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == ((workgraph__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (workgraph__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (workgraph__confirmation_denies_self_attest_empty(arg_completion_policy, supplied_evidence_kind) = FALSE) /\ (workgraph__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) = FALSE))
 
 workgraph_CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count) ==
@@ -250,16 +252,14 @@ workgraph_UpdateOpen(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_ut
        /\ workgraph_phase = "Open"
        /\ (workgraph_revision = packet.payload.expected_revision)
        /\ workgraph__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)
+       /\ ((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Open"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
        /\ workgraph_due_at_utc_ms' = packet.payload.due_at_utc_ms
        /\ workgraph_not_before_utc_ms' = packet.payload.not_before_utc_ms
        /\ workgraph_snoozed_until_utc_ms' = packet.payload.snoozed_until_utc_ms
-       /\ workgraph_completion_policy' = packet.payload.completion_policy
-       /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
-       /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -285,16 +285,14 @@ workgraph_UpdateInProgress(arg_expected_revision, arg_due_at_utc_ms, arg_not_bef
        /\ workgraph_phase = "InProgress"
        /\ (workgraph_revision = packet.payload.expected_revision)
        /\ workgraph__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)
+       /\ ((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "InProgress"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
        /\ workgraph_due_at_utc_ms' = packet.payload.due_at_utc_ms
        /\ workgraph_not_before_utc_ms' = packet.payload.not_before_utc_ms
        /\ workgraph_snoozed_until_utc_ms' = packet.payload.snoozed_until_utc_ms
-       /\ workgraph_completion_policy' = packet.payload.completion_policy
-       /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
-       /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -320,22 +318,170 @@ workgraph_UpdateBlocked(arg_expected_revision, arg_due_at_utc_ms, arg_not_before
        /\ workgraph_phase = "Blocked"
        /\ (workgraph_revision = packet.payload.expected_revision)
        /\ workgraph__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)
+       /\ ((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold))
        /\ workgraph_phase' = "Blocked"
        /\ workgraph_revision' = (workgraph_revision) + 1
        /\ workgraph_unresolved_blocker_count' = packet.payload.unresolved_blocker_count
        /\ workgraph_due_at_utc_ms' = packet.payload.due_at_utc_ms
        /\ workgraph_not_before_utc_ms' = packet.payload.not_before_utc_ms
        /\ workgraph_snoozed_until_utc_ms' = packet.payload.snoozed_until_utc_ms
-       /\ workgraph_completion_policy' = packet.payload.completion_policy
-       /\ workgraph_completion_supervisor_owner_key' = packet.payload.completion_supervisor_owner_key
-       /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.completion_reviewer_quorum_threshold
-       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Updated", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "UpdateBlocked"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "UpdateBlocked", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_PolicyEscalateOpenAdmitted(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "PolicyEscalate"
+       /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.requested_completion_policy = arg_requested_completion_policy
+       /\ packet.payload.requested_completion_supervisor_owner_key = arg_requested_completion_supervisor_owner_key
+       /\ packet.payload.requested_completion_reviewer_quorum_threshold = arg_requested_completion_reviewer_quorum_threshold
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold)
+       /\ workgraph_phase' = "Open"
+       /\ workgraph_revision' = (workgraph_revision) + 1
+       /\ workgraph_completion_policy' = packet.payload.requested_completion_policy
+       /\ workgraph_completion_supervisor_owner_key' = packet.payload.requested_completion_supervisor_owner_key
+       /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.requested_completion_reviewer_quorum_threshold
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Updated", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateOpenAdmitted"], [machine |-> "workgraph", variant |-> "PolicyEscalationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateOpenAdmitted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "PolicyEscalateOpenAdmitted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_PolicyEscalateOpenDenied(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "PolicyEscalate"
+       /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.requested_completion_policy = arg_requested_completion_policy
+       /\ packet.payload.requested_completion_supervisor_owner_key = arg_requested_completion_supervisor_owner_key
+       /\ packet.payload.requested_completion_reviewer_quorum_threshold = arg_requested_completion_reviewer_quorum_threshold
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Open"
+       /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ (workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE)
+       /\ workgraph_phase' = "Open"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PolicyEscalationAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateOpenDenied"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "PolicyEscalateOpenDenied", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Open"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_PolicyEscalateInProgressAdmitted(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "PolicyEscalate"
+       /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.requested_completion_policy = arg_requested_completion_policy
+       /\ packet.payload.requested_completion_supervisor_owner_key = arg_requested_completion_supervisor_owner_key
+       /\ packet.payload.requested_completion_reviewer_quorum_threshold = arg_requested_completion_reviewer_quorum_threshold
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold)
+       /\ workgraph_phase' = "InProgress"
+       /\ workgraph_revision' = (workgraph_revision) + 1
+       /\ workgraph_completion_policy' = packet.payload.requested_completion_policy
+       /\ workgraph_completion_supervisor_owner_key' = packet.payload.requested_completion_supervisor_owner_key
+       /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.requested_completion_reviewer_quorum_threshold
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Updated", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateInProgressAdmitted"], [machine |-> "workgraph", variant |-> "PolicyEscalationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateInProgressAdmitted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "PolicyEscalateInProgressAdmitted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_PolicyEscalateInProgressDenied(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "PolicyEscalate"
+       /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.requested_completion_policy = arg_requested_completion_policy
+       /\ packet.payload.requested_completion_supervisor_owner_key = arg_requested_completion_supervisor_owner_key
+       /\ packet.payload.requested_completion_reviewer_quorum_threshold = arg_requested_completion_reviewer_quorum_threshold
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "InProgress"
+       /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ (workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE)
+       /\ workgraph_phase' = "InProgress"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PolicyEscalationAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateInProgressDenied"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "PolicyEscalateInProgressDenied", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "InProgress"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_PolicyEscalateBlockedAdmitted(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "PolicyEscalate"
+       /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.requested_completion_policy = arg_requested_completion_policy
+       /\ packet.payload.requested_completion_supervisor_owner_key = arg_requested_completion_supervisor_owner_key
+       /\ packet.payload.requested_completion_reviewer_quorum_threshold = arg_requested_completion_reviewer_quorum_threshold
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold)
+       /\ workgraph_phase' = "Blocked"
+       /\ workgraph_revision' = (workgraph_revision) + 1
+       /\ workgraph_completion_policy' = packet.payload.requested_completion_policy
+       /\ workgraph_completion_supervisor_owner_key' = packet.payload.requested_completion_supervisor_owner_key
+       /\ workgraph_completion_reviewer_quorum_threshold' = packet.payload.requested_completion_reviewer_quorum_threshold
+       /\ UNCHANGED << workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "Updated", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateBlockedAdmitted"], [machine |-> "workgraph", variant |-> "PolicyEscalationAdmissionClassified", payload |-> [admission |-> "Admitted"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateBlockedAdmitted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "PolicyEscalateBlockedAdmitted", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+workgraph_PolicyEscalateBlockedDenied(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "workgraph"
+       /\ packet.variant = "PolicyEscalate"
+       /\ packet.payload.expected_revision = arg_expected_revision
+       /\ packet.payload.requested_completion_policy = arg_requested_completion_policy
+       /\ packet.payload.requested_completion_supervisor_owner_key = arg_requested_completion_supervisor_owner_key
+       /\ packet.payload.requested_completion_reviewer_quorum_threshold = arg_requested_completion_reviewer_quorum_threshold
+       /\ ~HigherPriorityReady("workgraph_authority")
+       /\ workgraph_phase = "Blocked"
+       /\ (workgraph_revision = packet.payload.expected_revision)
+       /\ (workgraph__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE)
+       /\ workgraph_phase' = "Blocked"
+       /\ UNCHANGED << workgraph_revision, workgraph_unresolved_blocker_count, workgraph_topology_item_keys, workgraph_topology_edge_keys, workgraph_blocks_reachability, workgraph_parent_reachability, workgraph_claim_owner_key, workgraph_claimed_at_utc_ms, workgraph_lease_expires_at_utc_ms, workgraph_due_at_utc_ms, workgraph_not_before_utc_ms, workgraph_snoozed_until_utc_ms, workgraph_completion_policy, workgraph_completion_supervisor_owner_key, workgraph_completion_reviewer_quorum_threshold, workgraph_terminal_at_utc_ms, workgraph_evidence_count, workgraph_host_confirmation_count, workgraph_principal_confirmation_count, workgraph_supervisor_confirmation_owner_keys, workgraph_reviewer_confirmation_owner_keys, attention_phase, attention_revision, attention_paused_until_utc_ms, attention_superseded_by_binding_key, attention_terminal_at_utc_ms, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "workgraph", variant |-> "PolicyEscalationAdmissionClassified", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "PolicyEscalateBlockedDenied"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "workgraph", transition |-> "PolicyEscalateBlockedDenied", actor |-> "workgraph_authority", step |-> (model_step_count + 1), from_phase |-> workgraph_phase, to_phase |-> "Blocked"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -7004,14 +7150,22 @@ workgraph__entry_packet__completion_policy_payload_valid(policy, supervisor_owne
 
 workgraph__entry_packet__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == (IF (arg_completion_policy = "HostConfirmed") THEN (supplied_evidence_kind # "HostConfirmation") ELSE (IF (arg_completion_policy = "PrincipalConfirmed") THEN ((workgraph__entry_packet__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (supplied_evidence_kind # "PrincipalConfirmation")) ELSE (IF (arg_completion_policy = "Supervisor") THEN ((workgraph__entry_packet__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (supplied_evidence_kind # "SupervisorConfirmation")) ELSE (IF (arg_completion_policy = "ReviewerQuorum") THEN ((workgraph__entry_packet__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (supplied_evidence_kind # "ReviewerConfirmation")) ELSE FALSE))))
 
+workgraph__entry_packet__completion_policy_escalation_admissible(current_policy, current_reviewer_quorum_threshold, requested_policy, requested_supervisor_owner_key, requested_reviewer_quorum_threshold) == (workgraph__entry_packet__completion_policy_payload_valid(requested_policy, requested_supervisor_owner_key, requested_reviewer_quorum_threshold) /\ (IF ((current_policy = "SelfAttest") /\ (requested_policy # "SelfAttest")) THEN TRUE ELSE ((current_policy = "ReviewerQuorum") /\ (requested_policy = "ReviewerQuorum") /\ (current_reviewer_quorum_threshold # None) /\ (requested_reviewer_quorum_threshold # None) /\ ((IF "value" \in DOMAIN requested_reviewer_quorum_threshold THEN requested_reviewer_quorum_threshold["value"] ELSE None) > (IF "value" \in DOMAIN current_reviewer_quorum_threshold THEN current_reviewer_quorum_threshold["value"] ELSE None)))))
+
 workgraph__entry_packet__confirmation_admits(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) == ((workgraph__entry_packet__confirmation_denies_principal_required(arg_completion_policy, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_principal_kind_mismatch(arg_completion_policy, requested_principal_owner_key, requested_principal_kind) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_supervisor_mismatch(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_self_attest_empty(arg_completion_policy, supplied_evidence_kind) = FALSE) /\ (workgraph__entry_packet__confirmation_denies_evidence_kind(arg_completion_policy, arg_completion_supervisor_owner_key, requested_principal_owner_key, requested_principal_kind, supplied_evidence_kind) = FALSE))
 
 EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "CreateOpen") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold))
     \/ /\ (packet.variant = "CreateBlocked") /\ (workgraph_phase = "Absent") /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold))
-    \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold))
-    \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold))
-    \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold))
+    \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
+    \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
+    \/ /\ (packet.variant = "Update") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_payload_valid(packet.payload.completion_policy, packet.payload.completion_supervisor_owner_key, packet.payload.completion_reviewer_quorum_threshold)) /\ (((packet.payload.completion_policy = workgraph_completion_policy) /\ (packet.payload.completion_supervisor_owner_key = workgraph_completion_supervisor_owner_key) /\ (packet.payload.completion_reviewer_quorum_threshold = workgraph_completion_reviewer_quorum_threshold)))
+    \/ /\ (packet.variant = "PolicyEscalate") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold))
+    \/ /\ (packet.variant = "PolicyEscalate") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ ((workgraph__entry_packet__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE))
+    \/ /\ (packet.variant = "PolicyEscalate") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold))
+    \/ /\ (packet.variant = "PolicyEscalate") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ ((workgraph__entry_packet__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE))
+    \/ /\ (packet.variant = "PolicyEscalate") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ (workgraph__entry_packet__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold))
+    \/ /\ (packet.variant = "PolicyEscalate") /\ (workgraph_phase = "Blocked") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ ((workgraph__entry_packet__completion_policy_escalation_admissible(workgraph_completion_policy, workgraph_completion_reviewer_quorum_threshold, packet.payload.requested_completion_policy, packet.payload.requested_completion_supervisor_owner_key, packet.payload.requested_completion_reviewer_quorum_threshold) = FALSE))
     \/ /\ (packet.variant = "Claim") /\ (workgraph_phase = "Open") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ ((workgraph_unresolved_blocker_count = 0)) /\ ((IF (workgraph_due_at_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN workgraph_due_at_utc_ms THEN workgraph_due_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))) /\ ((IF (workgraph_not_before_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN workgraph_not_before_utc_ms THEN workgraph_not_before_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))) /\ ((IF (workgraph_snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN workgraph_snoozed_until_utc_ms THEN workgraph_snoozed_until_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms)))
     \/ /\ (packet.variant = "Claim") /\ (workgraph_phase = "InProgress") /\ ((workgraph_revision = packet.payload.expected_revision)) /\ ((workgraph_claim_owner_key # None)) /\ ((workgraph_lease_expires_at_utc_ms # None)) /\ ((IF (workgraph_lease_expires_at_utc_ms = None) THEN FALSE ELSE ((IF "value" \in DOMAIN workgraph_lease_expires_at_utc_ms THEN workgraph_lease_expires_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))) /\ ((workgraph_unresolved_blocker_count = 0)) /\ ((IF (workgraph_due_at_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN workgraph_due_at_utc_ms THEN workgraph_due_at_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))) /\ ((IF (workgraph_not_before_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN workgraph_not_before_utc_ms THEN workgraph_not_before_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms))) /\ ((IF (workgraph_snoozed_until_utc_ms = None) THEN TRUE ELSE ((IF "value" \in DOMAIN workgraph_snoozed_until_utc_ms THEN workgraph_snoozed_until_utc_ms["value"] ELSE None) <= packet.payload.now_utc_ms)))
     \/ /\ (packet.variant = "Release") /\ (workgraph_phase = "InProgress") /\ (((workgraph_revision = packet.payload.expected_revision) /\ (workgraph_claim_owner_key # None)))
@@ -7437,6 +7591,12 @@ CoreNext ==
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateOpen(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateInProgress(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_due_at_utc_ms \in OptionU64Values : \E arg_not_before_utc_ms \in OptionU64Values : \E arg_snoozed_until_utc_ms \in OptionU64Values : \E arg_completion_policy \in WorkCompletionPolicyValues : \E arg_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_completion_reviewer_quorum_threshold \in OptionU64Values : \E arg_unresolved_blocker_count \in 0..2 : workgraph_UpdateBlocked(arg_expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_completion_policy, arg_completion_supervisor_owner_key, arg_completion_reviewer_quorum_threshold, arg_unresolved_blocker_count)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_PolicyEscalateOpenAdmitted(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_PolicyEscalateOpenDenied(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_PolicyEscalateInProgressAdmitted(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_PolicyEscalateInProgressDenied(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_PolicyEscalateBlockedAdmitted(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold)
+    \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_requested_completion_policy \in WorkCompletionPolicyValues : \E arg_requested_completion_supervisor_owner_key \in OptionWorkOwnerKeyValues : \E arg_requested_completion_reviewer_quorum_threshold \in OptionU64Values : workgraph_PolicyEscalateBlockedDenied(arg_expected_revision, arg_requested_completion_policy, arg_requested_completion_supervisor_owner_key, arg_requested_completion_reviewer_quorum_threshold)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_owner_key \in WorkOwnerKeyValues : \E arg_now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : workgraph_ClaimOpen(arg_expected_revision, arg_owner_key, arg_now_utc_ms, arg_lease_expires_at_utc_ms)
     \/ \E arg_expected_revision \in {workgraph_revision} : \E arg_owner_key \in WorkOwnerKeyValues : \E arg_now_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in OptionU64Values : workgraph_ClaimExpiredInProgress(arg_expected_revision, arg_owner_key, arg_now_utc_ms, arg_lease_expires_at_utc_ms)
     \/ \E arg_expected_revision \in {workgraph_revision} : workgraph_ReleaseInProgress(arg_expected_revision)

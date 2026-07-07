@@ -138,7 +138,7 @@ pub fn route_to_input(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedInput>
 ### V3. Runtime turn metadata
 
 **Current state.**
-- `meerkat-core/src/lifecycle/run_primitive.rs:93-125`: `RuntimeTurnMetadata` carries `model: Option<String>`, `provider: Option<String>`, `provider_params: Option<serde_json::Value>`, `render_metadata: Option<RenderMetadata>`, plus `handling_mode`, `skill_references`, `flow_tool_overlay`, `additional_instructions`, `execution_kind`.
+- `meerkat-core/src/lifecycle/run_primitive.rs:93-125`: `RuntimeTurnMetadata` carries `model: Option<String>`, `provider: Option<String>`, `provider_params: Option<serde_json::Value>`, `render_metadata: Option<RenderMetadata>`, plus `handling_mode`, `skill_references`, `turn_tool_overlay`, `additional_instructions`, `execution_kind`.
 - Missing explicit `connection_ref: Option<ConnectionRef>` field and `keep_alive: Option<KeepAlivePolicy>`. The dogma catalog (#46) says these travel alongside but are dropped; the actual HEAD has `model`, `provider`, `provider_params`, `render_metadata` but **no** `connection_ref` or `keep_alive`. The overrides are incompletely captured: the seam carries scalars that the runtime cannot use authoritatively, and the fields the runtime does need (`connection_ref`, `keep_alive`) are silently dropped.
 - `meerkat-runtime/src/runtime_loop.rs:78-99` — `input_turn_metadata` constructs `RuntimeTurnMetadata` from `ExternalEvent`/`Continuation` and otherwise clones `prompt.turn_metadata` / `flow_step.turn_metadata`. Two construction sites.
 - `meerkat-runtime/src/runtime_loop.rs:147-193` (`inputs_to_primitive_with_boundary`) merges per-input metadata via `merge_batch_turn_metadata`; the merge rule is scalar-last-wins + collection-accumulating.
@@ -150,7 +150,7 @@ pub fn route_to_input(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedInput>
 pub struct RuntimeTurnMetadata {
     pub handling_mode: Option<HandlingMode>,
     pub skill_references: Option<Vec<SkillKey>>,          // SkillKey, not SkillId
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    pub turn_tool_overlay: Option<TurnToolOverlay>,
     pub additional_instructions: Option<Vec<TurnInstruction>>, // typed, see below
     pub model: Option<ModelId>,                            // newtype
     pub provider: Option<ProviderId>,                      // existing Provider enum

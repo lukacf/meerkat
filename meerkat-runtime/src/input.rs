@@ -569,7 +569,7 @@ pub struct ContinuationInput {
     pub request_id: Option<String>,
     /// Optional per-turn tool visibility overlay for scoped continuations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    pub turn_tool_overlay: Option<TurnToolOverlay>,
     /// Optional runtime-owned context projected into the next turn boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_append: Option<ConversationContextAppend>,
@@ -603,7 +603,7 @@ impl ContinuationInput {
             continuation_kind: ContinuationKind::Ordinary,
             handling_mode: HandlingMode::Steer,
             request_id: None,
-            flow_tool_overlay: None,
+            turn_tool_overlay: None,
             context_append: None,
             turn_append: None,
         }
@@ -1579,7 +1579,7 @@ mod tests {
             continuation_kind: ContinuationKind::WorkgraphAttention,
             handling_mode: HandlingMode::Steer,
             request_id: Some("binding-1".into()),
-            flow_tool_overlay: Some(TurnToolOverlay {
+            turn_tool_overlay: Some(TurnToolOverlay {
                 allowed_tools: Some(vec!["workgraph_add_evidence".into()]),
                 blocked_tools: None,
                 dispatch_context: Default::default(),
@@ -1616,7 +1616,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .flow_tool_overlay
+                .turn_tool_overlay
                 .and_then(|overlay| overlay.allowed_tools),
             Some(vec!["workgraph_add_evidence".into()])
         );
@@ -2040,7 +2040,7 @@ mod tests {
             continuation_kind: ContinuationKind::Ordinary,
             handling_mode: HandlingMode::Steer,
             request_id: None,
-            flow_tool_overlay: None,
+            turn_tool_overlay: None,
             context_append: None,
             turn_append: None,
         });

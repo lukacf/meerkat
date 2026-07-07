@@ -1537,7 +1537,7 @@ impl SessionRuntime {
 
     fn turn_metadata_from_overrides(
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
         provider_hint: Option<&str>,
@@ -1560,7 +1560,7 @@ impl SessionRuntime {
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_directive(ov.keep_alive)),
             skill_references,
-            flow_tool_overlay,
+            turn_tool_overlay,
             additional_instructions: Self::turn_additional_instructions(additional_instructions),
             model: overrides
                 .and_then(|ov| ov.model.clone())
@@ -1578,14 +1578,14 @@ impl SessionRuntime {
 
     fn runtime_stamped_prompt_turn_metadata_from_overrides(
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
         provider_hint: Option<&str>,
     ) -> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
         meerkat_runtime::runtime_stamped_prompt_turn_metadata(Self::turn_metadata_from_overrides(
             skill_references,
-            flow_tool_overlay,
+            turn_tool_overlay,
             additional_instructions,
             overrides,
             provider_hint,
@@ -4581,7 +4581,7 @@ impl SessionRuntime {
         injected_context: Vec<ContentInput>,
         mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
@@ -4596,6 +4596,7 @@ impl SessionRuntime {
             .await?;
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
+        let workgraph_service = self.workgraph_service().ok();
 
         if self.live_session_is_stale(session_id).await? {
             self.discard_stale_live_session(session_id).await;
@@ -4658,7 +4659,7 @@ impl SessionRuntime {
 
         let turn_metadata = Self::turn_metadata_from_overrides(
             skill_references,
-            flow_tool_overlay,
+            turn_tool_overlay,
             additional_instructions,
             overrides.as_ref(),
             Some(effective_identity.provider.as_str()),
@@ -5246,7 +5247,7 @@ impl SessionRuntime {
         primitive: &RunPrimitive,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
         self.apply_runtime_turn_with_pre_admission(
@@ -5255,7 +5256,7 @@ impl SessionRuntime {
             primitive,
             prompt,
             event_tx,
-            flow_tool_overlay,
+            turn_tool_overlay,
             overrides,
             None,
         )
@@ -5273,11 +5274,12 @@ impl SessionRuntime {
         primitive: &RunPrimitive,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
         pre_admission: Option<RuntimePreAdmission>,
     ) -> Result<CoreApplyOutput, RpcError> {
         let mut pre_admission = pre_admission.map(RuntimePreAdmissionGuard::new);
+        let workgraph_service = self.workgraph_service().ok();
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(RpcError {
                 code: error::INTERNAL_ERROR,
@@ -5396,19 +5398,31 @@ impl SessionRuntime {
                 self.hot_swap_llm_client(session_id, ov).await?;
             }
 
-            let req = StartTurnRequest {
+            let mut req = StartTurnRequest {
                 injected_context: Vec::new(),
                 prompt: prompt.clone(),
                 system_prompt: None,
                 event_tx: Some(event_tx.clone()),
                 runtime: StartTurnRuntimeSemantics::new(
                     meerkat_core::types::HandlingMode::Queue,
-                    flow_tool_overlay.clone(),
+                    turn_tool_overlay.clone(),
                     pre_turn_context_appends.clone(),
                     primitive.turn_metadata().cloned(),
                 )
                 .with_typed_turn_appends(primitive.typed_turn_appends()),
             };
+            meerkat::surface::inject_workgraph_attention_turn_overlay(
+                self.service.as_ref(),
+                workgraph_service.as_ref(),
+                session_id,
+                &mut req,
+            )
+            .await
+            .map_err(|error| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: error.to_string(),
+                data: None,
+            })?;
 
             let result_rx = self.spawn_service_apply_runtime_turn_with_recoverable_admission_guard(
                 session_id.clone(),
@@ -5598,27 +5612,48 @@ impl SessionRuntime {
                 build: Some(build),
                 labels: labels.clone(),
             };
+            let mut start_request = StartTurnRequest {
+                // Empty on the runtime-appends path (typed_turn_appends
+                // carry the injected context); populated only when the
+                // deferred merge cleared the appends and direct lowering
+                // owns the turn.
+                injected_context: promotion_injected_context,
+                prompt: runtime_prompt,
+                system_prompt: None,
+                event_tx: Some(event_tx),
+                runtime: StartTurnRuntimeSemantics::new(
+                    meerkat_core::types::HandlingMode::Queue,
+                    turn_tool_overlay,
+                    pre_turn_context_appends.clone(),
+                    primitive.turn_metadata().cloned(),
+                )
+                .with_typed_turn_appends(typed_turn_appends),
+            };
+            if let Some(workgraph_service) = workgraph_service.as_ref() {
+                let empty_labels = BTreeMap::new();
+                let attention_labels = labels.as_ref().unwrap_or(&empty_labels);
+                if let Err(error) =
+                    meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
+                        workgraph_service,
+                        session_id,
+                        attention_labels,
+                        &mut start_request,
+                    )
+                    .await
+                {
+                    promotion_cleanup.restore_now().await;
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: error.to_string(),
+                        data: None,
+                    });
+                }
+            }
             let output_rx = self.spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                 session_id.clone(),
                 create_req,
                 run_id,
-                StartTurnRequest {
-                    // Empty on the runtime-appends path (typed_turn_appends
-                    // carry the injected context); populated only when the
-                    // deferred merge cleared the appends and direct lowering
-                    // owns the turn.
-                    injected_context: promotion_injected_context,
-                    prompt: runtime_prompt,
-                    system_prompt: None,
-                    event_tx: Some(event_tx),
-                    runtime: StartTurnRuntimeSemantics::new(
-                        meerkat_core::types::HandlingMode::Queue,
-                        flow_tool_overlay,
-                        pre_turn_context_appends.clone(),
-                        primitive.turn_metadata().cloned(),
-                    )
-                    .with_typed_turn_appends(typed_turn_appends),
-                },
+                start_request,
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
                     _ => RunApplyBoundary::Immediate,
@@ -5652,24 +5687,50 @@ impl SessionRuntime {
         let recovered_create = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
+        let recovered_labels = recovered_create.request.labels.clone();
+        let mut start_request = StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt,
+            system_prompt: None,
+            event_tx: Some(event_tx),
+            runtime: StartTurnRuntimeSemantics::new(
+                meerkat_core::types::HandlingMode::Queue,
+                turn_tool_overlay,
+                pre_turn_context_appends,
+                primitive.turn_metadata().cloned(),
+            )
+            .with_typed_turn_appends(primitive.typed_turn_appends()),
+        };
+        if let Some(workgraph_service) = workgraph_service.as_ref() {
+            let empty_labels = BTreeMap::new();
+            let attention_labels = recovered_labels.as_ref().unwrap_or(&empty_labels);
+            if let Err(error) =
+                meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
+                    workgraph_service,
+                    session_id,
+                    attention_labels,
+                    &mut start_request,
+                )
+                .await
+            {
+                self.cleanup_recovered_runtime_if_new(
+                    session_id,
+                    recovered_create.runtime_was_registered,
+                )
+                .await;
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: error.to_string(),
+                    data: None,
+                });
+            }
+        }
         let output_rx = self.spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
             session_id.clone(),
             recovered_create.request,
             recovered_create.runtime_was_registered,
             run_id,
-            StartTurnRequest {
-                injected_context: Vec::new(),
-                prompt,
-                system_prompt: None,
-                event_tx: Some(event_tx),
-                runtime: StartTurnRuntimeSemantics::new(
-                    meerkat_core::types::HandlingMode::Queue,
-                    flow_tool_overlay,
-                    pre_turn_context_appends,
-                    primitive.turn_metadata().cloned(),
-                )
-                .with_typed_turn_appends(primitive.typed_turn_appends()),
-            },
+            start_request,
             match primitive {
                 RunPrimitive::StagedInput(staged) => staged.boundary,
                 _ => RunApplyBoundary::Immediate,
@@ -5861,12 +5922,13 @@ impl SessionRuntime {
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
+        let workgraph_service = self.workgraph_service().ok();
 
         // Check if this is a pending (not-yet-materialized) session.
         let pending_session = match self.staged_sessions.begin_promotion(session_id).await {
@@ -6038,7 +6100,7 @@ impl SessionRuntime {
             build.initial_turn_metadata =
                 Some(Self::runtime_stamped_prompt_turn_metadata_from_overrides(
                     skill_references.clone(),
-                    flow_tool_overlay.clone(),
+                    turn_tool_overlay.clone(),
                     additional_instructions.clone(),
                     overrides.as_ref(),
                     initial_turn_provider_hint,
@@ -6061,21 +6123,42 @@ impl SessionRuntime {
                 labels: labels.clone(),
             };
 
+            let mut start_request = StartTurnRequest {
+                injected_context: Vec::new(),
+                prompt: turn_prompt,
+                system_prompt: None,
+                event_tx: Some(event_tx),
+                runtime: StartTurnRuntimeSemantics::new(
+                    meerkat_core::types::HandlingMode::Queue,
+                    turn_tool_overlay,
+                    Vec::new(),
+                    turn_metadata,
+                ),
+            };
+            if let Some(workgraph_service) = workgraph_service.as_ref() {
+                let empty_labels = BTreeMap::new();
+                let attention_labels = labels.as_ref().unwrap_or(&empty_labels);
+                if let Err(error) =
+                    meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
+                        workgraph_service,
+                        session_id,
+                        attention_labels,
+                        &mut start_request,
+                    )
+                    .await
+                {
+                    promotion_cleanup.restore_now().await;
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: error.to_string(),
+                        data: None,
+                    });
+                }
+            }
             let result_rx = self.spawn_pending_create_and_start_turn_with_admission_guard(
                 session_id.clone(),
                 create_req,
-                StartTurnRequest {
-                    injected_context: Vec::new(),
-                    prompt: turn_prompt,
-                    system_prompt: None,
-                    event_tx: Some(event_tx),
-                    runtime: StartTurnRuntimeSemantics::new(
-                        meerkat_core::types::HandlingMode::Queue,
-                        flow_tool_overlay,
-                        Vec::new(),
-                        turn_metadata,
-                    ),
-                },
+                start_request,
                 promotion_cleanup,
                 generated_machine_archived_resume_admission,
             );
@@ -6119,7 +6202,7 @@ impl SessionRuntime {
         };
         let turn_metadata = Some(Self::runtime_stamped_prompt_turn_metadata_from_overrides(
             skill_references.clone(),
-            flow_tool_overlay.clone(),
+            turn_tool_overlay.clone(),
             additional_instructions.clone(),
             overrides.as_ref(),
             Some(effective_identity.provider.as_str()),
@@ -6132,7 +6215,7 @@ impl SessionRuntime {
                 event_tx,
                 keep_alive,
                 skill_references,
-                flow_tool_overlay,
+                turn_tool_overlay,
                 additional_instructions,
                 overrides.as_ref(),
             ))
@@ -6182,18 +6265,30 @@ impl SessionRuntime {
         self.apply_mcp_boundary_to_turn_prompt(session_id, &event_tx, &mut turn_prompt)
             .await?;
 
-        let req = StartTurnRequest {
+        let mut req = StartTurnRequest {
             injected_context: Vec::new(),
             prompt: turn_prompt.clone(),
             system_prompt: None,
             event_tx: Some(event_tx.clone()),
             runtime: StartTurnRuntimeSemantics::new(
                 meerkat_core::types::HandlingMode::Queue,
-                flow_tool_overlay.clone(),
+                turn_tool_overlay.clone(),
                 Vec::new(),
                 turn_metadata,
             ),
         };
+        meerkat::surface::inject_workgraph_attention_turn_overlay(
+            self.service.as_ref(),
+            workgraph_service.as_ref(),
+            session_id,
+            &mut req,
+        )
+        .await
+        .map_err(|error| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: error.to_string(),
+            data: None,
+        })?;
 
         let result_rx = self.spawn_service_start_turn_with_admission_guard(
             session_id.clone(),
@@ -6212,7 +6307,7 @@ impl SessionRuntime {
                     event_tx,
                     keep_alive,
                     skill_references,
-                    flow_tool_overlay,
+                    turn_tool_overlay,
                     additional_instructions,
                     overrides.as_ref(),
                 ))
@@ -6238,7 +6333,7 @@ impl SessionRuntime {
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         keep_alive: bool,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
@@ -6359,7 +6454,7 @@ impl SessionRuntime {
             prompt,
             event_tx,
             skill_references,
-            flow_tool_overlay,
+            turn_tool_overlay,
             additional_instructions,
             None,
         ))
@@ -20858,6 +20953,29 @@ mod tests {
         .expect_err("retired clear_auth_binding must fail closed");
         assert!(
             err.to_string().contains("clear_auth_binding"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn turn_start_params_reject_dispatch_context_in_public_overlay() {
+        use crate::handlers::turn::StartTurnParams;
+
+        let err = serde_json::from_value::<StartTurnParams>(serde_json::json!({
+            "session_id": "test-id",
+            "prompt": "hello",
+            "turn_tool_overlay": {
+                "allowed_tools": [],
+                "dispatch_context": {
+                    "workgraph.attention_projection": {
+                        "binding_id": "attention-1"
+                    }
+                }
+            }
+        }))
+        .expect_err("dispatch_context is runtime-authored and must fail closed on RPC input");
+        assert!(
+            err.to_string().contains("dispatch_context"),
             "unexpected error: {err}"
         );
     }

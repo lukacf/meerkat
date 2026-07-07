@@ -633,7 +633,7 @@ async fn validate_workgraph_attention_primitive(
     };
     let projection = match primitive.turn_metadata() {
         Some(metadata) => {
-            crate::workgraph_attention_projection_from_overlay(metadata.flow_tool_overlay.as_ref())
+            crate::workgraph_attention_projection_from_overlay(metadata.turn_tool_overlay.as_ref())
                 .map_err(|error| {
                     CoreExecutorError::apply_failed_primitive_rejected(error.to_string())
                 })?
@@ -830,7 +830,15 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
 
         let boundary = primitive.apply_boundary();
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
-        let req = start_turn_request_from_primitive(&primitive)?;
+        let mut req = start_turn_request_from_primitive(&primitive)?;
+        super::inject_workgraph_attention_turn_overlay(
+            self.service.as_ref(),
+            self.workgraph_service.as_ref(),
+            &self.session_id,
+            &mut req,
+        )
+        .await
+        .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))?;
         self.service
             .apply_runtime_turn(
                 &self.session_id,
@@ -995,7 +1003,7 @@ mod tests {
                 salience: meerkat_core::types::RenderSalience::Important,
             }),
             skill_references: Some(vec![skill]),
-            flow_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
+            turn_tool_overlay: Some(meerkat_core::service::TurnToolOverlay {
                 allowed_tools: Some(vec!["runtime_tool".into()]),
                 blocked_tools: None,
                 dispatch_context: Default::default(),
@@ -1023,7 +1031,7 @@ mod tests {
             req.runtime.handling_mode,
             meerkat_core::types::HandlingMode::Queue
         );
-        assert_eq!(req.runtime.flow_tool_overlay, None);
+        assert_eq!(req.runtime.turn_tool_overlay, None);
         assert_eq!(
             req.runtime.typed_turn_appends,
             primitive.typed_turn_appends()

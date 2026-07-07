@@ -346,9 +346,9 @@ pub enum WorkPublicConfirmationAdmissionKind {
 }
 
 /// Machine-owned admission verdict for a requested mutation of a work item's
-/// `completion_policy`. This machine — not the shell — owns the immutability
-/// invariant "a work item's completion policy is fixed at creation and cannot be
-/// changed by an update". The shell extracts the requested completion policy as a
+/// `completion_policy`. This machine — not the shell — owns the invariant
+/// "a work item's completion policy is fixed at creation, monotonically
+/// tightenable, and never update-writable". The shell extracts the requested completion policy as a
 /// pure typed observation (variant plus supervisor owner key plus reviewer quorum
 /// threshold), drives `ClassifyCompletionPolicyMutationAdmission` over the
 /// recovered item state, and mirrors the verdict: `Admitted` (the requested
@@ -370,6 +370,26 @@ pub enum WorkPublicConfirmationAdmissionKind {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum WorkCompletionPolicyMutationAdmissionKind {
+    #[default]
+    Denied,
+    Admitted,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPolicyEscalationAdmissionKind {
     #[default]
     Denied,
     Admitted,
@@ -546,6 +566,12 @@ machine! {
                 completion_reviewer_quorum_threshold: Option<u64>,
                 unresolved_blocker_count: u64,
             },
+            PolicyEscalate {
+                expected_revision: u64,
+                requested_completion_policy: Enum<WorkCompletionPolicy>,
+                requested_completion_supervisor_owner_key: Option<WorkOwnerKey>,
+                requested_completion_reviewer_quorum_threshold: Option<u64>,
+            },
             Claim {
                 expected_revision: u64,
                 owner_key: WorkOwnerKey,
@@ -636,8 +662,8 @@ machine! {
             // DeniedRequiresTrustedHost -> InvalidInput), failing closed.
             ClassifyPublicConfirmationAdmission { completion_policy: Enum<WorkCompletionPolicy> },
             // Completion-policy mutation admission classification. This machine
-            // owns the immutability invariant "a work item's completion policy is
-            // fixed at creation and cannot be changed by an update". The shell
+            // owns the invariant "a work item's completion policy is fixed at
+            // creation, monotonically tightenable, and never update-writable". The shell
             // extracts the REQUESTED completion policy as a pure typed observation
             // (variant plus supervisor owner key plus reviewer quorum threshold)
             // and drives this input over the item's recovered machine state; this
@@ -708,6 +734,9 @@ machine! {
             },
             CompletionPolicyMutationAdmissionClassified {
                 admission: Enum<WorkCompletionPolicyMutationAdmissionKind>,
+            },
+            PolicyEscalationAdmissionClassified {
+                admission: Enum<WorkPolicyEscalationAdmissionKind>,
             },
             ConfirmationAdmissionClassified {
                 admission: Enum<WorkConfirmationAdmissionKind>,
@@ -793,6 +822,34 @@ machine! {
                     }
                 }
             }
+        }
+
+        helper completion_policy_escalation_admissible(
+            current_policy: WorkCompletionPolicy,
+            current_reviewer_quorum_threshold: Option<u64>,
+            requested_policy: WorkCompletionPolicy,
+            requested_supervisor_owner_key: Option<WorkOwnerKey>,
+            requested_reviewer_quorum_threshold: Option<u64>
+        ) -> bool {
+            completion_policy_payload_valid(
+                requested_policy,
+                requested_supervisor_owner_key,
+                requested_reviewer_quorum_threshold
+            )
+                && (
+                    (
+                        current_policy == WorkCompletionPolicy::SelfAttest
+                        && requested_policy != WorkCompletionPolicy::SelfAttest
+                    )
+                    || (
+                        current_policy == WorkCompletionPolicy::ReviewerQuorum
+                        && requested_policy == WorkCompletionPolicy::ReviewerQuorum
+                        && current_reviewer_quorum_threshold != None
+                        && requested_reviewer_quorum_threshold != None
+                        && requested_reviewer_quorum_threshold.get("value")
+                            > current_reviewer_quorum_threshold.get("value")
+                    )
+                )
         }
 
         helper evidence_kind_owner_key_present(
@@ -962,6 +1019,7 @@ machine! {
         disposition CloseStatusAdmissionClassified => local seam SurfaceResultAlignment,
         disposition PublicConfirmationAdmissionClassified => local seam SurfaceResultAlignment,
         disposition CompletionPolicyMutationAdmissionClassified => local seam SurfaceResultAlignment,
+        disposition PolicyEscalationAdmissionClassified => local seam SurfaceResultAlignment,
         disposition ConfirmationAdmissionClassified => local seam SurfaceResultAlignment,
         disposition WorkItemReadinessClassified => local seam SurfaceResultAlignment,
 
@@ -1011,15 +1069,17 @@ machine! {
             guard "completion_policy_payload_valid" {
                 completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
             }
+            guard "completion_policy_unchanged" {
+                completion_policy == self.completion_policy
+                    && completion_supervisor_owner_key == self.completion_supervisor_owner_key
+                    && completion_reviewer_quorum_threshold == self.completion_reviewer_quorum_threshold
+            }
             update {
                 self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
-                self.completion_policy = completion_policy;
-                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
-                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to Open
             emit Updated
@@ -1031,15 +1091,17 @@ machine! {
             guard "completion_policy_payload_valid" {
                 completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
             }
+            guard "completion_policy_unchanged" {
+                completion_policy == self.completion_policy
+                    && completion_supervisor_owner_key == self.completion_supervisor_owner_key
+                    && completion_reviewer_quorum_threshold == self.completion_reviewer_quorum_threshold
+            }
             update {
                 self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
-                self.completion_policy = completion_policy;
-                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
-                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to InProgress
             emit Updated
@@ -1051,18 +1113,140 @@ machine! {
             guard "completion_policy_payload_valid" {
                 completion_policy_payload_valid(completion_policy, completion_supervisor_owner_key, completion_reviewer_quorum_threshold)
             }
+            guard "completion_policy_unchanged" {
+                completion_policy == self.completion_policy
+                    && completion_supervisor_owner_key == self.completion_supervisor_owner_key
+                    && completion_reviewer_quorum_threshold == self.completion_reviewer_quorum_threshold
+            }
             update {
                 self.revision += 1;
                 self.unresolved_blocker_count = unresolved_blocker_count;
                 self.due_at_utc_ms = due_at_utc_ms;
                 self.not_before_utc_ms = not_before_utc_ms;
                 self.snoozed_until_utc_ms = snoozed_until_utc_ms;
-                self.completion_policy = completion_policy;
-                self.completion_supervisor_owner_key = completion_supervisor_owner_key;
-                self.completion_reviewer_quorum_threshold = completion_reviewer_quorum_threshold;
             }
             to Blocked
             emit Updated
+        }
+
+        transition PolicyEscalateOpenAdmitted {
+            on input PolicyEscalate { expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold }
+            guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "completion_policy_escalation_admissible" {
+                completion_policy_escalation_admissible(
+                    self.completion_policy,
+                    self.completion_reviewer_quorum_threshold,
+                    requested_completion_policy,
+                    requested_completion_supervisor_owner_key,
+                    requested_completion_reviewer_quorum_threshold
+                )
+            }
+            update {
+                self.revision += 1;
+                self.completion_policy = requested_completion_policy;
+                self.completion_supervisor_owner_key = requested_completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = requested_completion_reviewer_quorum_threshold;
+            }
+            to Open
+            emit Updated
+            emit PolicyEscalationAdmissionClassified { admission: WorkPolicyEscalationAdmissionKind::Admitted }
+        }
+
+        transition PolicyEscalateOpenDenied {
+            on input PolicyEscalate { expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold }
+            guard { self.lifecycle_phase == Phase::Open && self.revision == expected_revision }
+            guard "completion_policy_escalation_denied" {
+                completion_policy_escalation_admissible(
+                    self.completion_policy,
+                    self.completion_reviewer_quorum_threshold,
+                    requested_completion_policy,
+                    requested_completion_supervisor_owner_key,
+                    requested_completion_reviewer_quorum_threshold
+                ) == false
+            }
+            update {}
+            to Open
+            emit PolicyEscalationAdmissionClassified { admission: WorkPolicyEscalationAdmissionKind::Denied }
+        }
+
+        transition PolicyEscalateInProgressAdmitted {
+            on input PolicyEscalate { expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold }
+            guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "completion_policy_escalation_admissible" {
+                completion_policy_escalation_admissible(
+                    self.completion_policy,
+                    self.completion_reviewer_quorum_threshold,
+                    requested_completion_policy,
+                    requested_completion_supervisor_owner_key,
+                    requested_completion_reviewer_quorum_threshold
+                )
+            }
+            update {
+                self.revision += 1;
+                self.completion_policy = requested_completion_policy;
+                self.completion_supervisor_owner_key = requested_completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = requested_completion_reviewer_quorum_threshold;
+            }
+            to InProgress
+            emit Updated
+            emit PolicyEscalationAdmissionClassified { admission: WorkPolicyEscalationAdmissionKind::Admitted }
+        }
+
+        transition PolicyEscalateInProgressDenied {
+            on input PolicyEscalate { expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold }
+            guard { self.lifecycle_phase == Phase::InProgress && self.revision == expected_revision }
+            guard "completion_policy_escalation_denied" {
+                completion_policy_escalation_admissible(
+                    self.completion_policy,
+                    self.completion_reviewer_quorum_threshold,
+                    requested_completion_policy,
+                    requested_completion_supervisor_owner_key,
+                    requested_completion_reviewer_quorum_threshold
+                ) == false
+            }
+            update {}
+            to InProgress
+            emit PolicyEscalationAdmissionClassified { admission: WorkPolicyEscalationAdmissionKind::Denied }
+        }
+
+        transition PolicyEscalateBlockedAdmitted {
+            on input PolicyEscalate { expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold }
+            guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "completion_policy_escalation_admissible" {
+                completion_policy_escalation_admissible(
+                    self.completion_policy,
+                    self.completion_reviewer_quorum_threshold,
+                    requested_completion_policy,
+                    requested_completion_supervisor_owner_key,
+                    requested_completion_reviewer_quorum_threshold
+                )
+            }
+            update {
+                self.revision += 1;
+                self.completion_policy = requested_completion_policy;
+                self.completion_supervisor_owner_key = requested_completion_supervisor_owner_key;
+                self.completion_reviewer_quorum_threshold = requested_completion_reviewer_quorum_threshold;
+            }
+            to Blocked
+            emit Updated
+            emit PolicyEscalationAdmissionClassified { admission: WorkPolicyEscalationAdmissionKind::Admitted }
+        }
+
+        transition PolicyEscalateBlockedDenied {
+            on input PolicyEscalate { expected_revision, requested_completion_policy, requested_completion_supervisor_owner_key, requested_completion_reviewer_quorum_threshold }
+            guard { self.lifecycle_phase == Phase::Blocked && self.revision == expected_revision }
+            guard "completion_policy_escalation_denied" {
+                completion_policy_escalation_admissible(
+                    self.completion_policy,
+                    self.completion_reviewer_quorum_threshold,
+                    requested_completion_policy,
+                    requested_completion_supervisor_owner_key,
+                    requested_completion_reviewer_quorum_threshold
+                ) == false
+            }
+            update {}
+            to Blocked
+            emit PolicyEscalationAdmissionClassified { admission: WorkPolicyEscalationAdmissionKind::Denied }
         }
 
         transition ClaimOpen {
@@ -1978,8 +2162,8 @@ machine! {
 
         // --- Completion-policy mutation admission classification ---
         //
-        // This machine owns the immutability invariant "a work item's completion
-        // policy is fixed at creation and cannot be changed by an update". The
+        // This machine owns the invariant "a work item's completion policy is
+        // fixed at creation, monotonically tightenable, and never update-writable". The
         // shell extracts the requested completion policy as a pure typed
         // observation (variant plus supervisor owner key plus reviewer quorum
         // threshold) and drives this input over the item's recovered state; this

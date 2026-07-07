@@ -7,10 +7,10 @@ use crate::WorkGraphError;
 use crate::machines::{work_attention_lifecycle as attention_dsl, workgraph_lifecycle as wg_dsl};
 use crate::types::{
     AddEvidenceRequest, AttentionDelegatedAuthority, ClaimWorkItemRequest, CloseWorkItemRequest,
-    CreateWorkItemRequest, ProjectedAttentionAuthority, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionMode, WorkAttentionStatus, WorkClaim,
-    WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkGraphEvent, WorkGraphEventKind,
-    WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
+    CreateWorkItemRequest, PolicyEscalateRequest, ProjectedAttentionAuthority,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBinding, WorkAttentionMode,
+    WorkAttentionStatus, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkGraphEvent,
+    WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
 };
 
 /// Machine-owned public error classification surfaced to REST/RPC callers.
@@ -33,11 +33,12 @@ pub use wg_dsl::WorkPublicConfirmationAdmissionKind;
 /// `completion_policy`.
 ///
 /// Re-exported from the canonical `WorkGraphLifecycleMachine` DSL: the machine is
-/// the sole authority for the immutability invariant "a work item's completion
-/// policy is fixed at creation and cannot be changed by an update" (see
+/// the sole authority for the invariant "a work item's completion policy is
+/// fixed at creation, monotonically tightenable, and never update-writable" (see
 /// `WorkGraphMachine::classify_completion_policy_mutation_admission`). The shell
 /// mirrors the emitted verdict.
 pub use wg_dsl::WorkCompletionPolicyMutationAdmissionKind;
+pub use wg_dsl::WorkPolicyEscalationAdmissionKind;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkAttentionMachine;
@@ -78,6 +79,25 @@ impl WorkAttentionMachine {
     ) -> Result<WorkAttentionBinding, WorkGraphError> {
         let input = attention_dsl::WorkAttentionLifecycleInput::Stop {
             expected_revision,
+            at_utc_ms: datetime_to_millis(now),
+        };
+        binding.machine_state = apply_attention_dsl(&binding, input, Some(expected_revision))?;
+        sync_attention_from_machine_state(&mut binding);
+        binding.updated_at = now;
+        Ok(binding)
+    }
+
+    pub fn supersede(
+        mut binding: WorkAttentionBinding,
+        expected_revision: u64,
+        superseded_by_binding_id: &crate::types::WorkAttentionBindingId,
+        now: DateTime<Utc>,
+    ) -> Result<WorkAttentionBinding, WorkGraphError> {
+        let input = attention_dsl::WorkAttentionLifecycleInput::Supersede {
+            expected_revision,
+            superseded_by_binding_key: attention_dsl::WorkAttentionBindingKey(
+                superseded_by_binding_id.as_str().to_string(),
+            ),
             at_utc_ms: datetime_to_millis(now),
         };
         binding.machine_state = apply_attention_dsl(&binding, input, Some(expected_revision))?;
@@ -430,9 +450,9 @@ impl WorkGraphMachine {
 
     /// Resolve whether a requested completion-policy mutation is admissible.
     ///
-    /// The immutability invariant "a work item's completion policy is fixed at
-    /// creation and cannot be changed by an update" is owned by the canonical
-    /// `WorkGraphLifecycleMachine`, not the shell. The shell performs only a pure
+    /// The invariant "a work item's completion policy is fixed at creation,
+    /// monotonically tightenable, and never update-writable" is owned by the
+    /// canonical `WorkGraphLifecycleMachine`, not the shell. The shell performs only a pure
     /// typed extraction of the requested completion policy into the DSL
     /// observation (variant plus supervisor owner key plus reviewer quorum
     /// threshold), drives the machine's `ClassifyCompletionPolicyMutationAdmission`
@@ -777,6 +797,75 @@ impl WorkGraphMachine {
         if !request.external_refs.is_empty() {
             item.external_refs = request.external_refs;
         }
+        item.updated_at = now;
+        let event = item_event(&item, WorkGraphEventKind::Updated, now)?;
+        Ok((item, event))
+    }
+
+    pub fn escalate_policy(
+        mut item: WorkItem,
+        request: PolicyEscalateRequest,
+        now: DateTime<Utc>,
+    ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
+        validate_item_machine_projection(&item)?;
+        let mut state = item.machine_state.clone();
+        state.unresolved_blocker_count = item.machine_state.unresolved_blocker_count;
+        let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::recover_from_state(state)
+            .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
+        let transition = wg_dsl::WorkGraphLifecycleMachineMutator::apply(
+            &mut dsl_auth,
+            wg_dsl::WorkGraphLifecycleInput::PolicyEscalate {
+                expected_revision: request.expected_revision,
+                requested_completion_policy: request.completion_policy.to_machine(),
+                requested_completion_supervisor_owner_key: request
+                    .completion_policy
+                    .supervisor_owner_key(),
+                requested_completion_reviewer_quorum_threshold: request
+                    .completion_policy
+                    .reviewer_quorum_threshold(),
+            },
+        )
+        .map_err(|error| {
+            if item.revision != request.expected_revision {
+                return WorkGraphError::StaleRevision {
+                    id: item.id.clone(),
+                    expected: request.expected_revision,
+                    actual: item.revision,
+                };
+            }
+            WorkGraphError::InvalidTransition(format!("{error:?}"))
+        })?;
+
+        let mut admission = None;
+        for effect in transition.effects() {
+            if let wg_dsl::WorkGraphLifecycleEffect::PolicyEscalationAdmissionClassified {
+                admission: emitted,
+            } = effect
+                && admission.replace(*emitted).is_some()
+            {
+                return Err(WorkGraphError::Store(format!(
+                    "work item {} emitted multiple policy escalation verdicts",
+                    item.id
+                )));
+            }
+        }
+        match admission.ok_or_else(|| {
+            WorkGraphError::Store(format!(
+                "work item {} emitted no policy escalation verdict",
+                item.id
+            ))
+        })? {
+            WorkPolicyEscalationAdmissionKind::Admitted => {}
+            WorkPolicyEscalationAdmissionKind::Denied => {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "completion policy for work item {} can only be monotonically tightened",
+                    item.id
+                )));
+            }
+        }
+
+        item.machine_state = dsl_auth.state().clone();
+        sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
         let event = item_event(&item, WorkGraphEventKind::Updated, now)?;
         Ok((item, event))

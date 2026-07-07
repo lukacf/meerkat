@@ -366,7 +366,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                         .map(|skill_ref| skill_ref.key().clone())
                         .collect()
                 }),
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: (!dispatch.additional_instructions.is_empty())
                     .then(|| {
                         dispatch
@@ -1161,7 +1161,7 @@ fn start_turn_request_from_primitive(
             metadata
                 .and_then(|meta| meta.handling_mode)
                 .unwrap_or(HandlingMode::Queue),
-            metadata.and_then(|meta| meta.flow_tool_overlay.clone()),
+            metadata.and_then(|meta| meta.turn_tool_overlay.clone()),
             pre_turn_context_appends,
             metadata.cloned(),
         ),

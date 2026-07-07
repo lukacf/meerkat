@@ -16171,6 +16171,7 @@
         "type": "string"
       },
       "PublicTurnToolOverlay": {
+        "additionalProperties": false,
         "description": "Public caller-safe per-turn tool overlay.",
         "properties": {
           "allowed_tools": {
@@ -17124,16 +17125,6 @@
           }
         ]
       },
-      "flow_tool_overlay": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/PublicTurnToolOverlay"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
       "injected_context": {
         "description": "Host-attached injected context for this turn. Each entry materializes\nas a separate typed injected-context transcript message immediately\nbefore the turn's user message, in order. `mob/turn_start` already\nrejects autonomous members, so this always rides a turn-driven turn.",
         "items": {
@@ -17208,6 +17199,16 @@
         "type": [
           "string",
           "null"
+        ]
+      },
+      "turn_tool_overlay": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PublicTurnToolOverlay"
+          },
+          {
+            "type": "null"
+          }
         ]
       }
     },

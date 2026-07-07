@@ -231,7 +231,7 @@ mod runtime_backed_llm_reconfigure_tests {
 
         fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
 
-        fn set_flow_tool_overlay(
+        fn set_turn_tool_overlay(
             &mut self,
             _overlay: Option<meerkat_core::service::TurnToolOverlay>,
         ) -> Result<(), AgentError> {

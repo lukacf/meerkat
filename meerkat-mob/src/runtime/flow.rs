@@ -639,7 +639,7 @@ impl FlowEngine {
         let requested_step_timeout = Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
         let (step_timeout, step_timeout_outcome) =
             effective_step_timeout(requested_step_timeout, flow_deadline, run_id)?;
-        let flow_tool_overlay = step_tool_overlay(step);
+        let turn_tool_overlay = step_tool_overlay(step);
 
         let max_retries = config
             .limits
@@ -653,7 +653,7 @@ impl FlowEngine {
                 step_id,
                 &target,
                 &prompt,
-                flow_tool_overlay,
+                turn_tool_overlay,
                 step.effective_output_format(),
                 step_timeout,
                 max_retries,
@@ -709,7 +709,7 @@ impl FlowEngine {
         flow_deadline: Option<Instant>,
     ) -> Result<StepGuardOutcome, MobError> {
         let step_timeout = Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
-        let flow_tool_overlay = step_tool_overlay(step);
+        let turn_tool_overlay = step_tool_overlay(step);
         let (step_timeout, step_timeout_outcome) =
             effective_step_timeout(step_timeout, flow_deadline, run_id)?;
         let prompt = match render_content_input_template(&step.message, context) {
@@ -733,7 +733,7 @@ impl FlowEngine {
             let step_id = step_id.clone();
             let target = target.clone();
             let prompt = prompt.clone();
-            let overlay = flow_tool_overlay.clone();
+            let overlay = turn_tool_overlay.clone();
             let output_format = step.effective_output_format();
             let step_timeout_outcome = step_timeout_outcome.clone();
             in_flight.push(async move {
@@ -824,7 +824,7 @@ impl FlowEngine {
         step_id: &StepId,
         target: &AgentIdentity,
         prompt: &ContentInput,
-        flow_tool_overlay: Option<TurnToolOverlay>,
+        turn_tool_overlay: Option<TurnToolOverlay>,
         output_format: StepOutputFormat,
         step_timeout: Duration,
         max_retries: usize,
@@ -844,7 +844,7 @@ impl FlowEngine {
                     step_id,
                     target,
                     prompt.clone(),
-                    flow_tool_overlay.clone(),
+                    turn_tool_overlay.clone(),
                 )
                 .await
             {

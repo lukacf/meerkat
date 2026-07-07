@@ -5,15 +5,17 @@ use std::collections::BTreeSet;
 use chrono::{Duration, TimeZone, Utc};
 use meerkat_core::SessionId;
 use meerkat_workgraph::{
-    AddEvidenceRequest, AttentionBindingRequest, AttentionDelegatedAuthority, AttentionListRequest,
-    AttentionPauseRequest, AttentionProjectionPolicy, AttentionProjectionRequest,
+    AddEvidenceRequest, AttentionBindingRequest, AttentionContextProjection,
+    AttentionDelegatedAuthority, AttentionListRequest, AttentionPauseRequest,
+    AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionText,
     AttentionReassignRequest, AttentionResumeRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     GoalAttentionTarget, GoalConfirmRequest, GoalCreateRequest, GoalRequestCloseRequest,
-    GoalStatusRequest, GoalTerminalStatus, LinkWorkItemsRequest, UpdateWorkItemRequest,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode,
-    WorkAttentionStatus, WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef,
-    WorkGraphError, WorkGraphEventFilter, WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef,
-    WorkNamespace, WorkOwnerKey, WorkStatus, validate_workgraph_attention_projection_current,
+    GoalStatusRequest, GoalTerminalStatus, LinkWorkItemsRequest, PolicyEscalateRequest,
+    ProjectedAttentionAuthority, UpdateWorkItemRequest, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMode, WorkAttentionStatus,
+    WorkAttentionTarget, WorkCompletionPolicy, WorkEdgeKind, WorkEvidenceRef, WorkGraphError,
+    WorkGraphEventFilter, WorkGraphService, WorkGraphSnapshotFilter, WorkItemRef, WorkNamespace,
+    WorkOwnerKey, WorkStatus, validate_workgraph_attention_projection_current,
     workgraph_attention_continuation_key, workgraph_attention_supersession_key,
 };
 use serde_json::json;
@@ -93,6 +95,146 @@ async fn completion_policy_is_item_state_and_survives_memory_store_round_trip() 
         fetched.completion_policy,
         WorkCompletionPolicy::HostConfirmed
     );
+}
+
+#[tokio::test]
+async fn policy_escalate_tightens_self_attest_without_widening_update() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000056").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Require host confirmation".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("projection")
+        .projection;
+
+    let escalated = service
+        .escalate_policy(PolicyEscalateRequest {
+            id: goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            authority_projection: projection,
+            completion_policy: WorkCompletionPolicy::HostConfirmed,
+        })
+        .await
+        .expect("escalate policy");
+
+    assert_eq!(
+        escalated.completion_policy,
+        WorkCompletionPolicy::HostConfirmed
+    );
+    assert_eq!(escalated.revision, goal.item.revision + 1);
+
+    let update_error = service
+        .update(UpdateWorkItemRequest {
+            id: escalated.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: escalated.revision,
+            title: None,
+            description: None,
+            priority: None,
+            completion_policy: Some(WorkCompletionPolicy::SelfAttest),
+            labels: None,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+        })
+        .await
+        .expect_err("update must not change policy");
+    assert!(matches!(update_error, WorkGraphError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn policy_escalate_reviewer_quorum_only_raises_threshold() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000057").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Require more reviewers".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("projection")
+        .projection;
+
+    let tightened = service
+        .escalate_policy(PolicyEscalateRequest {
+            id: goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            authority_projection: projection,
+            completion_policy: WorkCompletionPolicy::ReviewerQuorum { threshold: 3 },
+        })
+        .await
+        .expect("raise quorum");
+    assert_eq!(
+        tightened.completion_policy,
+        WorkCompletionPolicy::ReviewerQuorum { threshold: 3 }
+    );
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("fresh projection")
+        .projection;
+
+    let denied = service
+        .escalate_policy(PolicyEscalateRequest {
+            id: tightened.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: tightened.revision,
+            authority_projection: projection,
+            completion_policy: WorkCompletionPolicy::ReviewerQuorum { threshold: 2 },
+        })
+        .await
+        .expect_err("lowering quorum is not escalation");
+    assert!(matches!(denied, WorkGraphError::InvalidInput(_)));
 }
 
 #[tokio::test]
@@ -228,6 +370,145 @@ async fn goal_create_is_atomic_and_attention_status_is_service_owned() {
         .await
         .expect("list attention");
     assert_eq!(listed.attention.len(), 1);
+}
+
+#[tokio::test]
+async fn attention_reassign_supersedes_old_binding_and_targets_owner_key() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000056").expect("valid session id");
+    let owner_key = WorkOwnerKey::agent("mob/team-a/agent/reviewer").expect("owner key");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: Some("realm-reassign".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            title: "Move goal attention to a durable owner".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Coordinate,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+    let authority_projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-reassign".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+        })
+        .await
+        .expect("project attention")
+        .projection;
+    assert!(authority_projection.authority.can_link_derived_from);
+
+    let reassigned = service
+        .reassign_attention(AttentionReassignRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-reassign".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            expected_revision: goal.attention.machine_state.revision,
+            authority_projection,
+            target: GoalAttentionTarget::Owner {
+                owner_key: owner_key.clone(),
+            },
+        })
+        .await
+        .expect("reassign attention");
+
+    assert_eq!(reassigned.previous.binding_id, goal.attention.binding_id);
+    assert_eq!(reassigned.previous.status, WorkAttentionStatus::Superseded);
+    assert_eq!(
+        reassigned.previous.machine_state.revision,
+        goal.attention.machine_state.revision + 1
+    );
+    assert_ne!(reassigned.attention.binding_id, goal.attention.binding_id);
+    assert_eq!(reassigned.attention.status, WorkAttentionStatus::Active);
+    assert_eq!(reassigned.attention.work_ref, goal.attention.work_ref);
+    assert_eq!(
+        reassigned.attention.target,
+        WorkAttentionTarget::LoweredOwner {
+            owner_key: owner_key.clone()
+        }
+    );
+
+    let fetched_previous = service
+        .attention_binding(AttentionBindingRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: Some("realm-reassign".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+        })
+        .await
+        .expect("fetch previous binding")
+        .attention;
+    assert_eq!(fetched_previous.status, WorkAttentionStatus::Superseded);
+
+    let owner_bindings = service
+        .list_attention(AttentionListRequest {
+            realm_id: Some("realm-reassign".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            target: Some(WorkAttentionTarget::LoweredOwner { owner_key }),
+            status: Some(WorkAttentionStatus::Active),
+        })
+        .await
+        .expect("list owner attention");
+    assert_eq!(owner_bindings.attention, vec![reassigned.attention]);
+}
+
+#[tokio::test]
+async fn attention_reassign_requires_derived_from_authority_projection() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000057").expect("valid session id");
+    let goal = service
+        .create_goal(GoalCreateRequest {
+            realm_id: Some("realm-reassign-deny".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            title: "Insufficient authority".to_string(),
+            description: None,
+            target: GoalAttentionTarget::Session { session_id },
+            mode: WorkAttentionMode::Pursue,
+            completion_policy: WorkCompletionPolicy::SelfAttest,
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create goal");
+    let authority_projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-reassign-deny".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+        })
+        .await
+        .expect("project attention")
+        .projection;
+    assert!(!authority_projection.authority.can_link_derived_from);
+
+    let err = service
+        .reassign_attention(AttentionReassignRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-reassign-deny".to_string()),
+            namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+            expected_revision: goal.attention.machine_state.revision,
+            authority_projection,
+            target: GoalAttentionTarget::Owner {
+                owner_key: WorkOwnerKey::agent("mob/team-a/agent/reviewer").expect("owner key"),
+            },
+        })
+        .await
+        .expect_err("reassign requires derived-from authority");
+
+    assert!(matches!(
+        err,
+        WorkGraphError::InvalidInput(message)
+            if message.contains("derived_from link authority")
+    ));
 }
 
 #[tokio::test]
@@ -2043,6 +2324,40 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
         binding_id: binding_id.clone(),
         realm_id: Some("realm-a".to_string()),
         namespace: Some(namespace.clone()),
+        expected_revision: 10,
+        authority_projection: AttentionContextProjection {
+            binding_id: binding_id.clone(),
+            work_ref: WorkItemRef {
+                realm_id: "realm-a".to_string(),
+                namespace: namespace.clone(),
+                item_id: meerkat_workgraph::WorkItemId::new("work-1").expect("work item id"),
+            },
+            mode: WorkAttentionMode::Coordinate,
+            binding_revision: 10,
+            item_revision: 11,
+            parent_refs: Vec::new(),
+            parent_context: Vec::new(),
+            evidence_refs: Vec::new(),
+            authority: ProjectedAttentionAuthority {
+                can_get: true,
+                can_add_evidence: true,
+                can_release: false,
+                can_update: true,
+                can_block: false,
+                can_create: true,
+                can_link: true,
+                can_link_parent: true,
+                can_link_related: true,
+                can_link_derived_from: true,
+                can_close_own_review_item: false,
+                can_close_if_policy_allows: false,
+            },
+            text: AttentionProjectionText {
+                title: "Projected work".to_string(),
+                rendered: "Projected work".to_string(),
+                truncated: false,
+            },
+        },
         target: GoalAttentionTarget::Session {
             session_id: SessionId::parse("019e63c2-0000-7000-8000-000000000004")
                 .expect("valid session id"),
@@ -2081,6 +2396,10 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
 
     let reassign_json = serde_json::to_value(reassign).expect("serialize reassign");
     assert_eq!(reassign_json["target"]["kind"], json!("session"));
+    assert_eq!(
+        reassign_json["authority_projection"]["binding_id"],
+        json!("binding-1")
+    );
     serde_json::from_value::<AttentionReassignRequest>(reassign_json)
         .expect("deserialize reassign");
 

@@ -152,12 +152,12 @@ impl SessionAgent for FactoryAgent {
         self.agent.pending_skill_references = refs;
     }
 
-    fn set_flow_tool_overlay(
+    fn set_turn_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
         self.agent
-            .set_flow_tool_overlay(overlay)
+            .set_turn_tool_overlay(overlay)
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
@@ -931,6 +931,25 @@ pub fn build_ephemeral_service(
 
 /// Convenience: build a `PersistentSessionService` backed by `AgentFactory`.
 #[cfg(feature = "session-store")]
+fn set_default_workgraph_tools_from_persistence(
+    builder: &FactoryAgentBuilder,
+    persistence: &PersistenceBundle,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(manifest) = persistence.manifest() {
+        let service = crate::WorkGraphService::with_scope(
+            persistence.workgraph_store(),
+            manifest.realm.as_str().to_owned(),
+            crate::WorkNamespace::default(),
+        );
+        crate::surface::set_default_workgraph_tools(
+            builder,
+            Some(Arc::new(crate::WorkGraphToolSurface::new(service))),
+        );
+    }
+}
+
+#[cfg(feature = "session-store")]
 pub fn build_persistent_service_with_runtime_adapter(
     factory: AgentFactory,
     config: Config,
@@ -941,6 +960,7 @@ pub fn build_persistent_service_with_runtime_adapter(
     Arc<meerkat_runtime::MeerkatMachine>,
 ) {
     let builder = FactoryAgentBuilder::new(factory, config);
+    set_default_workgraph_tools_from_persistence(&builder, &persistence);
     crate::surface::build_runtime_backed_service(builder, max_sessions, persistence)
 }
 

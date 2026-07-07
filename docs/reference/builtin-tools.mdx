@@ -61,6 +61,8 @@ categories, and gates.
 | `workgraph_close` | WorkGraph | No | `work_graph` | Close an item terminally |
 | `workgraph_link` | WorkGraph | No | `work_graph` | Add an edge |
 | `workgraph_add_evidence` | WorkGraph | No | `work_graph` | Add evidence |
+| `workgraph_attention_reassign` | WorkGraph | No | `work_graph` | Reassign a WorkGraph attention binding |
+| `workgraph_policy_escalate` | WorkGraph | No | `work_graph` | Monotonically tighten a WorkGraph completion policy |
 
 ## Enabling and disabling tools
 
@@ -150,7 +152,7 @@ Servers being removed transition through `Active → Removing (draining) → Rem
 **Source:** `meerkat-mcp/src/router.rs`, `meerkat-rpc/src/handlers/mcp.rs`
 </Accordion>
 
-<Accordion title="Per-turn flow tool overlay">
+<Accordion title="Per-turn tool overlay">
 Mob flow steps can restrict tools for a single turn via `TurnToolOverlay`:
 
 ```rust
@@ -160,7 +162,7 @@ TurnToolOverlay {
 }
 ```
 
-Set on `StartTurnRequest.flow_tool_overlay` by the flow engine. Ephemeral — cleared after the turn completes. Composes with the external filter using most-restrictive semantics.
+Set on `StartTurnRequest.turn_tool_overlay` by the flow engine and other per-turn producers. Ephemeral — cleared after the turn completes. Composes with the external filter using most-restrictive semantics.
 
 **Source:** `meerkat-core/src/service/mod.rs`, `meerkat-mob/src/runtime/flow.rs`
 </Accordion>
@@ -206,6 +208,8 @@ attention controls.
 | `workgraph_close` | Close as `completed`, `cancelled`, or `failed` |
 | `workgraph_link` | Add an edge |
 | `workgraph_add_evidence` | Add an evidence reference |
+| `workgraph_attention_reassign` | Reassign an attention binding with a current authority projection |
+| `workgraph_policy_escalate` | Monotonically tighten an item's completion policy |
 
 For operating guidance, load the `workgraph-workflow` companion skill when it
 is available. For the data model and host observability surfaces, see

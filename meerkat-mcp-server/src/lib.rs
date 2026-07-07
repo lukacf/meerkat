@@ -622,6 +622,7 @@ impl MeerkatMcpState {
             runtime_ingress::McpRuntimeIngressResources {
                 service: Arc::clone(&self.service),
                 runtime_adapter: Arc::clone(&self.runtime_adapter),
+                workgraph_service: self.workgraph_service.clone(),
                 config_runtime: Arc::clone(&self.config_runtime),
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),
@@ -819,7 +820,8 @@ impl MeerkatMcpState {
                     service.clone(),
                     Some(runtime_adapter.clone()),
                 )
-                .with_persistent_storage_root(Some(persistent_mob_root)),
+                .with_persistent_storage_root(Some(persistent_mob_root))
+                .with_workgraph_service(Some(workgraph_service.clone())),
             );
             *mob_tools_slot
                 .write()
@@ -1165,7 +1167,7 @@ pub struct MeerkatResumeInput {
     pub skill_references: Option<Vec<String>>,
     /// Optional per-turn tool overlay.
     #[serde(default)]
-    pub flow_tool_overlay: Option<TurnToolOverlayInput>,
+    pub turn_tool_overlay: Option<TurnToolOverlayInput>,
     /// Additional system-level instructions prepended to the prompt for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
@@ -1680,7 +1682,7 @@ fn empty_input_schema() -> Value {
 ///
 /// This is the authority for both the advertised descriptor JSON and the
 /// per-tool request lifecycle. Tools contributed by other crates
-/// (`schedule_tools_list`, `workgraph_tools_list`, the mob/comms surfaces)
+/// (`schedule_tools_list`, `unscoped_workgraph_tools_list`, the mob/comms surfaces)
 /// declare their lifecycle in [`contributed_tool_lifecycles`], keyed by the
 /// surface's own advertised list.
 fn base_tool_descriptors() -> Vec<BaseToolDescriptor> {
@@ -1837,7 +1839,7 @@ fn contributed_tool_lifecycles() -> Vec<(Vec<String>, RequestLifecycle)> {
             RequestLifecycle::LongRunningObservation,
         ),
         (
-            advertised_names(meerkat::workgraph_tools_list()),
+            advertised_names(meerkat::unscoped_workgraph_tools_list()),
             RequestLifecycle::LongRunningObservation,
         ),
     ];
@@ -1948,7 +1950,7 @@ impl MeerkatMcpState {
 pub fn tools_list() -> Vec<Value> {
     let mut tools = base_tools_list();
     tools.extend(meerkat::schedule_tools_list());
-    tools.extend(meerkat::workgraph_tools_list());
+    tools.extend(meerkat::unscoped_workgraph_tools_list());
 
     #[cfg(feature = "mob")]
     tools.extend(mob_host_tools_list());
@@ -2140,7 +2142,7 @@ pub async fn handle_tools_call_with_notifier(
                 .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
         }
         name if name.starts_with("workgraph_") => {
-            meerkat::handle_workgraph_tools_call(&state.workgraph_service, name, arguments)
+            meerkat::handle_unscoped_workgraph_tools_call(&state.workgraph_service, name, arguments)
                 .await
                 .map_err(map_workgraph_tool_error)
                 .and_then(|payload| wrap_tool_payload(payload).map_err(ToolCallError::internal))
@@ -4131,7 +4133,7 @@ async fn handle_meerkat_resume(
         // preserve the persisted session intent.
         let turn_seed_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             skill_references: skill_references.clone(),
-            flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
+            turn_tool_overlay: input.turn_tool_overlay.clone().map(Into::into),
             keep_alive: keep_alive_override.map(|keep_alive| {
                 if keep_alive {
                     meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
@@ -4153,7 +4155,7 @@ async fn handle_meerkat_resume(
             event_tx: event_tx.clone(),
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                 meerkat_core::types::HandlingMode::Queue,
-                input.flow_tool_overlay.clone().map(Into::into),
+                input.turn_tool_overlay.clone().map(Into::into),
                 Vec::new(),
                 Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(Some(
                     turn_seed_metadata,
@@ -5123,7 +5125,7 @@ mod tests {
     fn test_tools_list_schema() {
         let tools = tools_list();
         let schedule_tool_count = meerkat::schedule_tools_list().len();
-        let workgraph_tool_count = meerkat::workgraph_tools_list().len();
+        let workgraph_tool_count = meerkat::unscoped_workgraph_tools_list().len();
         #[cfg(all(feature = "comms", feature = "mob"))]
         assert_eq!(
             tools.len(),
@@ -5161,6 +5163,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect();
+        assert!(!tool_names.contains(&"workgraph_attention_reassign"));
         let find_tool = |name: &str| {
             tools
                 .iter()
@@ -6083,7 +6086,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -6167,7 +6170,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -6232,7 +6235,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -6418,7 +6421,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -6548,7 +6551,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -6680,7 +6683,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -6783,7 +6786,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -6880,7 +6883,7 @@ mod tests {
                 preload_skills: None,
                 skill_refs: None,
                 skill_references: None,
-                flow_tool_overlay: None,
+                turn_tool_overlay: None,
                 additional_instructions: None,
             },
             None,
@@ -7090,6 +7093,32 @@ mod tests {
             .expect("tool payload text");
         let payload: Value = serde_json::from_str(text).expect("json payload");
         assert_eq!(payload["items"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_rejects_attention_scoped_workgraph_tool_without_projection() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_attention_reassign",
+            &json!({
+                "binding_id": "attn_1",
+                "expected_revision": 1,
+                "target": {
+                    "kind": "owner",
+                    "owner_key": { "kind": "agent", "id": "agent:mob/demo/agent/member" }
+                }
+            }),
+        ))
+        .await
+        .expect_err("attention-only WorkGraph tool must not dispatch from public MCP");
+        assert_eq!(err.code, -32601);
+        assert!(
+            err.message
+                .contains("unknown WorkGraph tool 'workgraph_attention_reassign'")
+        );
     }
 
     #[cfg(feature = "mob")]

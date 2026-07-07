@@ -250,6 +250,7 @@ pub enum WorkCompletionPolicy {
         owner_key: WorkOwnerKey,
     },
     ReviewerQuorum {
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 64)))]
         threshold: u16,
     },
 }
@@ -508,6 +509,7 @@ impl WorkAttentionTarget {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GoalAttentionTarget {
     Session { session_id: SessionId },
+    Owner { owner_key: WorkOwnerKey },
 }
 
 impl GoalAttentionTarget {
@@ -515,6 +517,9 @@ impl GoalAttentionTarget {
         match self {
             Self::Session { session_id } => WorkAttentionTarget::Session {
                 session_id: session_id.clone(),
+            },
+            Self::Owner { owner_key } => WorkAttentionTarget::LoweredOwner {
+                owner_key: owner_key.clone(),
             },
         }
     }
@@ -809,7 +814,7 @@ impl schemars::JsonSchema for WorkItem {
                             "required": ["kind", "threshold"],
                             "properties": {
                                 "kind": { "type": "string", "const": "reviewer_quorum" },
-                                "threshold": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 65535 }
+                                "threshold": { "type": "integer", "format": "uint16", "minimum": 1, "maximum": 64 }
                             }
                         }
                     ]
@@ -1134,6 +1139,19 @@ pub struct UpdateWorkItemRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PolicyEscalateRequest {
+    pub id: WorkItemId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
+    pub authority_projection: AttentionContextProjection,
+    pub completion_policy: WorkCompletionPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ClaimWorkItemRequest {
     pub id: WorkItemId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1443,12 +1461,21 @@ pub struct AttentionReassignRequest {
     pub realm_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
+    pub authority_projection: AttentionContextProjection,
     pub target: GoalAttentionTarget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AttentionBindingResult {
+    pub attention: WorkAttentionBinding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AttentionReassignResult {
+    pub previous: WorkAttentionBinding,
     pub attention: WorkAttentionBinding,
 }
 

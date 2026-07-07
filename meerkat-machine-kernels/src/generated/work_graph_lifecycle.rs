@@ -877,6 +877,58 @@ impl std::fmt::Display for WorkOwnerKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum WorkPolicyEscalationAdmissionKind {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "Admitted")]
+    Admitted,
+}
+impl WorkPolicyEscalationAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::Admitted => "Admitted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkPolicyEscalationAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "Admitted" => Ok(Self::Admitted),
+            other => Err(format!(
+                "invalid WorkPolicyEscalationAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkPolicyEscalationAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkPolicyEscalationAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum WorkPublicConfirmationAdmissionKind {
     #[default]
     #[serde(rename = "DeniedRequiresTrustedHost")]
@@ -998,6 +1050,13 @@ pub mod inputs {
         pub unresolved_blocker_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PolicyEscalate {
+        pub expected_revision: u64,
+        pub requested_completion_policy: WorkCompletionPolicy,
+        pub requested_completion_supervisor_owner_key: Option<WorkOwnerKey>,
+        pub requested_completion_reviewer_quorum_threshold: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Claim {
         pub expected_revision: u64,
         pub owner_key: WorkOwnerKey,
@@ -1097,6 +1156,7 @@ pub enum Input {
     CreateOpen(inputs::CreateOpen),
     CreateBlocked(inputs::CreateBlocked),
     Update(inputs::Update),
+    PolicyEscalate(inputs::PolicyEscalate),
     Claim(inputs::Claim),
     Release(inputs::Release),
     Block(inputs::Block),
@@ -1123,6 +1183,7 @@ impl Input {
             Self::CreateOpen(_) => InputKind::CreateOpen,
             Self::CreateBlocked(_) => InputKind::CreateBlocked,
             Self::Update(_) => InputKind::Update,
+            Self::PolicyEscalate(_) => InputKind::PolicyEscalate,
             Self::Claim(_) => InputKind::Claim,
             Self::Release(_) => InputKind::Release,
             Self::Block(_) => InputKind::Block,
@@ -1156,6 +1217,7 @@ pub enum InputKind {
     CreateOpen,
     CreateBlocked,
     Update,
+    PolicyEscalate,
     Claim,
     Release,
     Block,
@@ -1235,6 +1297,10 @@ pub mod effects {
         pub admission: WorkCompletionPolicyMutationAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PolicyEscalationAdmissionClassified {
+        pub admission: WorkPolicyEscalationAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ConfirmationAdmissionClassified {
         pub admission: WorkConfirmationAdmissionKind,
     }
@@ -1264,6 +1330,7 @@ pub enum Effect {
     CompletionPolicyMutationAdmissionClassified(
         effects::CompletionPolicyMutationAdmissionClassified,
     ),
+    PolicyEscalationAdmissionClassified(effects::PolicyEscalationAdmissionClassified),
     ConfirmationAdmissionClassified(effects::ConfirmationAdmissionClassified),
     WorkItemReadinessClassified(effects::WorkItemReadinessClassified),
 }
@@ -1285,6 +1352,7 @@ pub enum EffectKind {
     CloseStatusAdmissionClassified,
     PublicConfirmationAdmissionClassified,
     CompletionPolicyMutationAdmissionClassified,
+    PolicyEscalationAdmissionClassified,
     ConfirmationAdmissionClassified,
     WorkItemReadinessClassified,
 }
@@ -1297,6 +1365,12 @@ pub enum TransitionId {
     UpdateOpen,
     UpdateInProgress,
     UpdateBlocked,
+    PolicyEscalateOpenAdmitted,
+    PolicyEscalateOpenDenied,
+    PolicyEscalateInProgressAdmitted,
+    PolicyEscalateInProgressDenied,
+    PolicyEscalateBlockedAdmitted,
+    PolicyEscalateBlockedDenied,
     ClaimOpen,
     ClaimExpiredInProgress,
     ReleaseInProgress,

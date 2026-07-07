@@ -318,8 +318,8 @@ where
         Ok(revision)
     }
 
-    /// Set or clear a per-turn flow tool overlay.
-    pub fn set_flow_tool_overlay(
+    /// Set or clear a per-turn tool overlay.
+    pub fn set_turn_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), ToolScopeStageError> {

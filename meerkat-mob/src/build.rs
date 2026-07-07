@@ -810,6 +810,12 @@ mod tests {
             .expect("test visibility authority should mint from snapshot")
     }
 
+    fn test_workgraph_tools() -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+        Arc::new(meerkat::WorkGraphToolSurface::new(
+            meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new())),
+        ))
+    }
+
     fn resumed_session_with_metadata(session_id: SessionId) -> Session {
         let mut resumed_session = Session::with_id(session_id);
         resumed_session
@@ -1249,6 +1255,7 @@ mod tests {
         .await
         .expect("build_agent_config");
         config.llm_client_override = Some(capture.clone());
+        config.workgraph_tools = Some(test_workgraph_tools());
 
         let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
             .builtins(false)

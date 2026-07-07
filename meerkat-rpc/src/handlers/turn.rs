@@ -11,7 +11,7 @@ use meerkat_contracts::SkillsParams;
 use meerkat_core::ContentInput;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::service::TurnToolOverlay;
+use meerkat_core::service::PublicTurnToolOverlay;
 use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::skills::reject_retired_skill_references;
@@ -46,7 +46,7 @@ pub struct StartTurnParams {
     #[serde(default, deserialize_with = "reject_retired_skill_references")]
     pub skill_references: Option<Vec<String>>,
     #[serde(default)]
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
+    pub turn_tool_overlay: Option<PublicTurnToolOverlay>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default)]
@@ -248,7 +248,7 @@ pub async fn start_turn_with_params(
             params.injected_context.unwrap_or_default(),
             mcp_event_tx,
             skill_refs,
-            params.flow_tool_overlay,
+            params.turn_tool_overlay.map(Into::into),
             params.additional_instructions,
             if overrides.is_empty() {
                 None

@@ -447,11 +447,11 @@ function mobTurnStartPayload(
   if (wireRefs) {
     payload.skill_refs = wireRefs as MobTurnStartParams["skill_refs"];
   }
-  if (options?.flowToolOverlay) {
-    payload.flow_tool_overlay = {
-      allowed_tools: options.flowToolOverlay.allowedTools,
-      blocked_tools: options.flowToolOverlay.blockedTools,
-    } as MobTurnStartParams["flow_tool_overlay"];
+  if (options?.turnToolOverlay) {
+    payload.turn_tool_overlay = {
+      allowed_tools: options.turnToolOverlay.allowedTools,
+      blocked_tools: options.turnToolOverlay.blockedTools,
+    } as MobTurnStartParams["turn_tool_overlay"];
   }
   setIfDefined(payload, "additional_instructions", options?.additionalInstructions);
   setIfDefined(
@@ -2723,10 +2723,10 @@ export class MeerkatClient {
     if (wireRefs) {
       params.skill_refs = wireRefs;
     }
-    if (options?.flowToolOverlay) {
-      params.flow_tool_overlay = {
-        allowed_tools: options.flowToolOverlay.allowedTools,
-        blocked_tools: options.flowToolOverlay.blockedTools,
+    if (options?.turnToolOverlay) {
+      params.turn_tool_overlay = {
+        allowed_tools: options.turnToolOverlay.allowedTools,
+        blocked_tools: options.turnToolOverlay.blockedTools,
       };
     }
     if (options?.additionalInstructions != null) {
@@ -2772,10 +2772,10 @@ export class MeerkatClient {
     if (wireRefs) {
       params.skill_refs = wireRefs;
     }
-    if (options?.flowToolOverlay) {
-      params.flow_tool_overlay = {
-        allowed_tools: options.flowToolOverlay.allowedTools,
-        blocked_tools: options.flowToolOverlay.blockedTools,
+    if (options?.turnToolOverlay) {
+      params.turn_tool_overlay = {
+        allowed_tools: options.turnToolOverlay.allowedTools,
+        blocked_tools: options.turnToolOverlay.blockedTools,
       };
     }
     if (options?.additionalInstructions != null) {

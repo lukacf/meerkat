@@ -58,7 +58,7 @@ pub trait FlowTurnExecutor: Send + Sync {
         step_id: &StepId,
         target: &AgentIdentity,
         message: ContentInput,
-        flow_tool_overlay: Option<TurnToolOverlay>,
+        turn_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError>;
 
     async fn await_terminal(

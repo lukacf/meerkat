@@ -441,7 +441,7 @@ export interface TurnOptions {
    */
   readonly injectedContext?: readonly ContentInput[];
   readonly skillRefs?: SkillRef[];
-  readonly flowToolOverlay?: TurnToolOverlay;
+  readonly turnToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: string[];
   readonly keepAlive?: boolean;
   readonly model?: string;
@@ -609,7 +609,7 @@ type MobTurnStartWireOptions = Omit<
 
 export interface MobTurnStartOptions {
   readonly skillRefs?: SkillRef[];
-  readonly flowToolOverlay?: TurnToolOverlay;
+  readonly turnToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: MobTurnStartWireOptions["additional_instructions"];
   /**
    * Host-attached ambient context delivered as separate typed transcript

@@ -238,7 +238,7 @@ void publicSpawnManySpecWithSingleSpawnOnlyField;
 
 const publicMobTurnStartOptions: MobTurnStartOptions = {
   skillRefs: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
-  flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
+  turnToolOverlay: { allowedTools: ["read"], blockedTools: [] },
   additionalInstructions: ["stay concise"],
   injectedContext: ["remembered operator preferences"],
   keepAlive: true,
@@ -274,7 +274,7 @@ const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
 type MobTurnStartSupportedWireOptionKeys =
   | "additional_instructions"
   | "auth_binding"
-  | "flow_tool_overlay"
+  | "turn_tool_overlay"
   | "injected_context"
   | "keep_alive"
   | "max_tokens"

@@ -118,6 +118,7 @@ pub async fn inject_workgraph_attention_turn_overlay(
     })?;
     inject_workgraph_attention_turn_overlay_from_labels(
         workgraph_service,
+        session_service,
         session_id,
         &session.state.labels,
         request,
@@ -125,36 +126,9 @@ pub async fn inject_workgraph_attention_turn_overlay(
     .await
 }
 
-pub async fn compose_workgraph_attention_turn_overlay_for_session(
-    session_service: &dyn meerkat_core::SessionService,
-    workgraph_service: Option<&crate::WorkGraphService>,
-    session_id: &meerkat_core::SessionId,
-    existing_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-) -> Result<Option<meerkat_core::service::TurnToolOverlay>, WorkGraphAttentionTurnOverlayError> {
-    let Some(workgraph_service) = workgraph_service else {
-        return Ok(existing_overlay);
-    };
-    if workgraph_service.store().kind() == crate::WorkGraphStoreKind::Disabled {
-        return Ok(existing_overlay);
-    }
-    let session = session_service.read(session_id).await.map_err(|source| {
-        WorkGraphAttentionTurnOverlayError::SessionRead {
-            session_id: session_id.clone(),
-            source,
-        }
-    })?;
-    compose_workgraph_attention_turn_overlay_from_labels(
-        workgraph_service,
-        Some(session_service),
-        session_id,
-        &session.state.labels,
-        existing_overlay,
-    )
-    .await
-}
-
 pub async fn inject_workgraph_attention_turn_overlay_from_labels(
     workgraph_service: &crate::WorkGraphService,
+    session_service: &dyn meerkat_core::SessionService,
     session_id: &meerkat_core::SessionId,
     labels: &BTreeMap<String, String>,
     request: &mut meerkat_core::StartTurnRequest,
@@ -167,7 +141,7 @@ pub async fn inject_workgraph_attention_turn_overlay_from_labels(
         .or_else(|| request.runtime.turn_tool_overlay.clone());
     let Some(overlay) = compose_workgraph_attention_turn_overlay_from_labels(
         workgraph_service,
-        None,
+        Some(session_service),
         session_id,
         labels,
         existing_overlay,
@@ -296,6 +270,17 @@ async fn attention_binding_resolves_to_session(
                 .cmp(&left.session_id.to_string())
         })
     });
+    // A session not yet visible in the listing is mid-creation: it is
+    // definitionally the newest session carrying these labels, so the
+    // attention overlay may bind to it. Otherwise the newest listed live
+    // session wins, so overlapping respawn generations resolve
+    // deterministically instead of both receiving the attention overlay.
+    if !summaries
+        .iter()
+        .any(|summary| summary.session_id == *session_id)
+    {
+        return Ok(true);
+    }
     Ok(summaries
         .first()
         .is_none_or(|summary| summary.session_id == *session_id))
@@ -1081,6 +1066,243 @@ mod tests {
         assert_eq!(
             overlay.dispatch_context["workgraph.attention_projection"],
             serde_json::json!({"binding_id": "b"})
+        );
+    }
+
+    /// Minimal SessionService fake for owner-key attention arbitration: `read`
+    /// serves the configured labels for any known session and `list` applies
+    /// the label filter over the configured summaries, mirroring the real
+    /// live-session listing the arbitration guard consults.
+    struct RespawnOverlapSessionService {
+        summaries: Vec<meerkat_core::service::SessionSummary>,
+        labels: BTreeMap<String, String>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::SessionService for RespawnOverlapSessionService {
+        async fn create_session(
+            &self,
+            _req: meerkat_core::service::CreateSessionRequest,
+        ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+            Err(meerkat_core::service::SessionError::Agent(
+                meerkat_core::AgentError::InternalError(
+                    "not used by arbitration tests".to_string(),
+                ),
+            ))
+        }
+
+        async fn start_turn(
+            &self,
+            id: &meerkat_core::SessionId,
+            _req: meerkat_core::StartTurnRequest,
+        ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+            Err(meerkat_core::service::SessionError::NotFound { id: id.clone() })
+        }
+
+        async fn interrupt(
+            &self,
+            _id: &meerkat_core::SessionId,
+        ) -> Result<(), meerkat_core::service::SessionError> {
+            Ok(())
+        }
+
+        async fn read(
+            &self,
+            id: &meerkat_core::SessionId,
+        ) -> Result<meerkat_core::service::SessionView, meerkat_core::service::SessionError>
+        {
+            Ok(meerkat_core::service::SessionView {
+                state: meerkat_core::service::SessionInfo {
+                    session_id: id.clone(),
+                    created_at: std::time::SystemTime::UNIX_EPOCH,
+                    updated_at: std::time::SystemTime::UNIX_EPOCH,
+                    message_count: 0,
+                    is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
+                    last_assistant_text: None,
+                    labels: self.labels.clone(),
+                },
+                billing: meerkat_core::service::SessionUsage {
+                    total_tokens: 0,
+                    usage: meerkat_core::Usage::default(),
+                },
+            })
+        }
+
+        async fn list(
+            &self,
+            query: meerkat_core::service::SessionQuery,
+        ) -> Result<Vec<meerkat_core::service::SessionSummary>, meerkat_core::service::SessionError>
+        {
+            Ok(self
+                .summaries
+                .iter()
+                .filter(|summary| {
+                    query.labels.as_ref().is_none_or(|filter| {
+                        filter.iter().all(|(key, value)| {
+                            summary.labels.get(key).is_some_and(|label| label == value)
+                        })
+                    })
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn archive(
+            &self,
+            _id: &meerkat_core::SessionId,
+        ) -> Result<(), meerkat_core::service::SessionError> {
+            Ok(())
+        }
+    }
+
+    fn respawn_summary(
+        session_id: meerkat_core::SessionId,
+        created_at: std::time::SystemTime,
+        labels: &BTreeMap<String, String>,
+    ) -> meerkat_core::service::SessionSummary {
+        meerkat_core::service::SessionSummary {
+            session_id,
+            created_at,
+            updated_at: created_at,
+            message_count: 0,
+            total_tokens: 0,
+            is_active: true,
+            labels: labels.clone(),
+        }
+    }
+
+    fn mob_owner_labels() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("mob_id".to_string(), "alpha".to_string()),
+            ("agent_identity".to_string(), "reviewer".to_string()),
+        ])
+    }
+
+    async fn owner_scoped_workgraph_service() -> crate::WorkGraphService {
+        let service =
+            crate::WorkGraphService::new(std::sync::Arc::new(crate::MemoryWorkGraphStore::new()));
+        service
+            .create_goal(crate::GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "arbitrated goal".to_string(),
+                description: None,
+                target: crate::GoalAttentionTarget::Owner {
+                    owner_key: crate::WorkOwnerKey::agent("mob/alpha/agent/reviewer")
+                        .expect("owner key"),
+                },
+                mode: crate::WorkAttentionMode::Coordinate,
+                completion_policy: crate::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: crate::AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: crate::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create owner-scoped goal");
+        service
+    }
+
+    fn empty_start_turn_request() -> meerkat_core::StartTurnRequest {
+        meerkat_core::StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt: meerkat_core::ContentInput::Text(String::new()),
+            system_prompt: None,
+            event_tx: None,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+                Vec::new(),
+                None,
+            ),
+        }
+    }
+
+    /// Respawn-overlap arbitration on the canonical apply-time injection
+    /// path: when two live sessions carry the same mob owner labels, only
+    /// the newest receives the attention overlay.
+    #[tokio::test]
+    async fn attention_overlay_binds_only_to_newest_labeled_session() {
+        let labels = mob_owner_labels();
+        let older_id = meerkat_core::SessionId::new();
+        let newer_id = meerkat_core::SessionId::new();
+        let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let session_service = RespawnOverlapSessionService {
+            summaries: vec![
+                respawn_summary(older_id.clone(), base, &labels),
+                respawn_summary(
+                    newer_id.clone(),
+                    base + std::time::Duration::from_secs(60),
+                    &labels,
+                ),
+            ],
+            labels: labels.clone(),
+        };
+        let workgraph_service = owner_scoped_workgraph_service().await;
+
+        let mut older_request = empty_start_turn_request();
+        inject_workgraph_attention_turn_overlay(
+            &session_service,
+            Some(&workgraph_service),
+            &older_id,
+            &mut older_request,
+        )
+        .await
+        .expect("inject for older session");
+        assert!(
+            older_request.runtime.turn_tool_overlay.is_none(),
+            "the older overlapping session must not receive the attention overlay"
+        );
+
+        let mut newer_request = empty_start_turn_request();
+        inject_workgraph_attention_turn_overlay(
+            &session_service,
+            Some(&workgraph_service),
+            &newer_id,
+            &mut newer_request,
+        )
+        .await
+        .expect("inject for newest session");
+        let overlay = newer_request
+            .runtime
+            .turn_tool_overlay
+            .expect("newest session must receive the attention overlay");
+        assert!(
+            overlay
+                .dispatch_context
+                .contains_key("workgraph.attention_projection"),
+            "attention overlay must carry the projection dispatch context"
+        );
+    }
+
+    /// A session that is not yet visible in the session listing is
+    /// mid-creation and definitionally the newest carrier of its labels, so
+    /// creation-time injection (RPC/REST create-and-start paths) still binds.
+    #[tokio::test]
+    async fn attention_overlay_allows_unlisted_mid_creation_session() {
+        let labels = mob_owner_labels();
+        let listed_id = meerkat_core::SessionId::new();
+        let mid_creation_id = meerkat_core::SessionId::new();
+        let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let session_service = RespawnOverlapSessionService {
+            summaries: vec![respawn_summary(listed_id, base, &labels)],
+            labels: labels.clone(),
+        };
+        let workgraph_service = owner_scoped_workgraph_service().await;
+
+        let mut request = empty_start_turn_request();
+        inject_workgraph_attention_turn_overlay_from_labels(
+            &workgraph_service,
+            &session_service,
+            &mid_creation_id,
+            &labels,
+            &mut request,
+        )
+        .await
+        .expect("inject for mid-creation session");
+        assert!(
+            request.runtime.turn_tool_overlay.is_some(),
+            "a mid-creation session absent from the listing is the newest by construction"
         );
     }
 

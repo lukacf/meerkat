@@ -5635,6 +5635,7 @@ impl SessionRuntime {
                 if let Err(error) =
                     meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
                         workgraph_service,
+                        self.service.as_ref(),
                         session_id,
                         attention_labels,
                         &mut start_request,
@@ -5707,6 +5708,7 @@ impl SessionRuntime {
             if let Err(error) =
                 meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
                     workgraph_service,
+                    self.service.as_ref(),
                     session_id,
                     attention_labels,
                     &mut start_request,
@@ -6141,6 +6143,7 @@ impl SessionRuntime {
                 if let Err(error) =
                     meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
                         workgraph_service,
+                        self.service.as_ref(),
                         session_id,
                         attention_labels,
                         &mut start_request,

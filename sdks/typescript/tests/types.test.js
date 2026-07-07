@@ -1324,54 +1324,6 @@ describe("WorkGraph parsers", () => {
       created_at: timestamp,
       updated_at: timestamp,
     };
-    const reassignedAttention = {
-      ...attention,
-      binding_id: "attention-2",
-      target: {
-        kind: "lowered_owner",
-        owner_key: {
-          kind: "agent",
-          id: "mob/family-dentist/agent/planner",
-        },
-      },
-      machine_state: { revision: 2 },
-    };
-    const supersededAttention = {
-      ...attention,
-      status: { state: "superseded" },
-      machine_state: { revision: 2 },
-    };
-    const authorityProjection = {
-      binding_id: "attention-1",
-      work_ref: {
-        realm_id: "homecore",
-        namespace: "family/appointments",
-        item_id: "prep-dentist-ride",
-      },
-      mode: "coordinate",
-      binding_revision: 1,
-      item_revision: 1,
-      authority: {
-        can_get: true,
-        can_add_evidence: true,
-        can_release: false,
-        can_update: true,
-        can_block: false,
-        can_create: true,
-        can_link: true,
-        can_link_parent: false,
-        can_link_related: true,
-        can_link_derived_from: true,
-        can_close_if_policy_allows: false,
-        can_close_own_review_item: false,
-      },
-      text: {
-        title: "Prep A for non-preferred dentist car",
-        rendered: "projection",
-        truncated: false,
-      },
-    };
-
     const clientFor = (entry) => {
       const client = new MeerkatClient();
       client.request = async () => ({ attention: [entry] });

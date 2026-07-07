@@ -1288,6 +1288,70 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     );
 }
 
+/// Fail-closed contract (post-#850): a WorkGraph-enabled non-wasm build with
+/// no supplied dispatcher (and no surface-installed default) must refuse to
+/// build with the typed Config error instead of silently falling back to an
+/// in-memory store.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn build_agent_workgraph_enabled_without_dispatcher_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            self_hosted_server_id: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Disable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
+                schedule: ToolCategoryOverride::Disable,
+                workgraph: ToolCategoryOverride::Enable,
+                image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
+                tool_access_policy: None,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: None,
+        })
+        .unwrap();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session),
+        provider: Some(Provider::Anthropic),
+        max_tokens: Some(1024),
+        realm_id: Some(meerkat_core::RealmId::parse("dev").expect("valid realm")),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let Err(error) = factory.build_agent(build_config, &config).await else {
+        panic!("WorkGraph enable without a dispatcher must fail the build closed");
+    };
+    assert!(
+        error.to_string().contains("without a supplied dispatcher"),
+        "expected the typed fail-closed Config error, got: {error}"
+    );
+}
+
 #[tokio::test]
 async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
     let temp = tempfile::tempdir().unwrap();

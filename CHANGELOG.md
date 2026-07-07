@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Scheduled prompt delivery no longer snapshots the WorkGraph attention
+  projection at enqueue time (facade schedule host and CLI schedule host).
+  A queued prompt behind a running turn that mutated its work item carried a
+  projection that failed exact-currency validation at apply, deterministically
+  failing the scheduled delivery. The runtime executors inject a fresh
+  projection at apply time — the single canonical injection point — so the
+  enqueue-time composition was removed outright.
+- WorkGraph attention overlays now arbitrate newest-session-wins on the
+  canonical apply-time injection path. The arbitration guard previously ran
+  only on the (removed) enqueue-time composition path, so during mob member
+  respawn overlap both the old and new session matched the same owner-key
+  binding and both received the attention overlay. The session-listing
+  arbitration is now threaded through every injection surface (CLI, REST,
+  RPC, MCP, mob provisioner, runtime executors); a session not yet visible in
+  the listing (mid-creation) is treated as the newest carrier of its labels.
+
+### Testing
+
+- Pinned the apply-time attention injection on `CliRuntimeExecutor` and the
+  newest-session arbitration semantics (overlap denial + mid-creation allow).
+- Pinned the non-wasm fail-closed factory contract: WorkGraph enabled without
+  a supplied dispatcher refuses to build with the typed `Config` error.
+- Pinned the SQLite UNIQUE-violation → typed `Conflict` mapping for duplicate
+  work item and attention binding inserts.
+
 ## [0.7.22] - 2026-07-07
 
 Meerkat 0.7.22 fixes the runtime-loop self-deadlock that was the root

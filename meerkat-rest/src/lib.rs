@@ -1693,6 +1693,7 @@ async fn apply_runtime_turn(
             if let Err(error) =
                 meerkat::surface::inject_workgraph_attention_turn_overlay_from_labels(
                     &context.workgraph_service,
+                    context.session_service.as_ref(),
                     session_id,
                     attention_labels,
                     &mut recovered_turn_req,

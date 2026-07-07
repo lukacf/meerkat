@@ -10913,7 +10913,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         let mut scheduled_instructions = dispatch.additional_instructions.clone();
         scheduled_instructions.push(SCHEDULED_PROMPT_VISIBLE_COMPLETION_INSTRUCTION.to_string());
 
-        let mut turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
             keep_alive: None,
             skill_references: scheduled_skill_keys(&dispatch.skill_refs)?,
@@ -10944,15 +10944,11 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             auth_binding: None,
             transcript_identity: Default::default(),
         };
-        turn_metadata.turn_tool_overlay =
-            meerkat::surface::compose_workgraph_attention_turn_overlay_for_session(
-                self.service.as_ref(),
-                Some(&self.workgraph_service),
-                session_id,
-                turn_metadata.turn_tool_overlay.take(),
-            )
-            .await
-            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        // The attention overlay is deliberately NOT composed here: a queued
+        // prompt can sit behind a running turn that mutates the work item,
+        // and a projection snapshotted at enqueue time would fail exact-
+        // currency validation at apply. CliRuntimeExecutor::apply injects a
+        // fresh projection at apply time instead.
         let mut prompt_input =
             PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
         prompt_input.header.source = InputOrigin::System;
@@ -17072,6 +17068,7 @@ default_model = "gemma"
         session_id: SessionId,
         saw_event_tx: std::sync::atomic::AtomicBool,
         pre_turn_context_appends: Mutex<Vec<meerkat_core::PendingSystemContextAppend>>,
+        captured_turn_tool_overlay: Mutex<Option<meerkat_core::service::TurnToolOverlay>>,
     }
 
     impl CapturingEventTurnService {
@@ -17080,6 +17077,7 @@ default_model = "gemma"
                 session_id,
                 saw_event_tx: std::sync::atomic::AtomicBool::new(false),
                 pre_turn_context_appends: Mutex::new(Vec::new()),
+                captured_turn_tool_overlay: Mutex::new(None),
             }
         }
     }
@@ -17117,6 +17115,11 @@ default_model = "gemma"
                 .lock()
                 .expect("pre-turn context appends lock poisoned") =
                 req.runtime.pre_turn_context_appends;
+            *self
+                .captured_turn_tool_overlay
+                .lock()
+                .expect("captured turn tool overlay lock poisoned") =
+                req.runtime.turn_tool_overlay.clone();
             if let Some(tx) = req.event_tx {
                 self.saw_event_tx
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -17615,6 +17618,73 @@ default_model = "gemma"
                 .saw_event_tx
                 .load(std::sync::atomic::Ordering::Acquire),
             "runtime-backed executor must forward the caller event sender"
+        );
+    }
+
+    /// Pin (post-#850 fixups): CliRuntimeExecutor::apply is the CLI's canonical
+    /// attention-overlay injection point. A session-scoped active binding must
+    /// surface as a turn tool overlay carrying the projection dispatch context
+    /// on the request the executor hands to the session service. Reverting the
+    /// apply-time injection call silently drops attention from CLI turns.
+    #[tokio::test]
+    async fn test_cli_runtime_executor_injects_attention_overlay_at_apply() {
+        let session_id = SessionId::new();
+        let service = Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let workgraph_service = meerkat::WorkGraphService::new(std::sync::Arc::new(
+            meerkat::MemoryWorkGraphStore::new(),
+        ));
+        workgraph_service
+            .create_goal(meerkat::GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "cli attention pin".to_string(),
+                description: None,
+                target: meerkat::GoalAttentionTarget::Session {
+                    session_id: session_id.clone(),
+                },
+                mode: meerkat::WorkAttentionMode::Coordinate,
+                completion_policy: meerkat::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: meerkat::AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: meerkat::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create session-scoped goal");
+
+        let mut executor = CliRuntimeExecutor {
+            service: service.clone(),
+            #[cfg(feature = "session-store")]
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter,
+            workgraph_service: Some(workgraph_service),
+            event_tx: None,
+        };
+        let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(
+            meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                    text: "hello".to_string(),
+                },
+            },
+        );
+        let run_id = meerkat_core::lifecycle::RunId::new();
+
+        meerkat_core::lifecycle::CoreExecutor::apply(&mut executor, run_id, primitive)
+            .await
+            .expect("runtime-backed CLI turn should succeed");
+
+        let overlay = service
+            .captured_turn_tool_overlay
+            .lock()
+            .expect("captured turn tool overlay lock poisoned")
+            .clone()
+            .expect("apply must inject the attention turn overlay for an active binding");
+        assert!(
+            overlay
+                .dispatch_context
+                .contains_key("workgraph.attention_projection"),
+            "injected overlay must carry the attention projection dispatch context"
         );
     }
 

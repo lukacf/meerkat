@@ -1875,6 +1875,107 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
+    /// Pins the SQLite UNIQUE-violation mapping for duplicate item inserts:
+    /// a second insert of an existing item id must surface as the typed
+    /// `Conflict`, not a generic `Store` error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_store_duplicate_item_insert_maps_to_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let item = service
+            .create(CreateWorkItemRequest {
+                realm_id: None,
+                namespace: None,
+                title: "unique item".to_string(),
+                description: None,
+                priority: Default::default(),
+                completion_policy: Default::default(),
+                labels: BTreeSet::new(),
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+                evidence_refs: Vec::new(),
+                status: None,
+            })
+            .await
+            .expect("create");
+
+        let event = WorkGraphEvent::graph(
+            item.realm_id.clone(),
+            item.namespace.clone(),
+            WorkGraphEventKind::Created,
+            item.created_at,
+            json!({ "item_id": item.id }),
+        );
+        let error = store
+            .insert_item(item, event)
+            .await
+            .expect_err("duplicate item insert must fail");
+        assert!(
+            matches!(error, WorkGraphError::Conflict(_)),
+            "duplicate item insert must map to Conflict, got: {error:?}"
+        );
+    }
+
+    /// Pins the SQLite UNIQUE-violation mapping for duplicate attention
+    /// binding inserts (via the compound goal insert): the typed `Conflict`,
+    /// not a generic `Store` error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_store_duplicate_attention_insert_maps_to_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let goal = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "unique goal".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session {
+                    session_id: meerkat_core::SessionId::new(),
+                },
+                mode: WorkAttentionMode::Coordinate,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("create goal");
+
+        let mut fresh_item = goal.item.clone();
+        fresh_item.id = WorkItemId::generated();
+        let item_event = WorkGraphEvent::graph(
+            fresh_item.realm_id.clone(),
+            fresh_item.namespace.clone(),
+            WorkGraphEventKind::Created,
+            fresh_item.created_at,
+            json!({ "item_id": fresh_item.id }),
+        );
+        let attention_event = WorkGraphEvent::graph(
+            goal.attention.work_ref.realm_id.clone(),
+            goal.attention.work_ref.namespace.clone(),
+            WorkGraphEventKind::AttentionCreated,
+            goal.attention.updated_at,
+            json!({ "binding_id": goal.attention.binding_id }),
+        );
+        let error = store
+            .insert_goal(fresh_item, item_event, goal.attention, attention_event)
+            .await
+            .expect_err("duplicate attention insert must fail");
+        assert!(
+            matches!(error, WorkGraphError::Conflict(_)),
+            "duplicate attention insert must map to Conflict, got: {error:?}"
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn sqlite_persistence_survives_restart() {

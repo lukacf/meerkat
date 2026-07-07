@@ -527,7 +527,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
 
-        let mut turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
             keep_alive: None,
             skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
@@ -559,15 +559,12 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             auth_binding: None,
             transcript_identity: Default::default(),
         };
-        turn_metadata.turn_tool_overlay =
-            super::compose_workgraph_attention_turn_overlay_for_session(
-                self.service.as_ref(),
-                self.workgraph_service.as_ref(),
-                session_id,
-                turn_metadata.turn_tool_overlay.take(),
-            )
-            .await
-            .map_err(schedule_internal)?;
+        // The attention overlay is deliberately NOT composed here: a queued
+        // prompt can sit behind a running turn that mutates the work item,
+        // and a projection snapshotted at enqueue time would fail exact-
+        // currency validation at apply. The runtime executor (wired with
+        // this host's workgraph service) injects a fresh projection at
+        // apply time instead.
         let mut prompt_input =
             meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
         prompt_input.header.source = meerkat_runtime::InputOrigin::System;

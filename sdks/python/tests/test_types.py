@@ -694,8 +694,10 @@ def test_parse_run_result_skill_diagnostics():
             },
             "quarantined": [
                 {
-                    "source_uuid": "src-1",
-                    "skill_id": "extract/email",
+                    "identity": {
+                        "source_uuid": "src-1",
+                        "raw_id": "extract/email",
+                    },
                     "location": "project",
                     "error_code": "bad_frontmatter",
                     "error_class": "ValidationError",
@@ -704,12 +706,20 @@ def test_parse_run_result_skill_diagnostics():
                     "last_seen_unix_secs": 20,
                 }
             ],
+            "collection_fault": {
+                "reason_type": "source_unknown",
+                "message": "diagnostics source unavailable",
+            },
         },
     }
     result = MeerkatClient._parse_run_result(raw)
     assert result.skill_diagnostics is not None
     assert result.skill_diagnostics.source_health.state == "healthy"
     assert result.skill_diagnostics.quarantined[0].skill_id == "extract/email"
+    assert result.skill_diagnostics.collection_fault == {
+        "reason_type": "source_unknown",
+        "message": "diagnostics source unavailable",
+    }
 
 
 def test_parse_run_result_extraction_error():
@@ -733,6 +743,26 @@ def test_parse_run_result_extraction_error():
 
 
 def test_parse_run_result_rejects_malformed_counters():
+    with pytest.raises(MeerkatError, match="missing session_id"):
+        MeerkatClient._parse_run_result(
+            {
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    MeerkatClient._parse_run_result(
+        {
+            "session_id": "s1",
+            "text": "",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    )
+
     with pytest.raises(MeerkatError, match="missing usage"):
         MeerkatClient._parse_run_result(
             {"session_id": "s1", "text": "ok", "turns": 1, "tool_calls": 0}
@@ -757,6 +787,90 @@ def test_parse_run_result_rejects_malformed_counters():
                 "turns": 1,
                 "tool_calls": 0,
                 "usage": {"input_tokens": "oops", "output_tokens": 1},
+            }
+        )
+
+    with pytest.raises(MeerkatError, match="missing provider"):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "schema_warnings": [{"path": "$", "message": "warn"}],
+            }
+        )
+
+    with pytest.raises(MeerkatError, match="schema_warnings must be a list"):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "schema_warnings": "warn",
+            }
+        )
+
+    with pytest.raises(MeerkatError, match="missing reason"):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "extraction_error": {"last_output": "bad", "attempts": 1},
+            }
+        )
+
+    with pytest.raises(MeerkatError, match="missing extraction_error"):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "extraction_error": "bad",
+            }
+        )
+
+    with pytest.raises(MeerkatError, match="missing skill_diagnostics.source_health"):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "skill_diagnostics": {"quarantined": []},
+            }
+        )
+
+    with pytest.raises(
+        MeerkatError, match=r"missing skill_diagnostics.quarantined\[0\].identity"
+    ):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "skill_diagnostics": {
+                    "source_health": {
+                        "state": "healthy",
+                        "invalid_ratio": 0,
+                        "invalid_count": 0,
+                        "total_count": 0,
+                        "failure_streak": 0,
+                        "handshake_failed": False,
+                    },
+                    "quarantined": [{"location": "project"}],
+                },
             }
         )
 
@@ -1187,6 +1301,19 @@ async def test_create_deferred_session_returns_runtime_backed_deferred_wrapper()
             {"prompt": "Hold until first turn", "initial_turn": "deferred"},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_deferred_session_rejects_missing_session_id() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        return {"session_ref": "team/deferred"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing session_id"):
+        await client.create_deferred_session("Hold until first turn")
 
 
 @pytest.mark.asyncio
@@ -2452,6 +2579,48 @@ async def test_client_list_sessions_parses_summary_shape():
 
 
 @pytest.mark.asyncio
+async def test_client_list_sessions_rejects_missing_required_summary_facts():
+    client = MeerkatClient()
+
+    async def missing_total_tokens(method, params):
+        return {
+            "sessions": [
+                {
+                    "session_id": "s1",
+                    "created_at": 10,
+                    "updated_at": 20,
+                    "message_count": 2,
+                    "is_active": True,
+                }
+            ]
+        }
+
+    client._request = missing_total_tokens  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing total_tokens"):
+        await client.list_sessions()
+
+    async def missing_sessions(method, params):
+        return {}
+
+    client._request = missing_sessions  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing sessions"):
+        await client.list_sessions()
+
+
+@pytest.mark.asyncio
+async def test_client_get_blob_rejects_missing_required_fields():
+    client = MeerkatClient()
+
+    async def fake_request(method, params):
+        return {"blob_id": "blob-1", "data": "AAAA"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing media_type"):
+        await client.get_blob("blob-1")
+
+
+@pytest.mark.asyncio
 async def test_client_read_session_parses_details_shape():
     client = MeerkatClient()
 
@@ -3194,7 +3363,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 },
             }
         if method == "mob/flows":
-            return {"flows": ["incident"]}
+            return {"mob_id": "mob-1", "flows": ["incident"]}
         if method == "mob/run":
             return {"run_id": "run-typed"}
         if method == "mob/flow_run":
@@ -3416,6 +3585,50 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
 
 
 @pytest.mark.asyncio
+async def test_client_mob_wrappers_reject_malformed_success_responses():
+    client = MeerkatClient()
+    client.require_capability = lambda _cap: None  # type: ignore[method-assign]
+
+    async def empty_response(method, params):
+        return {}
+
+    client._request = empty_response  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing mob_id"):
+        await client.create_mob(definition={"id": "mob-1", "profiles": {}})
+    with pytest.raises(MeerkatError, match="missing mobs"):
+        await client.list_mobs()
+
+    async def fake_request(method, params):
+        if method == "mob/cancel_work":
+            return {"ok": True}
+        if method == "mob/cancel_all_work":
+            return {"mob_id": "mob-1"}
+        if method == "mob/profile/list":
+            return {}
+        if method == "mob/flows":
+            return {"mob_id": "mob-1", "flows": ["incident", 42]}
+        if method == "mob/flow_run":
+            return {}
+        if method == "mob/run":
+            return {}
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing mob_id"):
+        await client.mob_cancel_work("mob-1", "work-1")
+    with pytest.raises(MeerkatError, match="ok must be boolean"):
+        await client.mob_cancel_all_work(_make_member_ref("mob-1", "agent-a"))
+    with pytest.raises(MeerkatError, match="missing profiles"):
+        await client.list_mob_profiles()
+    with pytest.raises(MeerkatError, match=r"flows\[1\] must be string"):
+        await client.list_mob_flows("mob-1")
+    with pytest.raises(MeerkatError, match="missing run_id"):
+        await client.run_mob_flow("mob-1", "incident")
+    with pytest.raises(MeerkatError, match="missing run_id"):
+        await client.run_mob("mob-1")
+
+
+@pytest.mark.asyncio
 async def test_spawn_mob_member_rejects_missing_runtime_mob_id() -> None:
     client = MeerkatClient()
 
@@ -3497,7 +3710,7 @@ async def test_mob_member_status_rejects_missing_tokens_used():
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    with pytest.raises(MeerkatError, match="tokens_used must be number"):
+    with pytest.raises(MeerkatError, match="missing tokens_used"):
         await client.mob_member_status("mob-1", "agent-a")
 
 
@@ -3634,9 +3847,9 @@ async def test_mob_helper_wrappers_reject_missing_tokens_used():
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    with pytest.raises(MeerkatError, match="tokens_used must be number"):
+    with pytest.raises(MeerkatError, match="missing tokens_used"):
         await client.spawn_mob_helper("mob-1", "help")
-    with pytest.raises(MeerkatError, match="tokens_used must be number"):
+    with pytest.raises(MeerkatError, match="missing tokens_used"):
         await client.fork_mob_helper("mob-1", "agent-a", "help")
 
 

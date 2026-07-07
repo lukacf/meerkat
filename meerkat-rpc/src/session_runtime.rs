@@ -3721,14 +3721,38 @@ impl SessionRuntime {
                 })?;
         }
 
-        match self
+        let report = match self
             .runtime_adapter
             .reconfigure_session_llm_identity(session_id, request.clone())
             .await
         {
-            Ok(_) => Ok(()),
-            Err(err) => Err(runtime_driver_error_to_rpc(err)),
+            Ok(report) => report,
+            Err(err) => return Err(runtime_driver_error_to_rpc(err)),
+        };
+
+        if live_channel_requires_close_for_identity_change(
+            &report.previous_identity,
+            &report.new_identity,
+        ) {
+            let snapshot = self.realm_context_snapshot();
+            let cleanup = self.archive_runtime_cleanup();
+            let close_report = self
+                .live_orchestrator(&snapshot, cleanup)
+                .close_live_channels_for_identity_change(session_id, &report.new_identity)
+                .await;
+            if !close_report.close_failed.is_empty() {
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "failed to close stale live channel after LLM identity change for {session_id}: {:?}",
+                        close_report.close_failed
+                    ),
+                    data: None,
+                });
+            }
         }
+
+        Ok(())
     }
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -8901,6 +8925,25 @@ mod tests {
         assert!(
             live_channel_requires_close_for_identity_change(&prev, &new),
             "provider swap must require close+reopen even at same model_id"
+        );
+    }
+
+    #[test]
+    fn r11_close_required_when_auth_binding_swapped() {
+        let prev = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(test_auth_binding("dev", "openai_oauth_a")),
+        };
+        let new = SessionLlmIdentity {
+            auth_binding: Some(test_auth_binding("dev", "openai_oauth_b")),
+            ..prev.clone()
+        };
+        assert!(
+            live_channel_requires_close_for_identity_change(&prev, &new),
+            "auth_binding swap at the same model/provider must require close+reopen"
         );
     }
 
@@ -22680,6 +22723,152 @@ mod tests {
                 }
             }
             other => panic!("R11/CC1: expected Error observation, got {other:?}"),
+        }
+    }
+
+    /// Auth-binding swaps are credential identity swaps for live channels even
+    /// when model/provider stay unchanged. The open adapter resolved
+    /// credentials from the old binding at open/attach time; hot-swapping the
+    /// session identity must therefore close the channel so callers reopen with
+    /// fresh credentials instead of refreshing stale auth in place.
+    #[tokio::test]
+    async fn r11_hot_swap_closes_channel_on_auth_binding_swap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(
+                realtime_build_config("gpt-realtime-2"),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("create_session for live channel");
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize for auth binding swap test".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session via first turn");
+
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        runtime.set_live_adapter_host(Arc::clone(&host));
+        let runtime = Arc::new(runtime);
+        let current_identity = runtime
+            .live_open_config_for_session(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("live_open_config_for_session")
+            .llm_identity;
+        assert!(
+            current_identity.auth_binding.is_none(),
+            "test setup expects initial live identity to use env/default auth"
+        );
+        let candidate_channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let open_authority = runtime
+            .runtime_adapter()
+            .resolve_live_open_admission(&session_id, &candidate_channel_id, &current_identity)
+            .await
+            .expect("live open admission");
+        let channel_id = host
+            .open_channel_with_authority(
+                open_authority
+                    .channel_open_authority()
+                    .expect("generated live open handoff"),
+            )
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(R11RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        let overrides = crate::handlers::turn::TurnOverrides {
+            auth_binding: Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    test_auth_binding("dev", "openai_oauth_b"),
+                ),
+            ),
+            ..Default::default()
+        };
+        runtime
+            .hot_swap_llm_client(&session_id, &overrides)
+            .await
+            .expect("auth-binding hot swap should close stale live channel");
+
+        let recorded = log.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "auth-binding swap must close, not enqueue Refresh: {recorded:?}"
+        );
+        drop(recorded);
+        let status =
+            generated_live_public_status(&runtime, &session_id, host.as_ref(), &channel_id).await;
+        assert_eq!(
+            status,
+            meerkat_runtime::meerkat_machine::dsl::LiveChannelPublicStatus::Closed,
+            "auth-binding swap must close the channel; got status {status:?}"
+        );
+
+        let synthetic = drain_pending_synthetic(&host, &channel_id)
+            .await
+            .expect("auth-binding swap must enqueue a synthetic terminal obs");
+        match synthetic {
+            meerkat_core::live_adapter::LiveAdapterObservation::Error { code, message } => {
+                match code {
+                    meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected { reason } => {
+                        match &reason {
+                            meerkat_core::live_adapter::LiveConfigRejectionReason::ChannelIdentitySwap {
+                                from_model,
+                                to_model,
+                                auth_binding_changed,
+                                ..
+                            } => {
+                                assert_eq!(from_model, "gpt-realtime-2");
+                                assert_eq!(to_model, "gpt-realtime-2");
+                                assert!(
+                                    *auth_binding_changed,
+                                    "reason must identify auth_binding as the changed identity field"
+                                );
+                            }
+                            other => panic!(
+                                "expected ChannelIdentitySwap reason for auth-binding swap, got {other:?}"
+                            ),
+                        }
+                        let rendered = reason.to_string();
+                        assert!(
+                            rendered.contains("auth_binding_swap")
+                                && rendered.contains("auth_binding changed"),
+                            "Display projection must name the auth-binding swap; got: {rendered}"
+                        );
+                        assert_eq!(message, rendered);
+                    }
+                    other => {
+                        panic!(
+                            "expected ConfigRejected error code on auth-binding swap, got {other:?}"
+                        )
+                    }
+                }
+            }
+            other => panic!("expected Error observation, got {other:?}"),
         }
     }
 

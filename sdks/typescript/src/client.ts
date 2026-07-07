@@ -935,10 +935,11 @@ export class MeerkatClient {
     const params = MeerkatClient.buildCreateParams(prompt, options);
     params.initial_turn = "deferred";
     const raw = await this.request("session/create", params);
+    const context = "Invalid session/create deferred response";
     return new DeferredSession(
       this,
-      String(raw.session_id ?? ""),
-      raw.session_ref != null ? String(raw.session_ref) : undefined,
+      MeerkatClient.requireStringField(raw, "session_id", context),
+      MeerkatClient.optionalStringField(raw, "session_ref", context),
     );
   }
 
@@ -965,8 +966,11 @@ export class MeerkatClient {
     if (options?.limit !== undefined) params.limit = options.limit;
     if (options?.offset !== undefined) params.offset = options.offset;
     const result = await this.request("session/list", params);
-    const sessions = (result.sessions as Array<Record<string, unknown>>) ?? [];
-    return sessions.map((s) => MeerkatClient.parseSessionInfo(s));
+    const sessions = MeerkatClient.requireRecordArray(
+      result.sessions,
+      "Invalid session/list response",
+    );
+    return sessions.map((s) => MeerkatClient.parseSessionSummary(s));
   }
 
   async readSession(sessionId: string): Promise<SessionInfo> {
@@ -1301,10 +1305,11 @@ export class MeerkatClient {
   async getBlob(blobId: string): Promise<BlobPayload> {
     type _RpcSignature = [RpcBlobGetParams, RpcBlobPayload];
     const result = await this.request("blob/get", { blob_id: blobId });
+    const context = "Invalid blob/get response";
     return {
-      blobId: String(result.blob_id ?? blobId),
-      mediaType: String(result.media_type ?? ""),
-      dataBase64: String(result.data ?? ""),
+      blobId: MeerkatClient.requireStringField(result, "blob_id", context),
+      mediaType: MeerkatClient.requireStringField(result, "media_type", context),
+      dataBase64: MeerkatClient.requireStringField(result, "data", context),
     };
   }
 
@@ -1557,7 +1562,14 @@ export class MeerkatClient {
   async createMob(options: MobCreateOptions): Promise<Mob> {
     this.requireCapability("mob");
     const result = await this.request("mob/create", options);
-    return new Mob(this, String(result.mob_id ?? ""));
+    return new Mob(
+      this,
+      MeerkatClient.requireStringField(
+        result,
+        "mob_id",
+        "Invalid mob/create response",
+      ),
+    );
   }
 
   mob(mobId: string): Mob {
@@ -1568,12 +1580,13 @@ export class MeerkatClient {
     this.requireCapability("mob");
     const result = await this.request("mob/list", {});
     const mobs = MeerkatClient.requireRecordArray(result.mobs, "Invalid mob/list response");
+    const context = "Invalid mob/list response entry";
     return mobs.map((mob) => ({
-      mobId: String(mob.mob_id ?? mob.mobId ?? ""),
+      mobId: MeerkatClient.requireStringField(mob, "mob_id", context),
       status: MeerkatClient.requireStringField(
         mob,
         "status",
-        "Invalid mob/list response entry: missing status",
+        context,
       ),
     }));
   }
@@ -2116,10 +2129,10 @@ export class MeerkatClient {
       mob_id: mobId,
       work_ref: workRef,
     });
-    if (typeof result.ok !== "boolean") {
-      throw new Error("Invalid mob/cancel_work response: missing ok");
-    }
-    return { ok: result.ok };
+    const context = "Invalid mob/cancel_work response";
+    MeerkatClient.requireStringField(result, "mob_id", context);
+    const ok = MeerkatClient.requireBooleanField(result, "ok", context);
+    return { ok };
   }
 
   /**
@@ -2132,10 +2145,10 @@ export class MeerkatClient {
     const result = await this.request("mob/cancel_all_work", {
       member_ref: args.memberRef,
     });
-    if (typeof result.ok !== "boolean") {
-      throw new Error("Invalid mob/cancel_all_work response: missing ok");
-    }
-    return { ok: result.ok };
+    const context = "Invalid mob/cancel_all_work response";
+    MeerkatClient.requireStringField(result, "mob_id", context);
+    const ok = MeerkatClient.requireBooleanField(result, "ok", context);
+    return { ok };
   }
 
   async waitMobKickoff(
@@ -2447,9 +2460,10 @@ export class MeerkatClient {
 
   async listMobProfiles(): Promise<MobProfileLookupResult[]> {
     const raw = await this.request("mob/profile/list", {});
-    const profiles = Array.isArray(raw.profiles)
-      ? (raw.profiles as Array<Record<string, unknown>>)
-      : [];
+    const profiles = MeerkatClient.requireRecordArray(
+      raw.profiles,
+      "Invalid mob/profile/list response",
+    );
     return profiles.map((profile) => MeerkatClient.parseMobProfileLookup(profile));
   }
 
@@ -2487,7 +2501,9 @@ export class MeerkatClient {
 
   async listMobFlows(mobId: string): Promise<string[]> {
     const result = await this.request("mob/flows", { mob_id: mobId });
-    return (result.flows as string[]) ?? [];
+    const context = "Invalid mob/flows response";
+    MeerkatClient.requireStringField(result, "mob_id", context);
+    return MeerkatClient.requireStringArrayField(result, "flows", context);
   }
 
   async runMobFlow(mobId: string, flowId: string, params: Record<string, unknown> = {}): Promise<string> {
@@ -3395,12 +3411,27 @@ export class MeerkatClient {
     return value;
   }
 
+  private static requirePresentStringField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): string {
+    const value = raw[field];
+    if (typeof value !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
+    }
+    return value;
+  }
+
   private static requireNumberField(
     raw: Record<string, unknown>,
     field: string,
     context: string,
     displayField = field,
   ): number {
+    if (!(field in raw)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${displayField}`);
+    }
     const value = raw[field];
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new MeerkatError("INVALID_RESPONSE", `${context}: ${displayField} must be number`);
@@ -3467,6 +3498,26 @@ export class MeerkatClient {
       throw new MeerkatError("INVALID_RESPONSE", `${context}: ${field} must be boolean`);
     }
     return value;
+  }
+
+  private static requireStringArrayField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): string[] {
+    const value = raw[field];
+    if (!Array.isArray(value)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: ${field} must be array`);
+    }
+    return value.map((item, index) => {
+      if (typeof item !== "string" || item.length === 0) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: ${field}[${index}] must be string`,
+        );
+      }
+      return item;
+    });
   }
 
   private static parseWireMobMemberStatus(
@@ -3658,36 +3709,89 @@ export class MeerkatClient {
   }
 
   private static parseSkillDiagnostics(raw: unknown): SkillRuntimeDiagnostics | undefined {
-    if (!raw || typeof raw !== "object") return undefined;
-    const data = raw as Record<string, unknown>;
-    const sourceHealthRaw = data.source_health as Record<string, unknown> | undefined;
-    const rawQuarantined = Array.isArray(data.quarantined)
-      ? data.quarantined
-      : [];
+    if (raw == null) return undefined;
+    const context = "Invalid run result";
+    const data = MeerkatClient.requireRecord(raw, "skill_diagnostics", context);
+    const sourceHealthRaw = MeerkatClient.requireRecord(
+      data.source_health,
+      "skill_diagnostics.source_health",
+      context,
+    );
+    if (!Array.isArray(data.quarantined)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: missing skill_diagnostics.quarantined`,
+      );
+    }
 
-    const quarantined = rawQuarantined
-      .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-      .map((item) => ({
-        sourceUuid: String(item.source_uuid ?? ""),
-        skillId: String(item.skill_id ?? ""),
-        location: String(item.location ?? ""),
-        errorCode: String(item.error_code ?? ""),
-        errorClass: String(item.error_class ?? ""),
-        message: String(item.message ?? ""),
-        firstSeenUnixSecs: Number(item.first_seen_unix_secs ?? 0),
-        lastSeenUnixSecs: Number(item.last_seen_unix_secs ?? 0),
-      }));
+    const quarantined = data.quarantined.map((item, index) => {
+      const record = MeerkatClient.requireRecord(
+        item,
+        `skill_diagnostics.quarantined[${index}]`,
+        context,
+      );
+      const identity = MeerkatClient.requireRecord(
+        record.identity,
+        `skill_diagnostics.quarantined[${index}].identity`,
+        context,
+      );
+      return {
+        sourceUuid: MeerkatClient.requireStringField(identity, "source_uuid", context),
+        skillId: MeerkatClient.requirePresentStringField(identity, "raw_id", context),
+        location: MeerkatClient.requirePresentStringField(record, "location", context),
+        errorCode: MeerkatClient.requirePresentStringField(record, "error_code", context),
+        errorClass: MeerkatClient.requirePresentStringField(record, "error_class", context),
+        message: MeerkatClient.requirePresentStringField(record, "message", context),
+        firstSeenUnixSecs: MeerkatClient.requireNonNegativeIntegerField(
+          record,
+          "first_seen_unix_secs",
+          context,
+          "skill_diagnostics.quarantined.first_seen_unix_secs",
+        ),
+        lastSeenUnixSecs: MeerkatClient.requireNonNegativeIntegerField(
+          record,
+          "last_seen_unix_secs",
+          context,
+          "skill_diagnostics.quarantined.last_seen_unix_secs",
+        ),
+      };
+    });
 
     return {
       sourceHealth: {
-        state: String(sourceHealthRaw?.state ?? ""),
-        invalidRatio: Number(sourceHealthRaw?.invalid_ratio ?? 0),
-        invalidCount: Number(sourceHealthRaw?.invalid_count ?? 0),
-        totalCount: Number(sourceHealthRaw?.total_count ?? 0),
-        failureStreak: Number(sourceHealthRaw?.failure_streak ?? 0),
-        handshakeFailed: Boolean(sourceHealthRaw?.handshake_failed ?? false),
+        state: MeerkatClient.requireStringField(sourceHealthRaw, "state", context),
+        invalidRatio: MeerkatClient.requireNumberField(
+          sourceHealthRaw,
+          "invalid_ratio",
+          context,
+          "skill_diagnostics.source_health.invalid_ratio",
+        ),
+        invalidCount: MeerkatClient.requireNonNegativeIntegerField(
+          sourceHealthRaw,
+          "invalid_count",
+          context,
+          "skill_diagnostics.source_health.invalid_count",
+        ),
+        totalCount: MeerkatClient.requireNonNegativeIntegerField(
+          sourceHealthRaw,
+          "total_count",
+          context,
+          "skill_diagnostics.source_health.total_count",
+        ),
+        failureStreak: MeerkatClient.requireNonNegativeIntegerField(
+          sourceHealthRaw,
+          "failure_streak",
+          context,
+          "skill_diagnostics.source_health.failure_streak",
+        ),
+        handshakeFailed: MeerkatClient.requireBooleanField(
+          sourceHealthRaw,
+          "handshake_failed",
+          context,
+        ),
       },
       quarantined,
+      collectionFault: data.collection_fault ?? undefined,
     };
   }
 
@@ -3732,33 +3836,49 @@ export class MeerkatClient {
         : undefined,
     };
 
-    const rawWarnings = data.schema_warnings as Array<Record<string, unknown>> | undefined;
-    const schemaWarnings: SchemaWarning[] | undefined = rawWarnings?.map(
-      (w): SchemaWarning => ({
-        provider: String(w.provider ?? ""),
-        path: String(w.path ?? ""),
-        message: String(w.message ?? ""),
-      }),
-    );
+    const rawWarnings = data.schema_warnings;
+    const schemaWarnings: SchemaWarning[] | undefined = rawWarnings == null
+      ? undefined
+      : MeerkatClient.requireRecordArray(rawWarnings, context).map(
+          (w): SchemaWarning => ({
+            provider: MeerkatClient.requirePresentStringField(w, "provider", context),
+            path: MeerkatClient.requirePresentStringField(w, "path", context),
+            message: MeerkatClient.requirePresentStringField(w, "message", context),
+          }),
+        );
     const rawExtractionError = data.extraction_error;
-    const extractionError =
-      rawExtractionError && typeof rawExtractionError === "object"
-        ? {
-            lastOutput: String((rawExtractionError as Record<string, unknown>).last_output ?? ""),
+    const extractionError = rawExtractionError == null
+      ? undefined
+      : (() => {
+          const extraction = MeerkatClient.requireRecord(
+            rawExtractionError,
+            "extraction_error",
+            context,
+          );
+          return {
+            lastOutput: MeerkatClient.requirePresentStringField(
+              extraction,
+              "last_output",
+              context,
+            ),
             attempts: MeerkatClient.requireNumberField(
-              rawExtractionError as Record<string, unknown>,
+              extraction,
               "attempts",
               context,
               "extraction_error.attempts",
             ),
-            reason: String((rawExtractionError as Record<string, unknown>).reason ?? ""),
-          }
-        : undefined;
+            reason: MeerkatClient.requirePresentStringField(
+              extraction,
+              "reason",
+              context,
+            ),
+          };
+        })();
 
     return {
-      sessionId: String(data.session_id ?? ""),
-      sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      text: String(data.text ?? ""),
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
+      sessionRef: MeerkatClient.optionalStringField(data, "session_ref", context),
+      text: MeerkatClient.requirePresentStringField(data, "text", context),
       turns: MeerkatClient.requireNumberField(data, "turns", context),
       toolCalls: MeerkatClient.requireNumberField(data, "tool_calls", context),
       usage,
@@ -3773,30 +3893,61 @@ export class MeerkatClient {
     };
   }
 
-  static parseSessionInfo(data: Record<string, unknown>): SessionInfo {
-    const labelsRaw =
-      data.labels && typeof data.labels === "object"
-        ? (data.labels as Record<string, unknown>)
-        : {};
-    const labels = Object.fromEntries(
-      Object.entries(labelsRaw).map(([key, value]) => [key, String(value)]),
+  private static parseSessionLabels(
+    raw: unknown,
+    context: string,
+  ): Readonly<Record<string, string>> {
+    if (raw == null) {
+      return {};
+    }
+    if (typeof raw !== "object" || Array.isArray(raw)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: labels must be object`);
+    }
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>).map(([key, value]) => [
+        key,
+        String(value),
+      ]),
     );
+  }
+
+  static parseSessionSummary(data: Record<string, unknown>): SessionInfo {
+    const context = "Invalid session/list response entry";
     return {
-      sessionId: String(data.session_id ?? ""),
-      sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      createdAt: Number(data.created_at ?? 0),
-      updatedAt: Number(data.updated_at ?? 0),
-      messageCount: Number(data.message_count ?? 0),
-      isActive: Boolean(data.is_active),
-      totalTokens: data.total_tokens != null ? Number(data.total_tokens) : undefined,
-      model: data.model != null ? String(data.model) : undefined,
-      provider: data.provider != null ? String(data.provider) : undefined,
-      lastAssistantText:
-        data.last_assistant_text != null ? String(data.last_assistant_text) : undefined,
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
+      sessionRef: MeerkatClient.optionalStringField(data, "session_ref", context),
+      createdAt: MeerkatClient.requireNonNegativeIntegerField(data, "created_at", context),
+      updatedAt: MeerkatClient.requireNonNegativeIntegerField(data, "updated_at", context),
+      messageCount: MeerkatClient.requireNonNegativeIntegerField(data, "message_count", context),
+      isActive: MeerkatClient.requireBooleanField(data, "is_active", context),
+      totalTokens: MeerkatClient.requireNonNegativeIntegerField(data, "total_tokens", context),
+      labels: MeerkatClient.parseSessionLabels(data.labels, context),
+    };
+  }
+
+  static parseSessionInfo(data: Record<string, unknown>): SessionInfo {
+    const context = "Invalid session/read response";
+    return {
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
+      sessionRef: MeerkatClient.optionalStringField(data, "session_ref", context),
+      createdAt: MeerkatClient.requireNonNegativeIntegerField(data, "created_at", context),
+      updatedAt: MeerkatClient.requireNonNegativeIntegerField(data, "updated_at", context),
+      messageCount: MeerkatClient.requireNonNegativeIntegerField(data, "message_count", context),
+      isActive: MeerkatClient.requireBooleanField(data, "is_active", context),
+      totalTokens: data.total_tokens != null
+        ? MeerkatClient.requireNonNegativeIntegerField(data, "total_tokens", context)
+        : undefined,
+      model: MeerkatClient.requireStringField(data, "model", context),
+      provider: MeerkatClient.requireStringField(data, "provider", context),
+      lastAssistantText: MeerkatClient.optionalStringField(
+        data,
+        "last_assistant_text",
+        context,
+      ),
       resolvedCapabilities: MeerkatClient.parseResolvedModelCapabilities(
         data.resolved_capabilities,
       ),
-      labels,
+      labels: MeerkatClient.parseSessionLabels(data.labels, context),
     };
   }
 
@@ -4136,15 +4287,17 @@ export class MeerkatClient {
   }
 
   static parseMobProfileLookup(data: Record<string, unknown>): MobProfileLookupResult {
+    const context = "Invalid mob/profile response";
+    const name = MeerkatClient.requireStringField(data, "name", context);
     if (Boolean(data.not_found)) {
       return {
         notFound: true,
-        name: String(data.name ?? ""),
+        name,
       };
     }
     return {
       notFound: false,
-      name: String(data.name ?? ""),
+      name,
       profile:
         data.profile && typeof data.profile === "object"
           ? (data.profile as MobProfile)

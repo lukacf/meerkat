@@ -3188,6 +3188,7 @@ export interface WireLiveAdapterStatusUnknown {
 export type WireLiveAdapterStatus = WireLiveAdapterStatusIdle | WireLiveAdapterStatusOpening | WireLiveAdapterStatusReady | WireLiveAdapterStatusDegraded | WireLiveAdapterStatusClosing | WireLiveAdapterStatusClosed | WireLiveAdapterStatusUnknown;
 
 export interface WireLiveConfigRejectionReasonChannelIdentitySwap {
+  auth_binding_changed?: boolean;
   from_model: string;
   from_provider: WireProvider;
   kind: "channel_identity_swap";

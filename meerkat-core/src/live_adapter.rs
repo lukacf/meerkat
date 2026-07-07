@@ -481,6 +481,10 @@ pub enum LiveAdapterErrorCode {
 /// Wire shape: internally tagged on `kind` (snake_case) so SDK consumers
 /// can route on the discriminator. `#[non_exhaustive]` so future variants
 /// don't break existing callers.
+fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -488,13 +492,16 @@ pub enum LiveAdapterErrorCode {
 pub enum LiveConfigRejectionReason {
     /// Runtime detected the live channel's bound LLM identity diverges
     /// from the session's resolved identity (typically after a global
-    /// `config/patch` model/provider swap). The channel cannot rebind
+    /// `config/patch` model/provider swap, or a session-scoped auth binding
+    /// swap). The channel cannot rebind
     /// in place; the SDK must close + reopen against the new identity.
     ChannelIdentitySwap {
         from_model: String,
         from_provider: Provider,
         to_model: String,
         to_provider: Provider,
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        auth_binding_changed: bool,
     },
     /// Per-session post-`config/patch` precheck rejected the channel
     /// because the new resolved model is not realtime-capable, or the
@@ -562,10 +569,24 @@ impl std::fmt::Display for LiveConfigRejectionReason {
                 from_provider,
                 to_model,
                 to_provider,
+                auth_binding_changed,
             } => {
+                let kind = if *auth_binding_changed
+                    && from_model == to_model
+                    && from_provider == to_provider
+                {
+                    "auth_binding_swap"
+                } else {
+                    "model_swap"
+                };
+                let suffix = if *auth_binding_changed {
+                    "; auth_binding changed"
+                } else {
+                    ""
+                };
                 write!(
                     f,
-                    "model_swap: {from_model} ({from_provider:?}) -> {to_model} ({to_provider:?})"
+                    "{kind}: {from_model} ({from_provider:?}) -> {to_model} ({to_provider:?}){suffix}"
                 )
             }
             Self::NonRealtimeResolution { detail } => {
@@ -1992,6 +2013,7 @@ mod tests {
                 from_provider: Provider::OpenAI,
                 to_model: "test-realtime-2".into(),
                 to_provider: Provider::OpenAI,
+                auth_binding_changed: false,
             },
             LiveConfigRejectionReason::NonRealtimeResolution {
                 detail: "ModelNotRealtime { model: \"test-model-a\", provider: \"openai\" }".into(),

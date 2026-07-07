@@ -94,6 +94,7 @@ export interface SkillQuarantineDiagnostic {
 export interface SkillRuntimeDiagnostics {
   readonly sourceHealth: SourceHealthSnapshot;
   readonly quarantined: readonly SkillQuarantineDiagnostic[];
+  readonly collectionFault?: unknown;
 }
 
 /** Structured skill identifier (source UUID + skill name). */

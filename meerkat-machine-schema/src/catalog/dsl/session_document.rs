@@ -3252,9 +3252,10 @@ machine! {
             }
         }
 
-        // Idempotent re-archive: an already-Archived document resolves to an
-        // explicit AlreadyArchived verdict with an empty action vector. The
-        // surface contract maps this verdict to its existing NotFound error.
+        // Idempotent re-archive of a QUIESCENT archived document (no
+        // registered runtime): explicit AlreadyArchived verdict with an
+        // empty action vector. The surface contract maps this verdict to
+        // its existing NotFound error.
         transition ArchiveSessionDocumentAlreadyArchived {
             on input ArchiveSessionDocument {
                 session_id,
@@ -3267,12 +3268,43 @@ machine! {
                 && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
                     == SessionDocumentLifecycle::Archived
             }
+            guard "runtime_quiescent" { runtime_session_registered == false }
             update {}
             to Ready
             emit SessionArchiveResolved {
                 disposition: SessionArchiveDisposition::AlreadyArchived,
                 write_document: false,
                 retire_runtime: false
+            }
+        }
+
+        // Retry convergence (ask 21b): an archived document with a STILL
+        // REGISTERED runtime is the partial state left by an archive whose
+        // document commit landed but whose runtime retire failed (the
+        // realization order is document-first by design). The machine owns
+        // the convergence: re-archive completes the retire (no document
+        // rewrite) instead of resolving AlreadyArchived — which mapped to
+        // NotFound and made the partial state permanently unrecoverable
+        // (never-run mob members stranded in `retiring` forever).
+        transition ArchiveSessionDocumentCompleteRetire {
+            on input ArchiveSessionDocument {
+                session_id,
+                runtime_backed,
+                durable_snapshot_present,
+                runtime_session_registered
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Archived
+            }
+            guard "runtime_residue" { runtime_session_registered == true }
+            update {}
+            to Ready
+            emit SessionArchiveResolved {
+                disposition: SessionArchiveDisposition::Archive,
+                write_document: false,
+                retire_runtime: true
             }
         }
 

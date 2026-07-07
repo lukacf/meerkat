@@ -268,6 +268,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ArchiveSessionDocumentAlreadyArchived`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ArchiveSessionDocumentCompleteRetire`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `SessionFirstTurnPhaseResolved`

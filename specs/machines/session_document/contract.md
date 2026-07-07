@@ -755,6 +755,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
 - Guards:
   - ``
+  - `runtime_quiescent`
+- Emits: `SessionArchiveResolved`
+- To: `Ready`
+
+### `ArchiveSessionDocumentCompleteRetire`
+- From: `Ready`
+- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
+- Guards:
+  - ``
+  - `runtime_residue`
 - Emits: `SessionArchiveResolved`
 - To: `Ready`
 

@@ -730,6 +730,16 @@ ArchiveSessionDocumentActive(session_id, runtime_backed, durable_snapshot_presen
 ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered) ==
     /\ phase = "Ready"
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
+    /\ (runtime_session_registered = FALSE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
+ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered) ==
+    /\ phase = "Ready"
+    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
+    /\ (runtime_session_registered = TRUE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -818,6 +828,7 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E terminal \in SessionDocumentLifecycleValues : RecoverSessionLifecycleTerminal(session_id, terminal)
     \/ \E session_id \in SessionIdValues : \E runtime_backed \in BOOLEAN : \E durable_snapshot_present \in BOOLEAN : \E runtime_session_registered \in BOOLEAN : ArchiveSessionDocumentActive(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
     \/ \E session_id \in SessionIdValues : \E runtime_backed \in BOOLEAN : \E durable_snapshot_present \in BOOLEAN : \E runtime_session_registered \in BOOLEAN : ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
+    \/ \E session_id \in SessionIdValues : \E runtime_backed \in BOOLEAN : \E durable_snapshot_present \in BOOLEAN : \E runtime_session_registered \in BOOLEAN : ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
 
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 1

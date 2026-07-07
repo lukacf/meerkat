@@ -321,6 +321,7 @@ class SkillRuntimeDiagnostics:
 
     source_health: SourceHealthSnapshot = field(default_factory=SourceHealthSnapshot)
     quarantined: list[SkillQuarantineDiagnostic] = field(default_factory=list)
+    collection_fault: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -608,17 +608,25 @@ class MeerkatClient:
         )
         if isinstance(caps_result, CapabilitiesResponse):  # pragma: no cover - typing aid
             caps_result = caps_result.__dict__
-        self._capabilities = [
-            Capability(
-                id=c.get("id", ""),
-                description=c.get("description", ""),
-                status=self._parse_wire_capability_status(
-                    c.get("status"),
-                    "Invalid capabilities/get response",
-                ),
+        context = "Invalid capabilities/get response"
+        capabilities = self._require_present_list_field(
+            caps_result, "capabilities", context
+        )
+        self._capabilities = []
+        for c in capabilities:
+            entry = self._require_dict(c, "capability", context)
+            self._capabilities.append(
+                Capability(
+                    id=self._require_string_field(entry, "id", context),
+                    description=self._require_string_field(
+                        entry, "description", context
+                    ),
+                    status=self._parse_wire_capability_status(
+                        entry.get("status"),
+                        context,
+                    ),
+                )
             )
-            for c in caps_result.get("capabilities", [])
-        ]
 
         # Register callback tools with the server if any were declared.
         if self._tool_registry:
@@ -1076,10 +1084,11 @@ class MeerkatClient:
         )
         params["initial_turn"] = "deferred"
         raw = await self._request("session/create", params)
+        context = "Invalid session/create deferred response"
         return DeferredSession(
             self,
-            session_id=raw.get("session_id", ""),
-            session_ref=raw.get("session_ref"),
+            session_id=self._require_string_field(raw, "session_id", context),
+            session_ref=self._optional_string_field(raw, "session_ref", context),
         )
 
     async def ask_help(
@@ -1134,9 +1143,14 @@ class MeerkatClient:
         if offset is not None:
             params["offset"] = offset
         result = await self._request("session/list", params)
+        sessions = self._require_present_list_field(
+            result, "sessions", "Invalid session/list response"
+        )
         return [
-            self._parse_session_summary(s)
-            for s in result.get("sessions", [])
+            self._parse_session_summary(
+                self._require_dict(s, f"sessions[{idx}]", "Invalid session/list response")
+            )
+            for idx, s in enumerate(sessions)
         ]
 
     async def read_session(self, session_id: str) -> SessionDetails:
@@ -1413,10 +1427,11 @@ class MeerkatClient:
             | RpcBlobPayload
         )
         raw = await self._request("blob/get", {"blob_id": blob_id})
+        context = "Invalid blob/get response"
         return BlobPayload(
-            blob_id=str(raw.get("blob_id", blob_id)),
-            media_type=str(raw.get("media_type", "")),
-            data_base64=str(raw.get("data", "")),
+            blob_id=self._require_string_field(raw, "blob_id", context),
+            media_type=self._require_string_field(raw, "media_type", context),
+            data_base64=self._require_string_field(raw, "data", context),
         )
 
     async def get_runtime_host_info(self) -> dict[str, Any]:
@@ -1884,8 +1899,13 @@ class MeerkatClient:
         definition: MobDefinitionInput | dict[str, Any],
     ) -> Mob:
         self.require_capability("mob")
-        result = await self._request("mob/create", {"definition": _wire_params(definition)})
-        return Mob(self, str(result.get("mob_id", "")))
+        result = await self._request(
+            "mob/create", {"definition": _wire_params(definition)}
+        )
+        return Mob(
+            self,
+            self._require_string_field(result, "mob_id", "Invalid mob/create response"),
+        )
 
     def mob(self, mob_id: str) -> Mob:
         return Mob(self, mob_id)
@@ -1893,7 +1913,13 @@ class MeerkatClient:
     async def list_mobs(self) -> list[dict[str, Any]]:
         self.require_capability("mob")
         result = await self._request("mob/list", {})
-        return self._require_list_field(result, "mobs", "Invalid mob/list response")
+        mobs = self._require_present_list_field(result, "mobs", "Invalid mob/list response")
+        parsed: list[dict[str, Any]] = []
+        for idx, mob in enumerate(mobs):
+            entry = self._require_dict(mob, f"mobs[{idx}]", "Invalid mob/list response")
+            self._require_string_field(entry, "mob_id", "Invalid mob/list response")
+            parsed.append(entry)
+        return parsed
 
     async def mob_status(self, mob_id: str) -> dict[str, Any]:
         result = await self._request("mob/status", {"mob_id": mob_id})
@@ -2692,8 +2718,21 @@ class MeerkatClient:
 
     async def list_mob_profiles(self) -> list[StoredMobProfile]:
         raw = await self._request("mob/profile/list", {})
-        profiles = raw.get("profiles", [])
-        return profiles if isinstance(profiles, list) else []
+        profiles = self._require_present_list_field(
+            raw, "profiles", "Invalid mob/profile/list response"
+        )
+        parsed: list[StoredMobProfile] = []
+        for idx, profile in enumerate(profiles):
+            entry = self._require_dict(
+                profile,
+                f"profiles[{idx}]",
+                "Invalid mob/profile/list response",
+            )
+            self._require_string_field(
+                entry, "name", "Invalid mob/profile/list response"
+            )
+            parsed.append(entry)  # type: ignore[arg-type]
+        return parsed
 
     async def update_mob_profile(
         self,
@@ -2829,9 +2868,14 @@ class MeerkatClient:
 
         Wraps the ``mob/cancel_work`` RPC (DELETE_ME C4).
         """
-        return await self._request(
+        result = await self._request(
             "mob/cancel_work", {"mob_id": mob_id, "work_ref": work_ref}
         )
+        context = "Invalid mob/cancel_work response"
+        return {
+            "mob_id": self._require_string_field(result, "mob_id", context),
+            "ok": self._require_bool_field(result, "ok", context),
+        }
 
     async def mob_cancel_all_work(self, member_ref: MobMemberRef) -> dict[str, Any]:
         """Cancel all in-flight work for a specific mob member.
@@ -2840,10 +2884,15 @@ class MeerkatClient:
         ``ensure_member``/``spawn_helper``/``fork_helper`` and member-list
         responses.
         """
-        return await self._request(
+        result = await self._request(
             "mob/cancel_all_work",
             {"member_ref": member_ref},
         )
+        context = "Invalid mob/cancel_all_work response"
+        return {
+            "mob_id": self._require_string_field(result, "mob_id", context),
+            "ok": self._require_bool_field(result, "ok", context),
+        }
 
     async def append_mob_system_context(
         self,
@@ -2878,11 +2927,20 @@ class MeerkatClient:
 
     async def list_mob_flows(self, mob_id: str) -> list[str]:
         result = await self._request("mob/flows", {"mob_id": mob_id})
-        return result.get("flows", [])
+        context = "Invalid mob/flows response"
+        self._require_string_field(result, "mob_id", context)
+        flows = self._require_present_list_field(result, "flows", context)
+        for idx, flow in enumerate(flows):
+            if not isinstance(flow, str) or not flow:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: flows[{idx}] must be string",
+                )
+        return flows
 
     async def run_mob_flow(self, mob_id: str, flow_id: str, params: dict[str, Any] | None = None) -> str:
         result = await self._request("mob/flow_run", {"mob_id": mob_id, "flow_id": flow_id, "params": params or {}})
-        return str(result.get("run_id", ""))
+        return self._require_string_field(result, "run_id", "Invalid mob/flow_run response")
 
     async def run_mob(
         self,
@@ -2903,7 +2961,7 @@ class MeerkatClient:
             _wire_params(payload),
         )
         if isinstance(result, dict):
-            return str(result.get("run_id", ""))
+            return self._require_string_field(result, "run_id", "Invalid mob/run response")
         return result.run_id
 
     async def get_mob_flow_status(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
@@ -4074,12 +4132,24 @@ class MeerkatClient:
         return value
 
     @staticmethod
+    def _require_present_string_field(raw: dict[str, Any], field: str, context: str) -> str:
+        value = raw.get(field)
+        if not isinstance(value, str):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
+        return value
+
+    @staticmethod
     def _require_number_field(
         raw: dict[str, Any],
         field: str,
         context: str,
         display_field: str | None = None,
     ) -> int | float:
+        if field not in raw:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: missing {display_field or field}",
+            )
         value = raw.get(field)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise MeerkatError(
@@ -4200,47 +4270,112 @@ class MeerkatClient:
         return value
 
     @staticmethod
-    def _parse_skill_diagnostics(raw: Any) -> SkillRuntimeDiagnostics | None:
-        if not isinstance(raw, dict):
-            return None
+    def _require_present_list_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> list[Any]:
+        if field not in raw:
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
+        return MeerkatClient._require_list_field(raw, field, context)
 
-        source_health_raw = raw.get("source_health")
-        source_health = SourceHealthSnapshot()
-        if isinstance(source_health_raw, dict):
-            source_health = SourceHealthSnapshot(
-                state=str(source_health_raw.get("state", "")),
-                invalid_ratio=float(source_health_raw.get("invalid_ratio", 0.0)),
-                invalid_count=int(source_health_raw.get("invalid_count", 0)),
-                total_count=int(source_health_raw.get("total_count", 0)),
-                failure_streak=int(source_health_raw.get("failure_streak", 0)),
-                handshake_failed=bool(source_health_raw.get("handshake_failed", False)),
-            )
+    @staticmethod
+    def _parse_skill_diagnostics(raw: Any) -> SkillRuntimeDiagnostics | None:
+        if raw is None:
+            return None
+        context = "Invalid run result"
+        data = MeerkatClient._require_dict(raw, "skill_diagnostics", context)
+
+        source_health_raw = MeerkatClient._require_dict(
+            data.get("source_health"),
+            "skill_diagnostics.source_health",
+            context,
+        )
+        source_health = SourceHealthSnapshot(
+            state=MeerkatClient._require_string_field(
+                source_health_raw, "state", context
+            ),
+            invalid_ratio=MeerkatClient._require_number_field(
+                source_health_raw,
+                "invalid_ratio",
+                context,
+                "skill_diagnostics.source_health.invalid_ratio",
+            ),
+            invalid_count=MeerkatClient._require_non_negative_integer_field(
+                source_health_raw,
+                "invalid_count",
+                context,
+                "skill_diagnostics.source_health.invalid_count",
+            ),
+            total_count=MeerkatClient._require_non_negative_integer_field(
+                source_health_raw,
+                "total_count",
+                context,
+                "skill_diagnostics.source_health.total_count",
+            ),
+            failure_streak=MeerkatClient._require_non_negative_integer_field(
+                source_health_raw,
+                "failure_streak",
+                context,
+                "skill_diagnostics.source_health.failure_streak",
+            ),
+            handshake_failed=MeerkatClient._require_bool_field(
+                source_health_raw, "handshake_failed", context
+            ),
+        )
 
         quarantined_items: list[SkillQuarantineDiagnostic] = []
-        raw_quarantined = raw.get("quarantined")
-        if isinstance(raw_quarantined, list):
-            for item in raw_quarantined:
-                if not isinstance(item, dict):
-                    raise MeerkatError(
-                        "INVALID_RESPONSE",
-                        "Invalid skill diagnostics: quarantined entry must be an object",
-                    )
-                quarantined_items.append(
-                    SkillQuarantineDiagnostic(
-                        source_uuid=str(item.get("source_uuid", "")),
-                        skill_id=str(item.get("skill_id", "")),
-                        location=str(item.get("location", "")),
-                        error_code=str(item.get("error_code", "")),
-                        error_class=str(item.get("error_class", "")),
-                        message=str(item.get("message", "")),
-                        first_seen_unix_secs=int(item.get("first_seen_unix_secs", 0)),
-                        last_seen_unix_secs=int(item.get("last_seen_unix_secs", 0)),
-                    )
+        raw_quarantined = MeerkatClient._require_present_list_field(
+            data, "quarantined", context
+        )
+        for idx, item in enumerate(raw_quarantined):
+            entry = MeerkatClient._require_dict(
+                item,
+                f"skill_diagnostics.quarantined[{idx}]",
+                context,
+            )
+            identity = MeerkatClient._require_dict(
+                entry.get("identity"),
+                f"skill_diagnostics.quarantined[{idx}].identity",
+                context,
+            )
+            quarantined_items.append(
+                SkillQuarantineDiagnostic(
+                    source_uuid=MeerkatClient._require_string_field(
+                        identity, "source_uuid", context
+                    ),
+                    skill_id=MeerkatClient._require_present_string_field(
+                        identity, "raw_id", context
+                    ),
+                    location=MeerkatClient._require_present_string_field(
+                        entry, "location", context
+                    ),
+                    error_code=MeerkatClient._require_present_string_field(
+                        entry, "error_code", context
+                    ),
+                    error_class=MeerkatClient._require_present_string_field(
+                        entry, "error_class", context
+                    ),
+                    message=MeerkatClient._require_present_string_field(
+                        entry, "message", context
+                    ),
+                    first_seen_unix_secs=MeerkatClient._require_non_negative_integer_field(
+                        entry,
+                        "first_seen_unix_secs",
+                        context,
+                        "skill_diagnostics.quarantined.first_seen_unix_secs",
+                    ),
+                    last_seen_unix_secs=MeerkatClient._require_non_negative_integer_field(
+                        entry,
+                        "last_seen_unix_secs",
+                        context,
+                        "skill_diagnostics.quarantined.last_seen_unix_secs",
+                    ),
                 )
+            )
 
         return SkillRuntimeDiagnostics(
             source_health=source_health,
             quarantined=quarantined_items,
+            collection_fault=data.get("collection_fault"),
         )
 
     @staticmethod
@@ -4291,37 +4426,65 @@ class MeerkatClient:
         raw_warnings = data.get("schema_warnings")
         schema_warnings: list[SchemaWarning] | None = None
         if raw_warnings is not None:
-            schema_warnings = [
-                SchemaWarning(
-                    provider=w.get("provider", ""),
-                    path=w.get("path", ""),
-                    message=w.get("message", ""),
+            warnings = MeerkatClient._require_list_field(
+                {"schema_warnings": raw_warnings},
+                "schema_warnings",
+                context,
+            )
+            schema_warnings = []
+            for idx, warning in enumerate(warnings):
+                entry = MeerkatClient._require_dict(
+                    warning, f"schema_warnings[{idx}]", context
                 )
-                for w in raw_warnings
-            ]
+                schema_warnings.append(
+                    SchemaWarning(
+                        provider=MeerkatClient._require_present_string_field(
+                            entry, "provider", context
+                        ),
+                        path=MeerkatClient._require_present_string_field(
+                            entry, "path", context
+                        ),
+                        message=MeerkatClient._require_present_string_field(
+                            entry, "message", context
+                        ),
+                    )
+                )
         raw_extraction_error = data.get("extraction_error")
         extraction_error = None
-        if isinstance(raw_extraction_error, dict):
+        if raw_extraction_error is not None:
+            extraction = MeerkatClient._require_dict(
+                raw_extraction_error,
+                "extraction_error",
+                context,
+            )
             extraction_error = ExtractionError(
-                last_output=str(raw_extraction_error.get("last_output", "")),
+                last_output=MeerkatClient._require_present_string_field(
+                    extraction,
+                    "last_output",
+                    context,
+                ),
                 attempts=MeerkatClient._require_number_field(
-                    raw_extraction_error,
+                    extraction,
                     "attempts",
                     context,
                     "extraction_error.attempts",
                 ),
-                reason=str(raw_extraction_error.get("reason", "")),
+                reason=MeerkatClient._require_present_string_field(
+                    extraction,
+                    "reason",
+                    context,
+                ),
             )
         return RunResult(
-            session_id=data.get("session_id", ""),
-            text=data.get("text", ""),
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
+            text=MeerkatClient._require_present_string_field(data, "text", context),
             turns=MeerkatClient._require_number_field(data, "turns", context),
             tool_calls=MeerkatClient._require_number_field(data, "tool_calls", context),
             usage=usage,
             terminal_cause_kind=data.get("terminal_cause_kind")
             if isinstance(data.get("terminal_cause_kind"), str)
             else None,
-            session_ref=data.get("session_ref"),
+            session_ref=MeerkatClient._optional_string_field(data, "session_ref", context),
             structured_output=data.get("structured_output"),
             extraction_error=extraction_error,
             schema_warnings=schema_warnings,
@@ -4707,15 +4870,27 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_session_summary(s: dict[str, Any]) -> SessionSummary:
+        context = "Invalid session/list response entry"
+        labels_raw = s.get("labels")
+        if labels_raw is not None and not isinstance(labels_raw, dict):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: labels must be object")
         return SessionSummary(
-            session_id=str(s.get("session_id", "")),
-            session_ref=s.get("session_ref"),
-            created_at=MeerkatClient._parse_int(s.get("created_at"), 0),
-            updated_at=MeerkatClient._parse_int(s.get("updated_at"), 0),
-            message_count=MeerkatClient._parse_int(s.get("message_count"), 0),
-            total_tokens=MeerkatClient._parse_int(s.get("total_tokens"), 0),
-            labels=MeerkatClient._parse_string_map(s.get("labels")),
-            is_active=bool(s.get("is_active", False)),
+            session_id=MeerkatClient._require_string_field(s, "session_id", context),
+            session_ref=MeerkatClient._optional_string_field(s, "session_ref", context),
+            created_at=MeerkatClient._require_non_negative_integer_field(
+                s, "created_at", context
+            ),
+            updated_at=MeerkatClient._require_non_negative_integer_field(
+                s, "updated_at", context
+            ),
+            message_count=MeerkatClient._require_non_negative_integer_field(
+                s, "message_count", context
+            ),
+            total_tokens=MeerkatClient._require_non_negative_integer_field(
+                s, "total_tokens", context
+            ),
+            labels=MeerkatClient._parse_string_map(labels_raw),
+            is_active=MeerkatClient._require_bool_field(s, "is_active", context),
         )
 
     @staticmethod

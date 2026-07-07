@@ -108,9 +108,9 @@ pub fn build_live_projection_snapshot_for_runtime(
     }
 }
 
-/// R11: pure helper deciding whether a `config/patch`-resolved live
-/// identity represents a model or provider swap relative to the identity
-/// the channel was opened with.
+/// Pure helper deciding whether a newly resolved live identity represents
+/// a channel-bound identity swap relative to the identity the channel was
+/// opened with.
 ///
 /// Returns `true` when the channel must be closed (so the SDK can reopen
 /// against the new identity); `false` when an in-place `Refresh` is safe.
@@ -119,17 +119,53 @@ pub fn build_live_projection_snapshot_for_runtime(
 /// authority. Missing generated identity is handled as a fail-closed channel
 /// close before this comparison is reached.
 ///
+/// Provider params are intentionally NOT checked here. Provider parameters
+/// are projected through in-place refresh semantics and do not necessarily
+/// require a new provider connection. The durable auth binding is checked
+/// because live adapters resolve credentials at open/attach time; a changed
+/// binding means the already-open provider session may be authenticated with
+/// stale credentials and must be closed + reopened.
+///
 /// Audio-rate change is intentionally NOT checked here. The OpenAI
 /// Refresh guard rejects it, but R11's typed runtime path is scoped to
-/// model + provider until `audio_config` is plumbed into the projection
-/// snapshot. Audio mismatches still surface as the existing async
+/// channel-bound LLM identity until `audio_config` is plumbed into the
+/// projection snapshot. Audio mismatches still surface as the existing async
 /// `LiveAdapterErrorCode::ConfigRejected` error from the adapter.
 #[must_use]
 pub fn live_channel_requires_close_for_identity_change(
     bound_identity: &SessionLlmIdentity,
     new_identity: &SessionLlmIdentity,
 ) -> bool {
-    bound_identity.model != new_identity.model || bound_identity.provider != new_identity.provider
+    bound_identity.model != new_identity.model
+        || bound_identity.provider != new_identity.provider
+        || bound_identity.auth_binding != new_identity.auth_binding
+}
+
+fn live_channel_identity_swap_reason(
+    bound_identity: &SessionLlmIdentity,
+    new_identity: &SessionLlmIdentity,
+) -> meerkat_core::live_adapter::LiveConfigRejectionReason {
+    meerkat_core::live_adapter::LiveConfigRejectionReason::ChannelIdentitySwap {
+        from_model: bound_identity.model.clone(),
+        from_provider: bound_identity.provider,
+        to_model: new_identity.model.clone(),
+        to_provider: new_identity.provider,
+        auth_binding_changed: bound_identity.auth_binding != new_identity.auth_binding,
+    }
+}
+
+fn live_channel_identity_swap_context(
+    bound_identity: &SessionLlmIdentity,
+    new_identity: &SessionLlmIdentity,
+) -> &'static str {
+    if bound_identity.model == new_identity.model
+        && bound_identity.provider == new_identity.provider
+        && bound_identity.auth_binding != new_identity.auth_binding
+    {
+        "auth_binding_swap"
+    } else {
+        "model_swap"
+    }
 }
 
 /// Decide whether `propagate_config_to_live_channels` should hot-swap a
@@ -436,6 +472,7 @@ mod orchestrator {
     use super::{
         LiveChannelCloseFailure, LiveChannelRefreshFailure, LiveConfigPropagationReport,
         LiveHotSwapSkipReason, build_live_projection_snapshot_for_runtime,
+        live_channel_identity_swap_context, live_channel_identity_swap_reason,
         live_channel_requires_close_for_identity_change, precheck_identity,
         realtime_projection_messages, realtime_projection_root_system_message,
         realtime_projection_runtime_system_context, should_apply_global_model_hot_swap,
@@ -897,6 +934,110 @@ mod orchestrator {
                 })
         }
 
+        /// Close active live channels for a session after its durable LLM
+        /// identity changes in a way the provider session cannot refresh in
+        /// place. This is the session-scoped sibling of
+        /// `propagate_config_to_live_channels`: both paths compare the
+        /// generated live-open bound identity against the new session identity
+        /// and close through generated live-close authority.
+        pub async fn close_live_channels_for_identity_change(
+            &self,
+            session_id: &SessionId,
+            new_identity: &SessionLlmIdentity,
+        ) -> LiveConfigPropagationReport {
+            let mut report = LiveConfigPropagationReport::default();
+            let Some(host) = self.host.as_ref() else {
+                return report;
+            };
+            let channels = host.active_channels().await;
+            for channel_id in channels {
+                let Some(channel_session_id) = self
+                    .runtime_adapter
+                    .live_session_for_active_channel(&channel_id)
+                    .await
+                else {
+                    continue;
+                };
+                if &channel_session_id != session_id {
+                    continue;
+                }
+                let bound_identity = match self
+                    .runtime_adapter
+                    .live_channel_bound_llm_identity(session_id, &channel_id)
+                    .await
+                {
+                    Ok(Some(identity)) => identity,
+                    Ok(None) => {
+                        let reason = meerkat_core::live_adapter::LiveConfigRejectionReason::Other {
+                            detail: "missing generated live-channel bound identity authority"
+                                .to_string(),
+                        };
+                        match self
+                            .close_live_channel_for_config_rejection(
+                                host,
+                                session_id,
+                                &channel_id,
+                                reason,
+                                "missing_generated_identity",
+                            )
+                            .await
+                        {
+                            Ok(()) => report.closed.push(session_id.clone()),
+                            Err(failure) => {
+                                report.close_failed.push((session_id.clone(), failure));
+                            }
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        let reason = meerkat_core::live_adapter::LiveConfigRejectionReason::Other {
+                            detail: format!(
+                                "generated live-channel bound identity authority lookup failed: {err}"
+                            ),
+                        };
+                        match self
+                            .close_live_channel_for_config_rejection(
+                                host,
+                                session_id,
+                                &channel_id,
+                                reason,
+                                "generated_identity_lookup_failed",
+                            )
+                            .await
+                        {
+                            Ok(()) => report.closed.push(session_id.clone()),
+                            Err(failure) => {
+                                report.close_failed.push((session_id.clone(), failure));
+                            }
+                        }
+                        continue;
+                    }
+                };
+                if !live_channel_requires_close_for_identity_change(&bound_identity, new_identity) {
+                    report
+                        .skipped
+                        .push((session_id.clone(), LiveHotSwapSkipReason::NoOpOrOverride));
+                    continue;
+                }
+                let reason = live_channel_identity_swap_reason(&bound_identity, new_identity);
+                let context = live_channel_identity_swap_context(&bound_identity, new_identity);
+                match self
+                    .close_live_channel_for_config_rejection(
+                        host,
+                        session_id,
+                        &channel_id,
+                        reason,
+                        context,
+                    )
+                    .await
+                {
+                    Ok(()) => report.closed.push(session_id.clone()),
+                    Err(failure) => report.close_failed.push((session_id.clone(), failure)),
+                }
+            }
+            report
+        }
+
         /// Fan out `Refresh` (or `Close` if the new resolved model is no
         /// longer realtime-capable, or if the model/provider was
         /// swapped) to every active live channel. Per-channel faults are
@@ -1114,6 +1255,10 @@ mod orchestrator {
                     &bound_identity,
                     &open_config.llm_identity,
                 ) {
+                    let context = live_channel_identity_swap_context(
+                        &bound_identity,
+                        &open_config.llm_identity,
+                    );
                     tracing::info!(
                         target: "meerkat::session_runtime::live_orchestration",
                         %channel_id,
@@ -1122,24 +1267,23 @@ mod orchestrator {
                         new_model_id = %open_config.llm_identity.model,
                         old_provider_id = ?bound_identity.provider,
                         new_provider_id = ?open_config.llm_identity.provider,
-                        reason = "model_swap",
-                        "closing live channel: config patch swapped \
-                         model/provider; SDK must reopen against new identity"
+                        old_auth_binding = ?bound_identity.auth_binding,
+                        new_auth_binding = ?open_config.llm_identity.auth_binding,
+                        reason = context,
+                        "closing live channel: resolved live identity changed; \
+                         SDK must reopen against new identity"
                     );
-                    let reason =
-                        meerkat_core::live_adapter::LiveConfigRejectionReason::ChannelIdentitySwap {
-                            from_model: bound_identity.model.clone(),
-                            from_provider: bound_identity.provider,
-                            to_model: open_config.llm_identity.model.clone(),
-                            to_provider: open_config.llm_identity.provider,
-                        };
+                    let reason = live_channel_identity_swap_reason(
+                        &bound_identity,
+                        &open_config.llm_identity,
+                    );
                     match self
                         .close_live_channel_for_config_rejection(
                             host,
                             &session_id,
                             &channel_id,
                             reason,
-                            "model_swap",
+                            context,
                         )
                         .await
                     {

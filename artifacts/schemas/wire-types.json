@@ -45125,10 +45125,12 @@
   "WireLiveAdapterErrorCode": {
     "$defs": {
       "WireLiveConfigRejectionReason": {
-        "description": "Wire mirror of\n[`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2\ndogma): pins the typed semantic-routing variants on the wire so SDKs\ncan distinguish a runtime-side identity swap from an adapter-side\ninput-modality rejection without string parsing.\n\nR6-5 (P3 dogma): closes the last typed-route-as-detail-string gap. The\nprevious wildcard fallback collapsed future core variants into\n`Other { detail: \"unknown_live_config_rejection_reason\" }`, which SDK\nconsumers had to pattern-match on the English `detail` to route — the\nexact \"typed route becomes detail string\" antipattern R3-6 + R5-3\nclosed for transport / observation / continuity / modality / status /\nerror_code. Future core variants now surface as `Unknown { debug }`\nwith the `{:?}` projection of the source variant preserved for\nserver-side observability.",
         "oneOf": [
           {
             "properties": {
+              "auth_binding_changed": {
+                "type": "boolean"
+              },
               "from_model": {
                 "type": "string"
               },
@@ -46047,10 +46049,12 @@
         ]
       },
       "WireLiveConfigRejectionReason": {
-        "description": "Wire mirror of\n[`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2\ndogma): pins the typed semantic-routing variants on the wire so SDKs\ncan distinguish a runtime-side identity swap from an adapter-side\ninput-modality rejection without string parsing.\n\nR6-5 (P3 dogma): closes the last typed-route-as-detail-string gap. The\nprevious wildcard fallback collapsed future core variants into\n`Other { detail: \"unknown_live_config_rejection_reason\" }`, which SDK\nconsumers had to pattern-match on the English `detail` to route — the\nexact \"typed route becomes detail string\" antipattern R3-6 + R5-3\nclosed for transport / observation / continuity / modality / status /\nerror_code. Future core variants now surface as `Unknown { debug }`\nwith the `{:?}` projection of the source variant preserved for\nserver-side observability.",
         "oneOf": [
           {
             "properties": {
+              "auth_binding_changed": {
+                "type": "boolean"
+              },
               "from_model": {
                 "type": "string"
               },

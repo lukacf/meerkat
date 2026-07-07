@@ -1116,6 +1116,10 @@ pub enum WireLiveAdapterErrorCode {
 /// error_code. Future core variants now surface as `Unknown { debug }`
 /// with the `{:?}` projection of the source variant preserved for
 /// server-side observability.
+fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1126,6 +1130,8 @@ pub enum WireLiveConfigRejectionReason {
         from_provider: WireProvider,
         to_model: String,
         to_provider: WireProvider,
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        auth_binding_changed: bool,
     },
     NonRealtimeResolution {
         detail: String,
@@ -1193,11 +1199,13 @@ impl From<LiveConfigRejectionReason> for WireLiveConfigRejectionReason {
                 from_provider,
                 to_model,
                 to_provider,
+                auth_binding_changed,
             } => Self::ChannelIdentitySwap {
                 from_model,
                 from_provider: from_provider.into(),
                 to_model,
                 to_provider: to_provider.into(),
+                auth_binding_changed,
             },
             LiveConfigRejectionReason::NonRealtimeResolution { detail } => {
                 Self::NonRealtimeResolution { detail }
@@ -1276,11 +1284,13 @@ impl TryFrom<WireLiveConfigRejectionReason> for LiveConfigRejectionReason {
                 from_provider,
                 to_model,
                 to_provider,
+                auth_binding_changed,
             } => Ok(Self::ChannelIdentitySwap {
                 from_model,
                 from_provider: from_provider.try_into()?,
                 to_model,
                 to_provider: to_provider.try_into()?,
+                auth_binding_changed,
             }),
             WireLiveConfigRejectionReason::NonRealtimeResolution { detail } => {
                 Ok(Self::NonRealtimeResolution { detail })
@@ -2754,6 +2764,7 @@ mod tests {
                 from_provider: WireProvider::Anthropic,
                 to_model: "gpt-5.4".into(),
                 to_provider: WireProvider::OpenAi,
+                auth_binding_changed: false,
             },
             WireLiveConfigRejectionReason::Other {
                 detail: "anything".into(),
@@ -2847,10 +2858,12 @@ mod tests {
             from_provider: WireProvider::Anthropic,
             to_model: "gpt-5.4".into(),
             to_provider: WireProvider::OpenAi,
+            auth_binding_changed: false,
         };
         let j = serde_json::to_value(&v).expect("serialization should succeed");
         assert_eq!(j["from_provider"], "anthropic");
         assert_eq!(j["to_provider"], "openai");
+        assert!(j.get("auth_binding_changed").is_none());
         // Must NOT serialize as "open_a_i"
         assert_ne!(
             j["to_provider"], "open_a_i",

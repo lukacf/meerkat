@@ -1421,6 +1421,16 @@ describe("Session wrappers", () => {
     ]]);
   });
 
+  it("createDeferredSession rejects malformed success responses", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ session_ref: "team/deferred" });
+
+    await assert.rejects(
+      () => client.createDeferredSession("Hold until first turn"),
+      /missing session_id/,
+    );
+  });
+
   it("createSession forwards extended creation options", async () => {
     const client = new MeerkatClient();
     const seen = [];
@@ -1524,6 +1534,33 @@ describe("Session wrappers", () => {
     });
   });
 
+  it("listSessions rejects missing required session facts", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      sessions: [
+        {
+          session_id: "s1",
+          created_at: 10,
+          updated_at: 20,
+          message_count: 2,
+          is_active: true,
+          labels: {},
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.listSessions(),
+      /missing total_tokens/,
+    );
+
+    client.request = async () => ({});
+    await assert.rejects(
+      () => client.listSessions(),
+      /expected array/,
+    );
+  });
+
   it("drops malformed resolved capabilities instead of fabricating false defaults", async () => {
     const client = new MeerkatClient();
     client.request = async (method) => {
@@ -1534,6 +1571,8 @@ describe("Session wrappers", () => {
         updated_at: 20,
         message_count: 2,
         is_active: false,
+        model: "claude-sonnet-4-6",
+        provider: "anthropic",
         resolved_capabilities: {
           vision: true,
           image_input: true,
@@ -1549,6 +1588,19 @@ describe("Session wrappers", () => {
     const details = await client.readSession("s1");
 
     assert.equal(details.resolvedCapabilities, undefined);
+  });
+
+  it("getBlob rejects missing required blob fields", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      blob_id: "blob-1",
+      data: "AAAA",
+    });
+
+    await assert.rejects(
+      () => client.getBlob("blob-1"),
+      /missing media_type/,
+    );
   });
 
   it("session/deferred injectContext call public wrapper", async () => {
@@ -1755,8 +1807,10 @@ describe("RunResult parsing", () => {
         },
         quarantined: [
           {
-            source_uuid: "src-1",
-            skill_id: "extract/email",
+            identity: {
+              source_uuid: "src-1",
+              raw_id: "extract/email",
+            },
             location: "project",
             error_code: "bad_frontmatter",
             error_class: "ValidationError",
@@ -1765,6 +1819,10 @@ describe("RunResult parsing", () => {
             last_seen_unix_secs: 20,
           },
         ],
+        collection_fault: {
+          reason_type: "source_unknown",
+          message: "diagnostics source unavailable",
+        },
       },
     };
     const result = MeerkatClient.parseRunResult(raw);
@@ -1789,6 +1847,10 @@ describe("RunResult parsing", () => {
           lastSeenUnixSecs: 20,
         },
       ],
+      collectionFault: {
+        reason_type: "source_unknown",
+        message: "diagnostics source unavailable",
+      },
     });
   });
 
@@ -1805,6 +1867,24 @@ describe("RunResult parsing", () => {
   });
 
   it("rejects malformed run results instead of fabricating counters", () => {
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      /missing session_id/,
+    );
+    assert.doesNotThrow(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
     assert.throws(
       () => MeerkatClient.parseRunResult({ session_id: "s1", text: "ok", turns: 1, tool_calls: 0 }),
       /missing usage/,
@@ -1828,6 +1908,84 @@ describe("RunResult parsing", () => {
         usage: { input_tokens: "oops", output_tokens: 1 },
       }),
       /usage.input_tokens must be number/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        schema_warnings: [{ path: "$", message: "warn" }],
+      }),
+      /missing provider/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        schema_warnings: "warn",
+      }),
+      /expected array/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        extraction_error: { last_output: "bad", attempts: 1 },
+      }),
+      /missing reason/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        extraction_error: "bad",
+      }),
+      /missing extraction_error/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        skill_diagnostics: {
+          quarantined: [],
+        },
+      }),
+      /missing skill_diagnostics.source_health/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        skill_diagnostics: {
+          source_health: {
+            state: "healthy",
+            invalid_ratio: 0,
+            invalid_count: 0,
+            total_count: 0,
+            failure_streak: 0,
+            handshake_failed: false,
+          },
+          quarantined: [{ location: "project" }],
+        },
+      }),
+      /missing skill_diagnostics\.quarantined\[0\]\.identity/,
     );
   });
 });
@@ -2636,6 +2794,61 @@ describe("Parity wrappers", () => {
     assert.equal(calls[4].params.limit, 5);
   });
 
+  it("rejects malformed mob wrapper success responses instead of fabricating defaults", async () => {
+    const client = new MeerkatClient();
+    client.requireCapability = () => {};
+
+    client.request = async () => ({});
+    await assert.rejects(
+      () => client.createMob({ definition: { id: "mob-1", profiles: {} } }),
+      /missing mob_id/,
+    );
+    await assert.rejects(
+      () => client.listMobs(),
+      /expected array/,
+    );
+
+    client.request = async (method) => {
+      if (method === "mob/cancel_work") {
+        return { ok: true };
+      }
+      if (method === "mob/cancel_all_work") {
+        return { mob_id: "mob-1" };
+      }
+      if (method === "mob/profile/list") {
+        return {};
+      }
+      if (method === "mob/flows") {
+        return { mob_id: "mob-1", flows: ["incident", 42] };
+      }
+      if (method === "mob/flow_run") {
+        return {};
+      }
+      return {};
+    };
+
+    await assert.rejects(
+      () => client.mobCancelWork("mob-1", "work-1"),
+      /missing mob_id/,
+    );
+    await assert.rejects(
+      () => client.mobCancelAllWork({ memberRef: makeMemberRef("mob-1", "worker-1") }),
+      /ok must be boolean/,
+    );
+    await assert.rejects(
+      () => client.listMobProfiles(),
+      /expected array/,
+    );
+    await assert.rejects(
+      () => client.listMobFlows("mob-1"),
+      /flows\[1\] must be string/,
+    );
+    await assert.rejects(
+      () => client.runMobFlow("mob-1", "incident"),
+      /missing run_id/,
+    );
+  });
+
   it("rejects mob spawn receipts missing server-owned identity fields", async () => {
     const client = new MeerkatClient();
     client.request = async () => ({
@@ -2920,14 +3133,14 @@ describe("Parity wrappers", () => {
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        /tokens_used must be number/.test(String(error.message)),
+        /missing tokens_used/.test(String(error.message)),
     );
     await assert.rejects(
       () => client.forkMobHelper("mob-1", "source", "help"),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
-        /tokens_used must be number/.test(String(error.message)),
+        /missing tokens_used/.test(String(error.message)),
     );
   });
 
@@ -3543,7 +3756,7 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
         (error) =>
           error instanceof MeerkatError &&
           error.code === "INVALID_RESPONSE" &&
-          /tokens_used must be number/.test(String(error.message)),
+          /missing tokens_used/.test(String(error.message)),
       );
     });
 

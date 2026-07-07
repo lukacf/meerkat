@@ -3529,22 +3529,9 @@ class WireLiveAdapterStatusUnknown(TypedDict, total=False):
 
 WireLiveAdapterStatus = WireLiveAdapterStatusIdle | WireLiveAdapterStatusOpening | WireLiveAdapterStatusReady | WireLiveAdapterStatusDegraded | WireLiveAdapterStatusClosing | WireLiveAdapterStatusClosed | WireLiveAdapterStatusUnknown
 
-# Wire mirror of
-# [`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2
-# dogma): pins the typed semantic-routing variants on the wire so SDKs
-# can distinguish a runtime-side identity swap from an adapter-side
-# input-modality rejection without string parsing.
-#
-# R6-5 (P3 dogma): closes the last typed-route-as-detail-string gap. The
-# previous wildcard fallback collapsed future core variants into
-# `Other { detail: "unknown_live_config_rejection_reason" }`, which SDK
-# consumers had to pattern-match on the English `detail` to route — the
-# exact "typed route becomes detail string" antipattern R3-6 + R5-3
-# closed for transport / observation / continuity / modality / status /
-# error_code. Future core variants now surface as `Unknown { debug }`
-# with the `{:?}` projection of the source variant preserved for
-# server-side observability.
+# Wire projection of LiveConfigRejectionReason (tagged on `kind`).
 class WireLiveConfigRejectionReasonChannelIdentitySwap(TypedDict, total=False):
+    auth_binding_changed: NotRequired[bool]
     from_model: Required[str]
     from_provider: Required[WireProvider]
     kind: Required[Literal['channel_identity_swap']]

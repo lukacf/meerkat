@@ -607,6 +607,7 @@ enum SessionDocumentTransition {
     RecoverSessionLifecycleTerminal,
     ArchiveSessionDocumentActive,
     ArchiveSessionDocumentAlreadyArchived,
+    ArchiveSessionDocumentCompleteRetire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2740,8 +2741,16 @@ impl SessionDocumentMachineAuthority {
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (self.session_lifecycle_terminal_value(&session_id)?
                         == SessionDocumentLifecycle::Archived)
+                    && (runtime_session_registered == false)
                 {
                     matches.push(SessionDocumentTransition::ArchiveSessionDocumentAlreadyArchived);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self.session_lifecycle_terminal_value(&session_id)?
+                        == SessionDocumentLifecycle::Archived)
+                    && (runtime_session_registered == true)
+                {
+                    matches.push(SessionDocumentTransition::ArchiveSessionDocumentCompleteRetire);
                 }
                 let transition = Self::single_transition(matches, "ArchiveSessionDocument")?;
                 match transition {
@@ -2766,6 +2775,14 @@ impl SessionDocumentMachineAuthority {
                             disposition: SessionArchiveDisposition::AlreadyArchived,
                             write_document: false,
                             retire_runtime: false,
+                        }])
+                    }
+                    SessionDocumentTransition::ArchiveSessionDocumentCompleteRetire => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SessionArchiveResolved {
+                            disposition: SessionArchiveDisposition::Archive,
+                            write_document: false,
+                            retire_runtime: true,
                         }])
                     }
                     #[allow(unreachable_patterns)]

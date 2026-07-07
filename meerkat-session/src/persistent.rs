@@ -2244,9 +2244,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?
         {
-            if self.session_archived_by_authority(id, &stored).await? {
-                return Err(SessionError::NotFound { id: id.clone() });
-            }
+            // Archived documents are returned too (ask 21b): the archive
+            // protocol seeds the SessionDocumentMachine with the canonical
+            // archived-ness and the machine decides — quiescent duplicates
+            // resolve AlreadyArchived (mapped to the public NotFound
+            // contract), while an archived document with a still-registered
+            // runtime completes the retire so the partial state left by a
+            // failed retire converges on retry instead of NotFounding
+            // forever.
             return Ok(Some(stored));
         }
         Ok(None)
@@ -17166,6 +17171,104 @@ mod tests {
             runtime_state,
             Some(meerkat_runtime::RuntimeState::Retired),
             "archive must durably retire the registered runtime session"
+        );
+    }
+
+    /// Ask 21b regression: the partial state left by an archive whose
+    /// document commit landed but whose runtime retire failed (document
+    /// Archived + runtime still registered) must CONVERGE on retry. It used
+    /// to resolve AlreadyArchived -> NotFound with the runtime left
+    /// registered, so every retry failed identically and never-run mob
+    /// members stranded in `retiring` forever.
+    #[tokio::test]
+    async fn test_machine_authorized_archive_completes_retire_for_archived_registered_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("mark seeded session archived");
+        store
+            .save(&session)
+            .await
+            .expect("seed the archived durable record");
+
+        let machine = std::sync::Arc::new(meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        ));
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("register the residual runtime session");
+
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(machine.as_ref()),
+            )
+            .await
+            .expect("re-archive must complete the runtime retire, not NotFound");
+
+        let runtime_state = meerkat_runtime::store::load_runtime_state(
+            runtime_store.as_ref(),
+            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+        )
+        .await
+        .expect("runtime state load should succeed");
+        assert_eq!(
+            runtime_state,
+            Some(meerkat_runtime::RuntimeState::Retired),
+            "the residual runtime must be durably retired by the convergent re-archive"
+        );
+    }
+
+    /// The idempotent-duplicate contract is unchanged: re-archiving an
+    /// archived document with NO registered runtime resolves the machine's
+    /// AlreadyArchived verdict, mapped to the public NotFound error.
+    #[tokio::test]
+    async fn test_machine_authorized_archive_of_quiescent_archived_session_is_not_found() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("mark seeded session archived");
+        store
+            .save(&session)
+            .await
+            .expect("seed the archived durable record");
+
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let err = service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect_err("quiescent duplicate archive keeps the NotFound contract");
+        assert!(
+            matches!(err, SessionError::NotFound { .. }),
+            "unexpected duplicate-archive error: {err:?}"
         );
     }
 

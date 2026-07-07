@@ -10157,14 +10157,26 @@ mod tests {
             )
             .await
             .unwrap();
+        // Ask 21b: the retry that finally completes the retained cleanup is
+        // THIS caller's archive converging — it reports success. (The old
+        // AlreadyArchived -> 404 mapping left the runtime session registered
+        // forever, the exact never-run-member retiring strand.)
         assert_eq!(
             complete_retry_response.status(),
-            StatusCode::NOT_FOUND,
-            "REST archive retry should preserve machine/service NotFound after retained cleanup completes"
+            StatusCode::OK,
+            "the completing REST archive retry must report success, not NotFound"
         );
+        let complete_body = complete_retry_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let complete_payload: serde_json::Value = serde_json::from_slice(&complete_body).unwrap();
+        assert_eq!(complete_payload["archived"], true);
         assert!(
             mob_state.handle_for(&mob_id).await.is_err(),
-            "post-NotFound REST archive cleanup should remove the mob retry anchor"
+            "the completing REST archive retry must remove the mob retry anchor"
         );
     }
 

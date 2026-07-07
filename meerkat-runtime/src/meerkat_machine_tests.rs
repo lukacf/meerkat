@@ -6293,6 +6293,224 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
     );
 }
 
+/// Ask 21c defensive class tests (meerkat-studio P0): executor cleanup that
+/// re-enters the machine (the mob executor unregisters its session in
+/// `cleanup_after_runtime_stop_terminalized`) must never run while the
+/// runtime-loop task holds the session mutation gate — that is a
+/// single-task self-deadlock that parks the loop forever, leaves the
+/// session registered forever (the producer of the ask 20/21/21b strand
+/// family), and wedges every caller that later touches the gate (bricking
+/// whole mobs). Each test drives a DIFFERENT stop entry path with a
+/// machine-re-entrant executor under a hard timeout: a hang is a fail.
+mod stop_under_gate_deadlock_class {
+    use super::*;
+
+    struct ReentrantCleanupExecutor {
+        machine: Arc<MeerkatMachine>,
+        session_id: SessionId,
+        cleanup_ran: Arc<AtomicUsize>,
+        block_apply: Option<(Arc<Notify>, Arc<Notify>)>,
+        fail_checkpoint: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for ReentrantCleanupExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            if let Some((started, release)) = &self.block_apply {
+                started.notify_waiters();
+                release.notified().await;
+            }
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: if self.fail_checkpoint {
+                    Some(vec![1, 2, 3])
+                } else {
+                    None
+                },
+                terminal: None,
+            })
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            _session_snapshot: &[u8],
+        ) -> Result<(), CoreExecutorError> {
+            if self.fail_checkpoint {
+                return Err(CoreExecutorError::control_failed_runtime(
+                    "synthetic checkpoint failure",
+                ));
+            }
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), CoreExecutorError> {
+            // The mob executor shape: post-stop cleanup re-enters the
+            // machine, whose first await is the SAME session mutation gate
+            // the loop task must therefore not be holding.
+            self.cleanup_ran.fetch_add(1, Ordering::SeqCst);
+            self.machine.unregister_session(&self.session_id).await;
+            Ok(())
+        }
+    }
+
+    async fn register(
+        machine: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        cleanup_ran: &Arc<AtomicUsize>,
+        block_apply: Option<(Arc<Notify>, Arc<Notify>)>,
+        fail_checkpoint: bool,
+    ) {
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(ReentrantCleanupExecutor {
+                    machine: Arc::clone(machine),
+                    session_id: session_id.clone(),
+                    cleanup_ran: Arc::clone(cleanup_ran),
+                    block_apply,
+                    fail_checkpoint,
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+    }
+
+    /// Path 1: explicit stop on an idle attached loop (stop effect via the
+    /// select! direct-effect arm).
+    #[tokio::test]
+    async fn explicit_stop_with_reentrant_cleanup_completes() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        register(&machine, &session_id, &cleanup_ran, None, false).await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            machine
+                .stop_runtime_executor(&session_id, "class test: explicit stop")
+                .await
+                .expect("stop should be accepted");
+            while cleanup_ran.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            while machine.contains_session(&session_id).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect(
+            "stop with machine-re-entrant cleanup must complete: a hang means a stop path \
+             ran executor cleanup while holding the session mutation gate",
+        );
+    }
+
+    /// Path 2: stop requested while a turn is mid-apply (stop effect drained
+    /// by process_queue after the apply returns — the drain must surface the
+    /// stop instead of applying it under the queue authority guard).
+    #[tokio::test]
+    async fn mid_apply_stop_with_reentrant_cleanup_completes() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        let apply_started = Arc::new(Notify::new());
+        let release_apply = Arc::new(Notify::new());
+        register(
+            &machine,
+            &session_id,
+            &cleanup_ran,
+            Some((Arc::clone(&apply_started), Arc::clone(&release_apply))),
+            false,
+        )
+        .await;
+
+        let (outcome, _completion) = machine
+            .accept_input_with_completion(&session_id, make_prompt("turn to stop mid-apply"))
+            .await
+            .expect("prompt should be accepted");
+        assert!(outcome.is_accepted());
+        tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+            .await
+            .expect("turn should start running");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            machine
+                .stop_runtime_executor(&session_id, "class test: mid-apply stop")
+                .await
+                .expect("stop should be accepted");
+            release_apply.notify_waiters();
+            while cleanup_ran.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            while machine.contains_session(&session_id).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect(
+            "mid-apply stop with machine-re-entrant cleanup must complete: a hang means the \
+             effect drain applied the stop under the queue authority guard",
+        );
+    }
+
+    /// Path 3: checkpoint-failure stop (the terminal-authority-guard family
+    /// — the same guard the field deadlock parked on in the
+    /// terminal-failure arm).
+    #[tokio::test]
+    async fn checkpoint_failure_stop_with_reentrant_cleanup_completes() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        register(&machine, &session_id, &cleanup_ran, None, true).await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (outcome, _completion) = machine
+                .accept_input_with_completion(
+                    &session_id,
+                    make_prompt("turn whose checkpoint fails"),
+                )
+                .await
+                .expect("prompt should be accepted");
+            assert!(outcome.is_accepted());
+            while cleanup_ran.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            while machine.contains_session(&session_id).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect(
+            "checkpoint-failure stop with machine-re-entrant cleanup must complete: a hang \
+             means the stop ran under the terminal authority guard",
+        );
+    }
+}
+
 /// M1 regression (meerkat-studio P0): a boundary handle that (wrongly)
 /// re-enters `MeerkatMachine::cancel_after_boundary` from inside the
 /// machine's own dispatch used to recurse unboundedly — each lap re-staged

@@ -641,8 +641,25 @@ impl MeerkatMachine {
         );
         let (session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
         let gate = self.session_mutation_gate(&session_id).await;
+        // Bounded acquisition (defense in depth for the stop-under-gate
+        // deadlock class): the gate is only ever held for short critical
+        // sections, so a long wait means another task is parked while
+        // holding it — a bug in THAT task. Fail with a typed busy error so
+        // callers (e.g. a single-task mob actor) fast-fail instead of
+        // wedging every subsequent command behind an unbounded lock wait.
         let _gate_guard = match gate {
-            Some(ref gate) => Some(gate.lock().await),
+            Some(ref gate) => Some(
+                crate::tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    gate.lock(),
+                )
+                .await
+                .map_err(|_| {
+                    RuntimeControlPlaneError::Internal(format!(
+                        "retire for session {session_id} timed out acquiring the session                          mutation gate after 30s; the gate holder is likely deadlocked                          (stop-under-gate class) — retire can be retried"
+                    ))
+                })?,
+            ),
             None => None,
         };
 

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.21] - 2026-07-07
+
+Meerkat 0.7.21 fixes the 0.7.19/0.7.20 external-tool poison regression
+(every MCP tool call failing after the session bind) and makes archive
+retries converge for the last never-run-member retiring strand. It also
+supersedes 0.7.20, whose registry packages published but whose Windows
+GitHub-release assets were blocked by a runner disk flake — install
+0.7.21.
+
+### Fixed
+
+- External tool servers staged/connected before the session-authority bind
+  no longer poison the tool surface (meerkat-studio P0 regression on
+  0.7.19/0.7.20). 0.7.19's composite bind forwarding delivered the session
+  bind to nested MCP adapters for the first time, and the adapter refused
+  pre-bind surface facts with a permanently poisoned handle — every
+  subsequent call failed with "surface is poisoned … refusing to replay
+  handwritten snapshot". The pre-bind state is machine-validated state on
+  the construction-time authority, not a handwritten snapshot: the bind
+  now re-derives every fact through generated inputs on the session
+  authority (the sibling pattern to the MCP lifecycle bind's
+  connect-pending seed), and only a genuine machine refusal still poisons
+  fail-closed.
+- Archive retries converge for the partial state left by a failed runtime
+  retire (upstream ask 21b): an Archived document with a still-registered
+  runtime used to resolve AlreadyArchived → NotFound on every retry,
+  leaving the runtime registered forever (never-run mob-plane members
+  stranded in `retiring`). The SessionDocumentMachine now owns the
+  convergence — the re-archive completes the retire (no document rewrite)
+  and reports success; quiescent duplicates keep the public NotFound
+  contract. The REST archive retry that completes retained mob cleanup now
+  returns 200 and removes the retry anchor instead of 404-with-a-leaked
+  runtime.
+
 ## [0.7.20] - 2026-07-07
 
 Meerkat 0.7.20 stops the one-shot occurrence-regeneration runaway (HomeCore:

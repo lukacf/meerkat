@@ -765,7 +765,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 maybe_effect = effect_rx.recv() => {
                     match maybe_effect {
                         Some(effect) => {
-                            let _authority_guard = match authority_binding
+                            let authority_guard = match authority_binding
                                 .lock_current_driver_authority(
                                     &driver,
                                     "runtime loop direct executor effect",
@@ -775,6 +775,14 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 Ok(guard) => guard,
                                 Err(_) => break,
                             };
+                            if effect.is_stop() {
+                                // Stop realization awaits executor cleanup
+                                // that may re-enter the machine (unregister),
+                                // which acquires this same gate — applying it
+                                // under the guard self-deadlocks the loop
+                                // task and wedges every caller of the gate.
+                                drop(authority_guard);
+                            }
                             match crate::control_plane::apply_executor_effect(
                                 &driver,
                                 completions.as_ref(),
@@ -1152,7 +1160,29 @@ async fn process_queue(
         )
         .await
         {
-            Ok(crate::control_plane::EffectDrainOutcome::AppliedStop) => return true,
+            Ok(crate::control_plane::EffectDrainOutcome::StopEffectPending(effect)) => {
+                // The drain never applies stops: realize it here AFTER the
+                // authority guard is released (cleanup may re-enter the
+                // machine and acquire the same session mutation gate).
+                drop(effect_authority_guard);
+                return match crate::control_plane::apply_executor_effect(
+                    driver,
+                    completions,
+                    executor,
+                    effect,
+                )
+                .await
+                {
+                    Ok(should_stop) => should_stop,
+                    Err(error) => {
+                        tracing::error!(
+                            error = %error,
+                            "failed to apply pending stop-runtime-executor effect"
+                        );
+                        true
+                    }
+                };
+            }
             Ok(crate::control_plane::EffectDrainOutcome::Empty) => {}
             Ok(crate::control_plane::EffectDrainOutcome::ChannelClosed) => {
                 // The effect sender was dropped: the control plane is gone.
@@ -1359,6 +1389,9 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(error = %err, "failed to record primitive rejection terminal event");
+                            // Stop paths must never run under the session
+                            // mutation gate (cleanup can re-enter the machine).
+                            drop(queue_authority_guard);
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
@@ -1399,6 +1432,7 @@ async fn process_queue(
                     .await
                     {
                         tracing::error!(error = %err, "failed to record turn-state preparation terminal event");
+                        drop(queue_authority_guard);
                         let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                             driver,
                             completions,
@@ -1483,6 +1517,7 @@ async fn process_queue(
                                 Some(completion_error),
                             )
                             .await;
+                            drop(terminal_authority_guard);
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
@@ -1517,6 +1552,7 @@ async fn process_queue(
                                 Some(completion_error),
                             )
                             .await;
+                            drop(terminal_authority_guard);
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
@@ -1594,6 +1630,12 @@ async fn process_queue(
                         };
                         if let Err(err) = fail_result {
                             tracing::error!(error = %err, "failed to record runtime terminal event");
+                            // The field deadlock (ask 21c): stopping here
+                            // while holding the authority guard parked the
+                            // loop task forever inside its own unregister —
+                            // same pattern as the ChannelClosed arm's
+                            // explicit drop.
+                            drop(terminal_authority_guard);
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
@@ -1650,6 +1692,7 @@ async fn process_queue(
                     let mut completions = completions.lock().await;
                     fail_completion_waiters(&mut completions, &input_ids, reason.clone());
                 }
+                drop(queue_authority_guard);
                 return stop_runtime_loop_executor_from_dsl_effect(
                     driver,
                     completions,

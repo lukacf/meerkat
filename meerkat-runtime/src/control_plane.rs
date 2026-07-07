@@ -94,11 +94,14 @@ pub(crate) async fn apply_executor_effect(
 /// channel closure must still route through the canonical stop/terminalize
 /// path (StopRuntimeExecutor + [`terminalize_async_stop`] + waiter resolution)
 /// instead of silently exiting as if a stop effect had already been applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum EffectDrainOutcome {
-    /// A stop effect was applied (and terminalized) during this drain. The
-    /// loop should stop, terminalization has already run.
-    AppliedStop,
+    /// A stop effect was received but NOT applied: stop realization awaits
+    /// executor cleanup that may re-enter the machine (e.g. a mob executor
+    /// unregistering its session), so it must never run under the session
+    /// mutation gate the drain callers hold. The caller drops its authority
+    /// guard first, then applies the returned effect.
+    StopEffectPending(RuntimeEffect),
     /// No effects were pending; the channel remains open. The loop may
     /// continue processing queued work.
     Empty,
@@ -118,9 +121,15 @@ pub(crate) async fn drain_ready_executor_effects(
     loop {
         match effect_rx.try_recv() {
             Ok(effect) => {
-                if apply_executor_effect(driver, completions, executor, effect).await? {
-                    return Ok(EffectDrainOutcome::AppliedStop);
+                if effect.is_stop() {
+                    // Never applied here: the caller holds the session
+                    // mutation gate during drains, and the stop path's
+                    // cleanup can re-enter the machine (unregister), which
+                    // acquires the same gate — a self-deadlock that parked
+                    // the loop task forever and wedged whole mobs.
+                    return Ok(EffectDrainOutcome::StopEffectPending(effect));
                 }
+                apply_executor_effect(driver, completions, executor, effect).await?;
             }
             Err(mpsc::error::TryRecvError::Empty) => return Ok(EffectDrainOutcome::Empty),
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -341,8 +350,11 @@ mod tests {
     async fn drain_ready_executor_effects_channel_closed_is_distinct_from_applied_stop() {
         let driver = shared_driver();
 
-        // Applied-stop case: a stop effect is delivered, then the sender is
-        // dropped. The drain applies the stop and reports `AppliedStop`.
+        // Stop-pending case: a stop effect is delivered, then the sender is
+        // dropped. The drain must NOT apply the stop (its cleanup can
+        // re-enter the machine and deadlock on the session mutation gate
+        // the drain callers hold); it surfaces the effect for the caller to
+        // apply after releasing its authority guard.
         {
             let stop_calls = Arc::new(AtomicUsize::new(0));
             let mut executor = RecordingExecutor {
@@ -362,12 +374,19 @@ mod tests {
 
             let outcome = drain_ready_executor_effects(&driver, None, &mut executor, &mut rx)
                 .await
-                .expect("drain with applied stop should succeed");
+                .expect("drain with pending stop should succeed");
+            let EffectDrainOutcome::StopEffectPending(effect) = outcome else {
+                panic!("a stop effect must surface as StopEffectPending, got {outcome:?}");
+            };
             assert_eq!(
-                outcome,
-                EffectDrainOutcome::AppliedStop,
-                "an applied stop effect must report AppliedStop"
+                stop_calls.load(Ordering::SeqCst),
+                0,
+                "the drain must never apply the stop itself"
             );
+            let should_stop = apply_executor_effect(&driver, None, &mut executor, effect)
+                .await
+                .expect("caller applies the pending stop guard-free");
+            assert!(should_stop);
             assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
         }
 
@@ -389,15 +408,9 @@ mod tests {
             let outcome = drain_ready_executor_effects(&driver, None, &mut executor, &mut rx)
                 .await
                 .expect("drain on closed channel should succeed");
-            assert_eq!(
-                outcome,
-                EffectDrainOutcome::ChannelClosed,
-                "a closed effect channel must be distinguishable from an applied stop"
-            );
-            assert_ne!(
-                outcome,
-                EffectDrainOutcome::AppliedStop,
-                "channel closure must NOT masquerade as an applied stop"
+            assert!(
+                matches!(outcome, EffectDrainOutcome::ChannelClosed),
+                "a closed effect channel must be distinguishable from a pending stop: {outcome:?}"
             );
             assert_eq!(
                 stop_calls.load(Ordering::SeqCst),

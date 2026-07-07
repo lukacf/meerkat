@@ -34,6 +34,14 @@ pub(crate) enum RuntimeEffectInner {
 }
 
 impl RuntimeEffect {
+    /// Whether realizing this effect stops the runtime executor. Stop
+    /// realization awaits executor cleanup that may re-enter the machine
+    /// (e.g. a mob executor unregistering its session), so callers must
+    /// NEVER apply a stop effect while holding the session mutation gate.
+    pub(crate) fn is_stop(&self) -> bool {
+        matches!(self.inner, RuntimeEffectInner::StopRuntimeExecutor { .. })
+    }
+
     fn from_fact(fact: RuntimeEffectFact) -> Self {
         let inner = match fact {
             RuntimeEffectFact::CancelAfterBoundary { reason } => {

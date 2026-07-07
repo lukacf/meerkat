@@ -659,6 +659,152 @@ impl McpRouterAdapter {
             || snapshot.snapshot_aligned_epoch != 0
             || !snapshot.entries.is_empty()
     }
+
+    fn seed_now_ms() -> u64 {
+        meerkat_core::time_compat::SystemTime::now()
+            .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(0)
+    }
+
+    /// Re-derive pre-bind surface facts through generated inputs on the
+    /// newly bound session authority (the same seed pattern as
+    /// `bind_mcp_server_lifecycle_handle`'s `apply_connect_pending` loop).
+    ///
+    /// The pre-bind state was built exclusively through the SAME generated
+    /// inputs on the router's construction-time authority (typically
+    /// `RuntimeExternalToolSurfaceHandle::ephemeral()`), so it is
+    /// machine-validated state on the wrong authority instance — not a
+    /// handwritten snapshot. Every fact re-enters the session authority
+    /// through its own typed inputs and the machine re-validates each
+    /// transition; a refusal fails the seed and the caller poisons
+    /// fail-closed. Without this, the common embedder flow (stage/connect
+    /// tool servers BEFORE the agent build delivers the session bind)
+    /// poisoned the surface permanently and every external tool call was
+    /// rejected thereafter.
+    fn seed_pre_bind_surface_facts(
+        snapshot: &ExternalToolSurfaceSnapshot,
+        new: &dyn ExternalToolSurfaceHandle,
+    ) -> Result<(), String> {
+        use meerkat_core::{
+            ExternalToolSurfaceBaseState as Base, ExternalToolSurfacePendingOp as Pending,
+            ExternalToolSurfaceStagedOp as Staged,
+        };
+
+        let now_ms = Self::seed_now_ms();
+        for entry in &snapshot.entries {
+            let surface_id = entry.surface_id.clone();
+            let seed_err = |stage: &str, error: &dyn std::fmt::Display| {
+                format!(
+                    "session authority refused pre-bind surface re-derivation \
+                     ({stage} for '{surface_id}'): {error}"
+                )
+            };
+            if entry.base_state == Base::Removed {
+                // A removed surface carries no live obligations; nothing to
+                // re-derive on the session authority.
+                continue;
+            }
+            new.register(surface_id.clone())
+                .map_err(|error| seed_err("register", &error))?;
+
+            // Everything except a never-applied staged Add reached its state
+            // through an applied Add: re-derive the Add lifecycle first.
+            let needs_applied_add =
+                entry.base_state != Base::Absent || entry.pending_op == Pending::Add;
+            let staged_add_only = entry.base_state == Base::Absent
+                && entry.pending_op == Pending::None
+                && entry.staged_op == Staged::Add;
+
+            if needs_applied_add || staged_add_only {
+                new.stage_add(surface_id.clone(), now_ms)
+                    .map_err(|error| seed_err("stage_add", &error))?;
+            }
+            let mut applied_staged_seq = None;
+            if needs_applied_add {
+                // Capture the staged sequence BEFORE ApplyBoundary consumes
+                // it — completion inputs carry the sequence pair from the
+                // boundary application, exactly like the router's
+                // ScheduleSurfaceCompletion effects do.
+                let staged_seq = new
+                    .surface_snapshot(&surface_id)
+                    .and_then(|seeded| seeded.staged_intent_sequence)
+                    .ok_or_else(|| {
+                        seed_err(
+                            "stage_add",
+                            &"session authority recorded no staged sequence",
+                        )
+                    })?;
+                new.apply_boundary(surface_id.clone(), now_ms, staged_seq, 0)
+                    .map_err(|error| seed_err("apply_boundary", &error))?;
+                applied_staged_seq = Some(staged_seq);
+            }
+            if entry.base_state != Base::Absent {
+                // The surface was Active (or draining): its pending Add
+                // completed on the old authority; complete it here too.
+                let pending_seq = new
+                    .surface_snapshot(&surface_id)
+                    .and_then(|seeded| seeded.pending_task_sequence)
+                    .ok_or_else(|| {
+                        seed_err(
+                            "apply_boundary",
+                            &"session authority recorded no pending sequence",
+                        )
+                    })?;
+                let staged_seq = applied_staged_seq.ok_or_else(|| {
+                    seed_err(
+                        "apply_boundary",
+                        &"seed applied no boundary for an active surface",
+                    )
+                })?;
+                new.mark_pending_succeeded(surface_id.clone(), pending_seq, staged_seq)
+                    .map_err(|error| seed_err("mark_pending_succeeded", &error))?;
+            }
+
+            // Re-derive any live follow-up intent on the Active base.
+            match entry.staged_op {
+                Staged::Remove => new
+                    .stage_remove(surface_id.clone(), now_ms)
+                    .map_err(|error| seed_err("stage_remove", &error))?,
+                Staged::Reload => new
+                    .stage_reload(surface_id.clone(), now_ms)
+                    .map_err(|error| seed_err("stage_reload", &error))?,
+                Staged::Add | Staged::None => {}
+            }
+            if entry.base_state == Base::Removing {
+                let staged_seq = new
+                    .surface_snapshot(&surface_id)
+                    .and_then(|seeded| seeded.staged_intent_sequence)
+                    .ok_or_else(|| {
+                        seed_err(
+                            "stage_remove",
+                            &"session authority recorded no removal sequence",
+                        )
+                    })?;
+                new.apply_boundary(surface_id.clone(), now_ms, staged_seq, 0)
+                    .map_err(|error| seed_err("apply_boundary(remove)", &error))?;
+            }
+            for _ in 0..entry.inflight_call_count {
+                new.call_started(surface_id.clone())
+                    .map_err(|error| seed_err("call_started", &error))?;
+            }
+        }
+
+        // Mirror the old authority's publication alignment so the seeded
+        // visible set publishes the same way it had pre-bind.
+        if snapshot.snapshot_aligned_epoch == snapshot.snapshot_epoch {
+            let new_epoch = new.snapshot_epoch();
+            if new_epoch != new.snapshot_aligned_epoch() {
+                new.snapshot_aligned(new_epoch).map_err(|error| {
+                    format!(
+                        "session authority refused pre-bind surface re-derivation \
+                         (snapshot_aligned): {error}"
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -825,18 +971,37 @@ impl AgentToolDispatcher for McpRouterAdapter {
             return;
         }
         let mut poisoned_handle = None;
-        if let Some(snapshot) = self.cached_surface_snapshot()
+        // Live snapshot: the cached copy can predate connection completions
+        // that already landed on the pre-bind authority.
+        let pre_bind_snapshot = self
+            .external_tool_surface_snapshot()
+            .or_else(|| self.cached_surface_snapshot());
+        if let Some(snapshot) = pre_bind_snapshot
             && Self::has_pre_bind_surface_facts(&snapshot)
         {
-            let error = "pre-bind external surface facts require generated authority; refusing to replay handwritten snapshot into bound handle".to_string();
-            tracing::warn!(
-                error = %error,
-                "external surface state existed before generated bind; poisoning surface owner"
-            );
-            poisoned_handle = Some(
-                Arc::new(PoisonedExternalToolSurfaceHandle::new(error, snapshot))
-                    as Arc<dyn ExternalToolSurfaceHandle>,
-            );
+            // Pre-bind facts (servers staged/connected before the session
+            // authority arrived — the normal embedder spawn flow) are
+            // re-derived through generated inputs on the new authority so
+            // the session machine re-validates every fact. Only a machine
+            // REFUSAL poisons fail-closed.
+            match Self::seed_pre_bind_surface_facts(&snapshot, handle.as_ref()) {
+                Ok(()) => {
+                    tracing::info!(
+                        surfaces = snapshot.entries.len(),
+                        "re-derived pre-bind external tool surface facts onto session authority"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "session authority refused pre-bind surface re-derivation; poisoning surface owner"
+                    );
+                    poisoned_handle = Some(Arc::new(PoisonedExternalToolSurfaceHandle::new(
+                        error, snapshot,
+                    ))
+                        as Arc<dyn ExternalToolSurfaceHandle>);
+                }
+            }
         }
         let mut guard = match slot.write() {
             Ok(slot) => slot,
@@ -1121,6 +1286,79 @@ mod tests {
         assert_eq!(snapshot.pending_op, ExternalToolSurfacePendingOp::Add);
         assert_eq!(snapshot.pending_task_sequence, Some(1));
         assert_eq!(snapshot.pending_lineage_sequence, Some(1));
+    }
+
+    /// 0.7.19 regression (meerkat-studio): the composite dispatcher now
+    /// forwards the session-authority bind to nested MCP adapters, so the
+    /// standard embedder flow — construct the router on an ephemeral
+    /// authority, stage + connect tool servers, THEN build the agent (bind
+    /// arrives) — hit the pre-bind poison and every subsequent tool call
+    /// failed with "surface is poisoned … refusing to replay handwritten
+    /// snapshot". Pre-bind facts must instead re-derive onto the session
+    /// authority and calls must keep working after the bind.
+    #[tokio::test]
+    async fn adapter_late_bind_rederives_pre_bind_facts_instead_of_poisoning() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+        // Embedder flow: ephemeral construction-time authority, servers
+        // staged + applied + connected BEFORE the session bind exists.
+        let mut router = generated_surface_router();
+        router
+            .stage_add(test_server_config("desktop_ui", &server_path))
+            .expect("stage desktop_ui pre-bind");
+        router.apply_staged().await.expect("apply staged add");
+        let adapter = McpRouterAdapter::new(router);
+        adapter
+            .wait_until_ready(std::time::Duration::from_secs(10))
+            .await
+            .expect("pre-bind server should connect");
+        adapter.refresh_tools().await.expect("refresh tools");
+
+        // The agent build delivers the session authority late.
+        let session_handle = generated_surface_handle();
+        adapter.bind_external_tool_surface_handle(Arc::clone(&session_handle));
+
+        // The session authority now owns the re-derived facts (the surface
+        // completion that connected pre-bind drains post-bind and must land
+        // on the session authority with matching machine sequences).
+        let _ = AgentToolDispatcher::poll_external_updates(&adapter).await;
+        let seeded = session_handle
+            .surface_snapshot("desktop_ui")
+            .expect("session authority must own the re-derived surface");
+        assert_eq!(
+            seeded.base_state,
+            Some(meerkat_core::ExternalToolSurfaceBaseState::Active),
+            "re-derived surface must be Active on the session authority: {seeded:?}"
+        );
+
+        // And calls keep working — the exact operation that failed in the
+        // field with the poisoned handle.
+        let tools = AgentToolDispatcher::tools(&adapter);
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_str() == "echo")
+            .expect("connected server must expose tools after the late bind");
+        let args =
+            serde_json::value::RawValue::from_string(r#"{"message":"after-bind"}"#.to_string())
+                .expect("raw args");
+        let tool_name = tool.name.to_string();
+        let view = ToolCallView {
+            id: "call-after-bind",
+            name: &tool_name,
+            args: &args,
+        };
+        let outcome = AgentToolDispatcher::dispatch(&adapter, view).await;
+        assert!(
+            outcome.is_ok(),
+            "tool calls must keep working after the late session bind: {outcome:?}"
+        );
+
+        // Post-bind surface mutations flow through the session authority.
+        adapter
+            .stage_add(test_server_config("post-bind", &server_path))
+            .await
+            .expect("post-bind stage_add must not be poisoned");
     }
 
     #[tokio::test]

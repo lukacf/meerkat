@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.20] - 2026-07-07
+
+Meerkat 0.7.20 stops the one-shot occurrence-regeneration runaway (HomeCore:
+223 misfired occurrences in ~2 minutes from one past-due one-shot) and
+unbricks retire/respawn for created-but-never-run mob members.
+
+### Fixed
+
+- A one-shot (or any trigger) whose occurrence went terminal no longer
+  regenerates occurrences unboundedly (upstream ask 22, P0). Root cause: the
+  machine-owned planning cursor is millisecond precision while trigger due
+  times carried nanoseconds — `truncate_ms(due) < due`, so the planner
+  re-yielded an already-planned due every tick once nothing pending was left
+  to dedupe against. The trigger engine now yields and compares
+  ms-truncated timestamps (one fact, one representation); existing runaway
+  stores heal in place on upgrade. Defense in depth: the
+  ScheduleLifecycleMachine now owns planning monotonicity —
+  `RecordPlanningWindow` refuses a cursor that does not strictly advance,
+  so any future planner or representation bug converges as a visible
+  per-tick refill fault instead of unbounded generation.
+- Archiving a created-but-never-run session (durable record exists, runtime
+  snapshot never committed) no longer rejects as a store-only projection
+  (upstream ask 21, P1). Archive is a lifecycle terminal, not a projection
+  promotion: the durable record is the complete truth for a never-run
+  session, so mob members that never received a prompt can be
+  retired/respawned instead of stranding in `retiring`. Control MUTATIONS
+  (context appends, tool staging) still reject store-only projections, and
+  already-archived sessions keep the typed NotFound contract.
+
+### Security
+
+- `crossbeam-epoch` 0.9.18 → 0.9.20 (RUSTSEC-2026-0204).
+
 ## [0.7.19] - 2026-07-06
 
 Meerkat 0.7.19 hardens the schedule subsystem against poisoned durable rows

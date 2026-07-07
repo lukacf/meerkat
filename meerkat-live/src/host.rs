@@ -3443,6 +3443,7 @@ mod tests {
                 from_provider: meerkat_core::Provider::OpenAI,
                 to_model: "b".to_string(),
                 to_provider: meerkat_core::Provider::OpenAI,
+                auth_binding_changed: false,
             },
         };
         host.signal_terminal_error(&ch, code).await.unwrap();

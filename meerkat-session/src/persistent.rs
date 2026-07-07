@@ -2219,6 +2219,39 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    /// Archive-scoped read (ask 21). Unlike control MUTATIONS — which
+    /// require runtime authority and reject store-only projections — a
+    /// session whose runtime never committed a snapshot is still
+    /// archivable: the runtime commits at run boundaries, so for a created
+    /// but never-run session (e.g. a mob member that never received a
+    /// prompt) the durable store projection IS the complete session truth.
+    /// Rejecting it stranded such members in `retiring` forever ("mob
+    /// archive authority returned NotFound for registered runtime
+    /// session"). The already-archived case still resolves the typed
+    /// NotFound contract.
+    async fn load_persisted_session_for_archive(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        if let Some(runtime) =
+            Self::load_runtime_session_snapshot_for_session(&self.runtime_store, id).await?
+        {
+            return Ok(Some(runtime));
+        }
+        if let Some(stored) = self
+            .store
+            .load(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?
+        {
+            if self.session_archived_by_authority(id, &stored).await? {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            return Ok(Some(stored));
+        }
+        Ok(None)
+    }
+
     async fn live_session_authority(
         &self,
         id: &SessionId,
@@ -5034,8 +5067,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let archived_snapshot = match self.export_session_with_labels(id).await {
             Ok(session) => Some(session),
             Err(SessionError::NotFound { .. }) => {
-                self.load_persisted_session_for_control(id, "archive")
-                    .await?
+                self.load_persisted_session_for_archive(id).await?
             }
             Err(err) => return Err(err),
         };
@@ -17072,7 +17104,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_machine_authorized_archive_rejects_store_only_projection() {
+    async fn test_machine_authorized_archive_accepts_never_run_session() {
+        // Ask 21 regression (meerkat-studio): a mob-created member that
+        // never ran a turn has a durable session record (create persisted
+        // it) but NO runtime snapshot (the machine commits at run
+        // boundaries). Archiving it used to be rejected as a "store-only
+        // compatibility projection", stranding the member in `retiring`
+        // forever. Archive is a lifecycle terminal, not a projection
+        // promotion: the durable record is the complete truth for a
+        // never-run session, and the archive must succeed and retire the
+        // registered runtime.
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -17087,62 +17128,44 @@ mod tests {
         store
             .save(&session)
             .await
-            .expect("test should seed a store-only compatibility projection");
+            .expect("test should seed the never-run durable record");
 
-        let machine = meerkat_runtime::MeerkatMachine::persistent(
+        let machine = std::sync::Arc::new(meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
-        let err = service
+        ));
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("register the never-run session (the mob field shape)");
+
+        service
             .archive_with_machine_protocol(
                 &id,
-                MachineSessionArchiveProtocol::from_machine(&machine),
+                MachineSessionArchiveProtocol::from_machine(machine.as_ref()),
             )
             .await
-            .expect_err("machine-routed archive must not promote store-only projection truth");
-        assert!(
-            matches!(err, SessionError::Unsupported(ref message)
-                if message.contains("store-only compatibility projection")
-                    && message.contains("machine snapshot")),
-            "unexpected store-only archive error: {err:?}"
-        );
+            .expect("archiving a never-run session must succeed, not strand it");
 
         let raw = store
             .load(&id)
             .await
             .expect("raw store load should succeed")
-            .expect("store-only projection should remain present");
+            .expect("archived record should remain present");
         assert!(
-            !session_marks_archived(&raw),
-            "machine-routed archive rejection must not persist archived lifecycle metadata"
+            session_marks_archived(&raw),
+            "archive must persist the archived lifecycle metadata"
         );
-        assert!(
-            raw.system_context_state().is_none(),
-            "archive must not add control append state"
-        );
-        assert!(
-            raw.deferred_turn_state().is_none(),
-            "archive must not add deferred-turn control state"
-        );
-        assert!(
-            runtime_store
-                .load_session_snapshot(
-                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-                )
-                .await
-                .expect("runtime snapshot load should succeed")
-                .is_none(),
-            "store-only machine archive rejection must not create runtime authority"
-        );
+        let runtime_state = meerkat_runtime::store::load_runtime_state(
+            runtime_store.as_ref(),
+            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+        )
+        .await
+        .expect("runtime state load should succeed");
         assert_eq!(
-            meerkat_runtime::store::load_runtime_state(
-                runtime_store.as_ref(),
-                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-            )
-            .await
-            .expect("runtime state load should succeed"),
-            None,
-            "store-only machine archive rejection must not create retired lifecycle"
+            runtime_state,
+            Some(meerkat_runtime::RuntimeState::Retired),
+            "archive must durably retire the registered runtime session"
         );
     }
 

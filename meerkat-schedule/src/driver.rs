@@ -1719,6 +1719,79 @@ mod tests {
         Ok(())
     }
 
+    /// Ask 22 regression (HomeCore runaway): a one-shot whose occurrence
+    /// went terminal (misfired here) must never regenerate. Pre-fix, the
+    /// ns-precision due compared against the ms-precision machine cursor
+    /// re-yielded the same due every tick (~1/sec, unbounded).
+    #[tokio::test]
+    async fn one_shot_misfire_must_not_regenerate() -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("one-shot-misfire-regen".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(30),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::CatchUpWithin { window_seconds: 5 },
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+        let created = service.get(&schedule.schedule_id).await?;
+        eprintln!(
+            "post-create: cursor={:?} ordinal={:?} trigger_due 30s ago",
+            created.planning_cursor_utc, created.next_occurrence_ordinal
+        );
+        for tick in 0..6 {
+            let _ = driver.tick_once().await?;
+            let all = store
+                .list_occurrences(crate::OccurrenceFilter {
+                    schedule_id: Some(schedule.schedule_id.clone()),
+                    include_terminal: true,
+                    ..crate::OccurrenceFilter::default()
+                })
+                .await?;
+            let after = service.get(&schedule.schedule_id).await?;
+            eprintln!(
+                "tick {tick}: total={} cursor={:?} ordinal={:?}",
+                all.len(),
+                after.planning_cursor_utc,
+                after.next_occurrence_ordinal
+            );
+        }
+        let all = store
+            .list_occurrences(crate::OccurrenceFilter {
+                schedule_id: Some(schedule.schedule_id.clone()),
+                include_terminal: true,
+                ..crate::OccurrenceFilter::default()
+            })
+            .await?;
+        assert_eq!(
+            all.len(),
+            1,
+            "a one-shot must never regenerate after misfire"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn driver_misfires_long_overdue_skip_occurrence_without_dispatch()
     -> Result<(), ScheduleDomainError> {

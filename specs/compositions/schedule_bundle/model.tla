@@ -335,6 +335,7 @@ schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurre
        /\ ~HigherPriorityReady("schedule_authority")
        /\ schedule_phase = "Active"
        /\ (packet.payload.next_occurrence_ordinal > 0)
+       /\ (IF (schedule_planning_cursor_utc_ms = None) THEN TRUE ELSE (packet.payload.planning_cursor_utc_ms > (IF "value" \in DOMAIN schedule_planning_cursor_utc_ms THEN schedule_planning_cursor_utc_ms["value"] ELSE None)))
        /\ schedule_phase' = "Active"
        /\ schedule_planning_cursor_utc_ms' = Some(packet.payload.planning_cursor_utc_ms)
        /\ schedule_next_occurrence_ordinal' = packet.payload.next_occurrence_ordinal
@@ -4938,7 +4939,7 @@ EntryPacketAdmissible_schedule(packet) ==
     \/ /\ (packet.variant = "Revise") /\ (schedule_phase = "Paused")
     \/ /\ (packet.variant = "UpdatePlanningConfig") /\ (schedule_phase = "Active")
     \/ /\ (packet.variant = "UpdatePlanningConfig") /\ (schedule_phase = "Paused")
-    \/ /\ (packet.variant = "RecordPlanningWindow") /\ (schedule_phase = "Active") /\ ((packet.payload.next_occurrence_ordinal > 0))
+    \/ /\ (packet.variant = "RecordPlanningWindow") /\ (schedule_phase = "Active") /\ ((packet.payload.next_occurrence_ordinal > 0)) /\ ((IF (schedule_planning_cursor_utc_ms = None) THEN TRUE ELSE (packet.payload.planning_cursor_utc_ms > (IF "value" \in DOMAIN schedule_planning_cursor_utc_ms THEN schedule_planning_cursor_utc_ms["value"] ELSE None))))
     \/ /\ (packet.variant = "SyncTargetSnapshot") /\ (schedule_phase = "Active")
     \/ /\ (packet.variant = "SyncTargetSnapshot") /\ (schedule_phase = "Paused")
     \/ /\ (packet.variant = "Pause") /\ (schedule_phase = "Active" \/ schedule_phase = "Paused")

@@ -38,19 +38,42 @@ impl CronAuthoringSpec {
     }
 }
 
+/// Truncate a trigger timestamp to millisecond precision.
+///
+/// The planning cursor is machine-owned state at MILLISECOND precision
+/// (`planning_cursor_utc_ms`), so every due time the trigger engine yields
+/// or compares must live on the same grid. Comparing a full-precision
+/// (sub-ms) due against the ms-truncated cursor re-yields an
+/// already-planned due forever: once its occurrence went terminal, the
+/// planner regenerated it every tick (the HomeCore 223-misfires-in-2-min
+/// runaway). One semantic fact, one representation.
+fn truncate_to_millis(value: DateTime<Utc>) -> DateTime<Utc> {
+    Utc.timestamp_millis_opt(value.timestamp_millis())
+        .single()
+        .unwrap_or(value)
+}
+
 pub fn next_due_after(
     trigger: &TriggerSpec,
     after_utc: Option<DateTime<Utc>>,
 ) -> Result<Option<DateTime<Utc>>, ScheduleDomainError> {
     match trigger {
         TriggerSpec::Once { due_at_utc } => {
-            if after_utc.is_none_or(|after| *due_at_utc > after) {
-                Ok(Some(*due_at_utc))
+            let due_at_utc = truncate_to_millis(*due_at_utc);
+            if after_utc.is_none_or(|after| due_at_utc > after) {
+                Ok(Some(due_at_utc))
             } else {
                 Ok(None)
             }
         }
-        TriggerSpec::Interval(spec) => next_interval_due_after(spec, after_utc),
+        TriggerSpec::Interval(spec) => {
+            let spec = IntervalTriggerSpec {
+                start_at_utc: truncate_to_millis(spec.start_at_utc),
+                every_seconds: spec.every_seconds,
+                end_at_utc: spec.end_at_utc.map(truncate_to_millis),
+            };
+            next_interval_due_after(&spec, after_utc)
+        }
         TriggerSpec::Calendar(spec) => next_calendar_due_after(spec, after_utc),
     }
 }

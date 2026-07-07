@@ -79,6 +79,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecordPlanningWindow`(planning_cursor_utc_ms, next_occurrence_ordinal)
 - Guards:
   - `planning_window_advances_ordinal`
+  - `planning_cursor_advances`
 - Emits: `EmitScheduleNotice`, `PlanningWindowRecorded`
 - To: `Active`
 

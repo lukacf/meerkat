@@ -115,6 +115,7 @@ UpdatePlanningConfigPaused(arg_planning_horizon_days, arg_planning_horizon_occur
 RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal) ==
     /\ phase = "Active"
     /\ (arg_next_occurrence_ordinal > 0)
+    /\ (IF (planning_cursor_utc_ms = None) THEN TRUE ELSE (arg_planning_cursor_utc_ms > (IF "value" \in DOMAIN planning_cursor_utc_ms THEN planning_cursor_utc_ms["value"] ELSE None)))
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ planning_cursor_utc_ms' = Some(arg_planning_cursor_utc_ms)

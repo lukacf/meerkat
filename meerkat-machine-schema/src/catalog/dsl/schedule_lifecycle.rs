@@ -244,6 +244,16 @@ machine! {
         transition RecordPlanningWindowActive {
             on input RecordPlanningWindow { planning_cursor_utc_ms, next_occurrence_ordinal }
             guard "planning_window_advances_ordinal" { self.lifecycle_phase == Phase::Active && next_occurrence_ordinal > 0 }
+            // Machine-owned convergence invariant (ask 22): planning is
+            // MONOTONE. A replan that does not advance the cursor is the
+            // regeneration-runaway shape (re-planning an already-covered
+            // due); the machine refuses it, so even a future planner or
+            // representation bug converges as a visible per-tick refill
+            // fault instead of generating occurrences unboundedly.
+            guard "planning_cursor_advances" {
+                self.planning_cursor_utc_ms == None
+                || planning_cursor_utc_ms > self.planning_cursor_utc_ms.get("value")
+            }
             update {
                 self.planning_cursor_utc_ms = Some(planning_cursor_utc_ms);
                 self.next_occurrence_ordinal = next_occurrence_ordinal;

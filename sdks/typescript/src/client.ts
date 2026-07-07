@@ -3791,7 +3791,12 @@ export class MeerkatClient {
         ),
       },
       quarantined,
-      collectionFault: data.collection_fault ?? undefined,
+      // Omit the key entirely when absent: emitting `collectionFault:
+      // undefined` makes strict deep-equality (and honest JSON round-trips)
+      // diverge from the wire shape.
+      ...(data.collection_fault !== undefined && data.collection_fault !== null
+        ? { collectionFault: data.collection_fault }
+        : {}),
     };
   }
 

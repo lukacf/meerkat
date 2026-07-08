@@ -4815,23 +4815,28 @@ impl MobActor {
 
         // Raw observation only: the live runtime is gone; is the durable
         // snapshot still materializable? The verdict belongs to MobMachine.
-        let stored_session = if self.session_service.supports_persistent_sessions() {
+        // Presence is probed over the metadata-only read seam — the full
+        // document is loaded later, and only on the machine-authorized
+        // revival path.
+        let stored_session_present = if self.session_service.supports_persistent_sessions() {
             self.session_service
-                .load_persisted_session(bridge_session_id)
+                .load_persisted_session_metadata(bridge_session_id)
                 .await
                 .map_err(MobError::SessionError)?
+                .is_some()
         } else {
-            None
+            false
         };
-        let (observation, reason) = match stored_session.as_ref() {
-            Some(_) => (
+        let (observation, reason) = if stored_session_present {
+            (
                 mob_dsl::MemberLiveMaterializationObservationKind::DurableSnapshotPresent,
                 format!("live session materialization missing for '{bridge_session_id}'"),
-            ),
-            None => (
+            )
+        } else {
+            (
                 mob_dsl::MemberLiveMaterializationObservationKind::DurableSnapshotMissing,
                 format!("missing bridge session snapshot for '{bridge_session_id}'"),
-            ),
+            )
         };
 
         let transition = self.apply_dsl_signal_collect_transition(
@@ -4889,21 +4894,33 @@ impl MobActor {
                 })
             }
             mob_dsl::MemberRevivalVerdictKind::ReviveAuthorized => {
-                let Some(stored_session) = stored_session else {
-                    return Err(MobError::Internal(
-                        "MobMachine authorized member revival without a durable snapshot observation"
-                            .into(),
-                    ));
-                };
-                match self
-                    .materialize_revived_member_session(
-                        entry,
-                        member_ref,
-                        bridge_session_id,
-                        stored_session,
-                    )
+                // Full-load only now that the machine authorized exactly one
+                // materialization attempt. A snapshot that vanished between
+                // the metadata presence probe and this load resolves through
+                // the SAME machine-owned failure path as any other
+                // materialization error — the revival obligation is never
+                // left dangling.
+                let materialization = match self
+                    .session_service
+                    .load_persisted_session(bridge_session_id)
                     .await
                 {
+                    Ok(Some(stored_session)) => {
+                        self.materialize_revived_member_session(
+                            entry,
+                            member_ref,
+                            bridge_session_id,
+                            stored_session,
+                        )
+                        .await
+                    }
+                    Ok(None) => Err(MobError::Internal(format!(
+                        "durable snapshot for bridge session '{bridge_session_id}' vanished \
+                         between the metadata presence probe and revival materialization"
+                    ))),
+                    Err(error) => Err(MobError::SessionError(error)),
+                };
+                match materialization {
                     Ok(()) => {
                         self.apply_dsl_signal(
                             mob_dsl::MobMachineSignal::ResolveMemberRevivalSucceeded {

@@ -1028,6 +1028,80 @@ impl<'de> Deserialize<'de> for Session {
     }
 }
 
+/// Serde helper for the metadata-only partial decode of a persisted session
+/// envelope.
+///
+/// LOCKSTEP with [`SessionSerde`]: this struct must decode exactly the field
+/// names and serde shapes that `SessionSerde` persists for `version`, `id`,
+/// and `metadata` (`rename_all = "snake_case"`, `#[serde(default)]` on
+/// `metadata`). The `session_metadata_document_lockstep_with_full_envelope`
+/// pin test fails if the two drift.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct SessionMetadataDocumentSerde {
+    version: u32,
+    id: SessionId,
+    #[serde(default)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Metadata-only projection of a persisted session envelope.
+///
+/// Produced by [`session_metadata_document_from_slice`] without materializing
+/// the transcript. Exposes ONLY the two session-authority facts the metadata
+/// read seam is allowed to observe ([`SESSION_METADATA_KEY`] and
+/// [`SESSION_LIFECYCLE_TERMINAL_KEY`]) — deliberately no raw metadata-map
+/// accessor, so the partial decode can never grow into an untyped side
+/// channel around [`Session`]'s authority-gated reads.
+#[derive(Debug, Clone)]
+pub struct SessionMetadataDocument {
+    session_id: SessionId,
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+impl SessionMetadataDocument {
+    /// Session identity carried by the envelope.
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Raw projected [`SESSION_METADATA_KEY`] value, for divergence
+    /// comparison against another projection of the same fact.
+    pub fn session_metadata_value(&self) -> Option<&serde_json::Value> {
+        self.metadata.get(SESSION_METADATA_KEY)
+    }
+
+    /// Raw projected [`SESSION_LIFECYCLE_TERMINAL_KEY`] value, for divergence
+    /// comparison against another projection of the same fact.
+    pub fn lifecycle_terminal_value(&self) -> Option<&serde_json::Value> {
+        self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY)
+    }
+
+    /// Decode the typed metadata view through the canonical map-level
+    /// decoders, failing closed on corrupt values.
+    pub fn try_into_view(self) -> Result<PersistedSessionMetadataView, serde_json::Error> {
+        PersistedSessionMetadataView::try_from_metadata_map(self.session_id, &self.metadata)
+    }
+}
+
+/// Partially decode a persisted session envelope into its metadata-only
+/// document, without materializing the transcript.
+///
+/// Fail-closed on the envelope format version through the generated
+/// persistence version authority — exactly like the full [`Session`]
+/// deserializer.
+pub fn session_metadata_document_from_slice(
+    bytes: &[u8],
+) -> Result<SessionMetadataDocument, serde_json::Error> {
+    let serde_repr: SessionMetadataDocumentSerde = serde_json::from_slice(bytes)?;
+    session_persistence_version_authority::restore_session_envelope_version(serde_repr.version)
+        .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+    Ok(SessionMetadataDocument {
+        session_id: serde_repr.id,
+        metadata: serde_repr.metadata,
+    })
+}
+
 /// Metadata key used to store durable system-context control state.
 pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
 
@@ -3743,18 +3817,7 @@ impl Session {
 
     /// Try to load SessionMetadata through generated restore authority.
     pub fn try_session_metadata(&self) -> Result<Option<SessionMetadata>, serde_json::Error> {
-        let Some(value) = self.metadata.get(SESSION_METADATA_KEY) else {
-            return Ok(None);
-        };
-        let mut metadata = serde_json::from_value::<SessionMetadata>(value.clone())?;
-        metadata.schema_version =
-            session_persistence_version_authority::restore_session_metadata_schema_version(
-                metadata.schema_version,
-            )
-            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
-        session_durable_config_authority::restore_session_metadata(metadata)
-            .map(Some)
-            .map_err(<serde_json::Error as serde::de::Error>::custom)
+        try_session_metadata_from_map(&self.metadata)
     }
 
     /// Store durable system-context control state in the session metadata map.
@@ -3857,10 +3920,7 @@ impl Session {
     pub fn try_lifecycle_terminal(
         &self,
     ) -> Result<Option<SessionLifecycleTerminal>, serde_json::Error> {
-        match self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY) {
-            Some(value) => serde_json::from_value(value.clone()).map(Some),
-            None => Ok(None),
-        }
+        try_lifecycle_terminal_from_map(&self.metadata)
     }
 
     /// Load the typed session lifecycle-terminal fact, failing closed on a
@@ -4800,6 +4860,93 @@ impl From<&Session> for SessionMeta {
             total_tokens: session.total_tokens(),
             metadata: session.metadata.clone(),
         }
+    }
+}
+
+/// Decode the typed [`SESSION_METADATA_KEY`] fact from a session metadata map
+/// through the generated restore authority.
+///
+/// Canonical single decoder: [`Session::try_session_metadata`] and every
+/// metadata-only read seam ([`PersistedSessionMetadataView`]) delegate here so
+/// the full-session and metadata-only decode paths can never drift.
+///
+/// Fail-closed: a present-but-corrupt value is an error, never "absent".
+pub fn try_session_metadata_from_map(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<SessionMetadata>, serde_json::Error> {
+    let Some(value) = metadata.get(SESSION_METADATA_KEY) else {
+        return Ok(None);
+    };
+    let mut metadata = serde_json::from_value::<SessionMetadata>(value.clone())?;
+    metadata.schema_version =
+        session_persistence_version_authority::restore_session_metadata_schema_version(
+            metadata.schema_version,
+        )
+        .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+    session_durable_config_authority::restore_session_metadata(metadata)
+        .map(Some)
+        .map_err(<serde_json::Error as serde::de::Error>::custom)
+}
+
+/// Decode the typed [`SESSION_LIFECYCLE_TERMINAL_KEY`] fact from a session
+/// metadata map.
+///
+/// Canonical single decoder: [`Session::try_lifecycle_terminal`] and every
+/// metadata-only read seam delegate here. An absent key means no terminal
+/// fact; a present-but-corrupt value fails closed.
+pub fn try_lifecycle_terminal_from_map(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<SessionLifecycleTerminal>, serde_json::Error> {
+    match metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY) {
+        Some(value) => serde_json::from_value(value.clone()).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Typed metadata-only view of a persisted session row or snapshot.
+///
+/// The metadata read seam's currency (mobkit ask-24 clause 3): carries the
+/// session identity plus the two typed session-authority metadata facts,
+/// decoded fail-closed through the canonical map-level decoders. Consumers
+/// that only need ownership/policy/lifecycle facts read this view instead of
+/// materializing the full session document.
+#[derive(Debug, Clone)]
+pub struct PersistedSessionMetadataView {
+    pub session_id: SessionId,
+    pub session_metadata: Option<SessionMetadata>,
+    pub lifecycle_terminal: Option<SessionLifecycleTerminal>,
+}
+
+impl PersistedSessionMetadataView {
+    /// Build the view from a persisted metadata map (e.g. a
+    /// [`SessionMeta`] row projection).
+    ///
+    /// Fail-closed: corrupt values under either reserved key are an error,
+    /// never treated as absent.
+    pub fn try_from_metadata_map(
+        session_id: SessionId,
+        metadata: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            session_id,
+            session_metadata: try_session_metadata_from_map(metadata)?,
+            lifecycle_terminal: try_lifecycle_terminal_from_map(metadata)?,
+        })
+    }
+
+    /// Project the view from a fully materialized session document.
+    pub fn try_from_session(session: &Session) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            session_id: session.id().clone(),
+            session_metadata: session.try_session_metadata()?,
+            lifecycle_terminal: session.try_lifecycle_terminal()?,
+        })
+    }
+
+    /// Typed durable mob member identity carried on the session metadata,
+    /// if any.
+    pub fn mob_member_binding(&self) -> Option<&crate::MobMemberBinding> {
+        self.session_metadata.as_ref()?.mob_member_binding.as_ref()
     }
 }
 
@@ -9182,5 +9329,133 @@ mod tests {
             }
             other => unreachable!("expected BlockAssistant, got {other:?}"),
         }
+    }
+
+    fn metadata_seam_session_metadata() -> SessionMetadata {
+        SessionMetadata {
+            schema_version: SESSION_METADATA_SCHEMA_VERSION,
+            model: "test-model".to_string(),
+            max_tokens: 1024,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: SessionTooling::default(),
+            keep_alive: false,
+            comms_name: Some("team/reviewer/alice".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: Some(crate::MobMemberBinding {
+                mob_id: "team".to_string(),
+                role: "reviewer".to_string(),
+                member: "alice".to_string(),
+            }),
+        }
+    }
+
+    /// Lockstep pin: the metadata-only partial decode must read the exact
+    /// envelope that `SessionSerde` writes. If a field rename or serde-shape
+    /// change lands on the full envelope without the partial decoder
+    /// following, this test fails.
+    #[test]
+    fn session_metadata_document_lockstep_with_full_envelope() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session
+            .set_session_metadata(metadata_seam_session_metadata())
+            .expect("session metadata should persist");
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("lifecycle terminal should persist");
+
+        let bytes = serde_json::to_vec(&session).expect("session should serialize");
+        let document = session_metadata_document_from_slice(&bytes)
+            .expect("partial decode must accept the canonical envelope");
+
+        assert_eq!(document.session_id(), session.id());
+        assert_eq!(
+            document.session_metadata_value(),
+            session.metadata().get(SESSION_METADATA_KEY),
+            "partial decode must project the identical raw session-metadata value"
+        );
+        assert_eq!(
+            document.lifecycle_terminal_value(),
+            session.metadata().get(SESSION_LIFECYCLE_TERMINAL_KEY),
+            "partial decode must project the identical raw lifecycle-terminal value"
+        );
+
+        let view = document
+            .try_into_view()
+            .expect("typed view must decode from the partial document");
+        let full_view =
+            PersistedSessionMetadataView::try_from_session(&session).expect("full-session view");
+        assert_eq!(view.session_id, full_view.session_id);
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.clone()),
+            full_view.session_metadata.as_ref().map(|m| m.model.clone())
+        );
+        assert_eq!(
+            view.mob_member_binding(),
+            full_view.mob_member_binding(),
+            "typed binding must be identical across the two decode paths"
+        );
+        assert_eq!(
+            view.lifecycle_terminal,
+            Some(SessionLifecycleTerminal::Archived)
+        );
+        assert_eq!(
+            full_view.lifecycle_terminal,
+            Some(SessionLifecycleTerminal::Archived)
+        );
+    }
+
+    /// The metadata-only partial decode fails closed on an unsupported
+    /// envelope version — same contract as the full deserializer.
+    #[test]
+    fn session_metadata_document_fails_closed_on_envelope_version() {
+        let session = Session::new();
+        let mut value = serde_json::to_value(&session).expect("session should serialize");
+        value["version"] = serde_json::json!(SESSION_VERSION + 999);
+        let bytes = serde_json::to_vec(&value).expect("mangled envelope should serialize");
+
+        session_metadata_document_from_slice(&bytes)
+            .expect_err("an unsupported envelope version must fail the partial decode closed");
+    }
+
+    /// Corrupt values under either reserved key are a read FAULT for the
+    /// metadata view — never coalesced into "absent".
+    #[test]
+    fn persisted_session_metadata_view_fails_closed_on_corrupt_values() {
+        let session_id = SessionId::new();
+
+        let mut corrupt_metadata = serde_json::Map::new();
+        corrupt_metadata.insert(SESSION_METADATA_KEY.to_string(), serde_json::json!(42));
+        PersistedSessionMetadataView::try_from_metadata_map(session_id.clone(), &corrupt_metadata)
+            .expect_err("corrupt session_metadata must fail the view decode closed");
+
+        let mut corrupt_terminal = serde_json::Map::new();
+        corrupt_terminal.insert(
+            SESSION_LIFECYCLE_TERMINAL_KEY.to_string(),
+            serde_json::json!("definitely-not-a-terminal"),
+        );
+        PersistedSessionMetadataView::try_from_metadata_map(session_id, &corrupt_terminal)
+            .expect_err("corrupt lifecycle terminal must fail the view decode closed");
+    }
+
+    /// Absent reserved keys decode as typed absence through the view.
+    #[test]
+    fn persisted_session_metadata_view_reads_absent_facts_as_none() {
+        let view = PersistedSessionMetadataView::try_from_metadata_map(
+            SessionId::new(),
+            &serde_json::Map::new(),
+        )
+        .expect("empty metadata map must decode");
+        assert!(view.session_metadata.is_none());
+        assert!(view.lifecycle_terminal.is_none());
+        assert!(view.mob_member_binding().is_none());
     }
 }

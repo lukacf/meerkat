@@ -1649,6 +1649,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    /// Metadata-seam sibling of [`Self::session_archived_by_authority`]:
+    /// the same authority precedence (runtime `Retired` realization primary,
+    /// durable typed lifecycle-terminal projection fallback), driven by an
+    /// already-decoded terminal fact instead of a full session document.
+    pub async fn session_archived_by_authority_with_terminal(
+        &self,
+        id: &SessionId,
+        lifecycle_terminal: Option<&SessionLifecycleTerminal>,
+    ) -> Result<bool, SessionError> {
+        match Self::load_runtime_state_for_session(&self.runtime_store, id).await? {
+            Some(RuntimeState::Retired) => Ok(true),
+            Some(_) => Ok(false),
+            None => Ok(lifecycle_terminal.is_some_and(|terminal| terminal.is_archived())),
+        }
+    }
+
     fn runtime_id_for_session(id: &SessionId) -> LogicalRuntimeId {
         LogicalRuntimeId::for_session(id)
     }
@@ -1804,7 +1820,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                 self.runtime_projection_fallback_quarantined(id).await;
                             match self.store_projection_recovery_source_resolved(
                                 id,
-                                &session,
+                                session.session_metadata().is_some(),
+                                session.build_state().is_some(),
                                 runtime_projection_quarantined,
                             ) {
                                 Ok(true) => Some(session),
@@ -2468,18 +2485,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
     }
 
+    /// Drive the canonical SessionDocumentMachine recovery-source verdict for
+    /// a store-only projection from typed observations.
+    ///
+    /// Takes the two metadata-presence observations as bools so both read
+    /// seams (the full-session path and the metadata-only path) feed the SAME
+    /// machine input from their respective projections — neither re-derives
+    /// the verdict.
     fn store_projection_recovery_source_resolved(
         &self,
         id: &SessionId,
-        session: &Session,
+        session_metadata_present: bool,
+        build_state_present: bool,
         runtime_projection_quarantined: bool,
     ) -> Result<bool, SessionError> {
         let mut authority = SessionDocumentMachineAuthority::new();
         let effects = authority
             .recover_session_from_store(
                 SessionDocumentKey::new(id.to_string()),
-                session.session_metadata().is_some(),
-                session.build_state().is_some(),
+                session_metadata_present,
+                build_state_present,
                 runtime_projection_quarantined,
             )
             .map_err(|err| {
@@ -6332,6 +6357,150 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         self.load_authoritative_session_base(id).await
+    }
+
+    /// Load the authoritative durable session METADATA view without
+    /// materializing the full session document.
+    ///
+    /// Mirrors the authority precedence of
+    /// [`Self::load_authoritative_session`] WITHOUT re-deriving any machine
+    /// verdict:
+    ///
+    /// 1. Runtime `Retired`: the durable store row is the authoritative read
+    ///    source; its metadata projection wins.
+    /// 2. Runtime snapshot present: the snapshot's metadata document stands
+    ///    when the store row is absent or agrees on both projected facts
+    ///    (`SESSION_METADATA_KEY`, `SESSION_LIFECYCLE_TERMINAL_KEY`) — in
+    ///    that case the full path's read-source arbitration cannot change
+    ///    the metadata answer, whichever side it picks. ANY disagreement is
+    ///    AMBIGUOUS: this seam delegates to the full
+    ///    [`Self::load_authoritative_session`] path and projects its result —
+    ///    the full path stays the single divergence arbiter (stale-prefix
+    ///    continuity, machine read-source verdicts, quarantine).
+    /// 3. Store-only row: eligibility is the same canonical
+    ///    SessionDocumentMachine recovery-source verdict the full path
+    ///    drives, fed with the same typed observations (metadata/build-state
+    ///    presence, quarantine marker). Verdict parity with the full path:
+    ///    `Ok(true)` exposes the view; `Ok(false)` and machine drive errors
+    ///    read as absent.
+    ///
+    /// This seam skips transcript-rewrite replay and rewrite-audit
+    /// verification — sound because it exposes ONLY the two session-authority
+    /// metadata facts, which replay never mutates (rewrites replace messages
+    /// and advance transcript revisions; they never touch
+    /// `SESSION_METADATA_KEY` or `SESSION_LIFECYCLE_TERMINAL_KEY`). The
+    /// returned view deliberately has no raw metadata-map accessor.
+    ///
+    /// Fail-closed: a corrupt value under either reserved key is an error,
+    /// never `Ok(None)`.
+    pub async fn load_authoritative_session_metadata(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        use meerkat_core::session::{SESSION_LIFECYCLE_TERMINAL_KEY, SESSION_METADATA_KEY};
+
+        let corrupt_metadata_error = |err: serde_json::Error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "session {id} durable metadata failed typed restore: {err}"
+            )))
+        };
+
+        // (1) Retired: the durable archived projection row wins.
+        if matches!(
+            Self::load_runtime_state_for_session(&self.runtime_store, id).await?,
+            Some(RuntimeState::Retired)
+        ) {
+            let Some(meta) = self
+                .store
+                .load_meta(id)
+                .await
+                .map_err(|e| SessionError::Store(Box::new(e)))?
+            else {
+                return Ok(None);
+            };
+            return meerkat_core::PersistedSessionMetadataView::try_from_metadata_map(
+                meta.id,
+                &meta.metadata,
+            )
+            .map(Some)
+            .map_err(corrupt_metadata_error);
+        }
+
+        // (2) Committed runtime snapshot present.
+        let runtime_id = Self::runtime_id_for_session(id);
+        let snapshot_bytes = self
+            .runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to load runtime session snapshot: {err}"
+                )))
+            })?;
+        if let Some(bytes) = snapshot_bytes {
+            let document =
+                meerkat_core::session_metadata_document_from_slice(&bytes).map_err(|err| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to decode runtime session snapshot metadata document for \
+                         session {id}: {err}"
+                    )))
+                })?;
+            let store_meta = self
+                .store
+                .load_meta(id)
+                .await
+                .map_err(|e| SessionError::Store(Box::new(e)))?;
+            let store_agrees = match store_meta.as_ref() {
+                None => true,
+                Some(meta) => {
+                    document.session_metadata_value() == meta.metadata.get(SESSION_METADATA_KEY)
+                        && document.lifecycle_terminal_value()
+                            == meta.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY)
+                }
+            };
+            if store_agrees {
+                return document
+                    .try_into_view()
+                    .map(Some)
+                    .map_err(corrupt_metadata_error);
+            }
+            // AMBIGUOUS snapshot-vs-row metadata: the full authoritative load
+            // owns divergence arbitration; project its result.
+            let Some(session) = self.load_authoritative_session(id).await? else {
+                return Ok(None);
+            };
+            return meerkat_core::PersistedSessionMetadataView::try_from_session(&session)
+                .map(Some)
+                .map_err(corrupt_metadata_error);
+        }
+
+        // (3) Store-only projection: mirror the canonical recovery-source
+        // verdict from the metadata row's typed observations.
+        let Some(meta) = self
+            .store
+            .load_meta(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        let runtime_projection_quarantined = self.runtime_projection_fallback_quarantined(id).await;
+        match self.store_projection_recovery_source_resolved(
+            id,
+            meta.metadata.contains_key(SESSION_METADATA_KEY),
+            meta.metadata
+                .contains_key(meerkat_core::SESSION_BUILD_STATE_KEY),
+            runtime_projection_quarantined,
+        ) {
+            Ok(true) => meerkat_core::PersistedSessionMetadataView::try_from_metadata_map(
+                meta.id,
+                &meta.metadata,
+            )
+            .map(Some)
+            .map_err(corrupt_metadata_error),
+            // Verdict parity with the full path (`Ok(false) | Err(_) => None`).
+            Ok(false) | Err(_) => Ok(None),
+        }
     }
 
     /// Export the full session from the live task and persist it to the store.
@@ -17757,6 +17926,382 @@ mod tests {
             matches!(read_error, SessionError::NotFound { ref id } if *id == legacy_id),
             "archived read must reject with the typed archived/NotFound contract: {read_error:?}"
         );
+    }
+
+    fn metadata_seam_service(
+        store: &Arc<dyn SessionStore>,
+        runtime_store: &Arc<dyn RuntimeStore>,
+    ) -> PersistentSessionService<DummyBuilder> {
+        PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(store),
+            Arc::clone(runtime_store),
+            memory_blob_store(),
+        )
+    }
+
+    async fn seed_runtime_snapshot(runtime_store: &Arc<dyn RuntimeStore>, session: &Session) {
+        let snapshot = serde_json::to_vec(session).expect("snapshot session should serialize");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(session.id()),
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: snapshot,
+                },
+            )
+            .await
+            .expect("test should seed a runtime session snapshot");
+    }
+
+    /// AMBIGUITY FAILS CLOSED INTO THE FULL PATH: when the frozen runtime
+    /// snapshot carries metadata A and the durable store head carries
+    /// metadata B, the metadata seam must not prefer either projection on
+    /// its own — it delegates to `load_authoritative_session`, whose
+    /// machine-owned read-source verdict stays the divergence arbiter, and
+    /// mirrors that answer exactly (in BOTH verdict directions).
+    #[tokio::test]
+    async fn test_metadata_seam_ambiguous_snapshot_vs_head_equals_full_path() {
+        // Direction 1: the store head provably extends the stale snapshot —
+        // the full path picks the head; the seam must mirror it.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+
+        let mut snapshot_session = recoverable_store_row();
+        snapshot_session.push(Message::User(UserMessage::text("hello".to_string())));
+        let id = snapshot_session.id().clone();
+        seed_runtime_snapshot(&runtime_store, &snapshot_session).await;
+
+        let mut head = snapshot_session.clone();
+        head.push(Message::User(UserMessage::text("newer".to_string())));
+        let mut head_metadata = head.session_metadata().expect("head metadata");
+        head_metadata.model = "head-model".to_string();
+        head.set_session_metadata(head_metadata)
+            .expect("head metadata should persist");
+        store.save(&head).await.expect("seed store head");
+
+        let view = service
+            .load_authoritative_session_metadata(&id)
+            .await
+            .expect("metadata seam load should succeed")
+            .expect("session must resolve");
+        let full_view = meerkat_core::PersistedSessionMetadataView::try_from_session(
+            &service
+                .load_authoritative_session(&id)
+                .await
+                .expect("full path load should succeed")
+                .expect("session must resolve"),
+        )
+        .expect("full-path view should project");
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            full_view
+                .session_metadata
+                .as_ref()
+                .map(|m| m.model.as_str()),
+            "ambiguous snapshot-vs-head metadata must resolve exactly like the full path"
+        );
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            Some("head-model"),
+            "the machine verdict picks the extending store head here; the seam must mirror it"
+        );
+
+        // Direction 2: the store row does NOT extend the snapshot (equal
+        // transcripts, diverged metadata only) — the full path keeps the
+        // runtime snapshot; the seam must mirror that too, proving it
+        // delegates instead of preferring the row.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+
+        let mut snapshot_session = recoverable_store_row();
+        snapshot_session.push(Message::User(UserMessage::text("hello".to_string())));
+        let id = snapshot_session.id().clone();
+        seed_runtime_snapshot(&runtime_store, &snapshot_session).await;
+
+        let mut row = snapshot_session.clone();
+        let mut row_metadata = row.session_metadata().expect("row metadata");
+        row_metadata.model = "row-model".to_string();
+        row.set_session_metadata(row_metadata)
+            .expect("row metadata should persist");
+        store.save(&row).await.expect("seed diverged store row");
+
+        let view = service
+            .load_authoritative_session_metadata(&id)
+            .await
+            .expect("metadata seam load should succeed")
+            .expect("session must resolve");
+        let full_view = meerkat_core::PersistedSessionMetadataView::try_from_session(
+            &service
+                .load_authoritative_session(&id)
+                .await
+                .expect("full path load should succeed")
+                .expect("session must resolve"),
+        )
+        .expect("full-path view should project");
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            full_view
+                .session_metadata
+                .as_ref()
+                .map(|m| m.model.as_str()),
+            "seam must mirror the full path in the snapshot-wins direction too"
+        );
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            Some("test-model"),
+            "the machine verdict keeps the runtime snapshot here; the seam must mirror it"
+        );
+    }
+
+    /// When snapshot and store row agree on both projected metadata facts,
+    /// the seam answers from the snapshot document without a full load.
+    #[tokio::test]
+    async fn test_metadata_seam_agreeing_snapshot_and_row_project_without_full_load() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+
+        let mut session = recoverable_store_row();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        let id = session.id().clone();
+        seed_runtime_snapshot(&runtime_store, &session).await;
+        store.save(&session).await.expect("seed agreeing store row");
+
+        let view = service
+            .load_authoritative_session_metadata(&id)
+            .await
+            .expect("metadata seam load should succeed")
+            .expect("session must resolve");
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            Some("test-model")
+        );
+        assert_eq!(view.session_id, id);
+
+        // Snapshot present with NO store row at all: the snapshot is the sole
+        // truth and projects directly.
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+        seed_runtime_snapshot(&runtime_store, &session).await;
+        let view = service
+            .load_authoritative_session_metadata(&id)
+            .await
+            .expect("metadata seam load should succeed")
+            .expect("snapshot-only session must resolve");
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            Some("test-model")
+        );
+    }
+
+    /// Once the machine has retired the runtime, the durable store row is
+    /// the authoritative read source — the frozen pre-retirement snapshot
+    /// (which may carry stale metadata) must not answer.
+    #[tokio::test]
+    async fn test_metadata_seam_retired_row_wins_over_frozen_snapshot() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+
+        let mut snapshot_session = recoverable_store_row();
+        let id = snapshot_session.id().clone();
+        snapshot_session.push(Message::User(UserMessage::text("hello".to_string())));
+        seed_runtime_snapshot(&runtime_store, &snapshot_session).await;
+
+        let mut row = snapshot_session.clone();
+        let mut row_metadata = row.session_metadata().expect("row metadata");
+        row_metadata.model = "post-archive-model".to_string();
+        row.set_session_metadata(row_metadata)
+            .expect("row metadata should persist");
+        row.set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("row terminal should persist");
+        store.save(&row).await.expect("seed archived store row");
+
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("register session");
+        meerkat_runtime::RuntimeControlPlane::retire(
+            &machine,
+            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+        )
+        .await
+        .expect("retire session");
+
+        let view = service
+            .load_authoritative_session_metadata(&id)
+            .await
+            .expect("metadata seam load should succeed")
+            .expect("retired session must resolve from the durable row");
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            Some("post-archive-model"),
+            "the retired read source is the durable row, not the frozen snapshot"
+        );
+        assert_eq!(
+            view.lifecycle_terminal,
+            Some(SessionLifecycleTerminal::Archived)
+        );
+        assert!(
+            service
+                .session_archived_by_authority_with_terminal(&id, view.lifecycle_terminal.as_ref())
+                .await
+                .expect("archived-by-authority read must not error"),
+            "runtime Retired must read as archived through the terminal overload"
+        );
+    }
+
+    /// Store-only rows mirror the canonical recovery-source verdict: a raw
+    /// row without session metadata or build state is NOT a recoverable
+    /// projection and must read as absent — exactly like the full path.
+    #[tokio::test]
+    async fn test_metadata_seam_store_only_verdict_parity() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+
+        // Ineligible raw row: no session metadata, no build state.
+        let mut raw = Session::new();
+        raw.push(Message::User(UserMessage::text("raw".to_string())));
+        let raw_id = raw.id().clone();
+        store.save(&raw).await.expect("seed raw store row");
+        assert!(
+            service
+                .load_authoritative_session_metadata(&raw_id)
+                .await
+                .expect("metadata seam load should succeed")
+                .is_none(),
+            "a non-recoverable store-only row must read as absent through the seam"
+        );
+        assert!(
+            service
+                .load_authoritative_session(&raw_id)
+                .await
+                .expect("full path load should succeed")
+                .is_none(),
+            "verdict parity: the full path reads the same row as absent"
+        );
+
+        // Eligible recoverable row: carries session metadata.
+        let recoverable = recoverable_store_row();
+        let recoverable_id = recoverable.id().clone();
+        store
+            .save(&recoverable)
+            .await
+            .expect("seed recoverable store row");
+        let view = service
+            .load_authoritative_session_metadata(&recoverable_id)
+            .await
+            .expect("metadata seam load should succeed")
+            .expect("recoverable store-only row must project through the seam");
+        assert_eq!(
+            view.session_metadata.as_ref().map(|m| m.model.as_str()),
+            Some("test-model")
+        );
+        assert!(
+            service
+                .load_authoritative_session(&recoverable_id)
+                .await
+                .expect("full path load should succeed")
+                .is_some(),
+            "verdict parity: the full path recovers the same row"
+        );
+    }
+
+    /// Corrupt metadata under the reserved key is a read FAULT for the seam
+    /// — `Err`, never `Ok(None)` (which would launder corruption into
+    /// "no such session").
+    #[tokio::test]
+    async fn test_metadata_seam_corrupt_session_metadata_fails_closed() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+
+        let session = recoverable_store_row();
+        let id = session.id().clone();
+        let mut value = serde_json::to_value(&session).expect("session should serialize");
+        value["metadata"][SESSION_METADATA_KEY] = serde_json::json!(42);
+        let corrupt: Session =
+            serde_json::from_value(value).expect("corrupt envelope should still deserialize");
+        store.save(&corrupt).await.expect("seed corrupt store row");
+
+        service
+            .load_authoritative_session_metadata(&id)
+            .await
+            .expect_err("corrupt session_metadata must surface as Err, never Ok(None)");
+    }
+
+    /// Seam parity across present / absent / archived: filtering the seam
+    /// through `session_archived_by_authority_with_terminal` yields exactly
+    /// the visibility of the full-path `load_authoritative_session` +
+    /// `session_archived_by_authority` composition (the persistent
+    /// `MobSessionService::load_persisted_session` contract).
+    #[tokio::test]
+    async fn test_metadata_seam_visibility_parity_across_present_absent_archived() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = metadata_seam_service(&store, &runtime_store);
+
+        // Present.
+        let present = recoverable_store_row();
+        let present_id = present.id().clone();
+        store.save(&present).await.expect("seed present row");
+
+        // Archived (legacy store-only archived shape).
+        let archived = legacy_store_only_archived_row();
+        let archived_id = archived.id().clone();
+        store.save(&archived).await.expect("seed archived row");
+
+        // Absent.
+        let absent_id = SessionId::new();
+
+        for (id, expected_visible) in [
+            (&present_id, true),
+            (&archived_id, false),
+            (&absent_id, false),
+        ] {
+            let seam_visible = match service
+                .load_authoritative_session_metadata(id)
+                .await
+                .expect("metadata seam load should succeed")
+            {
+                Some(view) => !service
+                    .session_archived_by_authority_with_terminal(
+                        id,
+                        view.lifecycle_terminal.as_ref(),
+                    )
+                    .await
+                    .expect("terminal archived read should succeed"),
+                None => false,
+            };
+            let full_visible = match service
+                .load_authoritative_session(id)
+                .await
+                .expect("full path load should succeed")
+            {
+                Some(session) => !service
+                    .session_archived_by_authority(id, &session)
+                    .await
+                    .expect("full archived read should succeed"),
+                None => false,
+            };
+            assert_eq!(
+                seam_visible, full_visible,
+                "seam visibility must match the full path for session {id}"
+            );
+            assert_eq!(
+                seam_visible, expected_visible,
+                "unexpected visibility for session {id}"
+            );
+        }
     }
 
     #[tokio::test]

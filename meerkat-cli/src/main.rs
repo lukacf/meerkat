@@ -11357,6 +11357,20 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn load_persisted_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<meerkat_core::PersistedSessionMetadataView>,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session_metadata(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn execution_snapshot(
         &self,
         session_id: &SessionId,

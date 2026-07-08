@@ -1466,6 +1466,25 @@ pub trait SessionStore: Send + Sync {
     /// List sessions matching filter.
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError>;
 
+    /// Load only the summary metadata row for a session.
+    ///
+    /// Metadata-only read seam (mobkit ask-24 clause 3): callers that need
+    /// session-level metadata facts (the reserved `session_*` authority keys
+    /// carried on [`SessionMeta::metadata`]) but not the transcript can avoid
+    /// materializing the full session document.
+    ///
+    /// Default: full [`load`](Self::load) projected through
+    /// [`SessionMeta::from`] — correct for every backend, with no
+    /// partial-read benefit. Backends with a row-level metadata projection
+    /// (SQLite) override this with a real partial read that survives a
+    /// corrupt or unreadable full session document.
+    async fn load_meta(&self, id: &SessionId) -> Result<Option<SessionMeta>, SessionStoreError> {
+        Ok(self
+            .load(id)
+            .await?
+            .map(|session| SessionMeta::from(&session)))
+    }
+
     /// Delete a session.
     async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError>;
 

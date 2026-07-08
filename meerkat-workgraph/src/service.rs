@@ -10,8 +10,9 @@ use crate::types::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionBindingResult,
     AttentionContextProjection, AttentionListRequest, AttentionListResult, AttentionPauseRequest,
     AttentionProjectionParentContext, AttentionProjectionRequest, AttentionProjectionResult,
-    AttentionProjectionText, AttentionReassignRequest, AttentionReassignResult,
-    AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    AttentionProjectionText, AttentionPruneRequest, AttentionPruneResult, AttentionReassignRequest,
+    AttentionReassignResult, AttentionResumeRequest, BreakGlassAttentionReassignRequest,
+    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget,
     GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
     GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
     LinkWorkItemsRequest, PolicyEscalateRequest, ProjectedAttentionAuthority, ReadyWorkFilter,
@@ -205,6 +206,26 @@ impl WorkGraphService {
         Ok(AttentionListResult { attention })
     }
 
+    /// Prune TERMINAL (superseded/stopped) attention binding rows in scope.
+    /// The workgraph event stream keeps the audit history; binding rows
+    /// otherwise grow monotonically with reassignment churn. Host-plane
+    /// lifecycle API — not exposed on the agent tool surface.
+    pub async fn prune_terminal_attention(
+        &self,
+        request: AttentionPruneRequest,
+    ) -> Result<AttentionPruneResult, WorkGraphError> {
+        let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
+        let pruned = self
+            .store
+            .prune_terminal_attention(AttentionPruneRequest {
+                realm_id: Some(realm_id),
+                namespace: Some(namespace),
+                updated_before: request.updated_before,
+            })
+            .await?;
+        Ok(AttentionPruneResult { pruned })
+    }
+
     pub async fn pause_attention(
         &self,
         request: AttentionPauseRequest,
@@ -294,10 +315,76 @@ impl WorkGraphService {
                 "attention reassignment requires derived_from link authority".to_string(),
             ));
         }
+        self.reassign_attention_core(
+            request.binding_id,
+            realm_id,
+            namespace,
+            request.expected_revision,
+            &request.target,
+            None,
+        )
+        .await
+    }
+
+    /// Break-glass host-plane reassignment. WorkGraphs are agent-operated:
+    /// the agent-native transfer is a coordinate-mode agent executing the
+    /// move, and the agent tool surface's mode-derived authority stays
+    /// untouched. This entry exists for the one state the graph cannot heal
+    /// agent-natively — a binding stuck on a wedged/retired agent with no
+    /// coordinator holding authority over it. It bypasses the projection
+    /// witness (hosts must not forge projections) but keeps every other
+    /// invariant: binding currency (expected_revision CAS), item
+    /// non-terminality, and the active-binding-per-target occupancy guard.
+    /// Mandatory attribution is recorded in the workgraph event stream and a
+    /// WARN log. Never exposed on the agent tool surface or wire catalogs.
+    pub async fn break_glass_reassign_attention(
+        &self,
+        request: BreakGlassAttentionReassignRequest,
+    ) -> Result<AttentionReassignResult, WorkGraphError> {
+        if request.principal.trim().is_empty() {
+            return Err(WorkGraphError::InvalidInput(
+                "break-glass reassignment requires a non-empty principal".to_string(),
+            ));
+        }
+        if request.reason.trim().is_empty() {
+            return Err(WorkGraphError::InvalidInput(
+                "break-glass reassignment requires a non-empty reason".to_string(),
+            ));
+        }
+        let (realm_id, namespace) = self.scope(request.realm_id.clone(), request.namespace.clone());
+        tracing::warn!(
+            binding_id = %request.binding_id,
+            principal = %request.principal,
+            reason = %request.reason,
+            "break-glass attention reassignment (host-plane, audit-logged)"
+        );
+        self.reassign_attention_core(
+            request.binding_id,
+            realm_id,
+            namespace,
+            request.expected_revision,
+            &request.target,
+            Some(json!({
+                "principal": request.principal,
+                "reason": request.reason,
+            })),
+        )
+        .await
+    }
+
+    async fn reassign_attention_core(
+        &self,
+        binding_id: WorkAttentionBindingId,
+        realm_id: String,
+        namespace: WorkNamespace,
+        expected_revision: u64,
+        target: &GoalAttentionTarget,
+        break_glass_audit: Option<serde_json::Value>,
+    ) -> Result<AttentionReassignResult, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
         let current = self
             .attention_binding(AttentionBindingRequest {
-                binding_id: request.binding_id,
+                binding_id,
                 realm_id: Some(realm_id),
                 namespace: Some(namespace),
             })
@@ -319,7 +406,7 @@ impl WorkGraphService {
         let replacement = WorkAttentionBinding {
             binding_id: WorkAttentionBindingId::generated(),
             work_ref: current.work_ref.clone(),
-            target: request.target.to_attention_target(),
+            target: target.to_attention_target(),
             mode: current.mode,
             status: WorkAttentionStatus::Active,
             machine_state: Default::default(),
@@ -328,7 +415,7 @@ impl WorkGraphService {
             created_at: now,
             updated_at: now,
         };
-        let expected_previous_revision = request.expected_revision;
+        let expected_previous_revision = expected_revision;
         let previous = WorkAttentionMachine::supersede(
             current,
             expected_previous_revision,
@@ -336,12 +423,19 @@ impl WorkGraphService {
             now,
         )?;
         let previous_event = attention_updated_event(&previous, now);
+        let replacement_payload = match &break_glass_audit {
+            None => json!({ "attention": replacement.clone() }),
+            Some(audit) => json!({
+                "attention": replacement.clone(),
+                "break_glass": audit,
+            }),
+        };
         let replacement_event = WorkGraphEvent::graph(
             replacement.work_ref.realm_id.clone(),
             replacement.work_ref.namespace.clone(),
             WorkGraphEventKind::AttentionCreated,
             now,
-            json!({ "attention": replacement.clone() }),
+            replacement_payload,
         );
         let (previous, attention) = self
             .store

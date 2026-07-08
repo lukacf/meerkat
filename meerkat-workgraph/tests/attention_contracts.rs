@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
 
@@ -745,13 +745,19 @@ async fn goal_confirm_and_request_close_reject_stale_item_revision() {
         meerkat_workgraph::WorkGraphError::StaleRevision { .. }
     ));
 
+    // Distinct target: the active-binding-per-target invariant (ask 25)
+    // forbids a second active binding on the session above.
+    let closable_session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000111").expect("valid session id");
     let closable = service
         .create_goal(GoalCreateRequest {
             realm_id: None,
             namespace: None,
             title: "Close exact revision".to_string(),
             description: None,
-            target: GoalAttentionTarget::Session { session_id },
+            target: GoalAttentionTarget::Session {
+                session_id: closable_session_id,
+            },
             mode: WorkAttentionMode::Pursue,
             completion_policy: WorkCompletionPolicy::SelfAttest,
             delegated_authority: AttentionDelegatedAuthority::CloseIfPolicyAllows,
@@ -1537,13 +1543,19 @@ async fn attention_projection_policy_controls_parent_context() {
             .contains("Build the whole feature safely.")
     );
 
+    // Distinct target: the active-binding-per-target invariant (ask 25)
+    // forbids a second active binding on the session above.
+    let suppressed_session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000012").expect("valid session id");
     let without_parent = service
         .create_goal(GoalCreateRequest {
             realm_id: None,
             namespace: None,
             title: "Review child without parent".to_string(),
             description: None,
-            target: GoalAttentionTarget::Session { session_id },
+            target: GoalAttentionTarget::Session {
+                session_id: suppressed_session_id,
+            },
             mode: WorkAttentionMode::Review,
             completion_policy: WorkCompletionPolicy::SelfAttest,
             delegated_authority: AttentionDelegatedAuthority::AddEvidence,
@@ -2410,4 +2422,339 @@ fn narrow_goal_and_attention_control_contracts_round_trip() {
     let list_json = serde_json::to_value(list).expect("serialize list");
     assert_eq!(list_json["status"]["state"], json!("active"));
     serde_json::from_value::<AttentionListRequest>(list_json).expect("deserialize list");
+}
+
+// ---------------------------------------------------------------------------
+// Ask 25: active-binding-per-target uniqueness (service/store-owned)
+// ---------------------------------------------------------------------------
+
+fn contract_goal_request(session_id: SessionId, title: &str) -> GoalCreateRequest {
+    GoalCreateRequest {
+        realm_id: Some("realm-a".to_string()),
+        namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+        title: title.to_string(),
+        description: None,
+        target: GoalAttentionTarget::Session { session_id },
+        mode: WorkAttentionMode::Pursue,
+        completion_policy: WorkCompletionPolicy::SelfAttest,
+        delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+        projection_policy: AttentionProjectionPolicy::default(),
+    }
+}
+
+/// Ask 25: nothing upstream prevented duplicate active bindings on one
+/// target; hosts built five-round admission guards for an invariant that can
+/// only be enforced race-free next to the data. The store now rejects a
+/// second active binding per target transactionally, with a typed conflict
+/// NAMING the occupant.
+#[tokio::test]
+async fn active_binding_per_target_conflicts_at_create() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-000000000021").expect("valid session id");
+
+    let first = service
+        .create_goal(contract_goal_request(session_id.clone(), "first goal"))
+        .await
+        .expect("first goal binds the target");
+    let error = service
+        .create_goal(contract_goal_request(session_id.clone(), "second goal"))
+        .await
+        .expect_err("second active binding on the same target must conflict");
+    let WorkGraphError::Conflict(message) = error else {
+        panic!("expected typed Conflict, got {error:?}");
+    };
+    assert!(
+        message.contains(first.attention.binding_id.as_str()),
+        "conflict must name the occupant binding: {message}"
+    );
+}
+
+#[tokio::test]
+async fn reassign_onto_occupied_target_conflicts_and_frees_previous_target() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_a =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000a1").expect("valid session id");
+    let session_b =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000b1").expect("valid session id");
+    let session_c =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000c1").expect("valid session id");
+
+    let goal_a = service
+        .create_goal(contract_goal_request(session_a.clone(), "goal a"))
+        .await
+        .expect("goal a");
+    let goal_b = service
+        .create_goal(contract_goal_request(session_b.clone(), "goal b"))
+        .await
+        .expect("goal b");
+
+    // Reassigning B onto A's occupied target must conflict...
+    let error = service
+        .break_glass_reassign_attention(meerkat_workgraph::BreakGlassAttentionReassignRequest {
+            binding_id: goal_b.attention.binding_id.clone(),
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: goal_b.attention.machine_state.revision,
+            target: GoalAttentionTarget::Session {
+                session_id: session_a.clone(),
+            },
+            principal: "operator@test".to_string(),
+            reason: "occupied-target probe".to_string(),
+        })
+        .await
+        .expect_err("reassignment onto an occupied target must conflict");
+    assert!(
+        matches!(error, WorkGraphError::Conflict(_)),
+        "expected typed Conflict, got {error:?}"
+    );
+
+    // ...while reassigning onto a free target succeeds and frees B's old
+    // target for a new tenant.
+    service
+        .break_glass_reassign_attention(meerkat_workgraph::BreakGlassAttentionReassignRequest {
+            binding_id: goal_b.attention.binding_id.clone(),
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: goal_b.attention.machine_state.revision,
+            target: GoalAttentionTarget::Session {
+                session_id: session_c.clone(),
+            },
+            principal: "operator@test".to_string(),
+            reason: "move to free target".to_string(),
+        })
+        .await
+        .expect("reassignment onto a free target succeeds");
+    service
+        .create_goal(contract_goal_request(session_b.clone(), "new tenant"))
+        .await
+        .expect("the superseded binding's target is free for a new tenant");
+    let _ = goal_a;
+}
+
+#[tokio::test]
+async fn resume_onto_occupied_target_conflicts() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000d1").expect("valid session id");
+
+    let first = service
+        .create_goal(contract_goal_request(session_id.clone(), "first"))
+        .await
+        .expect("first goal");
+    let paused = service
+        .pause_attention(AttentionPauseRequest {
+            binding_id: first.attention.binding_id.clone(),
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: first.attention.machine_state.revision,
+            until: None,
+        })
+        .await
+        .expect("pause first binding");
+
+    // A paused binding releases the target: a second active binding may take it.
+    service
+        .create_goal(contract_goal_request(session_id.clone(), "second"))
+        .await
+        .expect("paused binding does not occupy the target");
+
+    // Resuming the first binding now collides with the active occupant.
+    let error = service
+        .resume_attention(AttentionResumeRequest {
+            binding_id: paused.attention.binding_id.clone(),
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: paused.attention.machine_state.revision,
+        })
+        .await
+        .expect_err("resume onto an occupied target must conflict");
+    assert!(
+        matches!(error, WorkGraphError::Conflict(_)),
+        "expected typed Conflict, got {error:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ask 24: terminal-binding GC
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn prune_terminal_attention_removes_only_terminal_bindings() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_a =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000e1").expect("valid session id");
+    let session_b =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000e2").expect("valid session id");
+
+    let goal = service
+        .create_goal(contract_goal_request(session_a.clone(), "churning goal"))
+        .await
+        .expect("goal");
+    // Reassign twice: each reassignment strands a superseded row.
+    let first = service
+        .break_glass_reassign_attention(meerkat_workgraph::BreakGlassAttentionReassignRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: goal.attention.machine_state.revision,
+            target: GoalAttentionTarget::Session {
+                session_id: session_b.clone(),
+            },
+            principal: "operator@test".to_string(),
+            reason: "gc seed".to_string(),
+        })
+        .await
+        .expect("first reassign");
+    let second = service
+        .break_glass_reassign_attention(meerkat_workgraph::BreakGlassAttentionReassignRequest {
+            binding_id: first.attention.binding_id.clone(),
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: first.attention.machine_state.revision,
+            target: GoalAttentionTarget::Session {
+                session_id: session_a.clone(),
+            },
+            principal: "operator@test".to_string(),
+            reason: "gc seed".to_string(),
+        })
+        .await
+        .expect("second reassign");
+
+    let pruned = service
+        .prune_terminal_attention(meerkat_workgraph::AttentionPruneRequest {
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            updated_before: None,
+        })
+        .await
+        .expect("prune");
+    assert_eq!(pruned.pruned, 2, "both superseded rows are pruned");
+
+    let listed = service
+        .list_attention(AttentionListRequest {
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            target: None,
+            status: None,
+        })
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.attention.len(),
+        1,
+        "only the live binding survives the prune"
+    );
+    assert_eq!(listed.attention[0].binding_id, second.attention.binding_id);
+}
+
+// ---------------------------------------------------------------------------
+// Ask 23: break-glass host reassignment (audit-logged, mode-independent)
+// ---------------------------------------------------------------------------
+
+/// The agent tool surface's mode-derived restriction is the design (only
+/// coordinate-mode witnesses may reassign). Break-glass exists for the one
+/// state the graph cannot heal agent-natively — and it must carry
+/// attribution into the audit stream.
+#[tokio::test]
+async fn break_glass_reassign_moves_non_coordinate_binding_with_audit() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_a =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000f1").expect("valid session id");
+    let session_b =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000f2").expect("valid session id");
+
+    // Pursue mode: the agent-plane reassign is mode-restricted; break-glass
+    // is the host-plane recovery path.
+    let goal = service
+        .create_goal(contract_goal_request(session_a.clone(), "stuck goal"))
+        .await
+        .expect("goal");
+    assert_eq!(goal.attention.mode, WorkAttentionMode::Pursue);
+
+    let moved = service
+        .break_glass_reassign_attention(meerkat_workgraph::BreakGlassAttentionReassignRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            expected_revision: goal.attention.machine_state.revision,
+            target: GoalAttentionTarget::Session {
+                session_id: session_b.clone(),
+            },
+            principal: "operator@test".to_string(),
+            reason: "member wedged; no coordinator holds authority".to_string(),
+        })
+        .await
+        .expect("break-glass reassign of a pursue-mode binding");
+    assert_eq!(moved.previous.status, WorkAttentionStatus::Superseded);
+    assert_eq!(
+        moved.attention.target,
+        WorkAttentionTarget::Session {
+            session_id: session_b.clone()
+        }
+    );
+
+    // Attribution lands in the audit stream.
+    let events = service
+        .events(WorkGraphEventFilter {
+            realm_id: Some("realm-a".to_string()),
+            namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+            all_namespaces: false,
+            after_seq: None,
+            limit: None,
+        })
+        .await
+        .expect("events");
+    let audited = events.iter().any(|event| {
+        event.payload["break_glass"]["principal"] == json!("operator@test")
+            && event.payload["attention"]["binding_id"]
+                == json!(moved.attention.binding_id.as_str())
+    });
+    assert!(
+        audited,
+        "break-glass reassignment must record principal attribution in the event stream"
+    );
+}
+
+#[tokio::test]
+async fn break_glass_reassign_requires_principal_and_reason() {
+    let service = WorkGraphService::new(std::sync::Arc::new(
+        meerkat_workgraph::MemoryWorkGraphStore::new(),
+    ));
+    let session_id =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000f9").expect("valid session id");
+    let goal = service
+        .create_goal(contract_goal_request(session_id.clone(), "goal"))
+        .await
+        .expect("goal");
+    for (principal, reason) in [("", "reason"), ("operator", "")] {
+        let error = service
+            .break_glass_reassign_attention(meerkat_workgraph::BreakGlassAttentionReassignRequest {
+                binding_id: goal.attention.binding_id.clone(),
+                realm_id: Some("realm-a".to_string()),
+                namespace: Some(WorkNamespace::new("session-123").expect("namespace")),
+                expected_revision: goal.attention.machine_state.revision,
+                target: GoalAttentionTarget::Session {
+                    session_id: session_id.clone(),
+                },
+                principal: principal.to_string(),
+                reason: reason.to_string(),
+            })
+            .await
+            .expect_err("break-glass without attribution must be rejected");
+        assert!(
+            matches!(error, WorkGraphError::InvalidInput(_)),
+            "expected InvalidInput, got {error:?}"
+        );
+    }
 }

@@ -14,9 +14,9 @@ use rusqlite::{
 
 use crate::WorkGraphError;
 use crate::types::{
-    AttentionListRequest, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionStatus,
-    WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId,
-    WorkNamespace,
+    AttentionListRequest, AttentionPruneRequest, WorkAttentionBinding, WorkAttentionBindingId,
+    WorkAttentionStatus, WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter,
+    WorkItemId, WorkNamespace,
 };
 use crate::{WorkAttentionMachine, WorkGraphMachine};
 
@@ -144,6 +144,16 @@ pub trait WorkGraphStore: Send + Sync {
         &self,
         _filter: AttentionListRequest,
     ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        Err(unsupported(self.kind()))
+    }
+
+    /// Delete TERMINAL (superseded/stopped) attention binding rows in scope.
+    /// The event stream keeps the audit history; binding rows otherwise grow
+    /// monotonically with reassignment churn. Returns the pruned row count.
+    async fn prune_terminal_attention(
+        &self,
+        _filter: AttentionPruneRequest,
+    ) -> Result<u64, WorkGraphError> {
         Err(unsupported(self.kind()))
     }
 
@@ -432,6 +442,9 @@ impl WorkGraphStore for MemoryWorkGraphStore {
                 attention.binding_id
             )));
         }
+        if let Some(occupant) = active_target_occupant_in(guard.attention.values(), &attention) {
+            return Err(active_target_conflict(&attention, &occupant));
+        }
         guard.items.insert(item_key, item.clone());
         guard.attention.insert(attention_key, attention.clone());
         guard.append_event(item_event);
@@ -464,6 +477,9 @@ impl WorkGraphStore for MemoryWorkGraphStore {
                 expected: expected_previous_revision,
                 actual: current.machine_state.revision,
             });
+        }
+        if let Some(occupant) = active_target_occupant_in(guard.attention.values(), &attention) {
+            return Err(active_target_conflict(&attention, &occupant));
         }
         guard.attention.insert(key, attention.clone());
         guard.append_event(event);
@@ -508,6 +524,17 @@ impl WorkGraphStore for MemoryWorkGraphStore {
                 "work attention binding {} already exists",
                 replacement.binding_id
             )));
+        }
+        // Occupancy over the post-reassign state: `previous` is being
+        // superseded in this same mutation, so it is excluded from the probe.
+        if let Some(occupant) = active_target_occupant_in(
+            guard
+                .attention
+                .values()
+                .filter(|binding| binding.binding_id != previous.binding_id),
+            &replacement,
+        ) {
+            return Err(active_target_conflict(&replacement, &occupant));
         }
         guard.attention.insert(previous_key, previous.clone());
         guard.attention.insert(replacement_key, replacement.clone());
@@ -561,6 +588,30 @@ impl WorkGraphStore for MemoryWorkGraphStore {
                 });
             }
         }
+        // Occupancy over the post-update state: exclude every binding this
+        // batch rewrites, then judge each Active-status update against the
+        // survivors plus its already-applied batch predecessors.
+        let batch_ids: Vec<WorkAttentionBindingId> = attention_updates
+            .iter()
+            .map(|(attention, _, _)| attention.binding_id.clone())
+            .collect();
+        for (index, (attention, _, _)) in attention_updates.iter().enumerate() {
+            let occupant = active_target_occupant_in(
+                guard
+                    .attention
+                    .values()
+                    .filter(|binding| !batch_ids.contains(&binding.binding_id))
+                    .chain(
+                        attention_updates[..index]
+                            .iter()
+                            .map(|(applied, _, _)| applied),
+                    ),
+                attention,
+            );
+            if let Some(occupant) = occupant {
+                return Err(active_target_conflict(attention, &occupant));
+            }
+        }
         guard.items.insert(key, item.clone());
         guard.append_event(item_event);
         for (attention, _, event) in attention_updates {
@@ -605,6 +656,29 @@ impl WorkGraphStore for MemoryWorkGraphStore {
                 .then_with(|| left.binding_id.cmp(&right.binding_id))
         });
         Ok(bindings)
+    }
+
+    async fn prune_terminal_attention(
+        &self,
+        filter: AttentionPruneRequest,
+    ) -> Result<u64, WorkGraphError> {
+        let mut guard = self.inner.write().await;
+        let before = guard.attention.len();
+        guard.attention.retain(|_, binding| {
+            let in_scope = filter
+                .realm_id
+                .as_ref()
+                .is_none_or(|realm_id| &binding.work_ref.realm_id == realm_id)
+                && filter
+                    .namespace
+                    .as_ref()
+                    .is_none_or(|namespace| &binding.work_ref.namespace == namespace)
+                && filter
+                    .updated_before
+                    .is_none_or(|updated_before| binding.updated_at < updated_before);
+            !(in_scope && binding.status.is_terminal())
+        });
+        Ok((before - guard.attention.len()) as u64)
     }
 
     async fn insert_edge(
@@ -812,7 +886,7 @@ pub struct SqliteWorkGraphStore {
 impl SqliteWorkGraphStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, WorkGraphError> {
         let store = Self { path: path.into() };
-        store.with_connection(|_conn| Ok(()))?;
+        store.with_connection(migrate_sqlite_attention_query_columns)?;
         Ok(store)
     }
 
@@ -967,6 +1041,9 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            if let Some(occupant) = active_target_occupant_tx(&tx, &attention)? {
+                return Err(active_target_conflict(&attention, &occupant));
+            }
             insert_item_tx(&tx, &item)?;
             insert_attention_tx(&tx, &attention)?;
             insert_event_tx(&tx, &item_event)?;
@@ -1008,6 +1085,12 @@ impl WorkGraphStore for SqliteWorkGraphStore {
                     )),
                 };
             }
+            // Occupancy after the row rewrite (the probe excludes the
+            // candidate itself); a conflict drops the transaction, rolling
+            // the rewrite back.
+            if let Some(occupant) = active_target_occupant_tx(&tx, &attention)? {
+                return Err(active_target_conflict(&attention, &occupant));
+            }
             insert_event_tx(&tx, &event)?;
             tx.commit()
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
@@ -1047,6 +1130,12 @@ impl WorkGraphStore for SqliteWorkGraphStore {
                         previous.binding_id,
                     )),
                 };
+            }
+            // Occupancy over the post-reassign state: `previous` was just
+            // rewritten to Superseded inside this transaction, so the probe
+            // no longer sees it as active.
+            if let Some(occupant) = active_target_occupant_tx(&tx, &replacement)? {
+                return Err(active_target_conflict(&replacement, &occupant));
             }
             insert_attention_tx(&tx, &replacement)?;
             insert_event_tx(&tx, &previous_event)?;
@@ -1108,6 +1197,11 @@ impl WorkGraphStore for SqliteWorkGraphStore {
                         )),
                     };
                 }
+                // Occupancy after the row rewrite (the probe excludes the
+                // candidate itself); a conflict drops the transaction.
+                if let Some(occupant) = active_target_occupant_tx(&tx, attention)? {
+                    return Err(active_target_conflict(attention, &occupant));
+                }
                 insert_event_tx(&tx, event)?;
             }
             tx.commit()
@@ -1130,6 +1224,73 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         filter: AttentionListRequest,
     ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
         self.with_connection(|conn| list_sqlite_attention(conn, &filter))
+    }
+
+    async fn prune_terminal_attention(
+        &self,
+        filter: AttentionPruneRequest,
+    ) -> Result<u64, WorkGraphError> {
+        self.with_connection(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            // Candidate scan is NULL-tolerant (rows written by older binaries
+            // carry NULL status); each candidate is decoded and judged in
+            // Rust before deletion, so only provably terminal rows go.
+            let candidates: Vec<(String, String, String)> = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT realm_id, namespace, binding_id, attention_json
+                           FROM workgraph_attention
+                          WHERE status IN ('superseded', 'stopped') OR status IS NULL",
+                    )
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row_json::<WorkAttentionBinding>(row, 3)?,
+                        ))
+                    })
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                let mut candidates = Vec::new();
+                for row in rows {
+                    let (realm_id, namespace, binding_id, binding) =
+                        row.map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                    let in_scope = filter
+                        .realm_id
+                        .as_ref()
+                        .is_none_or(|realm| &binding.work_ref.realm_id == realm)
+                        && filter
+                            .namespace
+                            .as_ref()
+                            .is_none_or(|ns| &binding.work_ref.namespace == ns)
+                        && filter
+                            .updated_before
+                            .is_none_or(|updated_before| binding.updated_at < updated_before);
+                    if in_scope && binding.status.is_terminal() {
+                        candidates.push((realm_id, namespace, binding_id));
+                    }
+                }
+                candidates
+            };
+            let mut pruned = 0u64;
+            for (realm_id, namespace, binding_id) in candidates {
+                pruned += tx
+                    .execute(
+                        "DELETE FROM workgraph_attention
+                          WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3",
+                        params![realm_id, namespace, binding_id],
+                    )
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?
+                    as u64;
+            }
+            tx.commit()
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            Ok(pruned)
+        })
     }
 
     async fn insert_edge(
@@ -1370,8 +1531,9 @@ fn insert_attention_tx(
         serde_json::to_string(attention).map_err(|err| WorkGraphError::Store(err.to_string()))?;
     tx.execute(
         "INSERT INTO workgraph_attention
-            (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json,
+             status, target_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             attention.work_ref.realm_id,
             attention.work_ref.namespace.as_str(),
@@ -1379,6 +1541,8 @@ fn insert_attention_tx(
             attention.machine_state.revision,
             attention.updated_at.to_rfc3339(),
             json,
+            attention.status.status_key(),
+            attention.target.target_key(),
         ],
     )
     .map_err(|err| map_sqlite_insert_attention_error(err, attention))?;
@@ -1395,7 +1559,8 @@ fn update_attention_tx(
         serde_json::to_string(attention).map_err(|err| WorkGraphError::Store(err.to_string()))?;
     tx.execute(
         "UPDATE workgraph_attention
-            SET revision = ?4, updated_at_utc = ?5, attention_json = ?6
+            SET revision = ?4, updated_at_utc = ?5, attention_json = ?6,
+                status = ?8, target_key = ?9
           WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3 AND revision = ?7",
         params![
             attention.work_ref.realm_id,
@@ -1405,9 +1570,163 @@ fn update_attention_tx(
             attention.updated_at.to_rfc3339(),
             json,
             expected_previous_revision,
+            attention.status.status_key(),
+            attention.target.target_key(),
         ],
     )
     .map_err(|err| WorkGraphError::Store(err.to_string()))
+}
+
+/// One-time, idempotent migration adding the indexed `status` / `target_key`
+/// query columns to `workgraph_attention` (SQL filter pushdown + the
+/// active-binding-per-target occupancy guard) and backfilling existing rows.
+/// Rows written by OLDER binaries after this migration carry NULL columns:
+/// every reader of these columns is NULL-tolerant and falls back to decoding
+/// `attention_json`, so mixed-version shared stores stay correct.
+#[cfg(not(target_arch = "wasm32"))]
+fn migrate_sqlite_attention_query_columns(conn: &mut Connection) -> Result<(), WorkGraphError> {
+    for alter in [
+        "ALTER TABLE workgraph_attention ADD COLUMN status TEXT",
+        "ALTER TABLE workgraph_attention ADD COLUMN target_key TEXT",
+    ] {
+        if let Err(err) = conn.execute(alter, []) {
+            let message = err.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(WorkGraphError::Store(message));
+            }
+        }
+    }
+    let backfill: Vec<(String, String, String, WorkAttentionBinding)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT realm_id, namespace, binding_id, attention_json
+                   FROM workgraph_attention
+                  WHERE status IS NULL OR target_key IS NULL",
+            )
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row_json::<WorkAttentionBinding>(row, 3)?,
+                ))
+            })
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let mut backfill = Vec::new();
+        for row in rows {
+            backfill.push(row.map_err(|err| WorkGraphError::Store(err.to_string()))?);
+        }
+        backfill
+    };
+    for (realm_id, namespace, binding_id, binding) in backfill {
+        conn.execute(
+            "UPDATE workgraph_attention
+                SET status = ?4, target_key = ?5
+              WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3",
+            params![
+                realm_id,
+                namespace,
+                binding_id,
+                binding.status.status_key(),
+                binding.target.target_key(),
+            ],
+        )
+        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workgraph_attention_scope_status
+             ON workgraph_attention (realm_id, namespace, status, target_key)",
+        [],
+    )
+    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    Ok(())
+}
+
+/// Occupancy probe for the active-binding-per-target invariant, run INSIDE
+/// the same immediate write transaction as the mutation it guards so the
+/// check is race-free next to the data. NULL-column rows (written by older
+/// binaries) are decoded from JSON before judging, so mixed-version stores
+/// cannot dodge the guard.
+#[cfg(not(target_arch = "wasm32"))]
+fn active_target_occupant_tx(
+    tx: &Transaction<'_>,
+    candidate: &WorkAttentionBinding,
+) -> Result<Option<WorkAttentionBindingId>, WorkGraphError> {
+    if !matches!(candidate.status, WorkAttentionStatus::Active) {
+        return Ok(None);
+    }
+    let target_key = candidate.target.target_key();
+    let mut stmt = tx
+        .prepare(
+            "SELECT binding_id, attention_json FROM workgraph_attention
+              WHERE realm_id = ?1 AND namespace = ?2 AND binding_id != ?3
+                AND (status = 'active' OR status IS NULL)
+                AND (target_key = ?4 OR target_key IS NULL)",
+        )
+        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    let rows = stmt
+        .query_map(
+            params![
+                candidate.work_ref.realm_id,
+                candidate.work_ref.namespace.as_str(),
+                candidate.binding_id.as_str(),
+                target_key,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row_json::<WorkAttentionBinding>(row, 1)?,
+                ))
+            },
+        )
+        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    for row in rows {
+        let (_, binding) = row.map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        if matches!(binding.status, WorkAttentionStatus::Active)
+            && binding.target.target_key() == target_key
+        {
+            return Ok(Some(binding.binding_id));
+        }
+    }
+    Ok(None)
+}
+
+/// Typed conflict naming the occupant, so hosts get the invariant they were
+/// building by hand (mobkit admission guards demote to defense-in-depth).
+fn active_target_conflict(
+    candidate: &WorkAttentionBinding,
+    occupant: &WorkAttentionBindingId,
+) -> WorkGraphError {
+    WorkGraphError::Conflict(format!(
+        "active attention binding {occupant} already targets {} in {}/{}",
+        candidate.target.target_key(),
+        candidate.work_ref.realm_id,
+        candidate.work_ref.namespace.as_str(),
+    ))
+}
+
+/// Memory-store twin of [`active_target_occupant_tx`], run under the store's
+/// write lock.
+fn active_target_occupant_in<'a>(
+    bindings: impl Iterator<Item = &'a WorkAttentionBinding>,
+    candidate: &WorkAttentionBinding,
+) -> Option<WorkAttentionBindingId> {
+    if !matches!(candidate.status, WorkAttentionStatus::Active) {
+        return None;
+    }
+    let target_key = candidate.target.target_key();
+    bindings
+        .filter(|binding| {
+            binding.binding_id != candidate.binding_id
+                && binding.work_ref.realm_id == candidate.work_ref.realm_id
+                && binding.work_ref.namespace == candidate.work_ref.namespace
+                && matches!(binding.status, WorkAttentionStatus::Active)
+                && binding.target.target_key() == target_key
+        })
+        .map(|binding| binding.binding_id.clone())
+        .next()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1419,12 +1738,15 @@ fn upsert_attention_tx(
         serde_json::to_string(attention).map_err(|err| WorkGraphError::Store(err.to_string()))?;
     tx.execute(
         "INSERT INTO workgraph_attention
-            (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json,
+             status, target_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(realm_id, namespace, binding_id) DO UPDATE SET
             revision = excluded.revision,
             updated_at_utc = excluded.updated_at_utc,
-            attention_json = excluded.attention_json",
+            attention_json = excluded.attention_json,
+            status = excluded.status,
+            target_key = excluded.target_key",
         params![
             attention.work_ref.realm_id,
             attention.work_ref.namespace.as_str(),
@@ -1432,6 +1754,8 @@ fn upsert_attention_tx(
             attention.machine_state.revision,
             attention.updated_at.to_rfc3339(),
             json,
+            attention.status.status_key(),
+            attention.target.target_key(),
         ],
     )
     .map_err(|err| WorkGraphError::Store(err.to_string()))?;
@@ -1577,14 +1901,47 @@ fn list_sqlite_attention(
     conn: &Connection,
     filter: &AttentionListRequest,
 ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+    // SQL filter pushdown over the indexed query columns. Every predicate is
+    // NULL-tolerant: rows written by older binaries carry NULL status /
+    // target_key and must still reach the Rust-side filter, which remains the
+    // final authority over every returned row.
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(realm_id) = &filter.realm_id {
+        params.push(Box::new(realm_id.clone()));
+        clauses.push(format!("realm_id = ?{}", params.len()));
+    }
+    if let Some(namespace) = &filter.namespace {
+        params.push(Box::new(namespace.as_str().to_string()));
+        clauses.push(format!("namespace = ?{}", params.len()));
+    }
+    if let Some(status) = &filter.status {
+        params.push(Box::new(status.status_key().to_string()));
+        clauses.push(format!("(status = ?{} OR status IS NULL)", params.len()));
+    }
+    if let Some(target) = &filter.target {
+        params.push(Box::new(target.target_key()));
+        clauses.push(format!(
+            "(target_key = ?{} OR target_key IS NULL)",
+            params.len()
+        ));
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT attention_json FROM workgraph_attention{where_clause}
+         ORDER BY updated_at_utc ASC, binding_id ASC"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT attention_json FROM workgraph_attention
-             ORDER BY updated_at_utc ASC, binding_id ASC",
-        )
+        .prepare(&sql)
         .map_err(|err| WorkGraphError::Store(err.to_string()))?;
     let rows = stmt
-        .query_map([], |row| row_json::<WorkAttentionBinding>(row, 0))
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            row_json::<WorkAttentionBinding>(row, 0)
+        })
         .map_err(|err| WorkGraphError::Store(err.to_string()))?;
     let mut bindings = Vec::new();
     for row in rows {
@@ -2273,5 +2630,121 @@ mod tests {
             .await
             .expect("events");
         assert_eq!(events.len(), 1);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod legacy_schema_tests {
+    use super::*;
+    use crate::{
+        AttentionDelegatedAuthority, AttentionProjectionPolicy, GoalAttentionTarget,
+        GoalCreateRequest, WorkAttentionMode, WorkCompletionPolicy, WorkGraphService,
+    };
+    use meerkat_core::SessionId;
+
+    /// Ask 24/25 migration pin: a store created by an OLDER binary (no
+    /// status/target_key columns) is backfilled on open, and both the SQL
+    /// filter pushdown and the occupancy guard see its legacy rows.
+    #[tokio::test]
+    async fn legacy_attention_rows_are_backfilled_and_guarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let session_id = SessionId::new();
+
+        // Simulate the old binary: old-schema table + one active binding row
+        // written without the query columns.
+        {
+            let conn = Connection::open(&path).expect("open raw");
+            conn.execute_batch(
+                r"
+                CREATE TABLE workgraph_attention (
+                    realm_id TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    binding_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    updated_at_utc TEXT NOT NULL,
+                    attention_json TEXT NOT NULL,
+                    PRIMARY KEY (realm_id, namespace, binding_id)
+                );
+                ",
+            )
+            .expect("create legacy table");
+            let legacy = WorkAttentionBinding {
+                binding_id: WorkAttentionBindingId::new("legacy-binding").expect("binding id"),
+                work_ref: crate::WorkItemRef {
+                    realm_id: "realm".to_string(),
+                    namespace: WorkNamespace::default(),
+                    item_id: WorkItemId::generated(),
+                },
+                target: crate::WorkAttentionTarget::Session {
+                    session_id: session_id.clone(),
+                },
+                mode: WorkAttentionMode::Pursue,
+                status: WorkAttentionStatus::Active,
+                machine_state: Default::default(),
+                delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: AttentionProjectionPolicy::default(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            conn.execute(
+                "INSERT INTO workgraph_attention
+                    (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    legacy.work_ref.realm_id,
+                    legacy.work_ref.namespace.as_str(),
+                    legacy.binding_id.as_str(),
+                    legacy.machine_state.revision,
+                    legacy.updated_at.to_rfc3339(),
+                    serde_json::to_string(&legacy).expect("serialize legacy binding"),
+                ],
+            )
+            .expect("insert legacy row");
+        }
+
+        // Opening the store migrates + backfills.
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        {
+            let conn = Connection::open(&path).expect("reopen raw");
+            let (status, target_key): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT status, target_key FROM workgraph_attention
+                      WHERE binding_id = 'legacy-binding'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read backfilled columns");
+            assert_eq!(status.as_deref(), Some("active"));
+            assert_eq!(
+                target_key.as_deref(),
+                Some(format!("session:{session_id}").as_str())
+            );
+        }
+
+        // The occupancy guard sees the backfilled legacy row: a new active
+        // binding on the same target conflicts.
+        let service = WorkGraphService::with_scope(store, "realm", WorkNamespace::default());
+        let error = service
+            .create_goal(GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "duplicate target".to_string(),
+                description: None,
+                target: GoalAttentionTarget::Session {
+                    session_id: session_id.clone(),
+                },
+                mode: WorkAttentionMode::Pursue,
+                completion_policy: WorkCompletionPolicy::SelfAttest,
+                delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect_err("legacy occupant must conflict with a new active binding");
+        assert!(
+            matches!(error, WorkGraphError::Conflict(_)),
+            "expected typed Conflict, got {error:?}"
+        );
     }
 }

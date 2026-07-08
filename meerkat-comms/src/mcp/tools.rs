@@ -22,8 +22,9 @@ use meerkat_contracts::{
 use meerkat_core::BlobId;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource,
-    PeerId, PeerName, PeerRoute, PeerSendability, SendError, SendReceipt,
+    COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY, CommsCommand, InputStreamMode, PeerCapabilitySet,
+    PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerReplyCapability,
+    PeerReplyDispatchContext, PeerRoute, PeerSendability, SendError, SendReceipt,
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
@@ -69,6 +70,33 @@ pub struct SendMessageInput {
     #[serde(default)]
     pub display_name: Option<String>,
     /// Message body
+    pub body: String,
+    /// Optional multimodal blocks. Use image_ref entries such as
+    /// {"type":"image_ref","source":"current_turn","index":0} to forward
+    /// images from the current admitted user turn, or
+    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
+    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    #[serde(default)]
+    pub blocks: Option<Vec<CommsToolContentBlock>>,
+    /// "queue" for next turn boundary (normal), "steer" for urgent preemption
+    pub handling_mode: HandlingMode,
+}
+
+/// Reply to the peer message that triggered the current turn.
+///
+/// Pre-addressed: the runtime minted a typed reply capability for this turn's
+/// incoming peer message(s), so no `peer_id` is supplied — only content.
+///
+/// Example: `{"body": "Done — the migration completed.", "handling_mode": "queue"}`
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplyToPeerInput {
+    /// Optional delivery selector, only needed when more than one peer
+    /// message arrived in this turn. Set it to one of the delivery ids listed
+    /// by an `ambiguous_reply` error.
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// Reply body
     pub body: String,
     /// Optional multimodal blocks. Use image_ref entries such as
     /// {"type":"image_ref","source":"current_turn","index":0} to forward
@@ -234,6 +262,11 @@ pub fn tools_list() -> Vec<Value> {
             "inputSchema": schema_for::<SendMessageInput>()
         }),
         json!({
+            "name": "reply_to_peer",
+            "description": format!("{}{}{}", "Reply to the peer message that triggered the current turn. The reply is pre-addressed: the runtime already knows which peer sent the triggering message, so you do not supply a peer_id.\n\nWhen to use: Use reply_to_peer to answer a peer message you received this turn. Use send_message with an explicit peer_id for unsolicited outreach, and use send_response only for typed request/response contracts (send_request traffic).\n\nreply_to (optional): Only needed when more than one peer message arrived in this turn. On an ambiguous call the error lists the available delivery ids; retry with reply_to set to one of them.\n\nhandling_mode:\n- \"queue\": The reply is delivered at the peer's next turn boundary. Use for ordinary collaboration.\n- \"steer\": The peer processes your reply immediately, interrupting its current work. Use only for urgent or time-sensitive collaboration.", COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. Reply to the turn's peer message:\n   {\"body\": \"Done — the database migration completed successfully.\", \"handling_mode\": \"queue\"}\n2. Disambiguate between multiple deliveries in one turn:\n   {\"reply_to\": \"<delivery-id-from-ambiguous_reply-error>\", \"body\": \"Acknowledged.\", \"handling_mode\": \"queue\"}\n\nFailure handling:\n- no_reply_capability: This turn was not triggered by a peer message; there is nothing to reply to. Use peers + send_message instead.\n- ambiguous_reply: Multiple peer messages arrived this turn. Retry with reply_to set to one of the listed delivery ids.\n- unknown_reply_to: The reply_to value does not match any of this turn's deliveries. Use one of the listed delivery ids.\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message — the sending peer is no longer trusted or reachable."),
+            "inputSchema": schema_for::<ReplyToPeerInput>()
+        }),
+        json!({
             "name": "send_request",
             "description": format!("{}{}{}{}", "Send a typed structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request for typed comms request contracts such as checksum_token or supervisor.bridge. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use only for requests that block your own progress.", SEND_REQUEST_CONTRACTS_DESCRIPTION, COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. checksum_token image review request:\n   {\"peer_id\":\"<peer-id-from-peers>\",\"display_name\":\"reviewer\",\"intent\":\"checksum_token\",\"params\":{\"subject\":\"image_receipt_check\"},\"blocks\":[{\"type\":\"text\",\"text\":\"Please inspect this generated image and return a receipt token with an image receipt.\"},{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:generated-image\",\"media_type\":\"image/png\"}],\"handling_mode\":\"queue\"}\n2. supervisor bridge request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"member\", \"intent\": \"supervisor.bridge\", \"params\": {\"command\": \"observe_member\", \"supervisor\": {\"name\": \"supervisor\", \"peer_id\": \"<supervisor-peer-id>\", \"address\": \"inproc://supervisor\", \"pubkey\": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}, \"epoch\": 1, \"protocol_version\": 2}, \"handling_mode\": \"queue\"}\n  The peer receives this and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message."),
             "inputSchema": schema_for::<SendRequestInput>()
@@ -272,6 +305,34 @@ pub async fn handle_tools_call_with_context(
     }
 
     match name {
+        "reply_to_peer" => {
+            let input: ReplyToPeerInput = serde_json::from_value(args.clone())
+                .map_err(|e| format!("Invalid arguments: {e}"))?;
+            let reply_context = peer_reply_dispatch_context(dispatch_context)?;
+            let capability =
+                select_reply_capability(&reply_context.deliveries, input.reply_to.as_deref())?;
+            // Trust is re-validated at dispatch time: a capability minted at
+            // turn admission does not outlive a trust revocation.
+            let to = peer_route(ctx, capability.peer_id, capability.display_name.as_deref())?;
+            let blocks = resolve_message_blocks(&input.body, input.blocks, dispatch_context)?;
+            // Single content authority: mirrors send_message — when blocks are
+            // present they own the content and `body` is projected from their
+            // text blocks so the two cannot diverge.
+            let body = match &blocks {
+                Some(blocks) => project_body_from_blocks(blocks),
+                None => input.body,
+            };
+            let command = CommsCommand::PeerMessage {
+                to,
+                body,
+                blocks,
+                // Agent tools carry no per-send taint override: the outbound
+                // declaration is inherited from the runtime-level host config.
+                content_taint: None,
+                handling_mode: input.handling_mode,
+            };
+            dispatch(ctx, command).await
+        }
         "send_message" => {
             let input: SendMessageInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
@@ -526,6 +587,67 @@ fn project_peer_response_command(
         content_taint,
         handling_mode,
     })
+}
+
+/// Read the typed peer-reply dispatch context minted by the runtime for this
+/// turn. Absent key => the turn was not triggered by a peer message; a
+/// present-but-malformed value fails closed with a distinct typed code
+/// instead of being coerced or ignored.
+fn peer_reply_dispatch_context(
+    dispatch_context: &ToolDispatchContext,
+) -> Result<PeerReplyDispatchContext, String> {
+    let value = dispatch_context
+        .turn_metadata(COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY)
+        .ok_or_else(|| {
+            "no_reply_capability: this turn was not triggered by a peer message; \
+             use peers + send_message instead"
+                .to_string()
+        })?;
+    let context: PeerReplyDispatchContext = serde_json::from_value(value.clone())
+        .map_err(|err| format!("invalid_reply_context: malformed peer reply context: {err}"))?;
+    if context.deliveries.is_empty() {
+        return Err(
+            "no_reply_capability: this turn carries no peer message deliveries".to_string(),
+        );
+    }
+    Ok(context)
+}
+
+/// Select the delivery to reply to. One delivery with no selector resolves to
+/// it; multiple deliveries require an explicit `reply_to`; a selector must
+/// match one of the turn's delivery ids.
+fn select_reply_capability<'a>(
+    deliveries: &'a [PeerReplyCapability],
+    reply_to: Option<&str>,
+) -> Result<&'a PeerReplyCapability, String> {
+    match reply_to {
+        Some(selector) => deliveries
+            .iter()
+            .find(|capability| capability.in_reply_to.to_string() == selector)
+            .ok_or_else(|| {
+                format!(
+                    "unknown_reply_to: no peer delivery in this turn matches '{selector}'; \
+                     available delivery ids: [{}]",
+                    delivery_ids(deliveries)
+                )
+            }),
+        None => match deliveries {
+            [single] => Ok(single),
+            _ => Err(format!(
+                "ambiguous_reply: multiple peer messages arrived this turn; \
+                 set reply_to to one of the delivery ids: [{}]",
+                delivery_ids(deliveries)
+            )),
+        },
+    }
+}
+
+fn delivery_ids(deliveries: &[PeerReplyCapability]) -> String {
+    deliveries
+        .iter()
+        .map(|capability| capability.in_reply_to.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn peer_name(value: &str, field: &str) -> Result<PeerName, String> {
@@ -1088,11 +1210,12 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_list_has_four_tools() {
+    fn test_tools_list_has_five_tools() {
         let tools = tools_list();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"send_message"));
+        assert!(names.contains(&"reply_to_peer"));
         assert!(names.contains(&"send_request"));
         assert!(names.contains(&"send_response"));
         assert!(names.contains(&"peers"));
@@ -1154,6 +1277,245 @@ mod tests {
                 .unwrap()
                 .contains_key("blocks")
         );
+    }
+
+    /// The pre-addressed reply tool takes no peer identity: body and
+    /// handling_mode are required, reply_to and blocks optional, and unknown
+    /// fields (e.g. a smuggled peer_id) are rejected at the schema level.
+    #[test]
+    fn test_reply_to_peer_schema_is_pre_addressed() {
+        let schema = schema_for::<ReplyToPeerInput>();
+        let required = schema["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(
+            required_names.contains(&"handling_mode"),
+            "reply_to_peer must require handling_mode, got required: {required_names:?}"
+        );
+        assert!(required_names.contains(&"body"));
+        assert!(!required_names.contains(&"reply_to"));
+        assert!(!required_names.contains(&"blocks"));
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("reply_to"));
+        assert!(properties.contains_key("blocks"));
+        assert!(
+            !properties.contains_key("peer_id"),
+            "reply_to_peer is pre-addressed; it must not expose a peer_id input"
+        );
+        assert_eq!(
+            schema["additionalProperties"],
+            Value::Bool(false),
+            "deny_unknown_fields must project as additionalProperties: false"
+        );
+    }
+
+    fn reply_capability(peer_id: PeerId, interaction: u128) -> PeerReplyCapability {
+        PeerReplyCapability {
+            in_reply_to: InteractionId(uuid::Uuid::from_u128(interaction)),
+            peer_id,
+            display_name: Some("sender-agent".to_string()),
+            kind: meerkat_core::comms::PeerReplyDeliveryKind::Message,
+        }
+    }
+
+    fn reply_dispatch_context(deliveries: Vec<PeerReplyCapability>) -> ToolDispatchContext {
+        let context = PeerReplyDispatchContext { deliveries };
+        ToolDispatchContext::default().with_turn_metadata(std::collections::BTreeMap::from([(
+            COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
+            serde_json::to_value(&context).expect("reply context serializes"),
+        )]))
+    }
+
+    #[tokio::test]
+    async fn reply_to_peer_dispatches_peer_message_to_capability_peer() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let dispatch_context = reply_dispatch_context(vec![reply_capability(peer_id, 7)]);
+
+        handle_tools_call_with_context(
+            &ctx,
+            "reply_to_peer",
+            &json!({"body": "on it", "handling_mode": "queue"}),
+            &dispatch_context,
+        )
+        .await
+        .expect("single-delivery reply must dispatch without a selector");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerMessage {
+                to,
+                body,
+                blocks,
+                handling_mode,
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer message, got {sent:?}");
+        };
+        assert_eq!(to.peer_id, peer_id);
+        assert_eq!(body, "on it");
+        assert!(blocks.is_none());
+        assert_eq!(*handling_mode, HandlingMode::Queue);
+    }
+
+    #[tokio::test]
+    async fn reply_to_peer_without_capability_returns_no_reply_capability() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, _peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        let err = handle_tools_call_with_context(
+            &ctx,
+            "reply_to_peer",
+            &json!({"body": "on it", "handling_mode": "queue"}),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect_err("a turn without a peer delivery must not reply");
+
+        assert!(
+            err.starts_with("no_reply_capability"),
+            "expected typed no_reply_capability error, got: {err}"
+        );
+        assert_eq!(runtime.sent_len(), 0, "nothing may be dispatched");
+    }
+
+    #[tokio::test]
+    async fn reply_to_peer_with_multiple_deliveries_requires_selector() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let first = reply_capability(peer_id, 1);
+        let second = reply_capability(peer_id, 2);
+        let dispatch_context = reply_dispatch_context(vec![first.clone(), second.clone()]);
+
+        let err = handle_tools_call_with_context(
+            &ctx,
+            "reply_to_peer",
+            &json!({"body": "on it", "handling_mode": "queue"}),
+            &dispatch_context,
+        )
+        .await
+        .expect_err("two deliveries without a selector must be ambiguous");
+
+        assert!(
+            err.starts_with("ambiguous_reply"),
+            "expected typed ambiguous_reply error, got: {err}"
+        );
+        assert!(
+            err.contains(&first.in_reply_to.to_string())
+                && err.contains(&second.in_reply_to.to_string()),
+            "ambiguous error must list the delivery ids so the caller can retry: {err}"
+        );
+        assert_eq!(runtime.sent_len(), 0, "nothing may be dispatched");
+
+        // Retrying with an explicit selector resolves the ambiguity.
+        handle_tools_call_with_context(
+            &ctx,
+            "reply_to_peer",
+            &json!({
+                "reply_to": second.in_reply_to.to_string(),
+                "body": "on it",
+                "handling_mode": "queue"
+            }),
+            &dispatch_context,
+        )
+        .await
+        .expect("explicit selector must resolve the ambiguity");
+        assert_eq!(runtime.sent_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reply_to_peer_with_unknown_selector_returns_unknown_reply_to() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let dispatch_context = reply_dispatch_context(vec![reply_capability(peer_id, 7)]);
+
+        let err = handle_tools_call_with_context(
+            &ctx,
+            "reply_to_peer",
+            &json!({
+                "reply_to": uuid::Uuid::from_u128(999).to_string(),
+                "body": "on it",
+                "handling_mode": "queue"
+            }),
+            &dispatch_context,
+        )
+        .await
+        .expect_err("a selector outside the turn's deliveries must fail");
+
+        assert!(
+            err.starts_with("unknown_reply_to"),
+            "expected typed unknown_reply_to error, got: {err}"
+        );
+        assert_eq!(runtime.sent_len(), 0, "nothing may be dispatched");
+    }
+
+    /// Trust is re-validated at dispatch time: a capability naming a peer that
+    /// is not (or no longer) trusted must fail closed, never route on the
+    /// minted identity alone.
+    #[tokio::test]
+    async fn reply_to_peer_revalidates_trust_at_dispatch() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, _trusted_peer) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let untrusted_peer = PeerId::new();
+        let dispatch_context = reply_dispatch_context(vec![reply_capability(untrusted_peer, 7)]);
+
+        let err = handle_tools_call_with_context(
+            &ctx,
+            "reply_to_peer",
+            &json!({"body": "on it", "handling_mode": "queue"}),
+            &dispatch_context,
+        )
+        .await
+        .expect_err("an untrusted capability peer must fail closed");
+
+        assert!(
+            err.starts_with("peer_not_found_or_not_trusted"),
+            "expected typed trust error, got: {err}"
+        );
+        assert_eq!(runtime.sent_len(), 0, "nothing may be dispatched");
+    }
+
+    /// A present-but-malformed reply context is a distinct fail-closed error,
+    /// never coerced into "no capability" or a successful dispatch.
+    #[tokio::test]
+    async fn reply_to_peer_rejects_malformed_reply_context() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, _peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let dispatch_context =
+            ToolDispatchContext::default().with_turn_metadata(std::collections::BTreeMap::from([
+                (
+                    COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
+                    json!({"deliveries": [], "unexpected": true}),
+                ),
+            ]));
+
+        let err = handle_tools_call_with_context(
+            &ctx,
+            "reply_to_peer",
+            &json!({"body": "on it", "handling_mode": "queue"}),
+            &dispatch_context,
+        )
+        .await
+        .expect_err("unknown fields in the reply context must fail closed");
+
+        assert!(
+            err.starts_with("invalid_reply_context"),
+            "expected typed invalid_reply_context error, got: {err}"
+        );
+        assert_eq!(runtime.sent_len(), 0, "nothing may be dispatched");
     }
 
     #[test]

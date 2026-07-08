@@ -753,6 +753,49 @@ fn peer_display_label(peer: &PeerInput) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Mint the typed peer-reply capability for a runtime input, when one exists.
+///
+/// Only peer *message* deliveries — the [`InputKind::PeerMessage`] grouping
+/// (`PeerConvention::Message` or a bare peer input) — mint a reply capability.
+/// Request/response conventions have their own correlated reply channel
+/// (`send_response`) and mint none. A peer input whose origin `peer_id` is not
+/// a canonical [`meerkat_core::comms::PeerId`] cannot mint a routable
+/// capability: that is a producer bug, logged loudly and dropped rather than
+/// smuggled into the tool seam. A delivery without a stamped correlation id
+/// (the comms bridge stamps one on every classified peer ingress) carries no
+/// reply selector and mints none.
+pub(crate) fn peer_reply_capability(
+    input: &Input,
+) -> Option<meerkat_core::comms::PeerReplyCapability> {
+    if input.kind() != InputKind::PeerMessage {
+        return None;
+    }
+    let Input::Peer(peer) = input else {
+        return None;
+    };
+    let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
+        return None;
+    };
+    let peer_id = match meerkat_core::comms::PeerId::parse(peer_id) {
+        Ok(peer_id) => peer_id,
+        Err(error) => {
+            tracing::error!(
+                peer_id,
+                error = %error,
+                "dropping peer reply capability with non-canonical peer_id"
+            );
+            return None;
+        }
+    };
+    let correlation_id = peer.header.correlation_id.as_ref()?;
+    Some(meerkat_core::comms::PeerReplyCapability {
+        in_reply_to: meerkat_core::InteractionId(correlation_id.0),
+        peer_id,
+        display_name: peer_display_label(peer),
+        kind: meerkat_core::comms::PeerReplyDeliveryKind::Message,
+    })
+}
+
 /// Rendered prompt-text projection for a peer input.
 pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
     peer_projection_from_peer_input(peer)
@@ -1349,6 +1392,121 @@ mod tests {
         assert_eq!(json["input_type"], "peer");
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::Peer(_)));
+    }
+
+    fn peer_input_with(
+        peer_id: &str,
+        convention: Option<PeerConvention>,
+        correlation_id: Option<CorrelationId>,
+    ) -> Input {
+        let mut header = make_header();
+        header.source = InputOrigin::Peer {
+            peer_id: peer_id.into(),
+            display_identity: Some("  display-agent  ".into()),
+            runtime_id: None,
+        };
+        header.correlation_id = correlation_id;
+        Input::Peer(PeerInput {
+            injected_context: Vec::new(),
+            sender_taint: None,
+            header,
+            convention,
+            content: "hi there".into(),
+            payload: None,
+            handling_mode: None,
+        })
+    }
+
+    /// Only the `InputKind::PeerMessage` grouping mints a reply capability:
+    /// request/response conventions and non-peer inputs mint none, and a
+    /// message delivery without a stamped correlation id has no selector.
+    #[test]
+    fn non_message_conventions_mint_no_reply_capability() {
+        let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963005";
+        let correlation = CorrelationId::from_uuid(uuid::Uuid::from_u128(9));
+
+        let message = peer_input_with(
+            peer_id,
+            Some(PeerConvention::Message),
+            Some(correlation.clone()),
+        );
+        let capability = peer_reply_capability(&message)
+            .expect("message convention with correlation must mint a capability");
+        assert_eq!(
+            capability.peer_id,
+            meerkat_core::comms::PeerId::parse(peer_id).expect("canonical id")
+        );
+        assert_eq!(
+            capability.in_reply_to,
+            meerkat_core::InteractionId(uuid::Uuid::from_u128(9))
+        );
+        assert_eq!(
+            capability.display_name.as_deref(),
+            Some("display-agent"),
+            "display identity must be trimmed"
+        );
+        assert_eq!(
+            capability.kind,
+            meerkat_core::comms::PeerReplyDeliveryKind::Message
+        );
+
+        let bare = peer_input_with(peer_id, None, Some(correlation.clone()));
+        assert!(
+            peer_reply_capability(&bare).is_some(),
+            "bare peer input groups as PeerMessage and must mint"
+        );
+
+        let request = peer_input_with(
+            peer_id,
+            Some(PeerConvention::Request {
+                request_id: "req-1".into(),
+                intent: "review".into(),
+            }),
+            Some(correlation.clone()),
+        );
+        assert!(peer_reply_capability(&request).is_none());
+
+        let progress = peer_input_with(
+            peer_id,
+            Some(PeerConvention::ResponseProgress {
+                request_id: "req-1".into(),
+                phase: ResponseProgressPhase::Accepted,
+            }),
+            Some(correlation.clone()),
+        );
+        assert!(peer_reply_capability(&progress).is_none());
+
+        let terminal = peer_input_with(
+            peer_id,
+            Some(PeerConvention::ResponseTerminal {
+                request_id: "req-1".into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            Some(correlation),
+        );
+        assert!(peer_reply_capability(&terminal).is_none());
+
+        let no_correlation = peer_input_with(peer_id, Some(PeerConvention::Message), None);
+        assert!(
+            peer_reply_capability(&no_correlation).is_none(),
+            "a delivery without a correlation id has no reply selector"
+        );
+
+        let prompt = Input::Prompt(PromptInput::new("hello", None));
+        assert!(peer_reply_capability(&prompt).is_none());
+    }
+
+    #[test]
+    fn non_canonical_peer_id_mints_no_reply_capability() {
+        let input = peer_input_with(
+            "peer-1",
+            Some(PeerConvention::Message),
+            Some(CorrelationId::from_uuid(uuid::Uuid::from_u128(9))),
+        );
+        assert!(
+            peer_reply_capability(&input).is_none(),
+            "a non-canonical peer id must fail the mint, never smuggle a raw string"
+        );
     }
 
     #[test]

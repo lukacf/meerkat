@@ -1737,6 +1737,53 @@ pub enum SendReceipt {
     },
 }
 
+/// Turn-scoped dispatch-context key carrying the typed peer-reply capability.
+///
+/// The runtime mints a [`PeerReplyDispatchContext`] under this key on the
+/// per-turn tool overlay when the turn was triggered by one or more peer
+/// message deliveries; the comms `reply_to_peer` tool reads it back at
+/// dispatch time. The value under this key is always the serialized
+/// [`PeerReplyDispatchContext`] — no other producer may write this key.
+pub const COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY: &str = "comms.peer_reply";
+
+/// Delivery kind a peer-reply capability was minted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PeerReplyDeliveryKind {
+    /// A one-way peer message delivery (the `PeerMessage` input grouping).
+    Message,
+}
+
+/// Typed capability to reply to one peer delivery that triggered this turn.
+///
+/// Minted by the runtime at batch admission — never by tool input — so the
+/// `reply_to_peer` tool is pre-addressed: the model supplies no peer identity,
+/// only content. Trust is still re-validated at dispatch time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerReplyCapability {
+    /// Interaction id of the triggering delivery (the reply selector).
+    pub in_reply_to: InteractionId,
+    /// Canonical routing identity of the sending peer.
+    pub peer_id: PeerId,
+    /// Optional display label admitted at peer ingress. Presentation
+    /// metadata only; routing uses `peer_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Delivery kind the capability was minted for.
+    pub kind: PeerReplyDeliveryKind,
+}
+
+/// Turn-scoped peer-reply dispatch context: every peer message delivery in
+/// the admitted batch that can be answered with `reply_to_peer`, in batch
+/// delivery order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerReplyDispatchContext {
+    /// Reply capabilities in batch delivery order.
+    pub deliveries: Vec<PeerReplyCapability>,
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

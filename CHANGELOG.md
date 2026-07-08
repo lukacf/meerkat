@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-07-08
+
+Meerkat 0.7.24 closes the 0.7.19–0.7.23 resume-strand class at its root:
+the machine now owns revival of stopped sessions, and cold resume
+reconciles a stale runtime snapshot against the durable store head. This
+is the release for downstream pins chasing broken resumes
+("guard rejected transition from phase Stopped"), stranded disposals, or
+permanent save rejections after a torn shutdown.
+
 ### Fixed
 
 - The Stopped phase is no longer absorbing for resume — the root cause of

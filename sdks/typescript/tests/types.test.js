@@ -2340,6 +2340,43 @@ describe("Parity wrappers", () => {
     assert.equal(calls[1].params.event_type, "test");
   });
 
+  it("accepts wire-legal empty display_name/model_family from serde-default self-hosted config", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      contract_version: { major: 0, minor: 5, patch: 1 },
+      providers: [
+        {
+          provider: "self_hosted",
+          default_model_id: "my-model",
+          models: [
+            {
+              id: "my-model",
+              display_name: "",
+              tier: "supported",
+              profile: {
+                model_family: "",
+                supports_temperature: true,
+                supports_thinking: false,
+                supports_reasoning: false,
+                vision: false,
+                image_input: false,
+                image_tool_results: false,
+                inline_video: false,
+                realtime: false,
+                supports_web_search: false,
+                image_generation: false,
+                params_schema: {},
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const catalog = await client.getModelsCatalog();
+    assert.equal(catalog.providers[0].models[0].displayName, "");
+    assert.equal(catalog.providers[0].models[0].profile?.modelFamily, "");
+  });
+
   it("rejects missing or malformed models/catalog contract_version", async () => {
     const malformedResponses = [
       { providers: [] },

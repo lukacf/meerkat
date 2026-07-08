@@ -4042,7 +4042,9 @@ export class MeerkatClient {
         throw new MeerkatError("INVALID_RESPONSE", `${profileContext}: missing params_schema`);
       }
       return {
-        modelFamily: MeerkatClient.requireStringField(
+        // Present-but-empty is wire-legal: self-hosted models declared
+        // without `family` serialize model_family as "" (serde default).
+        modelFamily: MeerkatClient.requirePresentStringField(
           profile,
           "model_family",
           profileContext,
@@ -4116,7 +4118,9 @@ export class MeerkatClient {
             }
             return {
               id: MeerkatClient.requireStringField(model, "id", modelContext),
-              displayName: MeerkatClient.requireStringField(
+              // Present-but-empty is wire-legal: self-hosted models declared
+              // without `display_name` serialize it as "" (serde default).
+              displayName: MeerkatClient.requirePresentStringField(
                 model,
                 "display_name",
                 modelContext,

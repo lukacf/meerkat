@@ -62,11 +62,91 @@ rust_library(
 )
 
 rust_library(
+    name = "meerkat_mcp_test_support",
+    aliases = aliases(package_name = "meerkat-mcp"),
+    crate_name = "meerkat_mcp",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "test-support",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/mcp-server-setup/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+        "//meerkat-cli:__pkg__",
+        "//meerkat-mcp:__pkg__",
+        "//meerkat-mcp-server:__pkg__",
+        "//meerkat-rest:__pkg__",
+        "//meerkat-rpc:__pkg__",
+        "//meerkat-tools:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.24",
+        "CARGO_MANIFEST_DIR": "./meerkat-mcp",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mcp",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
+        "//meerkat-capabilities:meerkat_capabilities",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-mcp",
+        normal = True,
+    ),
+)
+
+rust_library(
     name = "meerkat_mcp_agent_factory_build",
     aliases = aliases(package_name = "meerkat-mcp"),
     crate_name = "meerkat_mcp",
     crate_root = "src/lib.rs",
     crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/mcp-server-setup/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.24",
+        "CARGO_MANIFEST_DIR": "./meerkat-mcp",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mcp",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_auth_core_agent_factory_build",
+        "//meerkat:meerkat_capabilities_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_skills_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-mcp",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_mcp_agent_factory_build_test_support",
+    aliases = aliases(package_name = "meerkat-mcp"),
+    crate_name = "meerkat_mcp",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "test-support",
+    ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
@@ -196,7 +276,7 @@ rust_test(
         "//meerkat-capabilities:meerkat_capabilities",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
-        "//meerkat-mcp:meerkat_mcp",
+        "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
@@ -253,7 +333,7 @@ rust_test(
         "//meerkat-capabilities:meerkat_capabilities",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
-        "//meerkat-mcp:meerkat_mcp",
+        "//meerkat-mcp:meerkat_mcp_test_support",
         "//meerkat-runtime:meerkat_runtime_test_support",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(

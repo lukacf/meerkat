@@ -2699,6 +2699,36 @@ async def test_client_read_session_drops_malformed_resolved_capabilities():
 
 
 @pytest.mark.asyncio
+async def test_models_catalog_rejects_malformed_provider_shapes():
+    """Fail-closed parity with the TS SDK: a non-list providers or a
+    non-object provider entry is a broken response, never coalesced into an
+    empty/partial catalog."""
+    client = MeerkatClient()
+
+    async def null_providers(method, params=None):
+        return {
+            "contract_version": {"major": 0, "minor": 5, "patch": 1},
+            "providers": None,
+        }
+
+    client._request = null_providers  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.get_models_catalog()
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+    async def non_dict_entry(method, params=None):
+        return {
+            "contract_version": {"major": 0, "minor": 5, "patch": 1},
+            "providers": ["not-an-object"],
+        }
+
+    client._request = non_dict_entry  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.get_models_catalog()
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_methods():
     client = MeerkatClient()
     calls = []

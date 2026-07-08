@@ -71,18 +71,6 @@ pub mod store;
 pub mod validate;
 pub mod workgraph_attention;
 
-inventory::submit! {
-    meerkat_skills::SkillRegistration {
-        id: "mob-communication",
-        name: "Mob Communication",
-        description: "How to communicate with peers in a collaborative mob",
-        scope: meerkat_core::skills::SkillScope::Builtin,
-        requires_capabilities: &["comms"],
-        body: include_str!("../skills/mob-communication/SKILL.md"),
-        extensions: &[],
-    }
-}
-
 // Re-exports for convenience
 pub use backend::{MobBackendKind, RuntimeBinding};
 pub use coordination::{

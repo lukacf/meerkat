@@ -1865,14 +1865,43 @@ fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
     if !attr.path().is_ident("cfg") {
         return false;
     }
-    let mut is_test = false;
-    let _ = attr.parse_nested_meta(|meta| {
-        if meta.path.is_ident("test") {
-            is_test = true;
+    // Token-level scan instead of parse_nested_meta: the meta closure does
+    // not recurse into `any(...)`/`all(...)` groups, so
+    // `#[cfg(any(test, feature = "test-support"))]` (and the test-support
+    // feature itself) would silently count as live. Any `test` predicate or
+    // `feature = "test-support"` anywhere in the cfg expression marks the
+    // item as absent from production builds.
+    fn tokens_contain_test_predicate(tokens: proc_macro2::TokenStream) -> bool {
+        let mut previous_idents: Vec<String> = Vec::new();
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Group(group) => {
+                    if tokens_contain_test_predicate(group.stream()) {
+                        return true;
+                    }
+                }
+                proc_macro2::TokenTree::Ident(ident) => {
+                    if ident == "test" {
+                        return true;
+                    }
+                    previous_idents.push(ident.to_string());
+                }
+                proc_macro2::TokenTree::Literal(literal) => {
+                    if previous_idents.last().map(String::as_str) == Some("feature")
+                        && literal.to_string() == "\"test-support\""
+                    {
+                        return true;
+                    }
+                }
+                proc_macro2::TokenTree::Punct(_) => {}
+            }
         }
-        Ok(())
-    });
-    is_test
+        false
+    }
+    match &attr.meta {
+        syn::Meta::List(list) => tokens_contain_test_predicate(list.tokens.clone()),
+        _ => false,
+    }
 }
 
 fn item_is_cfg_test(item: &Item) -> bool {

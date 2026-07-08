@@ -30,6 +30,42 @@ async fn embedded_skill_names_with_capabilities(caps: &[&str]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn base_crate_registers_mob_communication_for_cross_surface_resume() {
+    let _ = meerkat::SESSION_VERSION;
+    let source = EmbeddedSkillSource::new();
+    let key = builtin_skill_key("mob-communication");
+    let result = source.load(&key).await;
+    assert!(
+        result.is_ok(),
+        "mob-communication should be registered from the base crate"
+    );
+    let Ok(skill) = result else {
+        unreachable!("asserted embedded mob communication skill is available above");
+    };
+
+    assert_eq!(
+        skill.descriptor.key.skill_name.as_str(),
+        "mob-communication"
+    );
+    assert_eq!(skill.descriptor.name, "mob-communication");
+    assert_eq!(
+        skill.descriptor.description,
+        "How to communicate with peers in a collaborative mob"
+    );
+    // Content pin against dead-copy swaps (the PR-853 hazard: meerkat-mob
+    // once carried an unreferenced, drifted duplicate whose body dropped
+    // the concrete tool-kind guidance). The load-bearing operating rules
+    // must be present in whatever body actually registered.
+    assert!(
+        skill.body.contains("peer_request")
+            && skill.body.contains("peer_message")
+            && skill.body.contains("do not reply"),
+        "the canonical body's concrete tool-kind guidance must be present in \
+         the registered mob-communication skill"
+    );
+}
+
+#[tokio::test]
 async fn base_crate_registers_cli_reference_for_help_surface() {
     let _ = meerkat::SESSION_VERSION;
     let source = EmbeddedSkillSource::new();
@@ -58,6 +94,7 @@ async fn companion_skills_load_from_builtin_source_by_stable_slug() {
     let slugs = [
         "task-workflow",
         "shell-patterns",
+        "mob-communication",
         "hook-authoring",
         "workgraph-workflow",
         "schedule-workflow",

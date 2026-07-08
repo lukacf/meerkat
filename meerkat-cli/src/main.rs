@@ -14454,7 +14454,7 @@ where
     // fan-out. `NotificationSink` (next line) wraps `mpsc::Sender<RpcNotification>`
     // (RPC wire type — see `meerkat-rpc/src/router.rs`). Both are RPC-host
     // contracts and not lift candidates.
-    let mut runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
+    let runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
         factory,
         config.clone(),
         Arc::clone(&config_store),

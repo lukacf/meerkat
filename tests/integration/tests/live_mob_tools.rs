@@ -137,7 +137,7 @@ async fn make_smoke_rpc_stack(
         blob_store,
     );
 
-    let mut runtime = SessionRuntime::new(
+    let runtime = SessionRuntime::new(
         factory,
         config.clone(),
         64,

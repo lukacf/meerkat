@@ -552,7 +552,7 @@ impl AuthHarness {
             config.clone(),
             meerkat_models::canonical(),
         ));
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config.clone(),
             10,

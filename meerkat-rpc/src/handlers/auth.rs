@@ -2093,7 +2093,7 @@ mod tests {
         let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
             meerkat_core::MemoryConfigStore::new(config.clone(), meerkat_models::canonical()),
         );
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config,
             10,
@@ -2124,7 +2124,7 @@ mod tests {
         let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
             meerkat_core::MemoryConfigStore::new(config.clone(), meerkat_models::canonical()),
         );
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config,
             10,
@@ -2958,7 +2958,7 @@ mod tests {
 
         // The runtime's raw config_runtime holds the head (`dev`) doc only —
         // composition is what surfaces the inherited binding to the guard.
-        let mut runtime = test_runtime_with_config(dev_doc);
+        let runtime = test_runtime_with_config(dev_doc);
         runtime.set_realm_config_source(source);
         runtime.set_realm_context(
             Some(meerkat_core::connection::RealmId::parse("dev").unwrap()),

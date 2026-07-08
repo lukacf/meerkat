@@ -1281,6 +1281,10 @@ pub struct SessionRuntime {
     workgraph_store: Arc<dyn meerkat::WorkGraphStore>,
     artifact_store: Arc<dyn meerkat_core::ArtifactStore>,
     schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
+    /// Fast-path latch for [`Self::arm_schedule_host_for_agent_tools`]: set
+    /// once the schedule firing host has started successfully so the
+    /// per-session/per-executor arming calls skip the host mutex.
+    schedule_host_armed: std::sync::atomic::AtomicBool,
     /// Canonical staged-session authority (facade-owned). Holds sessions
     /// that have been created (ID returned to caller) but not yet materialized
     /// in the service. The first `start_turn` call promotes them through
@@ -1803,6 +1807,7 @@ impl SessionRuntime {
             workgraph_store,
             artifact_store,
             schedule_host: Mutex::new(None),
+            schedule_host_armed: std::sync::atomic::AtomicBool::new(false),
             staged_sessions,
             pending_session_event_streams,
             staged_capacity_admissions,
@@ -1943,6 +1948,7 @@ impl SessionRuntime {
             workgraph_store,
             artifact_store,
             schedule_host: Mutex::new(None),
+            schedule_host_armed: std::sync::atomic::AtomicBool::new(false),
             staged_sessions,
             pending_session_event_streams,
             staged_capacity_admissions,
@@ -2005,7 +2011,7 @@ impl SessionRuntime {
     }
 
     pub fn set_skill_identity_roots(
-        &mut self,
+        &self,
         context_root: Option<PathBuf>,
         user_root: Option<PathBuf>,
     ) {
@@ -2071,7 +2077,7 @@ impl SessionRuntime {
     }
 
     /// Attach config runtime for generation stamping.
-    pub fn set_config_runtime(&mut self, runtime: Arc<meerkat_core::ConfigRuntime>) {
+    pub fn set_config_runtime(&self, runtime: Arc<meerkat_core::ConfigRuntime>) {
         *self
             .config_runtime
             .write()
@@ -2098,7 +2104,7 @@ impl SessionRuntime {
     /// connection resolver's head default.
     ///
     /// Writes never compose — `config get/set` stay on the raw `config_runtime`.
-    pub fn set_realm_config_source(&mut self, source: Arc<dyn meerkat_core::RealmConfigSource>) {
+    pub fn set_realm_config_source(&self, source: Arc<dyn meerkat_core::RealmConfigSource>) {
         let head = self
             .realm_id()
             .unwrap_or_else(meerkat_core::connection::RealmId::global);
@@ -2920,7 +2926,7 @@ impl SessionRuntime {
     }
 
     /// Override the shared default LLM client used by this runtime.
-    pub fn set_default_llm_client(&mut self, client: Option<Arc<dyn LlmClient>>) {
+    pub fn set_default_llm_client(&self, client: Option<Arc<dyn LlmClient>>) {
         *self
             .default_llm_client
             .write()
@@ -2929,7 +2935,7 @@ impl SessionRuntime {
 
     /// Set the provider-agnostic wrapper applied to every agent LLM client.
     pub fn set_agent_llm_client_decorator(
-        &mut self,
+        &self,
         decorator: Option<meerkat_core::AgentLlmClientDecorator>,
     ) {
         *self
@@ -4429,6 +4435,10 @@ impl SessionRuntime {
         adapter: &Arc<MeerkatMachine>,
         session_id: &SessionId,
     ) -> Result<(), RpcError> {
+        // An executor means agent work can run, and agent work can author
+        // schedules against this runtime's store — the firing host must be
+        // live in the same process (see arm_schedule_host_for_agent_tools).
+        self.arm_schedule_host_for_agent_tools().await;
         if self
             .archived_persisted_session_without_live(session_id)
             .await?
@@ -5773,12 +5783,15 @@ impl SessionRuntime {
     /// Returns the session ID on success. The session is staged as "pending"
     /// and will be materialized inside the service on the first `start_turn`.
     pub async fn create_session(
-        &self,
+        self: &Arc<Self>,
         mut build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
         deferred_injected_context: Vec<ContentInput>,
     ) -> Result<SessionId, RpcError> {
+        // A session can author schedules on its first turn; the firing host
+        // for this runtime's store must be live in the same process.
+        self.arm_schedule_host_for_agent_tools().await;
         let effective_llm_identity = self.llm_identity_from_pending_build(&build_config).await?;
         build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
         if let Some(prompt) = deferred_prompt.as_ref() {
@@ -10212,7 +10225,7 @@ mod tests {
     #[tokio::test]
     async fn context_only_runtime_apply_preserves_run_checkpoint_boundary() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -10277,7 +10290,7 @@ mod tests {
         use meerkat_core::lifecycle::core_executor::CoreExecutor;
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -10346,7 +10359,7 @@ mod tests {
     #[tokio::test]
     async fn context_only_runtime_apply_recovers_persisted_live_missing_session() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (mut runtime, runtime_store) =
+        let (runtime, runtime_store) =
             make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
@@ -10453,7 +10466,7 @@ mod tests {
     #[tokio::test]
     async fn realtime_open_config_recovers_persisted_live_missing_session() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -10519,7 +10532,7 @@ mod tests {
     #[tokio::test]
     async fn context_only_runtime_apply_respects_active_admission_capacity() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -10669,7 +10682,7 @@ mod tests {
     async fn archived_store_projection_live_context_only_runtime_apply_does_not_bypass_capacity() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = make_runtime_with_session_store_and_runtime_store(
+        let runtime = make_runtime_with_session_store_and_runtime_store(
             temp_factory(&temp),
             1,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
@@ -10761,7 +10774,7 @@ mod tests {
     async fn archived_store_projection_live_external_runtime_inputs_ignore_store_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = make_runtime_with_session_store_and_runtime_store(
+        let runtime = make_runtime_with_session_store_and_runtime_store(
             temp_factory(&temp),
             1,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
@@ -10876,7 +10889,7 @@ mod tests {
     #[tokio::test]
     async fn realtime_open_config_carries_pending_system_context_as_typed_runtime_context() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -10954,7 +10967,7 @@ mod tests {
     async fn realtime_open_config_projects_build_state_additional_instructions_into_root_system_message()
      {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
@@ -11021,7 +11034,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_restores_build_state_additional_instructions_into_realtime_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
@@ -11112,7 +11125,7 @@ mod tests {
     #[tokio::test]
     async fn realtime_open_config_includes_runtime_owned_terminal_peer_response_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         base_runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(base_runtime);
 
@@ -11244,7 +11257,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_restores_runtime_owned_terminal_peer_response_from_authoritative_snapshot() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         base_runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(base_runtime);
 
@@ -11427,7 +11440,7 @@ mod tests {
     #[tokio::test]
     async fn accept_input_with_completion_persists_runtime_owned_terminal_peer_response() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -11548,7 +11561,7 @@ mod tests {
         use futures::StreamExt;
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -11675,7 +11688,7 @@ mod tests {
         use meerkat_core::interaction::InteractionId;
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -11838,7 +11851,7 @@ mod tests {
     #[tokio::test]
     async fn realtime_open_config_includes_runtime_context_applied_via_session_service() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (mut runtime, runtime_store) =
+        let (runtime, runtime_store) =
             make_runtime_with_runtime_store_handle(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
@@ -11918,13 +11931,13 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = Arc::new(SessionRuntime::new(
             temp_factory(&temp),
             Config::default(),
             10,
             meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
-        );
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
@@ -12004,13 +12017,13 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = Arc::new(SessionRuntime::new(
             temp_factory(&temp),
             Config::default(),
             10,
             meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
-        );
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -12109,13 +12122,13 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = Arc::new(SessionRuntime::new(
             temp_factory(&temp),
             Config::default(),
             10,
             meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
-        );
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
@@ -12203,13 +12216,13 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = Arc::new(SessionRuntime::new(
             temp_factory(&temp),
             Config::default(),
             10,
             meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
-        );
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
@@ -12317,13 +12330,13 @@ mod tests {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = Arc::new(SessionRuntime::new(
             temp_factory(&temp),
             Config::default(),
             10,
             meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
-        );
+        ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
@@ -12398,7 +12411,7 @@ mod tests {
     #[tokio::test]
     async fn realtime_open_config_preserves_committed_external_dialogue_for_reconstruction() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (mut runtime, runtime_store) =
+        let (runtime, runtime_store) =
             make_runtime_with_runtime_store_handle(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
@@ -12546,29 +12559,29 @@ mod tests {
         );
     }
 
-    fn make_runtime(factory: AgentFactory, max_sessions: usize) -> SessionRuntime {
+    fn make_runtime(factory: AgentFactory, max_sessions: usize) -> Arc<SessionRuntime> {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        SessionRuntime::new(
+        Arc::new(SessionRuntime::new(
             factory,
             Config::default(),
             max_sessions,
             meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
-        )
+        ))
     }
 
     fn make_runtime_with_session_store(
         factory: AgentFactory,
         max_sessions: usize,
         store: Arc<dyn meerkat::SessionStore>,
-    ) -> SessionRuntime {
+    ) -> Arc<SessionRuntime> {
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        SessionRuntime::new(
+        Arc::new(SessionRuntime::new(
             factory,
             Config::default(),
             max_sessions,
@@ -12578,64 +12591,109 @@ mod tests {
                 blob_store,
             ),
             crate::router::NotificationSink::noop(),
-        )
+        ))
     }
 
     fn make_runtime_with_session_store_and_runtime_store(
         factory: AgentFactory,
         max_sessions: usize,
         store: Arc<dyn meerkat::SessionStore>,
-    ) -> SessionRuntime {
+    ) -> Arc<SessionRuntime> {
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        SessionRuntime::new(
+        Arc::new(SessionRuntime::new(
             factory,
             Config::default(),
             max_sessions,
             meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
-        )
+        ))
     }
 
     fn make_runtime_with_runtime_store(
         factory: AgentFactory,
         max_sessions: usize,
-    ) -> SessionRuntime {
+    ) -> Arc<SessionRuntime> {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
-        SessionRuntime::new(
+        Arc::new(SessionRuntime::new(
             factory,
             Config::default(),
             max_sessions,
             meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
-        )
+        ))
     }
 
     fn make_runtime_with_runtime_store_handle(
         factory: AgentFactory,
         max_sessions: usize,
-    ) -> (SessionRuntime, Arc<dyn meerkat_runtime::RuntimeStore>) {
+    ) -> (Arc<SessionRuntime>, Arc<dyn meerkat_runtime::RuntimeStore>) {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
         (
-            SessionRuntime::new(
+            Arc::new(SessionRuntime::new(
                 factory,
                 Config::default(),
                 max_sessions,
                 meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
                 crate::router::NotificationSink::noop(),
-            ),
+            )),
             runtime_store,
         )
+    }
+
+    /// Bug C class pin (field, 0.7.23): a `SessionRuntime` embedded WITHOUT
+    /// the RPC router binds the `meerkat_schedule_*` agent tools to its own
+    /// schedule store at construction — so the runtime itself must arm the
+    /// firing host once agent work can run. Pre-fix, only the router's
+    /// eager start spawned the host: agent-authored schedules planned
+    /// occurrences that nothing in the process ever claimed (pending 12h+
+    /// past due in the field while the embedder's own host drove a
+    /// different store).
+    #[tokio::test]
+    async fn create_session_arms_the_schedule_firing_host_without_the_router() {
+        let temp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let persistence = meerkat::PersistenceBundle::new_with_schedule_store(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+            Arc::new(meerkat::MemoryScheduleStore::new()),
+        );
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            4,
+            persistence,
+            crate::router::NotificationSink::noop(),
+        ));
+
+        assert!(
+            runtime.schedule_host.lock().await.is_none(),
+            "no firing host may run before the runtime can execute agent work"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("session creation should succeed");
+
+        assert!(
+            runtime.schedule_host.lock().await.is_some(),
+            "creating a session must arm the schedule firing host: the agent \
+             schedule tools bind to this runtime's store, so an in-process \
+             firing authority is mandatory even when the embedder never \
+             constructs the RPC router"
+        );
     }
 
     async fn commit_runtime_output_snapshot(
@@ -13133,7 +13191,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let token_store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
         let factory = temp_factory(&temp).with_token_store(token_store.clone());
-        let mut runtime = make_runtime(factory, 10);
+        let runtime = make_runtime(factory, 10);
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::new(meerkat_core::MemoryConfigStore::new(
                 config_with_openai_managed_store_binding(),
@@ -13171,7 +13229,7 @@ mod tests {
     #[tokio::test]
     async fn reconfigure_build_adapter_applies_agent_llm_client_decorator() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let constructions = Arc::new(AtomicUsize::new(0));
         let stream_calls = Arc::new(AtomicUsize::new(0));
@@ -13371,7 +13429,7 @@ mod tests {
     #[tokio::test]
     async fn create_session_accepts_video_for_self_hosted_alias_from_runtime_config() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let store: Arc<dyn meerkat_core::ConfigStore> =
             Arc::new(meerkat_core::MemoryConfigStore::new(
                 self_hosted_test_config("local", true),
@@ -13401,7 +13459,7 @@ mod tests {
     #[tokio::test]
     async fn create_session_pins_self_hosted_server_id_before_materialization() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let store: Arc<dyn meerkat_core::ConfigStore> =
             Arc::new(meerkat_core::MemoryConfigStore::new(
                 self_hosted_test_config("local", false),
@@ -13447,7 +13505,7 @@ mod tests {
     #[tokio::test]
     async fn provider_param_override_keeps_pinned_self_hosted_server_binding() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let store: Arc<dyn meerkat_core::ConfigStore> =
             Arc::new(meerkat_core::MemoryConfigStore::new(
                 self_hosted_test_config("local", false),
@@ -13696,7 +13754,7 @@ mod tests {
     #[tokio::test]
     async fn create_session_returns_id_and_idle_state() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -13711,7 +13769,7 @@ mod tests {
     #[tokio::test]
     async fn start_turn_returns_run_result() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -13842,7 +13900,7 @@ mod tests {
     #[tokio::test]
     async fn append_system_context_survives_pending_session_promotion() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let (build_config, calls, release) = blocking_build_config();
 
         let session_id = runtime
@@ -13911,7 +13969,7 @@ mod tests {
             llm_client_override: Some(recorder.clone()),
             ..AgentBuildConfig::new("claude-sonnet-4-5")
         };
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(
@@ -13995,7 +14053,7 @@ mod tests {
     #[tokio::test]
     async fn turn_start_injected_context_lands_before_user_message() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
@@ -14043,7 +14101,7 @@ mod tests {
     #[tokio::test]
     async fn staged_promotion_materializes_deferred_injected_context_before_user_message() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let session_id = runtime
             .create_session(
                 mock_build_config(),
@@ -14092,7 +14150,7 @@ mod tests {
     #[tokio::test]
     async fn deferred_create_injected_context_without_prompt_rejected() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let err = runtime
             .create_session(
                 mock_build_config(),
@@ -14202,7 +14260,7 @@ mod tests {
     #[tokio::test]
     async fn start_turn_transitions_idle_running_idle() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         // Use a slow mock to give us time to observe Running state
         let session_id = runtime
@@ -14270,7 +14328,7 @@ mod tests {
     #[tokio::test]
     async fn start_turn_on_busy_session_fails() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
         let (build_config, calls, release) = blocking_build_config();
 
         let session_id = runtime
@@ -14343,7 +14401,7 @@ mod tests {
     #[tokio::test]
     async fn start_turn_emits_events() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -14819,11 +14877,11 @@ mod tests {
     async fn archived_store_only_runtime_routed_turn_fails_as_archived_projection() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
-        let runtime = Arc::new(make_runtime_with_session_store(
+        let runtime = make_runtime_with_session_store(
             temp_factory(&temp),
             1,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
-        ));
+        );
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
@@ -14857,11 +14915,11 @@ mod tests {
     async fn invalid_external_event_rejects_before_runtime_registration() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
-        let runtime = Arc::new(make_runtime_with_session_store_and_runtime_store(
+        let runtime = make_runtime_with_session_store_and_runtime_store(
             temp_factory(&temp),
             1,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
-        ));
+        );
 
         let session = Session::new();
         let session_id = session.id().clone();
@@ -14893,7 +14951,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_external_event_preserves_existing_runtime_registration() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -14981,7 +15039,7 @@ mod tests {
     #[tokio::test]
     async fn external_event_without_wake_uses_generated_pre_admission_feedback() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -15034,7 +15092,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_routed_turn_capacity_full_rejects_before_input_accept() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -15105,7 +15163,7 @@ mod tests {
     async fn runtime_submit_queued_same_session_input_extends_active_capacity() {
         let temp = tempfile::tempdir().unwrap();
         let (build_config, calls, release) = blocking_build_config();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(build_config, None, None, Vec::new())
@@ -15177,7 +15235,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_routed_turn_waits_for_registration_lock_before_active_admission() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -15248,7 +15306,7 @@ mod tests {
     #[tokio::test]
     async fn peer_response_terminal_capacity_full_rejects_before_input_accept() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -15446,7 +15504,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Notify::new());
-        let mut runtime = make_runtime(temp_factory(&temp), 2);
+        let runtime = make_runtime(temp_factory(&temp), 2);
         runtime.set_default_llm_client(Some(Arc::new(BlockingMockLlmClient {
             calls: Arc::clone(&calls),
             release: Arc::clone(&release),
@@ -15539,7 +15597,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_pre_admission_cleanup_releases_if_executor_never_takes_guard() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let session_id = SessionId::new();
         let input_id = InputId::new();
         let admission = runtime
@@ -15577,7 +15635,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_pre_admission_cleanup_unregisters_after_runtime_termination() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let session_id = SessionId::new();
         runtime
             .runtime_adapter
@@ -15637,7 +15695,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_pre_admission_registration_drop_releases_guard() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let session_id = SessionId::new();
         let input_id = InputId::new();
         let admission = runtime
@@ -15661,7 +15719,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_pre_admission_registration_drop_restores_staged_origin() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -15710,7 +15768,7 @@ mod tests {
     #[tokio::test]
     async fn stale_runtime_pre_admission_cleanup_does_not_remove_newer_input_guard() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let session_id = SessionId::new();
         let first_input_id = InputId::new();
         let first_admission = runtime
@@ -16136,7 +16194,7 @@ mod tests {
     async fn non_staged_archive_projection_failure_fails_closed_and_cleans_up_on_retry() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(ToggleFailSaveStore::new());
-        let mut runtime = make_runtime_with_session_store_and_runtime_store(
+        let runtime = make_runtime_with_session_store_and_runtime_store(
             temp_factory(&temp),
             2,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
@@ -16533,7 +16591,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_staged_archive_finishes_background_cleanup_after_service_archive() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
@@ -16693,7 +16751,7 @@ mod tests {
         use meerkat_core::lifecycle::core_executor::CoreExecutor;
 
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -16750,7 +16808,7 @@ mod tests {
         use meerkat_core::lifecycle::core_executor::CoreExecutor;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -16831,7 +16889,7 @@ mod tests {
         use meerkat_core::lifecycle::core_executor::CoreExecutor;
 
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let service = runtime.session_service();
 
         let direct = service
@@ -16882,7 +16940,7 @@ mod tests {
         use meerkat_core::lifecycle::core_executor::CoreExecutor;
 
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let service = runtime.session_service();
 
         let direct = service
@@ -16946,7 +17004,7 @@ mod tests {
     #[tokio::test]
     async fn mob_session_service_running_turn_blocks_rpc_admission_capacity() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let (build_config, calls, release) = blocking_build_config();
         let session_id = runtime
             .create_session(build_config, None, None, Vec::new())
@@ -17035,7 +17093,7 @@ mod tests {
     #[tokio::test]
     async fn mob_session_service_cannot_release_rpc_pending_first_turn_admission() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let (build_config, calls, release) = blocking_build_config();
         let session_id = runtime
             .create_session(build_config, None, None, Vec::new())
@@ -17173,7 +17231,7 @@ mod tests {
     #[tokio::test]
     async fn running_sessions_still_consume_admission_capacity() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 2));
+        let runtime = make_runtime(temp_factory(&temp), 2);
 
         let first = runtime
             .create_session(slow_build_config(250), None, None, Vec::new())
@@ -17263,7 +17321,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_create_session_admission_is_atomically_bounded() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 2));
+        let runtime = make_runtime(temp_factory(&temp), 2);
 
         let results = futures::future::join_all((0..8).map(|_| {
             let runtime = Arc::clone(&runtime);
@@ -17322,7 +17380,7 @@ mod tests {
     #[tokio::test]
     async fn archive_promoting_session_does_not_release_active_capacity() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(slow_build_config(250), None, None, Vec::new())
@@ -17395,7 +17453,7 @@ mod tests {
     #[tokio::test]
     async fn interrupt_reaches_promoting_pending_first_turn() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let (build_config, calls, _release) = blocking_build_config();
         let session_id = runtime
             .create_session(build_config, None, None, Vec::new())
@@ -17452,7 +17510,7 @@ mod tests {
     #[tokio::test]
     async fn public_interrupt_during_pending_promotion_start_window_returns_busy() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let hook = Arc::new(PendingPromotionPreTurnHook::default());
         *runtime
             .pending_promotion_pre_turn_hook
@@ -17511,7 +17569,7 @@ mod tests {
     #[tokio::test]
     async fn turn_interrupt_handler_during_pending_promotion_start_window_returns_busy() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let hook = Arc::new(PendingPromotionPreTurnHook::default());
         *runtime
             .pending_promotion_pre_turn_hook
@@ -17584,7 +17642,7 @@ mod tests {
     #[tokio::test]
     async fn turn_interrupt_handler_during_runtime_routed_pre_promotion_window_returns_busy() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let hook = Arc::new(PendingPromotionPreTurnHook::default());
         *runtime
             .runtime_routed_pre_promotion_hook
@@ -17672,7 +17730,7 @@ mod tests {
     #[tokio::test]
     async fn yielding_interrupt_during_runtime_routed_pre_promotion_window_returns_busy() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let hook = Arc::new(PendingPromotionPreTurnHook::default());
         *runtime
             .runtime_routed_pre_promotion_hook
@@ -17738,7 +17796,7 @@ mod tests {
     #[tokio::test]
     async fn public_interrupt_during_pending_promotion_apply_window_returns_busy() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let hook = Arc::new(PendingPromotionPreTurnHook::default());
         *runtime
             .pending_promotion_pre_turn_hook
@@ -18333,7 +18391,7 @@ mod tests {
     #[tokio::test]
     async fn recovered_create_archived_recheck_unregisters_prepared_bindings() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -18421,7 +18479,7 @@ mod tests {
     #[tokio::test]
     async fn recovered_create_request_failure_unregisters_new_runtime_registration() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -18486,7 +18544,7 @@ mod tests {
     #[tokio::test]
     async fn recovered_create_request_failure_preserves_existing_runtime_registration() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -18547,7 +18605,7 @@ mod tests {
     #[tokio::test]
     async fn recovered_staging_failure_unregisters_prepared_runtime_state() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -18993,7 +19051,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_materialized_turn_keeps_admission_until_service_turn_stops() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
         let (build_config, calls, release) = block_after_first_build_config();
 
         let session_id = runtime
@@ -19073,7 +19131,7 @@ mod tests {
     #[tokio::test]
     async fn materialized_turn_rejected_by_capacity_does_not_hot_swap_identity() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -19193,7 +19251,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_recovery_respects_active_admission_capacity() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -19307,7 +19365,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_apply_live_not_found_preserves_pre_admission_for_recovery() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -19446,7 +19504,7 @@ mod tests {
     #[tokio::test]
     async fn recovered_runtime_apply_pre_run_terminal_discards_live_deferred_session() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         let runtime = Arc::new(runtime);
 
@@ -19517,7 +19575,7 @@ mod tests {
     #[tokio::test]
     async fn archived_runtime_apply_recovery_rejects_without_admission_leak() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -19572,7 +19630,7 @@ mod tests {
     async fn recovered_runtime_apply_create_persist_failure_discards_live_deferred_admission() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(ToggleFailSaveStore::new());
-        let mut runtime = make_runtime_with_session_store_and_runtime_store(
+        let runtime = make_runtime_with_session_store_and_runtime_store(
             temp_factory(&temp),
             1,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
@@ -20717,7 +20775,7 @@ mod tests {
     #[tokio::test]
     async fn live_open_without_session_factory_fails_closed_and_opens_no_channel() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         // Materialize a realtime-capable session so the B17 existence check
         // passes and the flow reaches the #302 no-factory guard.
@@ -21382,7 +21440,7 @@ mod tests {
     #[tokio::test]
     async fn hot_swap_to_openai_keeps_view_image() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        let runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         // Create session with an Anthropic model (supports image_tool_results).
@@ -21470,7 +21528,7 @@ mod tests {
     #[tokio::test]
     async fn hot_swap_to_anthropic_clears_view_image_deny() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        let runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -21557,7 +21615,7 @@ mod tests {
     #[tokio::test]
     async fn hot_swap_preserves_preexisting_deny_filter() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        let runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -21633,7 +21691,7 @@ mod tests {
     #[tokio::test]
     async fn hot_swap_back_preserves_other_denied_tools() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
+        let runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -21744,7 +21802,7 @@ mod tests {
     #[tokio::test]
     async fn materialized_provider_only_override_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -21793,7 +21851,7 @@ mod tests {
     #[tokio::test]
     async fn materialized_provider_params_hot_swap_persists_identity() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -21877,7 +21935,7 @@ mod tests {
     #[tokio::test]
     async fn materialized_hot_swap_updates_durable_identity_for_recovery() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -21984,7 +22042,7 @@ mod tests {
     #[tokio::test]
     async fn missing_live_recovery_applies_turn_clear_and_connection_overrides() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let mut build = mock_build_config();
@@ -22094,7 +22152,7 @@ mod tests {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -22166,7 +22224,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_turn_on_pending_without_keep_alive_override_uses_staged_policy() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -22201,7 +22259,7 @@ mod tests {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -22257,7 +22315,7 @@ mod tests {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 1));
+        let runtime = make_runtime(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -22366,7 +22424,7 @@ mod tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let runtime = make_runtime(temp_factory(&temp), 10);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -22692,7 +22750,7 @@ mod tests {
     #[tokio::test]
     async fn r11_propagate_closes_channel_on_model_id_swap() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         // Session resolved identity: gpt-realtime-2 (realtime + OpenAI).
@@ -22855,7 +22913,7 @@ mod tests {
     #[tokio::test]
     async fn r11_hot_swap_closes_channel_on_auth_binding_swap() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -23007,7 +23065,7 @@ mod tests {
     #[tokio::test]
     async fn r11_propagate_dispatches_refresh_when_identity_unchanged() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime

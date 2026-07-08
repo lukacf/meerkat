@@ -9110,6 +9110,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_queued`
 - To: `Stopped`
 
+### `DeferInputBehindBacklogAlreadyResolvedIdle`
+- From: `Idle`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_tracked`
+  - `input_not_in_lane`
+  - `input_resolved_past_queued`
+- To: `Idle`
+
+### `DeferInputBehindBacklogAlreadyResolvedAttached`
+- From: `Attached`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_tracked`
+  - `input_not_in_lane`
+  - `input_resolved_past_queued`
+- To: `Attached`
+
+### `DeferInputBehindBacklogAlreadyResolvedRunning`
+- From: `Running`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_tracked`
+  - `input_not_in_lane`
+  - `input_resolved_past_queued`
+- To: `Running`
+
+### `DeferInputBehindBacklogAlreadyResolvedRetired`
+- From: `Retired`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_tracked`
+  - `input_not_in_lane`
+  - `input_resolved_past_queued`
+- To: `Retired`
+
+### `DeferInputBehindBacklogAlreadyResolvedStopped`
+- From: `Stopped`
+- On: `DeferInputBehindBacklog`(input_id)
+- Guards:
+  - `input_tracked`
+  - `input_not_in_lane`
+  - `input_resolved_past_queued`
+- To: `Stopped`
+
 ### `StageForRunIdle`
 - From: `Idle`
 - On: `StageForRun`(input_id, run_id)

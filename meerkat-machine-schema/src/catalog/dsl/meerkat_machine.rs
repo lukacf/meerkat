@@ -15744,6 +15744,31 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
+        // DeferInputBehindBacklogAlreadyResolved: the failure realization that
+        // precedes the shell's whole-batch defer sweep can legitimately
+        // resolve individual batch members out of the queued world —
+        // `ResolveStagedRollbackMaxAttemptsExhausted` terminalizes an input at
+        // the retry cap, and boundary-applied members sit in
+        // Applied/AppliedPendingConsumption with no lane entry. Deferring such
+        // a member is a machine-owned no-op, NOT a guard rejection: treating
+        // the machine's own resolution as a shell error wedged the runtime
+        // loop behind a dropped wake (field, 0.7.23: "DSL rejected
+        // DeferInputBehindBacklog: GuardRejected { phase: Attached }" followed
+        // by a stranded backlog). A tracked-but-lane-less input still claiming
+        // InputPhase::Queued stays a loud rejection — that is projection
+        // corruption, not a resolved member.
+        transition DeferInputBehindBacklogAlreadyResolved {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferInputBehindBacklog { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_in_lane" { !self.input_lane.contains_key(input_id) }
+            guard "input_resolved_past_queued" {
+                self.input_phases.get(input_id).get("value") != InputPhase::Queued
+            }
+            update {}
+            to Idle
+        }
+
         // StageForRun: stage a queued input for a run. Removes the input
         // from its work lane — staged inputs are no longer "currently
         // queuable". The shell's queue projections are derived from

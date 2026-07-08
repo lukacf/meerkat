@@ -434,6 +434,7 @@ test_suite(
         "//meerkat-machine-schema:auth_machine_oauth_flow_test",
         "//meerkat-machine-schema:auth_machine_release_test",
         "//meerkat-machine-schema:catalog_typed_round_trip_test",
+        "//meerkat-machine-schema:defer_input_totality_test",
         "//meerkat-machine-schema:docs_machine_authority_alignment_test",
         "//meerkat-machine-schema:identity_roundtrip_test",
         "//meerkat-machine-schema:meerkat_machine_schema_unit_test",

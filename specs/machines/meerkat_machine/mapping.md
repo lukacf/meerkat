@@ -2624,6 +2624,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DeferInputBehindBacklogStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyResolvedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyResolvedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyResolvedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyResolvedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyResolvedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageForRunIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

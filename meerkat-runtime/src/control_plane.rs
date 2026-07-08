@@ -149,6 +149,52 @@ pub(crate) mod test_support {
     };
     use meerkat_core::lifecycle::{RunId, run_primitive::RunPrimitive};
 
+    /// Deterministically fails every `apply` while keeping the stop path
+    /// healthy — models a poison payload whose run terminally fails on each
+    /// stage attempt (the field shape behind the defer-wedge class tests).
+    pub(crate) struct ApplyFailingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        stop_calls: Arc<AtomicUsize>,
+    }
+
+    impl ApplyFailingExecutor {
+        pub(crate) fn new(apply_calls: Arc<AtomicUsize>, stop_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                apply_calls,
+                stop_calls,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for ApplyFailingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreExecutorError::apply_failed_runtime_turn(
+                "synthetic deterministic apply failure",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     pub(crate) struct StopFailingExecutor {
         stop_calls: Arc<AtomicUsize>,
         apply_calls: Arc<AtomicUsize>,

@@ -11,7 +11,39 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures (enforced by the `semver-breaks` release gate
 via cargo-semver-checks against the published baselines).
 
-## [Unreleased]
+## [0.7.25] - 2026-07-08
+
+Meerkat 0.7.25 is the outstanding-asks sweep: O(delta) incremental session
+persistence, mob revival completeness, restart-first-class status queries,
+the structural peer-reply affordance, attention-binding uniqueness with
+break-glass and GC, a metadata-only session read seam — plus the field fix
+for the runtime-queue defer wedge and the pre-1.0 exact-pin versioning
+policy with its release gate.
+
+### Breaking
+
+- `WorkGraphAttentionTurnOverlayError::MultipleActiveBindings` (facade) is
+  removed. Multiple active bindings resolving to one session now arbitrate
+  deterministically (newest binding wins) with a loud diagnostic instead of
+  hard-failing every turn; new duplicates are prevented at the store.
+- `meerkat_core::event_injector::SubscribableInjector` gained a required
+  method `inject_with_interaction_id(...)`. Implementors outside this repo
+  must provide it (delegating to `inject` and discarding the id is NOT
+  faithful — the id must reach runtime admission).
+- `meerkat_mob::WorkSpec` gained the public field
+  `interaction_id: Option<InteractionId>`. Struct-literal constructors must
+  set it (serde `default` keeps wire compatibility).
+- `SqliteSessionStore` storage is now head-canonical: session heads and
+  transcript strands replace the monolithic `session_json` blob for new
+  writes, with a one-time transparent migration on open. External tools
+  reading `sessions.session_json` via direct SQL will not see content for
+  sessions written by 0.7.25+ binaries; use the store API (or `load_meta`
+  for metadata-only reads).
+- `session/input_state` / `session/input_status` for persistent sessions
+  without a live runtime registration now answer from durable state
+  (`Ok`/`NotFound`) instead of `NotReady { reason: Destroyed }`. Pollers
+  that treated `NotReady` as "try again later" get truthful terminal
+  answers after a host restart.
 
 ### Fixed
 
@@ -20,39 +52,70 @@ via cargo-semver-checks against the published baselines).
   (field, 0.7.23 crew gateway: a steer-shaped input's third failed stage
   attempt was abandoned by the machine's retry policy, the loop's
   whole-batch defer sweep then hit "DSL rejected DeferInputBehindBacklog:
-  GuardRejected { phase: Attached }", dropped the pending wake, and stranded
-  the backlog for ~13 minutes until an unrelated external wake). The defer
-  sweep is now machine-owned-total: `DeferInputBehindBacklogAlreadyResolved`
-  accepts tracked members that provably left `Queued` (max-attempts
-  abandonment, boundary-applied members) as an explicit no-op, while a
-  tracked-but-lane-less input still claiming `Queued` stays a loud rejection
-  (projection corruption). The runtime loop's three batch-failure arms
-  (apply failure, primitive rejection, turn-state preparation failure) now
-  share one canonical backlog resolution: defer the failed batch and keep
-  draining other queued work in the same wake, park only when nothing else
-  is queued, and fail closed through the canonical executor-stop path — not
-  a silent wake-dropping return — if the defer genuinely breaks.
-
-### Changed
-
-- `make machine-verify` and the pre-push machine gate now route through the
-  canonical TLC lane (`xtask/tests/machine_verify_all_tlc_test.sh`), which
-  owns the documented over-budget composition skips (`meerkat_mob_seam` /
-  `adaptive_mob_bundle` full ci.cfg sweeps) and the bounded adaptive witness
-  proof. The previous bare `machine-verify --all` form ran the full mob-seam
-  state-space sweep, which fits no local or pre-push budget; the unbounded
-  sweep remains available on demand as `make machine-verify-full`.
+  GuardRejected { phase: Attached }", dropped the pending wake, and
+  stranded the backlog for ~13 minutes until an unrelated external wake).
+  The defer sweep is now machine-owned-total:
+  `DeferInputBehindBacklogAlreadyResolved` accepts tracked members that
+  provably left `Queued` (max-attempts abandonment, boundary-applied
+  members) as an explicit no-op, while a tracked-but-lane-less input still
+  claiming `Queued` stays a loud rejection (projection corruption). The
+  runtime loop's three batch-failure arms (apply failure, primitive
+  rejection, turn-state preparation failure) now share one canonical
+  backlog resolution: defer the failed batch and keep draining other queued
+  work in the same wake, park only when nothing else is queued, and fail
+  closed through the canonical executor-stop path — not a silent
+  wake-dropping return — if the defer genuinely breaks.
+- Dogma-audit fixes (#853 + review hardening): the embedded
+  `mob-communication` skill is registered by the facade again (with a
+  content pin so an empty or drifted skill body fails tests); the
+  TypeScript and Python SDK model-catalog parsers fail closed on malformed
+  catalogs instead of coalescing missing fields; the ownership-ledger
+  `cfg(test)` detector recurses into `any()`/`all()` attribute groups and
+  `feature = "test-support"`; Bazel test-support variant generation is
+  seeded for `meerkat-mcp` alongside `meerkat-runtime`.
 
 ### Added
 
+- `IncrementalSessionStore` (upstream ask 11): O(delta) session
+  persistence. `SessionStore::as_incremental` exposes the optional trait;
+  the SQLite store becomes head-canonical (`SessionHead` +
+  `TranscriptStrandId` vocabulary, per-strand append tables, CAS'd head
+  swings), `PersistentSessionService` writes deltas when the store offers
+  them, and compaction rewrites the head so shrunken context is durable —
+  saving a long session no longer serializes the full transcript on every
+  turn.
+- Mob member revival completeness (studio M2): reviving a stopped member
+  recomposes its per-spawn external tools from the durable spawn spec
+  (spawn/respawn/dispose threading plus cold-restore seeding), and
+  `MemberSpawnedEvent` durably carries `effective_profile_override` so
+  roster replay restores the member's effective profile instead of `None`.
+- Restart-first-class terminal status (studio M4): `session/input_status`
+  and `session/input_state` answer from durable runtime rows without
+  requiring a live registration — a fresh host process can report terminal
+  outcomes for work finished before the restart, with zero wire-shape
+  changes.
+- Interaction ids persist onto committed transcript messages (mobkit ask 15
+  addendum): `SubscribableInjector::inject_with_interaction_id` and
+  `WorkSpec.interaction_id` thread host-supplied interaction identity to
+  runtime admission, so transcript messages join with the caller's live
+  interaction frames.
+- Structural peer-reply affordance (upstream ask 26): peer-message
+  deliveries mint a `PeerReplyCapability` into the turn's dispatch context
+  (key `comms.peer_reply`), and the pre-addressed `reply_to_peer` comms
+  tool replies to the delivering peer without the agent restating
+  addressing. Capability minting is batch-level (`TurnToolOverlay::compose`
+  lifted to `meerkat-core` as the one canonical compose); errors are typed
+  and fail closed. No wire changes.
+- Metadata-only session read seam (upstream ask 24 clause 3):
+  `SessionStore::load_meta` (SQL projection over stored metadata; ambiguity
+  delegates to the full canonical load) and
+  `MobSessionService::load_persisted_session_metadata` — list/status paths
+  read session metadata without deserializing full transcripts.
 - `semver-breaks` release-preflight gate (studio M3): cargo-semver-checks
   runs against the last published crates.io baselines; detected public-API
   breaks fail the release unless declared under a `### Breaking` changelog
   heading. The exact-pin policy in this file's header is the other half of
   the contract.
-
-### Added
-
 - Attention-binding uniqueness is now service/store-owned (mobkit ask 25):
   at most one ACTIVE attention binding per target, enforced transactionally
   inside the same store write that mints or revives a binding (`create_goal`,
@@ -84,6 +147,13 @@ via cargo-semver-checks against the published baselines).
   diagnostic, mirroring the newest-session arbitration. Reachable only via
   legacy rows, mixed-version writers, or cross-kind targets; new duplicates
   are prevented at the store.
+- `make machine-verify` and the pre-push machine gate now route through the
+  canonical TLC lane (`xtask/tests/machine_verify_all_tlc_test.sh`), which
+  owns the documented over-budget composition skips (`meerkat_mob_seam` /
+  `adaptive_mob_bundle` full ci.cfg sweeps) and the bounded adaptive witness
+  proof. The previous bare `machine-verify --all` form ran the full mob-seam
+  state-space sweep, which fits no local or pre-push budget; the unbounded
+  sweep remains available on demand as `make machine-verify-full`.
 
 ## [0.7.24] - 2026-07-08
 

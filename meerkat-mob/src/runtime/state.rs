@@ -256,6 +256,11 @@ pub(super) struct SubmitWorkPayload {
     /// dispatch carrier only — the MobMachine DSL admits identity facts
     /// (runtime id, fence, work id, origin), never content payloads.
     pub injected_context: Vec<ContentInput>,
+    /// Host-supplied interaction identity riding with the work content.
+    /// Shell dispatch carrier only (content-adjacent metadata, like
+    /// `render_metadata`); stamped into the turn's transcript identity at
+    /// delivery so the committed transcript joins the host's live frames.
+    pub interaction_id: Option<meerkat_core::interaction::InteractionId>,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
     pub ack_mode: crate::mob_machine::SubmitWorkAckMode,

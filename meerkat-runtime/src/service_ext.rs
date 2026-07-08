@@ -4,7 +4,7 @@
 //! operations. It lives in meerkat-runtime (NOT in core) to maintain
 //! the separation: core owns SessionService, runtime owns runtime extensions.
 
-use meerkat_core::lifecycle::InputId;
+use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 
 use crate::accept::AcceptOutcome;
@@ -16,6 +16,9 @@ use crate::meerkat_machine_types::{
     SessionLlmReconfigureRequest, SwitchTurnRequest,
 };
 use crate::runtime_state::RuntimeState;
+use crate::terminal_status::{
+    InteractionSelector, InteractionTerminalReport, RunTerminalReport, Sourced,
+};
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
 
 /// v9 runtime extensions for SessionService.
@@ -92,6 +95,34 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
         idempotency_key: &str,
     ) -> Result<Option<StoredInputState>, RuntimeDriverError>;
+
+    /// Durable terminal-status query for one interaction.
+    ///
+    /// Registered sessions answer from live DSL truth; unregistered sessions
+    /// on a machine with a persistent RuntimeStore answer from the durably
+    /// committed input-state witnesses WITHOUT reviving the runtime. A
+    /// never-admitted session id fails typed `NotFound`; unregistered
+    /// sessions on a store-less (ephemeral) machine keep the `NotReady`
+    /// class. `Ok(None)` means the session is known but no input matches the
+    /// selector.
+    async fn interaction_terminal_status(
+        &self,
+        session_id: &SessionId,
+        selector: InteractionSelector,
+    ) -> Result<Option<Sourced<InteractionTerminalReport>>, RuntimeDriverError>;
+
+    /// Durable terminal-status query for a run.
+    ///
+    /// Evaluates the input-state witnesses whose `last_run_id` references
+    /// `run_id` (live snapshot when registered, durable store rows
+    /// otherwise) through the canonical pure evaluator. An unknown run on a
+    /// known session reports `NoDurableWitness` — callers must not read that
+    /// as `Failed` (re-staging rebinds `last_run_id`).
+    async fn run_terminal_status(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+    ) -> Result<Sourced<RunTerminalReport>, RuntimeDriverError>;
 
     /// List all active (non-terminal) inputs for a session.
     async fn list_active_inputs(

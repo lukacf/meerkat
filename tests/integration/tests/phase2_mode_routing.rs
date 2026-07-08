@@ -87,6 +87,17 @@ impl SubscribableInjector for MockInjector {
             events: rx,
         })
     }
+
+    fn inject_with_interaction_id(
+        &self,
+        _interaction_id: InteractionId,
+        body: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        self.inject(body, source, handling_mode, render_metadata)
+    }
 }
 
 #[async_trait]

@@ -8089,6 +8089,23 @@ mod tests {
                 events,
             })
         }
+
+        fn inject_with_interaction_id(
+            &self,
+            _interaction_id: meerkat_core::InteractionId,
+            content: meerkat_core::types::ContentInput,
+            source: meerkat_core::PlainEventSource,
+            handling_mode: meerkat_core::types::HandlingMode,
+            render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        ) -> Result<(), meerkat_core::event_injector::EventInjectorError> {
+            meerkat_core::EventInjector::inject(
+                self,
+                content,
+                source,
+                handling_mode,
+                render_metadata,
+            )
+        }
     }
 
     struct NoopCommsRuntime {

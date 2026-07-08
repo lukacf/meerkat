@@ -2615,6 +2615,8 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::PrepareLocalSessionBindings { .. }
                 | MeerkatMachineCommand::InputState { .. }
                 | MeerkatMachineCommand::InputStateByIdempotencyKey { .. }
+                | MeerkatMachineCommand::InteractionTerminalStatus { .. }
+                | MeerkatMachineCommand::RunTerminalStatus { .. }
                 | MeerkatMachineCommand::ListActiveInputs { .. }
                 | MeerkatMachineCommand::ReconfigureSessionLlmIdentity { .. }
                 | MeerkatMachineCommand::StagePersistentFilter { .. }

@@ -949,6 +949,10 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         self.inner.stored_input_state(input_id)
     }
 
+    fn stored_input_states_snapshot(&self) -> Result<Vec<StoredInputState>, RuntimeDriverError> {
+        self.inner.stored_input_states_snapshot()
+    }
+
     fn input_id_for_idempotency_key(&self, idempotency_key: &str) -> Option<InputId> {
         self.inner.input_id_for_idempotency_key(idempotency_key)
     }

@@ -3028,6 +3028,541 @@ async fn input_terminal_status_by_idempotency_key_survives_restart() {
     );
 }
 
+/// Shared setup for the restart-first-class terminal-status lane: drive a
+/// keyed prompt to its `Consumed` terminal on a persistent machine, wait
+/// until the terminal facts (including the resolving run id) are visible
+/// through the machine seam, then drop the machine and the store handle.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+async fn seed_terminal_keyed_prompt_store() -> (
+    tempfile::TempDir,
+    PathBuf,
+    SessionId,
+    IdempotencyKey,
+    InputId,
+    RunId,
+) {
+    struct CompletingExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CompletingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let session_id = SessionId::new();
+    let key = crate::identifiers::IdempotencyKey::new("terminal-status-restart-1");
+
+    let machine = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store),
+        memory_blob_store(),
+    ));
+    machine
+        .register_session_with_executor(session_id.clone(), Box::new(CompletingExecutor))
+        .await
+        .expect("runtime executor registration should succeed");
+
+    let mut prompt = make_prompt("keyed interaction to reconcile after restart");
+    let prompt_id = prompt.id().clone();
+    if let Input::Prompt(inner) = &mut prompt {
+        inner.header.idempotency_key = Some(key.clone());
+    }
+    let (outcome, completion) = machine
+        .accept_input_with_completion(&session_id, prompt)
+        .await
+        .expect("keyed prompt should be accepted");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("queued prompt should register completion");
+    tokio::time::timeout(Duration::from_secs(2), completion.wait_authorized())
+        .await
+        .expect("keyed prompt should reach a terminal outcome before restart");
+
+    // Wait until the terminal state (with its resolving run id) is visible
+    // through the machine seam before simulating the restart.
+    let run_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let stored =
+                <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
+                    &machine,
+                    &session_id,
+                    &key.to_string(),
+                )
+                .await
+                .expect("keyed lookup should succeed pre-restart");
+            if let Some(stored) = stored
+                && stored.seed.terminal_outcome.is_some()
+                && let Some(run_id) = stored.seed.last_run_id
+            {
+                break run_id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("keyed prompt should terminalize with a bound run id before restart");
+    drop(machine);
+    drop(store);
+
+    (dir, path, session_id, key, prompt_id, run_id)
+}
+
+/// M4 restart-first-class (G1): the terminal status of a keyed interaction is
+/// queryable after a host restart WITHOUT registering the session — the
+/// durable RuntimeStore witnesses answer directly.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn interaction_terminal_status_by_key_survives_restart_without_registration() {
+    let (_dir, path, session_id, key, prompt_id, run_id) = seed_terminal_keyed_prompt_store().await;
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    // Deliberately NOT registered: the query must answer from the store.
+    let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::interaction_terminal_status(
+        &restarted,
+        &session_id,
+        crate::terminal_status::InteractionSelector::IdempotencyKey(key.to_string()),
+    )
+    .await
+    .expect("unregistered durable terminal-status query should succeed")
+    .expect("the persisted keyed interaction must resolve without registration");
+    assert_eq!(
+        sourced.source,
+        crate::terminal_status::TerminalWitnessSource::DurableStore,
+        "an unregistered session must be answered by the durable witness"
+    );
+    assert_eq!(sourced.report.input_id, prompt_id);
+    assert_eq!(
+        sourced.report.terminal,
+        Some(crate::input_state::InputTerminalOutcome::Consumed),
+    );
+    assert_eq!(sourced.report.resolving_run_id, Some(run_id));
+    assert_eq!(
+        sourced.report.idempotency_key,
+        Some(key),
+        "the durable report must carry the reconciliation key"
+    );
+}
+
+/// M4 restart-first-class (G1, shipped-surface fold-in): the EXISTING
+/// `input_state_by_idempotency_key` answers from the durable store for an
+/// unregistered session instead of failing `NotReady { Destroyed }`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn input_state_by_idempotency_key_falls_back_to_store_when_unregistered() {
+    let (_dir, path, session_id, key, prompt_id, _run_id) =
+        seed_terminal_keyed_prompt_store().await;
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let stored = <MeerkatMachine as SessionServiceRuntimeExt>::input_state_by_idempotency_key(
+        &restarted,
+        &session_id,
+        &key.to_string(),
+    )
+    .await
+    .expect("unregistered keyed lookup should fall back to the durable store")
+    .expect("the persisted binding must resolve without registration");
+    assert_eq!(stored.state.input_id, prompt_id);
+    assert_eq!(
+        stored.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Consumed),
+    );
+}
+
+/// M4 restart-first-class (G2): a run id captured before the restart resolves
+/// from the durable input witnesses without registration.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn run_terminal_status_resolves_from_durable_witnesses() {
+    let (_dir, path, session_id, _key, prompt_id, run_id) =
+        seed_terminal_keyed_prompt_store().await;
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
+        &restarted,
+        &session_id,
+        &run_id,
+    )
+    .await
+    .expect("unregistered durable run-status query should succeed");
+    assert_eq!(
+        sourced.source,
+        crate::terminal_status::TerminalWitnessSource::DurableStore,
+    );
+    assert_eq!(
+        sourced.report.status,
+        crate::terminal_status::RunTerminalStatus::Resolved {
+            outcome: crate::terminal_status::RunResolutionClass::Consumed
+        },
+    );
+    assert_eq!(
+        sourced.report.witnesses.len(),
+        1,
+        "exactly the seeding input must witness the run"
+    );
+    assert_eq!(sourced.report.witnesses[0].input_id, prompt_id);
+}
+
+/// Unknown run on a known session reports `NoDurableWitness` with an empty
+/// witness set; an unknown session id fails typed `NotFound`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn run_terminal_status_reports_no_durable_witness_for_unknown_run() {
+    let (_dir, path, session_id, _key, _prompt_id, _run_id) =
+        seed_terminal_keyed_prompt_store().await;
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+
+    let fresh_run = RunId::new();
+    let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
+        &restarted,
+        &session_id,
+        &fresh_run,
+    )
+    .await
+    .expect("known session with unknown run should answer, not error");
+    assert_eq!(
+        sourced.report.status,
+        crate::terminal_status::RunTerminalStatus::NoDurableWitness,
+    );
+    assert!(sourced.report.witnesses.is_empty());
+
+    let unknown_session = SessionId::new();
+    let err = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
+        &restarted,
+        &unknown_session,
+        &fresh_run,
+    )
+    .await
+    .expect_err("a never-admitted session must fail typed NotFound");
+    assert!(
+        matches!(err, RuntimeDriverError::NotFound { .. }),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+/// Live-runtime witness: an input staged to a run that has not terminalized
+/// reports `InFlight` from the live DSL snapshot.
+#[tokio::test]
+async fn run_terminal_status_reports_in_flight_on_live_runtime() {
+    struct PendingExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for PendingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            std::future::pending::<()>().await;
+            Err(CoreExecutorError::Stopped)
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session_with_executor(session_id.clone(), Box::new(PendingExecutor))
+        .await
+        .expect("runtime executor registration should succeed");
+
+    let prompt = make_prompt("never finishes");
+    let prompt_id = prompt.id().clone();
+    let outcome =
+        <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&machine, &session_id, prompt)
+            .await
+            .expect("prompt should be accepted");
+    assert!(outcome.is_accepted());
+
+    // Poll until the run association binds (staging happens before the
+    // executor apply, which never completes).
+    let run_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let stored = <MeerkatMachine as SessionServiceRuntimeExt>::input_state(
+                &machine,
+                &session_id,
+                &prompt_id,
+            )
+            .await
+            .expect("live input_state should succeed");
+            if let Some(run_id) = stored.and_then(|stored| stored.seed.last_run_id) {
+                break run_id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("staged prompt should bind a run id");
+
+    let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
+        &machine,
+        &session_id,
+        &run_id,
+    )
+    .await
+    .expect("live run-status query should succeed");
+    assert_eq!(
+        sourced.source,
+        crate::terminal_status::TerminalWitnessSource::LiveRuntime,
+    );
+    assert_eq!(
+        sourced.report.status,
+        crate::terminal_status::RunTerminalStatus::InFlight,
+    );
+}
+
+/// M4 cause class (G3): an abandoned interaction surfaces its typed abandon
+/// reason — not a string — through the terminal-status report.
+#[tokio::test]
+async fn interaction_terminal_status_carries_abandon_cause() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+
+    let key = crate::identifiers::IdempotencyKey::new("abandon-cause-1");
+    let mut prompt = make_prompt("will be retired before running");
+    if let Input::Prompt(inner) = &mut prompt {
+        inner.header.idempotency_key = Some(key.clone());
+    }
+    let outcome =
+        <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&adapter, &session_id, prompt)
+            .await
+            .expect("keyed prompt should be accepted");
+    assert!(outcome.is_accepted());
+
+    let retire_report =
+        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id)
+            .await
+            .expect("retire should abandon the queued prompt");
+    assert_eq!(retire_report.inputs_abandoned, 1);
+
+    let sourced = <MeerkatMachine as SessionServiceRuntimeExt>::interaction_terminal_status(
+        &adapter,
+        &session_id,
+        crate::terminal_status::InteractionSelector::IdempotencyKey(key.to_string()),
+    )
+    .await
+    .expect("live terminal-status query should succeed")
+    .expect("the abandoned interaction must resolve from its key");
+    assert_eq!(
+        sourced.source,
+        crate::terminal_status::TerminalWitnessSource::LiveRuntime,
+    );
+    assert_eq!(
+        sourced.report.terminal,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::Retired,
+        }),
+        "the typed abandon cause class must surface on the report"
+    );
+}
+
+/// Degradation pin: only persistent machines answer durably. An unregistered
+/// session on a store-less (ephemeral) machine keeps today's `NotReady`
+/// behavior class for both new query methods.
+#[tokio::test]
+async fn terminal_status_on_storeless_machine_unregistered_is_not_ready() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+
+    let err = <MeerkatMachine as SessionServiceRuntimeExt>::interaction_terminal_status(
+        &machine,
+        &session_id,
+        crate::terminal_status::InteractionSelector::InputId(InputId::new()),
+    )
+    .await
+    .expect_err("store-less machines cannot answer for unregistered sessions");
+    assert!(
+        matches!(
+            err,
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed
+            }
+        ),
+        "expected NotReady {{ Destroyed }}, got {err:?}"
+    );
+
+    let err = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
+        &machine,
+        &session_id,
+        &RunId::new(),
+    )
+    .await
+    .expect_err("store-less machines cannot answer for unregistered sessions");
+    assert!(
+        matches!(
+            err,
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed
+            }
+        ),
+        "expected NotReady {{ Destroyed }}, got {err:?}"
+    );
+}
+
+/// Never-admitted pin: an unregistered session id on a persistent machine
+/// with no lifecycle record and no input rows fails typed `NotFound` — never
+/// an empty success.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn terminal_status_never_admitted_session_is_not_found() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
+            .expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let machine = MeerkatMachine::persistent(store, memory_blob_store());
+    let session_id = SessionId::new();
+    let expected_runtime_id = runtime_id_for_session(&session_id);
+
+    let err = <MeerkatMachine as SessionServiceRuntimeExt>::interaction_terminal_status(
+        &machine,
+        &session_id,
+        crate::terminal_status::InteractionSelector::InputId(InputId::new()),
+    )
+    .await
+    .expect_err("a never-admitted session must fail typed NotFound");
+    match err {
+        RuntimeDriverError::NotFound { runtime_id } => {
+            assert_eq!(runtime_id, expected_runtime_id);
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+
+    let err = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
+        &machine,
+        &session_id,
+        &RunId::new(),
+    )
+    .await
+    .expect_err("a never-admitted session must fail typed NotFound");
+    assert!(
+        matches!(err, RuntimeDriverError::NotFound { .. }),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+/// One-canonical-evaluator agreement: after restart + re-registration, the
+/// live query and a store-handle-direct `evaluate_run` over
+/// `load_input_states` produce identical facts (only the source differs).
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn live_and_durable_run_terminal_reports_agree_after_recovery() {
+    let (_dir, path, session_id, _key, prompt_id, run_id) =
+        seed_terminal_keyed_prompt_store().await;
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(Arc::clone(&restarted_store), memory_blob_store());
+    restarted
+        .register_session(session_id.clone())
+        .await
+        .expect("session re-registration should recover persisted input states");
+
+    let live = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
+        &restarted,
+        &session_id,
+        &run_id,
+    )
+    .await
+    .expect("live run-status query should succeed");
+    assert_eq!(
+        live.source,
+        crate::terminal_status::TerminalWitnessSource::LiveRuntime,
+    );
+
+    let durable_witnesses = restarted_store
+        .load_input_states(&runtime_id_for_session(&session_id))
+        .await
+        .expect("store-handle-direct witness read should succeed");
+    let durable = crate::terminal_status::evaluate_run(&run_id, &durable_witnesses);
+
+    assert_eq!(live.report.status, durable.status);
+    let fact_projection = |report: &crate::terminal_status::RunTerminalReport| {
+        report
+            .witnesses
+            .iter()
+            .map(|witness| {
+                (
+                    witness.input_id.clone(),
+                    witness.phase,
+                    witness.terminal.clone(),
+                    witness.resolving_run_id.clone(),
+                    witness.attempt_count,
+                    witness.idempotency_key.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        fact_projection(&live.report),
+        fact_projection(&durable),
+        "the single canonical evaluator must produce identical facts from both witnesses"
+    );
+    assert_eq!(live.report.witnesses[0].input_id, prompt_id);
+}
+
 /// Test peer-comms install target that accepts the generated install: the
 /// minimal comms runtime surface the field repro needs (the 0.7.19–0.7.23
 /// resume-strand class fired `PublishLocalEndpoint` through this seam).
@@ -24259,6 +24794,12 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         MeerkatMachineCommandResult::Bindings(_) => "bindings".to_string(),
         MeerkatMachineCommandResult::InputState(state) => {
             format!("input_state_present:{}", state.is_some())
+        }
+        MeerkatMachineCommandResult::InteractionTerminalStatus(report) => {
+            format!("interaction_terminal_status_present:{}", report.is_some())
+        }
+        MeerkatMachineCommandResult::RunTerminalStatus(report) => {
+            format!("run_terminal_status:{:?}", report.report.status)
         }
         MeerkatMachineCommandResult::ActiveInputs(inputs) => {
             format!("active_inputs:{}", inputs.len())

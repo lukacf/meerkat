@@ -147,6 +147,58 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
+    async fn interaction_terminal_status(
+        &self,
+        session_id: &SessionId,
+        selector: crate::terminal_status::InteractionSelector,
+    ) -> Result<
+        Option<crate::terminal_status::Sourced<crate::terminal_status::InteractionTerminalReport>>,
+        RuntimeDriverError,
+    > {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::InteractionTerminalStatus {
+                    session_id: session_id.clone(),
+                    selector,
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::InteractionTerminalStatus(report) => Ok(report),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::interaction_terminal_status: {other:?}"
+            ))),
+        }
+    }
+
+    async fn run_terminal_status(
+        &self,
+        session_id: &SessionId,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<
+        crate::terminal_status::Sourced<crate::terminal_status::RunTerminalReport>,
+        RuntimeDriverError,
+    > {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::RunTerminalStatus {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::RunTerminalStatus(report) => Ok(report),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::run_terminal_status: {other:?}"
+            ))),
+        }
+    }
+
     async fn list_active_inputs(
         &self,
         session_id: &SessionId,

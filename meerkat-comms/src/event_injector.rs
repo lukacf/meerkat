@@ -160,6 +160,24 @@ impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
             events: rx,
         })
     }
+
+    fn inject_with_interaction_id(
+        &self,
+        interaction_id: meerkat_core::InteractionId,
+        content: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        CommsEventInjector::inject_with_interaction_id(
+            self,
+            interaction_id.0,
+            content,
+            source,
+            handling_mode,
+            render_metadata,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -2340,6 +2340,43 @@ describe("Parity wrappers", () => {
     assert.equal(calls[1].params.event_type, "test");
   });
 
+  it("accepts wire-legal empty display_name/model_family from serde-default self-hosted config", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      contract_version: { major: 0, minor: 5, patch: 1 },
+      providers: [
+        {
+          provider: "self_hosted",
+          default_model_id: "my-model",
+          models: [
+            {
+              id: "my-model",
+              display_name: "",
+              tier: "supported",
+              profile: {
+                model_family: "",
+                supports_temperature: true,
+                supports_thinking: false,
+                supports_reasoning: false,
+                vision: false,
+                image_input: false,
+                image_tool_results: false,
+                inline_video: false,
+                realtime: false,
+                supports_web_search: false,
+                image_generation: false,
+                params_schema: {},
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const catalog = await client.getModelsCatalog();
+    assert.equal(catalog.providers[0].models[0].displayName, "");
+    assert.equal(catalog.providers[0].models[0].profile?.modelFamily, "");
+  });
+
   it("rejects missing or malformed models/catalog contract_version", async () => {
     const malformedResponses = [
       { providers: [] },
@@ -2359,6 +2396,104 @@ describe("Parity wrappers", () => {
           error instanceof MeerkatError &&
           error.code === "INVALID_RESPONSE" &&
           String(error.message).includes("contract_version"),
+      );
+    }
+  });
+
+  it("rejects malformed models/catalog provider, model, and profile fields", async () => {
+    const validProfile = {
+      model_family: "claude",
+      supports_temperature: true,
+      supports_thinking: true,
+      supports_reasoning: true,
+      params_schema: {},
+    };
+    const validModel = {
+      id: "claude-sonnet-4-6",
+      display_name: "Claude Sonnet 4.6",
+      tier: "supported",
+      profile: validProfile,
+    };
+    const validProvider = {
+      provider: "anthropic",
+      default_model_id: "claude-sonnet-4-6",
+      models: [validModel],
+    };
+    const base = {
+      contract_version: { major: 0, minor: 5, patch: 1 },
+      providers: [validProvider],
+    };
+    const malformedResponses = [
+      { ...base, providers: null },
+      { ...base, providers: [{ ...validProvider, provider: "" }] },
+      { ...base, providers: [{ ...validProvider, models: null }] },
+      {
+        ...base,
+        providers: [{ ...validProvider, models: [{ ...validModel, id: "" }] }],
+      },
+      {
+        ...base,
+        providers: [
+          { ...validProvider, models: [{ ...validModel, tier: "experimental" }] },
+        ],
+      },
+      {
+        ...base,
+        providers: [
+          {
+            ...validProvider,
+            models: [
+              {
+                ...validModel,
+                context_window: -1,
+              },
+            ],
+          },
+        ],
+      },
+      {
+        ...base,
+        providers: [
+          {
+            ...validProvider,
+            models: [
+              {
+                ...validModel,
+                profile: { ...validProfile, supports_reasoning: "yes" },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        ...base,
+        providers: [
+          {
+            ...validProvider,
+            models: [
+              {
+                ...validModel,
+                profile: { ...validProfile, params_schema: undefined },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    for (const response of malformedResponses) {
+      const client = new MeerkatClient();
+      client.request = async (method) => {
+        assert.equal(method, "models/catalog");
+        return response;
+      };
+
+      await assert.rejects(
+        () => client.getModelsCatalog(),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("models/catalog"),
       );
     }
   });

@@ -9750,7 +9750,7 @@ mod tests {
 
     #[cfg(all(feature = "skills", feature = "comms"))]
     #[tokio::test]
-    async fn default_skill_runtime_resolves_embedded_mob_communication_skill() {
+    async fn default_skill_runtime_resolves_embedded_multi_agent_comms_skill() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).comms(true);
         let runtime = factory
@@ -9759,18 +9759,18 @@ mod tests {
             .expect("skill runtime build should not fail")
             .expect("skills-enabled config should build a runtime");
         let skill_key = meerkat_core::skills::SkillKey::builtin(
-            meerkat_core::skills::SkillName::parse("mob-communication").unwrap(),
+            meerkat_core::skills::SkillName::parse("multi-agent-comms").unwrap(),
         );
 
         let resolved = runtime
             .resolve_and_render(std::slice::from_ref(&skill_key))
             .await
-            .expect("embedded mob skill should resolve");
+            .expect("embedded comms skill should resolve");
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].key, skill_key);
-        assert_eq!(resolved[0].name, "mob-communication");
-        assert!(resolved[0].rendered_body.contains("Mob Communication"));
+        assert_eq!(resolved[0].name, "multi-agent-comms");
+        assert!(resolved[0].rendered_body.contains("Multi-Agent Comms"));
     }
 
     #[cfg(not(feature = "skills"))]

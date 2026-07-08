@@ -97,50 +97,50 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 
 | Path | Symbol | Class | Status | Anchor | Contract |
 | --- | --- | --- | --- | --- | --- |
-| `meerkat-mcp/src/router.rs` | `McpRouter.servers` | `capability-index` | `closed` | `ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract` | src: `canonical surface state + live server handles`; trigger: `apply_staged completion, pending completion, removal finalization, shutdown`; stale: `forbidden` |
-| `meerkat-mcp/src/router.rs` | `McpRouter.projection` | `derived-projection` | `closed` | `RouterProjectionSnapshot` | src: `ExternalToolSurfaceAuthority visibility + server manifests`; trigger: `snapshot rebuild at every visibility/routing invalidation`; stale: `forbidden` |
-| `meerkat-mcp/src/router.rs` | `RouterProjectionSnapshot.tool_to_server` | `derived-projection` | `closed` | `RouterProjectionSnapshot` | src: `ExternalToolSurfaceAuthority visibility + server manifests`; trigger: `snapshot rebuild at every visibility/routing invalidation`; stale: `forbidden` |
-| `meerkat-mcp/src/router.rs` | `RouterProjectionSnapshot.visible_tools` | `derived-projection` | `closed` | `RouterProjectionSnapshot` | src: `ExternalToolSurfaceAuthority visibility + server manifests`; trigger: `snapshot rebuild at every visibility/routing invalidation`; stale: `forbidden` |
-| `meerkat-mcp/src/router.rs` | `RouterProjectionSnapshot.epoch` | `derived-projection` | `closed` | `ExternalToolSurfaceAuthority snapshot_epoch` | src: `ExternalToolSurfaceAuthority snapshot publication epoch`; trigger: `projection snapshot rebuild/publication`; stale: `forbidden` |
+| `meerkat-mcp/src/router.rs` | `McpRouter.servers` | `capability-index` | `closed` | `ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract` | src: `canonical surface state + live server handles`; trigger: `apply_staged completion, pending completion, removal finalization, shutdown`; stale: `forbidden` |
+| `meerkat-mcp/src/router.rs` | `McpRouter.projection` | `derived-projection` | `closed` | `RouterProjectionSnapshot` | src: `ExternalToolSurfaceHandle visibility + server manifests`; trigger: `snapshot rebuild at every visibility/routing invalidation`; stale: `forbidden` |
+| `meerkat-mcp/src/router.rs` | `RouterProjectionSnapshot.tool_to_server` | `derived-projection` | `closed` | `RouterProjectionSnapshot` | src: `ExternalToolSurfaceHandle visibility + server manifests`; trigger: `snapshot rebuild at every visibility/routing invalidation`; stale: `forbidden` |
+| `meerkat-mcp/src/router.rs` | `RouterProjectionSnapshot.visible_tools` | `derived-projection` | `closed` | `RouterProjectionSnapshot` | src: `ExternalToolSurfaceHandle visibility + server manifests`; trigger: `snapshot rebuild at every visibility/routing invalidation`; stale: `forbidden` |
+| `meerkat-mcp/src/router.rs` | `RouterProjectionSnapshot.epoch` | `derived-projection` | `closed` | `ExternalToolSurfaceHandle snapshot_epoch` | src: `ExternalToolSurfaceHandle snapshot publication epoch`; trigger: `projection snapshot rebuild/publication`; stale: `forbidden` |
 | `meerkat-mcp/src/router.rs` | `McpRouter.pending_obligations` | `capability-index` | `closed` | `SurfaceCompletionObligation handoff protocol obligation identity` | src: `generated SurfaceCompletionObligation tokens from authority effects`; trigger: `schedule-surface-completion spawn + pending-result consumption`; stale: `forbidden` |
 | `meerkat-mcp/src/router.rs` | `McpRouter.pending_snapshot_alignment` | `capability-index` | `closed` | `SurfaceSnapshotAlignmentObligation handoff protocol obligation identity` | src: `generated SurfaceSnapshotAlignmentObligation token from authority effects`; trigger: `snapshot-alignment scheduling + alignment application`; stale: `forbidden` |
 | `meerkat-mcp/src/router.rs` | `McpRouter.pending_tx` | `capability-handle` | `closed` | `ExternalToolSurfaceHandle handoff protocol async completion transport` | - |
 | `meerkat-mcp/src/router.rs` | `McpRouter.pending_rx` | `transport-buffer` | `closed` | `ExternalToolSurfaceHandle handoff protocol async completion transport` | - |
-| `meerkat-mcp/src/router.rs` | `McpRouter.completed_updates` | `transport-buffer` | `closed` | `ExternalToolSurfaceAuthority lifecycle deltas` | - |
-| `meerkat-mcp/src/router.rs` | `McpRouter.staged_payloads` | `transport-buffer` | `closed` | `ExternalToolSurfaceAuthority staged intent sequence` | - |
+| `meerkat-mcp/src/router.rs` | `McpRouter.completed_updates` | `transport-buffer` | `closed` | `ExternalToolSurfaceHandle lifecycle deltas` | - |
+| `meerkat-mcp/src/router.rs` | `McpRouter.staged_payloads` | `transport-buffer` | `closed` | `ExternalToolSurfaceHandle staged intent sequence` | - |
 
 ## MCP Semantic Operations
 
 | Path | Symbol | Boundary | Status | Writes | Anchor |
 | --- | --- | --- | --- | --- | --- |
-| `meerkat-mcp/src/router.rs` | `set_removal_timeout` | `public-inherent` | `closed` | `surface_owner` | `ExternalToolSurfaceAuthority` |
-| `meerkat-mcp/src/router.rs` | `add_server` | `public-inherent` | `closed` | `servers`, `projection`, `pending_obligations` | `ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/router.rs` | `stage_add` | `public-inherent` | `closed` | `staged_payloads`, `surface_owner` | `ExternalToolSurfaceAuthority staged intent sequence` |
-| `meerkat-mcp/src/router.rs` | `stage_remove` | `public-inherent` | `closed` | `staged_payloads`, `surface_owner` | `ExternalToolSurfaceAuthority staged intent sequence` |
-| `meerkat-mcp/src/router.rs` | `stage_reload` | `public-inherent` | `closed` | `staged_payloads`, `surface_owner` | `ExternalToolSurfaceAuthority staged intent sequence` |
-| `meerkat-mcp/src/router.rs` | `apply_staged` | `public-inherent` | `closed` | `staged_payloads`, `pending_obligations`, `servers`, `projection` | `ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/router.rs` | `process_pending_result` | `manual-callback` | `closed` | `pending_obligations`, `servers`, `projection`, `completed_updates` | `ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/router.rs` | `take_lifecycle_actions` | `public-inherent` | `closed` | `completed_updates` | `ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/router.rs` | `take_external_updates` | `public-inherent` | `closed` | `completed_updates`, `projection`, `servers` | `ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/router.rs` | `progress_removals` | `public-inherent` | `closed` | `servers`, `projection` | `ExternalToolSurfaceAuthority + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/router.rs` | `call_tool` | `public-inherent` | `closed` | `servers`, `projection`, `ServerEntry.active_calls` | `ExternalToolSurfaceAuthority` |
-| `meerkat-mcp/src/router.rs` | `shutdown` | `public-inherent` | `closed` | `servers`, `pending_tx`, `pending_obligations`, `completed_updates` | `ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/router.rs` | `set_removal_timeout` | `public-inherent` | `closed` | `surface_owner` | `ExternalToolSurfaceHandle` |
+| `meerkat-mcp/src/router.rs` | `add_server` | `public-inherent` | `closed` | `servers`, `projection`, `pending_obligations` | `ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/router.rs` | `stage_add` | `public-inherent` | `closed` | `staged_payloads`, `surface_owner` | `ExternalToolSurfaceHandle staged intent sequence` |
+| `meerkat-mcp/src/router.rs` | `stage_remove` | `public-inherent` | `closed` | `staged_payloads`, `surface_owner` | `ExternalToolSurfaceHandle staged intent sequence` |
+| `meerkat-mcp/src/router.rs` | `stage_reload` | `public-inherent` | `closed` | `staged_payloads`, `surface_owner` | `ExternalToolSurfaceHandle staged intent sequence` |
+| `meerkat-mcp/src/router.rs` | `apply_staged` | `public-inherent` | `closed` | `staged_payloads`, `pending_obligations`, `servers`, `projection` | `ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/router.rs` | `process_pending_result` | `manual-callback` | `closed` | `pending_obligations`, `servers`, `projection`, `completed_updates` | `ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/router.rs` | `take_lifecycle_actions` | `public-inherent` | `closed` | `completed_updates` | `ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/router.rs` | `take_external_updates` | `public-inherent` | `closed` | `completed_updates`, `projection`, `servers` | `ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/router.rs` | `progress_removals` | `public-inherent` | `closed` | `servers`, `projection` | `ExternalToolSurfaceHandle + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/router.rs` | `call_tool` | `public-inherent` | `closed` | `servers`, `projection`, `ServerEntry.active_calls` | `ExternalToolSurfaceHandle` |
+| `meerkat-mcp/src/router.rs` | `shutdown` | `public-inherent` | `closed` | `servers`, `pending_tx`, `pending_obligations`, `completed_updates` | `ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
 | `meerkat-mcp/src/adapter.rs` | `refresh_tools` | `public-inherent` | `closed` | `router`, `has_pending` | `RouterProjectionSnapshot` |
-| `meerkat-mcp/src/adapter.rs` | `stage_add` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceAuthority staged intent sequence` |
-| `meerkat-mcp/src/adapter.rs` | `stage_remove` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceAuthority staged intent sequence` |
-| `meerkat-mcp/src/adapter.rs` | `stage_reload` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceAuthority staged intent sequence` |
+| `meerkat-mcp/src/adapter.rs` | `stage_add` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceHandle staged intent sequence` |
+| `meerkat-mcp/src/adapter.rs` | `stage_remove` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceHandle staged intent sequence` |
+| `meerkat-mcp/src/adapter.rs` | `stage_reload` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceHandle staged intent sequence` |
 | `meerkat-mcp/src/adapter.rs` | `apply_staged` | `public-inherent` | `closed` | `has_pending` | `RouterProjectionSnapshot` |
-| `meerkat-mcp/src/adapter.rs` | `poll_lifecycle_actions` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/adapter.rs` | `progress_removals` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceAuthority + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/adapter.rs` | `wait_until_ready` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
-| `meerkat-mcp/src/adapter.rs` | `shutdown` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/adapter.rs` | `poll_lifecycle_actions` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/adapter.rs` | `progress_removals` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceHandle + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/adapter.rs` | `wait_until_ready` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
+| `meerkat-mcp/src/adapter.rs` | `shutdown` | `public-inherent` | `closed` | `router`, `has_pending` | `ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract` |
 
 ## MCP Coupling Invariants
 
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
-| `mcp_snapshot_alignment` | `McpRouter.servers`, `RouterProjectionSnapshot` | `closed` | `ExternalToolSurfaceAuthority + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract` |
-| `mcp_pending_lineage_alignment` | `McpRouter.pending_obligations`, `ExternalToolSurfaceAuthority pending lineage + surface_completion obligations` | `closed` | `ExternalToolSurfaceAuthority pending lineage + surface_completion handoff protocol obligations` |
+| `mcp_snapshot_alignment` | `McpRouter.servers`, `RouterProjectionSnapshot` | `closed` | `ExternalToolSurfaceHandle + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract` |
+| `mcp_pending_lineage_alignment` | `McpRouter.pending_obligations`, `ExternalToolSurfaceHandle pending lineage + surface_completion obligations` | `closed` | `ExternalToolSurfaceHandle pending lineage + surface_completion handoff protocol obligations` |
 
 ## Mob State Cells
 

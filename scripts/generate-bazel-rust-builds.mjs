@@ -221,7 +221,7 @@ function rustLibraryCrateFeaturesFor(key, pkg) {
   const features = new Set(
     key === "meerkat-core" ? publicCoreCrateFeatures(key, pkg) : crateFeaturesFor(key, pkg),
   );
-  if (key === "meerkat-runtime") {
+  if (key === "meerkat-runtime" || key === "meerkat-mcp") {
     features.delete("test-support");
   }
   return [...features].sort();
@@ -230,9 +230,22 @@ function rustLibraryCrateFeaturesFor(key, pkg) {
 const runtimePackage = byName.get("meerkat-runtime") ?? null;
 const runtimePackageKey = runtimePackage ? packageKey(runtimePackage) : null;
 
+// Crates whose production rust_library targets strip the `test-support`
+// feature and therefore need generated `_test_support` variants for the
+// test graph. Consumers in any seed's reverse-dependency closure get
+// `_with_runtime_test_support` variants whose deps are rewritten onto the
+// seed variants.
+const testSupportSeedPackageNames = ["meerkat-runtime", "meerkat-mcp"];
+const testSupportSeedKeys = new Set(
+  testSupportSeedPackageNames
+    .map((name) => byName.get(name))
+    .filter(Boolean)
+    .map((pkg) => packageKey(pkg)),
+);
+
 function runtimeTestSupportVariantNameFor(pkg) {
-  return packageKey(pkg) === "meerkat-runtime"
-    ? "meerkat_runtime_test_support"
+  return testSupportSeedKeys.has(packageKey(pkg))
+    ? `${crateName(pkg.name)}_test_support`
     : `${crateName(pkg.name)}_with_runtime_test_support`;
 }
 
@@ -241,7 +254,7 @@ function runtimeTestSupportVariantLabel(pkg) {
 }
 
 function runtimeAgentFactoryTestSupportVariantNameFor(pkg) {
-  return packageKey(pkg) === "meerkat-runtime"
+  return testSupportSeedKeys.has(packageKey(pkg))
     ? `${agentFactoryVariantName(pkg)}_test_support`
     : `${agentFactoryVariantName(pkg)}_with_runtime_test_support`;
 }
@@ -381,8 +394,8 @@ const publicDownstreamFixtureKeys = new Set([
 ]);
 
 const runtimeTestSupportPackageKeys = new Set();
-if (runtimePackageKey) {
-  const stack = [runtimePackageKey];
+{
+  const stack = [...testSupportSeedKeys];
   while (stack.length) {
     const key = stack.pop();
     if (runtimeTestSupportPackageKeys.has(key)) continue;
@@ -1520,7 +1533,7 @@ for (const pkg of localPackages.values()) {
         }
         if (line.startsWith("    crate_features = ")) {
           return `    crate_features = ${
-            listExpr(key === "meerkat-runtime" ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
+            listExpr(testSupportSeedKeys.has(key) ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
           },`;
         }
         if (line === `    visibility = ${rustTargetVisibility(key)},`) {
@@ -1598,7 +1611,7 @@ for (const pkg of localPackages.values()) {
           }
           if (line.startsWith("    crate_features = ")) {
             return `    crate_features = ${
-              listExpr(key === "meerkat-runtime" ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
+              listExpr(testSupportSeedKeys.has(key) ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
             },`;
           }
           if (line === `    deps = ${internalDepsExpr},`) {

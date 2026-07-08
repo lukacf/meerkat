@@ -68,7 +68,13 @@ async-stream = { workspace = true }
 tempfile = { workspace = true }
 tokio-tungstenite = "0.28"
 meerkat-comms = { workspace = true }
+meerkat-mcp = { workspace = true, features = ["test-support"] }
 meerkat-mob = { workspace = true, features = ["test-support"] }
+
+[package.metadata.cargo-machete]
+ignored = [
+    "meerkat-mcp", # dev-dependency enables mcp test-support for in-crate lifecycle regression tests
+]
 
 [lints]
 workspace = true

@@ -36,6 +36,14 @@ reqwest = { workspace = true }
 http = "1"
 sse-stream = "0.2"
 
+[features]
+test-support = []
+
+[[test]]
+name = "lifecycle_contract"
+path = "tests/lifecycle_contract.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 meerkat-runtime = { path = "../meerkat-runtime", default-features = false } # path-only (no version): breaks packaging dev-dep cycle; flags mirror the workspace dep

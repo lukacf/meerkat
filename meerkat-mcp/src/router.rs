@@ -2280,6 +2280,7 @@ impl McpRouter {
         let _ = self.publish_projection_snapshot();
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_inflight_calls_for_testing(&mut self, server_name: &str, count: usize) {
         let sid = SurfaceId::from(server_name);
         if let Some(entry) = self.servers.get_mut(server_name) {

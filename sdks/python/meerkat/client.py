@@ -4944,12 +4944,23 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_models_catalog(data: dict[str, Any]) -> ModelsCatalogResponse:
-        providers_raw = data.get("providers", [])
+        # Fail closed on malformed shapes instead of silently coalescing them
+        # (parity with the TypeScript SDK): a non-list `providers` or a
+        # non-object entry is a broken response, not an empty catalog.
+        providers_raw = data.get("providers")
+        if not isinstance(providers_raw, list):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid models/catalog response: providers must be a list",
+            )
         providers: list[dict[str, Any]] = []
-        if isinstance(providers_raw, list):
-            for provider in providers_raw:
-                if isinstance(provider, dict):
-                    providers.append(provider)
+        for provider in providers_raw:
+            if not isinstance(provider, dict):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid models/catalog response: provider entries must be objects",
+                )
+            providers.append(provider)
         contract_version = MeerkatClient._parse_contract_version(
             data.get("contract_version"),
             "Invalid models/catalog response",

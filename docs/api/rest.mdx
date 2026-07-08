@@ -1072,7 +1072,7 @@ Push a canonical comms command into a running session. Requires the `comms` feat
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",
   "kind": "peer_message",
-  "to": "reviewer",
+  "to": "01936f8a-7b2c-7000-8000-000000000002",
   "body": "Please review the latest diff",
   "handling_mode": "queue",
   "source": "ci-pipeline"
@@ -1093,7 +1093,7 @@ Push a canonical comms command into a running session. Requires the `comms` feat
 </ParamField>
 
 <ParamField body="to" type="string | null">
-  Peer name to send to (required for `peer_message`, `peer_lifecycle`, `peer_request`, and `peer_response`).
+  Canonical peer ID to send to (required for `peer_message`, `peer_lifecycle`, `peer_request`, and `peer_response`).
 </ParamField>
 
 <ParamField body="body" type="string | null">

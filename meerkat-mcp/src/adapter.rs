@@ -623,6 +623,7 @@ impl McpRouterAdapter {
     }
 
     /// Test helper for cross-crate lifecycle integration tests.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn set_inflight_calls_for_testing(
         &self,
         server_name: &str,
@@ -638,6 +639,7 @@ impl McpRouterAdapter {
     }
 
     /// Test helper for controlling removal timeout from integration tests.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn set_removal_timeout_for_testing(
         &self,
         removal_timeout: Duration,

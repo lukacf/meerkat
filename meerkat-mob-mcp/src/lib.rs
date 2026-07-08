@@ -7264,6 +7264,7 @@ mod tests {
             .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
             .await
             .expect("worker bridge session");
+        drop(handle);
         svc.fail_archive(
             bridge_session_id.clone(),
             "forced archive failure for partial destroy test",

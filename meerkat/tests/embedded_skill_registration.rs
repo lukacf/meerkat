@@ -52,6 +52,17 @@ async fn base_crate_registers_mob_communication_for_cross_surface_resume() {
         skill.descriptor.description,
         "How to communicate with peers in a collaborative mob"
     );
+    // Content pin against dead-copy swaps (the PR-853 hazard: meerkat-mob
+    // once carried an unreferenced, drifted duplicate whose body dropped
+    // the concrete tool-kind guidance). The load-bearing operating rules
+    // must be present in whatever body actually registered.
+    assert!(
+        skill.body.contains("peer_request")
+            && skill.body.contains("peer_message")
+            && skill.body.contains("do not reply"),
+        "the canonical body's concrete tool-kind guidance must be present in \
+         the registered mob-communication skill"
+    );
 }
 
 #[tokio::test]

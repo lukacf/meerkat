@@ -93,10 +93,6 @@ pub enum WorkGraphAttentionTurnOverlayError {
     },
     #[error("{0}")]
     WorkGraph(#[from] crate::WorkGraphError),
-    #[error(
-        "multiple active WorkGraph attention bindings resolve to session {session_id}; pause or reassign all but one before starting a scoped turn"
-    )]
-    MultipleActiveBindings { session_id: meerkat_core::SessionId },
     #[error("conflicting turn tool overlay dispatch context for {key}")]
     ConflictingDispatchContext { key: String },
 }
@@ -197,19 +193,38 @@ async fn resolve_workgraph_attention_projection_for_session(
             status: Some(crate::WorkAttentionStatus::Active),
         })
         .await?;
-    let matching = active
+    let mut matching = active
         .attention
         .into_iter()
         .filter(|binding| attention_target_matches_session(&binding.target, session_id, labels))
         .collect::<Vec<_>>();
-    let binding = match matching.as_slice() {
-        [] => return Ok(None),
-        [binding] => binding,
-        _ => {
-            return Err(WorkGraphAttentionTurnOverlayError::MultipleActiveBindings {
-                session_id: session_id.clone(),
-            });
-        }
+    // Multiple active bindings matching one session is a store-invariant
+    // violation (the active-binding-per-target occupancy guard rejects new
+    // duplicates transactionally), reachable only through legacy rows or
+    // mixed-version writers. It must not brick the member's every turn:
+    // arbitrate deterministically — newest binding wins, binding id as the
+    // tie-break — with a loud diagnostic, mirroring newest-session-wins.
+    if matching.len() > 1 {
+        matching.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.binding_id.as_str().cmp(left.binding_id.as_str()))
+        });
+        tracing::error!(
+            session_id = %session_id,
+            bindings = ?matching
+                .iter()
+                .map(|binding| binding.binding_id.as_str().to_string())
+                .collect::<Vec<_>>(),
+            winner = %matching[0].binding_id,
+            "multiple active WorkGraph attention bindings resolve to one session; \
+             arbitrating newest-binding-wins — prune or reassign the losers"
+        );
+        matching.truncate(1);
+    }
+    let Some(binding) = matching.first() else {
+        return Ok(None);
     };
     if !attention_binding_resolves_to_session(binding, session_service, session_id, labels).await? {
         return Ok(None);
@@ -1272,6 +1287,71 @@ mod tests {
                 .dispatch_context
                 .contains_key("workgraph.attention_projection"),
             "attention overlay must carry the projection dispatch context"
+        );
+    }
+
+    /// Ask 25 degrade pin: multiple ACTIVE bindings resolving to one session
+    /// (reachable through legacy rows, mixed-version writers, or cross-kind
+    /// targets like Session{id} + Owner(session-key id) that share a session
+    /// but not a target key) must NOT brick the member's every turn. The
+    /// overlay arbitrates deterministically — newest binding wins — with a
+    /// loud diagnostic instead of the former hard MultipleActiveBindings
+    /// failure.
+    #[tokio::test]
+    async fn attention_overlay_arbitrates_multiple_active_bindings_newest_wins() {
+        let session_id = meerkat_core::SessionId::new();
+        let workgraph_service =
+            crate::WorkGraphService::new(std::sync::Arc::new(crate::MemoryWorkGraphStore::new()));
+        workgraph_service
+            .create_goal(crate::GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "session-target goal".to_string(),
+                description: None,
+                target: crate::GoalAttentionTarget::Session {
+                    session_id: session_id.clone(),
+                },
+                mode: crate::WorkAttentionMode::Coordinate,
+                completion_policy: crate::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: crate::AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: crate::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("session-target goal");
+        workgraph_service
+            .create_goal(crate::GoalCreateRequest {
+                realm_id: None,
+                namespace: None,
+                title: "owner-target goal on the same session".to_string(),
+                description: None,
+                target: crate::GoalAttentionTarget::Owner {
+                    owner_key: crate::WorkOwnerKey::session(session_id.to_string())
+                        .expect("owner key"),
+                },
+                mode: crate::WorkAttentionMode::Coordinate,
+                completion_policy: crate::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: crate::AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: crate::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("owner-target goal (distinct target key, same session)");
+
+        let session_service = RespawnOverlapSessionService {
+            summaries: Vec::new(),
+            labels: BTreeMap::new(),
+        };
+        let mut request = empty_start_turn_request();
+        inject_workgraph_attention_turn_overlay(
+            &session_service,
+            Some(&workgraph_service),
+            &session_id,
+            &mut request,
+        )
+        .await
+        .expect("multi-binding resolution must arbitrate, not hard-fail the turn");
+        assert!(
+            request.runtime.turn_tool_overlay.is_some(),
+            "the arbitrated winner's overlay must be injected"
         );
     }
 

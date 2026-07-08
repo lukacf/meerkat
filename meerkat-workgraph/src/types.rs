@@ -502,6 +502,19 @@ impl WorkAttentionTarget {
             Self::LoweredOwner { owner_key } => Ok(owner_key.clone()),
         }
     }
+
+    /// Canonical query/uniqueness key for an attention target. This string is
+    /// persisted as an indexed store column and backs the
+    /// active-binding-per-target invariant, so it must be stable and
+    /// injective over the target vocabulary.
+    pub fn target_key(&self) -> String {
+        match self {
+            Self::Session { session_id } => format!("session:{session_id}"),
+            Self::LoweredOwner { owner_key } => {
+                format!("owner:{}:{}", owner_key.kind.as_str(), owner_key.id)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,6 +554,7 @@ pub enum WorkAttentionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "state", rename_all = "snake_case")]
+// `status_key()` below mirrors this serde tag vocabulary; keep them in sync.
 pub enum WorkAttentionStatus {
     #[default]
     Active,
@@ -550,6 +564,26 @@ pub enum WorkAttentionStatus {
     },
     Superseded,
     Stopped,
+}
+
+impl WorkAttentionStatus {
+    /// Canonical status key persisted as an indexed store column (SQL query
+    /// pushdown + the active-binding-per-target occupancy guard). Mirrors the
+    /// serde `state` tag vocabulary.
+    pub fn status_key(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused { .. } => "paused",
+            Self::Superseded => "superseded",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// Terminal statuses are eligible for store pruning: no lifecycle
+    /// transition leads out of them.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Superseded | Self::Stopped)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1477,6 +1511,49 @@ pub struct AttentionBindingResult {
 pub struct AttentionReassignResult {
     pub previous: WorkAttentionBinding,
     pub attention: WorkAttentionBinding,
+}
+
+/// Break-glass host-plane reassignment (host API only — never exposed on the
+/// agent tool surface or any wire catalog). WorkGraphs are agent-operated;
+/// the agent-native transfer is a coordinate-mode agent executing the move.
+/// This request exists for the one case the graph cannot heal agent-natively:
+/// a binding stuck on a wedged/retired agent with no coordinator holding
+/// authority over it. It carries mandatory attribution and is audit-logged in
+/// the workgraph event stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakGlassAttentionReassignRequest {
+    pub binding_id: WorkAttentionBindingId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
+    pub target: GoalAttentionTarget,
+    /// Authenticated principal performing the break-glass move. Recorded in
+    /// the audit event; must identify a human/host operator, not an agent.
+    pub principal: String,
+    /// Operator-supplied justification. Recorded in the audit event.
+    pub reason: String,
+}
+
+/// Prune request for TERMINAL (superseded/stopped) attention bindings. The
+/// event stream keeps the full audit history; pruning removes only the
+/// binding rows, which otherwise grow monotonically with reassignment churn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AttentionPruneRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    /// Only prune bindings last updated strictly before this instant; `None`
+    /// prunes every terminal binding in scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_before: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttentionPruneResult {
+    pub pruned: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

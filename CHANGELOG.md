@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Attention-binding uniqueness is now service/store-owned (mobkit ask 25):
+  at most one ACTIVE attention binding per target, enforced transactionally
+  inside the same store write that mints or revives a binding (`create_goal`,
+  reassignment, `resume_attention`), with a typed `Conflict` naming the
+  occupant binding. Host-layer admission guards demote to defense-in-depth.
+- Break-glass host-plane attention reassignment (mobkit ask 23, reframed):
+  `WorkGraphService::break_glass_reassign_attention` moves any non-terminal
+  binding regardless of mode-derived authority, for the one state the graph
+  cannot heal agent-natively (a binding stuck on a wedged/retired agent with
+  no coordinator holding authority). Mandatory principal + reason are
+  recorded in the workgraph event stream and a WARN log. Host API only —
+  never exposed on the agent tool surface or wire catalogs; the agent-plane
+  mode restriction is untouched.
+- Terminal attention-binding GC (mobkit ask 24):
+  `WorkGraphService::prune_terminal_attention` deletes superseded/stopped
+  binding rows (optionally bounded by `updated_before`); the event stream
+  keeps the audit history.
+
+### Changed
+
+- SQLite attention queries push realm/namespace/status/target filters into
+  SQL over new indexed `status`/`target_key` columns (mobkit ask 24) instead
+  of decoding every row in the store. The columns are added and backfilled
+  by an idempotent open-time migration; all readers are NULL-tolerant, so
+  stores shared with older binaries stay correct.
+- Multiple active attention bindings resolving to one session no longer
+  hard-fail every turn (`MultipleActiveBindings` removed): the turn overlay
+  arbitrates deterministically — newest binding wins — with a loud
+  diagnostic, mirroring the newest-session arbitration. Reachable only via
+  legacy rows, mixed-version writers, or cross-kind targets; new duplicates
+  are prevented at the store.
+
 ## [0.7.24] - 2026-07-08
 
 Meerkat 0.7.24 closes the 0.7.19–0.7.23 resume-strand class at its root:

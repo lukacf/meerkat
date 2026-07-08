@@ -224,12 +224,14 @@ impl MeerkatMachine {
         };
         let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
         // Stage RegisterSession unconditionally: the generated machine owns
-        // both the idempotence verdict (`RegisterSessionIdempotent` no-ops a
-        // same-binding re-registration) and the Destroyed rejection
-        // (RegisterSession is not declared from Destroyed). No shell probe of
-        // the authority state precedes the staging.
-        if let Err(reason) = self
-            .stage_session_dsl_input(
+        // the idempotence verdict (`RegisterSessionIdempotent` no-ops a
+        // same-binding re-registration), the revival verdict
+        // (`RegisterSessionResumesStopped` re-admits a stopped session to
+        // Idle), and the Destroyed rejection (RegisterSession is not declared
+        // from Destroyed). No shell probe of the authority state precedes the
+        // staging.
+        match self
+            .stage_session_dsl_transition(
                 &session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
                     session_id: dsl_session_id,
@@ -238,14 +240,35 @@ impl MeerkatMachine {
             )
             .await
         {
-            let err = self
-                .classify_session_dsl_rejection(&session_id, reason)
-                .await;
-            if inserted_by_call {
-                self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                    .await;
+            Ok(staged) => {
+                if staged.revived_stopped_session() {
+                    // Machine-emitted revival: refresh the durable lifecycle
+                    // record so cross-process readers never observe a stale
+                    // `Stopped` snapshot for a revived session.
+                    if let Err(err) = driver_handle
+                        .lock()
+                        .await
+                        .persist_current_machine_lifecycle("resume")
+                        .await
+                    {
+                        if inserted_by_call {
+                            self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                                .await;
+                        }
+                        return Err(err);
+                    }
+                }
             }
-            return Err(err);
+            Err(reason) => {
+                let err = self
+                    .classify_session_dsl_rejection(&session_id, reason)
+                    .await;
+                if inserted_by_call {
+                    self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                        .await;
+                }
+                return Err(err);
+            }
         }
         tracing::debug!(
             %session_id,

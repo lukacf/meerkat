@@ -998,13 +998,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `new_session_binding`
 - To: `Retired`
 
-### `RegisterSessionStopped`
-- From: `Stopped`
-- On: `RegisterSession`(session_id)
-- Guards:
-  - `new_session_binding`
-- To: `Stopped`
-
 ### `RegisterSessionIdempotentIdle`
 - From: `Idle`
 - On: `RegisterSession`(session_id)
@@ -1033,12 +1026,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `same_session_binding`
 - To: `Retired`
 
-### `RegisterSessionIdempotentStopped`
+### `RegisterSessionResumesStopped`
 - From: `Stopped`
 - On: `RegisterSession`(session_id)
 - Guards:
   - `same_session_binding`
-- To: `Stopped`
+  - `not_draining`
+- Emits: `RuntimeNotice`
+- To: `Idle`
+
+### `RegisterSessionNewBindingFromStopped`
+- From: `Stopped`
+- On: `RegisterSession`(session_id)
+- Guards:
+  - `new_session_binding`
+  - `not_draining`
+- Emits: `RuntimeNotice`
+- To: `Idle`
 
 ### `StageDeferredSession`
 - From: `Initializing`
@@ -1570,14 +1574,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `capability_base_filter_matches_surface`
 - To: `Running`
 
-### `HydrateSessionLlmStateStopped`
-- From: `Stopped`
-- On: `HydrateSessionLlmState`(current_identity, current_capability_surface, current_capability_surface_status, current_capability_base_filter)
-- Guards:
-  - `session_registered`
-  - `capability_base_filter_matches_surface`
-- To: `Stopped`
-
 ### `HydrateSessionLlmStateRetired`
 - From: `Retired`
 - On: `HydrateSessionLlmState`(current_identity, current_capability_surface, current_capability_surface_status, current_capability_base_filter)
@@ -1682,14 +1678,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - Emits: `ModelRoutingStatusChanged`
 - To: `Retired`
-
-### `SetModelRoutingBaselineStopped`
-- From: `Stopped`
-- On: `SetModelRoutingBaseline`(baseline_model, realtime_capable)
-- Guards:
-  - `session_registered`
-- Emits: `ModelRoutingStatusChanged`
-- To: `Stopped`
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
@@ -2487,13 +2475,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Retired`
 
-### `StagePersistentFilterStopped`
-- From: `Stopped`
-- On: `StagePersistentFilter`(filter, witnesses)
-- Guards:
-  - `session_registered`
-- To: `Stopped`
-
 ### `RequestDeferredToolsIdle`
 - From: `Idle`
 - On: `RequestDeferredTools`(authorities)
@@ -2541,18 +2522,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `existing_requested_witness_preserved`
   - `existing_staged_authority_preserved`
 - To: `Retired`
-
-### `RequestDeferredToolsStopped`
-- From: `Stopped`
-- On: `RequestDeferredTools`(authorities)
-- Guards:
-  - `session_registered`
-  - `deferred_authorities_non_empty`
-  - `deferred_authorities_have_identity`
-  - `deferred_authorities_match_machine_catalog`
-  - `existing_requested_witness_preserved`
-  - `existing_staged_authority_preserved`
-- To: `Stopped`
 
 ### `PrepareBindingsIdempotentInitializing`
 - From: `Initializing`
@@ -2613,18 +2582,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `epoch_binding_exact`
   - `typed_binding_identity_present`
 - To: `Retired`
-
-### `PrepareBindingsIdempotentStopped`
-- From: `Stopped`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
-- Guards:
-  - `session_matches_current`
-  - `runtime_binding_exact`
-  - `fence_binding_exact`
-  - `generation_binding_exact`
-  - `epoch_binding_exact`
-  - `typed_binding_identity_present`
-- To: `Stopped`
 
 ### `PrepareBindingsInitializing`
 - From: `Initializing`
@@ -2695,20 +2652,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_binding_not_already_exact`
 - Emits: `RuntimeBound`
 - To: `Retired`
-
-### `PrepareBindingsStopped`
-- From: `Stopped`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
-- Guards:
-  - `session_matches_current`
-  - `runtime_binding_absent_or_same`
-  - `fence_binding_absent_or_same`
-  - `generation_binding_absent_or_same`
-  - `epoch_binding_absent_or_same`
-  - `typed_binding_identity_present`
-  - `runtime_binding_not_already_exact`
-- Emits: `RuntimeBound`
-- To: `Stopped`
 
 ### `SetPeerIngressContextIdle`
 - From: `Idle`
@@ -3991,26 +3934,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `CommittedVisibleSetPublished`
 - To: `Retired`
 
-### `PublishCommittedVisibleSetStopped`
-- From: `Stopped`
-- On: `PublishCommittedVisibleSet`(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_deferred_authorities, staged_deferred_authorities, active_visibility_revision, staged_visibility_revision)
-- Guards:
-  - `session_registered`
-  - `active_not_behind_staged`
-  - `equal_revision_requires_equal_active_and_staged_input`
-  - `active_requested_subset_of_staged_requested`
-  - `active_deferred_authorities_cover_names`
-  - `staged_deferred_authorities_cover_names`
-  - `active_deferred_authorities_are_name_scoped`
-  - `staged_deferred_authorities_are_name_scoped`
-  - `active_deferred_authorities_have_identity`
-  - `staged_deferred_authorities_have_identity`
-  - `visibility_authority_matches_machine_catalog`
-- Emits: `CommittedVisibleSetPublished`
-- To: `Stopped`
-
 ### `RetireRequestedFromIdle`
-- From: `Idle`, `Attached`, `Running`
+- From: `Idle`, `Attached`, `Running`, `Stopped`
 - On: `Retire`(session_id)
 - Guards:
   - `runtime_binding_present`
@@ -4018,7 +3943,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Retired`
 
 ### `RetireRequestedFromIdleUnbound`
-- From: `Idle`, `Attached`, `Running`
+- From: `Idle`, `Attached`, `Running`, `Stopped`
 - On: `Retire`(session_id)
 - Guards:
   - `runtime_binding_absent`
@@ -5496,7 +5421,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `EnsureSessionWithExecutorStopped`
 - From: `Stopped`
 - On: `EnsureSessionWithExecutor`(session_id)
-- To: `Stopped`
+- Guards:
+  - `not_draining`
+- Emits: `RuntimeNotice`
+- To: `Attached`
 
 ### `SetSilentIntentsIdle`
 - From: `Idle`
@@ -5525,13 +5453,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
 - To: `Retired`
-
-### `SetSilentIntentsStopped`
-- From: `Stopped`
-- On: `SetSilentIntents`(session_id, intents)
-- Guards:
-  - `session_registered`
-- To: `Stopped`
 
 ### `AbortIdle`
 - From: `Idle`

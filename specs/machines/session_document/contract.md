@@ -44,6 +44,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
 - `ResolveRuntimeProjectionRollback`(session_id: SessionId, row_continues_authority: Bool, row_is_runtime_checkpoint: Bool)
+- `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, store_head_extends_snapshot: Bool, store_head_is_runtime_checkpoint: Bool, session_is_live: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
@@ -77,6 +78,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveSessionAuthorityClassified`(authority: LiveSessionAuthorityKind, reason: LiveSessionAuthorityReason)
 - `SessionStoreRecoverySourceResolved`(recoverable: Bool)
 - `RuntimeProjectionRollbackResolved`(disposition: RuntimeProjectionRollbackDisposition)
+- `RuntimeSnapshotReadSourceResolved`(read_from_store_head: Bool)
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
 - `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
 - `SessionLifecycleTerminalRecovered`
@@ -694,6 +696,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `SessionStoreRecoverySourceResolved`
+- To: `Ready`
+
+### `ResolveRuntimeSnapshotReadSourceStoreHead`
+- From: `Ready`
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live)
+- Guards:
+  - ``
+- Emits: `RuntimeSnapshotReadSourceResolved`
+- To: `Ready`
+
+### `ResolveRuntimeSnapshotReadSourceSnapshot`
+- From: `Ready`
+- On: `ResolveRuntimeSnapshotReadSource`(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live)
+- Guards:
+  - ``
+- Emits: `RuntimeSnapshotReadSourceResolved`
 - To: `Ready`
 
 ### `ResolveRuntimeProjectionRollbackRebuild`

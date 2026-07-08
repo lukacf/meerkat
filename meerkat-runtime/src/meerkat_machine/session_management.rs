@@ -1100,6 +1100,15 @@ impl MeerkatMachine {
                     "runtime driver registration was repaired by generated executor authority; publishing attachment"
                 );
             }
+            if staged_registration.revived_stopped_session() {
+                // Machine-emitted revival (`EnsureSessionWithExecutorStopped`
+                // re-admitted a stopped session to Attached): refresh the
+                // durable lifecycle record so cross-process readers never
+                // observe a stale `Stopped` snapshot for a revived session.
+                driver_guard
+                    .persist_current_machine_lifecycle("resume")
+                    .await?;
+            }
             !driver_guard.as_driver().active_input_ids().is_empty()
         };
 

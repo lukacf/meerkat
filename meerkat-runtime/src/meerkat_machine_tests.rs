@@ -3028,14 +3028,90 @@ async fn input_terminal_status_by_idempotency_key_survives_restart() {
     );
 }
 
-/// Resume regression: a durably-STOPPED session that re-registers after a
-/// host restart still rebuilds its agent, and the build hydrates the
-/// resolved LLM identity/capability surface into the machine. The hydrate
-/// transitions used to admit only Idle/Attached/Running, so the resume
-/// build failed on the phase guard ("guard rejected transition from phase
-/// Stopped") and background repair retried the same guard forever.
+/// Test peer-comms install target that accepts the generated install: the
+/// minimal comms runtime surface the field repro needs (the 0.7.19–0.7.23
+/// resume-strand class fired `PublishLocalEndpoint` through this seam).
+struct AcceptingPeerCommsInstallTarget {
+    descriptor: meerkat_core::comms::TrustedPeerDescriptor,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl AcceptingPeerCommsInstallTarget {
+    fn new(name: &str, seed: u8) -> Self {
+        let pubkey = [seed; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let descriptor = meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            peer_id.to_string(),
+            pubkey,
+            format!("inproc://{name}"),
+        )
+        .expect("valid peer descriptor");
+        Self {
+            descriptor,
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::agent::CommsRuntime for AcceptingPeerCommsInstallTarget {
+    async fn drain_messages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.notify)
+    }
+
+    fn peer_id(&self) -> Option<meerkat_core::comms::PeerId> {
+        Some(self.descriptor.peer_id)
+    }
+
+    fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        Some(self.descriptor.pubkey)
+    }
+
+    fn comms_name(&self) -> Option<String> {
+        Some(self.descriptor.name.as_str().to_string())
+    }
+
+    fn advertised_address(&self) -> Option<String> {
+        Some(self.descriptor.address.to_string())
+    }
+}
+
+impl meerkat_core::handles::PeerCommsInstallTarget for AcceptingPeerCommsInstallTarget {
+    fn install_generated_peer_comms_handle(
+        &self,
+        _install: meerkat_core::handles::GeneratedPeerCommsInstall,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn test_llm_identity() -> meerkat_core::SessionLlmIdentity {
+    meerkat_core::SessionLlmIdentity {
+        model: "claude-sonnet-4-5".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    }
+}
+
+/// THE resume-strand class test (0.7.19–0.7.23, field: "guard rejected
+/// transition from phase Stopped for input::PublishLocalEndpoint"): the
+/// machine owns revival of a stopped session at the canonical resume seam.
+///
+/// 1. Build inputs fired directly against a Stopped machine guard-reject
+///    loudly — the per-input Stopped-tolerance arms are gone.
+/// 2. `prepare_bindings` (which stages `RegisterSession` unconditionally)
+///    revives the session via `RegisterSessionResumesStopped`, so the
+///    resume build — hydration AND the peer-comms install that produced
+///    the field failure — runs against a live phase.
 #[tokio::test]
-async fn hydrate_llm_capability_surface_is_admitted_in_stopped_phase() {
+async fn stopped_session_resume_class_revives_at_the_canonical_seam() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
@@ -3053,17 +3129,212 @@ async fn hydrate_llm_capability_surface_is_admitted_in_stopped_phase() {
         .expect("snapshot should exist after stop");
     assert_eq!(stopped.control.phase, RuntimeState::Stopped);
 
-    let identity = meerkat_core::SessionLlmIdentity {
-        model: "claude-sonnet-4-5".to_string(),
-        provider: meerkat_core::Provider::Anthropic,
-        self_hosted_server_id: None,
-        provider_params: None,
-        auth_binding: None,
-    };
-    bindings
+    // 1. No tolerance arms: build inputs at Stopped are loud ordering bugs.
+    let rejected = bindings
         .model_routing()
-        .hydrate_llm_capability_surface(&identity, None, &meerkat_core::ToolFilter::All)
-        .expect("resume build hydration must be admitted while the session is Stopped");
+        .hydrate_llm_capability_surface(&test_llm_identity(), None, &meerkat_core::ToolFilter::All)
+        .expect_err("hydration against a Stopped machine must guard-reject, not silently no-op");
+    assert!(
+        rejected.to_string().contains("Stopped"),
+        "rejection must name the Stopped phase: {rejected}"
+    );
+    let target = AcceptingPeerCommsInstallTarget::new("resume-target", 7);
+    let install_rejected = bindings
+        .install_peer_comms_on(&target)
+        .expect_err("peer-comms install against a Stopped machine must fail closed");
+    assert!(
+        install_rejected.contains("Stopped"),
+        "install rejection must name the Stopped phase: {install_rejected}"
+    );
+
+    // 2. The canonical resume seam revives the session; the resume build
+    //    then succeeds end to end, including the exact field-failure input.
+    let resumed = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("resume prepare_bindings must revive the stopped session");
+    let revived = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist after revival");
+    assert_ne!(
+        revived.control.phase,
+        RuntimeState::Stopped,
+        "revival must leave the visible runtime phase live"
+    );
+    resumed
+        .model_routing()
+        .hydrate_llm_capability_surface(&test_llm_identity(), None, &meerkat_core::ToolFilter::All)
+        .expect("resume build hydration succeeds post-revival");
+    resumed
+        .install_peer_comms_on(&target)
+        .expect("peer-comms install (PublishLocalEndpoint) succeeds post-revival");
+}
+
+/// Race pin: a stop landing AFTER revival re-enters Stopped, and a
+/// subsequent build input fails closed with the same historical error
+/// signature. This is correct behavior — the pin exists so a future field
+/// recurrence of the string is distinguishable from a revival regression
+/// (the resume seam itself is covered by the test above).
+#[tokio::test]
+async fn stop_after_revival_fails_the_next_build_input_closed() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare bindings registers the session");
+    adapter
+        .stop_runtime_executor(&session_id, "host shutdown")
+        .await
+        .expect("stop should succeed");
+    let resumed = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("resume prepare_bindings must revive the stopped session");
+    adapter
+        .stop_runtime_executor(&session_id, "raced stop")
+        .await
+        .expect("second stop should succeed");
+    let target = AcceptingPeerCommsInstallTarget::new("raced-target", 9);
+    let error = resumed
+        .install_peer_comms_on(&target)
+        .expect_err("install racing a stop must fail closed");
+    assert!(
+        error.contains("guard rejected transition from phase Stopped")
+            && error.contains("PublishLocalEndpoint"),
+        "raced install must surface the typed Stopped rejection: {error}"
+    );
+}
+
+/// Disposal-of-stopped class (the ask-21d strand): retiring a registered
+/// session whose machine is Stopped is a machine transition (`Retire`
+/// admits Stopped) that lands in Retired — not a silent shell early-return
+/// that strands the session un-retired.
+#[tokio::test]
+async fn stopped_session_retire_completes_durably() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare bindings registers the session");
+    adapter
+        .stop_runtime_executor(&session_id, "host shutdown")
+        .await
+        .expect("stop should succeed");
+    let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
+    crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("retire of a stopped session must be a machine transition");
+    let retired = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist after retire");
+    assert_eq!(
+        retired.control.phase,
+        RuntimeState::Retired,
+        "retire from Stopped must land in Retired"
+    );
+}
+
+/// Machine-level revival semantics: the revival arms preserve session
+/// identity and runtime bindings (contrast: `UnregisterSessionStopped`
+/// clears them), and both revival arms refuse while an unregister drain
+/// window is open.
+#[test]
+fn revival_arms_preserve_identity_and_refuse_while_draining() {
+    use crate::meerkat_machine::dsl as mm_dsl;
+
+    let stopped_state = || mm_dsl::MeerkatMachineState {
+        lifecycle_phase: mm_dsl::MeerkatPhase::Stopped,
+        session_id: Some(mm_dsl::SessionId("session-revive".to_string())),
+        active_runtime_id: Some(mm_dsl::AgentRuntimeId("runtime-1".to_string())),
+        active_fence_token: Some(mm_dsl::FenceToken(3)),
+        active_runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-1".to_string())),
+        ..Default::default()
+    };
+
+    // RegisterSession revival: Stopped → Idle preserving identity/bindings.
+    let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(stopped_state())
+        .expect("stopped state must be recoverable");
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RegisterSession {
+            session_id: mm_dsl::SessionId("session-revive".to_string()),
+        },
+    )
+    .expect("same-session re-registration must revive a stopped machine");
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mm_dsl::MeerkatPhase::Idle
+    );
+    assert_eq!(
+        authority.state().session_id,
+        Some(mm_dsl::SessionId("session-revive".to_string())),
+        "revival must preserve the session identity"
+    );
+    assert_eq!(
+        authority.state().active_runtime_id,
+        Some(mm_dsl::AgentRuntimeId("runtime-1".to_string())),
+        "revival must preserve the runtime binding"
+    );
+    assert_eq!(
+        authority.state().active_fence_token,
+        Some(mm_dsl::FenceToken(3)),
+        "revival must preserve the fence binding"
+    );
+
+    // EnsureSessionWithExecutor revival: Stopped → Attached + Active.
+    let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(stopped_state())
+        .expect("stopped state must be recoverable");
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+            session_id: mm_dsl::SessionId("session-revive".to_string()),
+        },
+    )
+    .expect("ensure-with-executor must revive a stopped machine");
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mm_dsl::MeerkatPhase::Attached
+    );
+    assert_eq!(
+        authority.state().registration_phase,
+        mm_dsl::RegistrationPhase::Active,
+        "executor revival must grant the active registration claim"
+    );
+
+    // Both revivals refuse while the unregister drain window is open: the
+    // drain completes (UnregisterSessionStopped) before any resume.
+    let draining_state = || {
+        let mut state = stopped_state();
+        state.registration_phase = mm_dsl::RegistrationPhase::Draining;
+        state
+    };
+    let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(draining_state())
+        .expect("draining state must be recoverable");
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::RegisterSession {
+            session_id: mm_dsl::SessionId("session-revive".to_string()),
+        },
+    )
+    .expect_err("revival must refuse while the unregister drain window is open");
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mm_dsl::MeerkatPhase::Stopped,
+        "refused revival must not change the phase"
+    );
+    let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(draining_state())
+        .expect("draining state must be recoverable");
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+            session_id: mm_dsl::SessionId("session-revive".to_string()),
+        },
+    )
+    .expect_err("executor revival must refuse while the unregister drain window is open");
 }
 
 #[tokio::test]
@@ -15818,36 +16089,36 @@ async fn ingest_rejects_stopped_session() {
 }
 
 #[tokio::test]
-async fn retire_rejection_from_stopped_surfaces_dsl_authority() {
+async fn retire_from_stopped_is_a_machine_transition() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    // Retire legality is DSL-owned; the Idle -> Retired path is exercised
-    // above, so this anchors an incompatible Stopped phase.
+    // Retire legality is DSL-owned. `Retire` admits Stopped (the disposal
+    // leg of the resume-strand class): a stopped session being retired is
+    // the terminal projection of the same session fact, so disposal no
+    // longer needs shell phase probes or early-returns around it.
     adapter
         .register_session(session_id.clone())
         .await
         .expect("register session");
 
-    // First stop
     adapter
         .stop_runtime_executor(&session_id, "test".to_string())
         .await
         .expect("stop should succeed");
 
     let runtime_id = runtime_id_for_session(&session_id);
-    let err = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
-        .expect_err("retire should reject a stopped session");
-    assert!(
-        matches!(
-            err,
-            RuntimeControlPlaneError::Internal(ref reason)
-                if reason.contains("DSL authority (Retire)")
-                    && reason.contains("Stopped")
-                    && reason.contains("Retire")
-        ),
-        "expected DSL authority rejection for Retire from Stopped, got {err:?}"
+        .expect("retire of a stopped session must be a machine transition");
+    let retired = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist after retire");
+    assert_eq!(
+        retired.control.phase,
+        RuntimeState::Retired,
+        "retire from Stopped must land in Retired"
     );
 }
 

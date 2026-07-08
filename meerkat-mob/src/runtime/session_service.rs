@@ -89,19 +89,14 @@ pub(crate) async fn retire_runtime_session_for_archive(
     runtime_adapter: &meerkat_runtime::MeerkatMachine,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
+    // No shell phase probes: the machine owns every retire verdict.
+    // `Retire` admits Idle/Attached/Running/Stopped (Stopped retires
+    // durably instead of the former silent early-return that stranded
+    // stopped sessions un-retired), and `RetireAlreadyRetired` no-ops a
+    // Retired machine. An unregistered session registers first — recovery
+    // seeds the durable phase and the retire then lands as a machine
+    // transition on it.
     let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
-    if runtime_adapter
-        .meerkat_machine_archive_snapshot(session_id)
-        .await
-        .is_some_and(|snapshot| {
-            matches!(
-                snapshot.control.phase,
-                meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
-            )
-        })
-    {
-        return Ok(());
-    }
     match meerkat_runtime::RuntimeControlPlane::retire(runtime_adapter, &runtime_id).await {
         Ok(_) => Ok(()),
         Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
@@ -113,19 +108,6 @@ pub(crate) async fn retire_runtime_session_for_archive(
                         "machine archive register before retire failed: {error}"
                     )))
                 })?;
-            if runtime_adapter
-                .meerkat_machine_archive_snapshot(session_id)
-                .await
-                .is_some_and(|snapshot| {
-                    matches!(
-                        snapshot.control.phase,
-                        meerkat_runtime::RuntimeState::Retired
-                            | meerkat_runtime::RuntimeState::Stopped
-                    )
-                })
-            {
-                return Ok(());
-            }
             meerkat_runtime::RuntimeControlPlane::retire(runtime_adapter, &runtime_id)
                 .await
                 .map(|_| ())

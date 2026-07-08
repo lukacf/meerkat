@@ -1452,6 +1452,13 @@ pub mod inputs {
         pub row_is_runtime_checkpoint: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeSnapshotReadSource {
+        pub session_id: SessionId,
+        pub store_head_extends_snapshot: bool,
+        pub store_head_is_runtime_checkpoint: bool,
+        pub session_is_live: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyPendingToolResults {
         pub session_id: SessionId,
         pub result_count: u64,
@@ -1508,6 +1515,7 @@ pub enum Input {
     ClassifyLiveSessionAuthority(inputs::ClassifyLiveSessionAuthority),
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
     ResolveRuntimeProjectionRollback(inputs::ResolveRuntimeProjectionRollback),
+    ResolveRuntimeSnapshotReadSource(inputs::ResolveRuntimeSnapshotReadSource),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
     RecoverSessionLifecycleTerminal(inputs::RecoverSessionLifecycleTerminal),
@@ -1569,6 +1577,9 @@ impl Input {
             Self::ResolveRuntimeProjectionRollback(_) => {
                 InputKind::ResolveRuntimeProjectionRollback
             }
+            Self::ResolveRuntimeSnapshotReadSource(_) => {
+                InputKind::ResolveRuntimeSnapshotReadSource
+            }
             Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
             Self::TranscriptEdit(_) => InputKind::TranscriptEdit,
             Self::RecoverSessionLifecycleTerminal(_) => InputKind::RecoverSessionLifecycleTerminal,
@@ -1609,6 +1620,7 @@ pub enum InputKind {
     ClassifyLiveSessionAuthority,
     RecoverSessionFromStore,
     ResolveRuntimeProjectionRollback,
+    ResolveRuntimeSnapshotReadSource,
     ApplyPendingToolResults,
     TranscriptEdit,
     RecoverSessionLifecycleTerminal,
@@ -1728,6 +1740,10 @@ pub mod effects {
         pub disposition: RuntimeProjectionRollbackDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeSnapshotReadSourceResolved {
+        pub read_from_store_head: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionToolResultsApplied {
         pub session_id: SessionId,
         pub applied_count: u64,
@@ -1778,6 +1794,7 @@ pub enum Effect {
     LiveSessionAuthorityClassified(effects::LiveSessionAuthorityClassified),
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
     RuntimeProjectionRollbackResolved(effects::RuntimeProjectionRollbackResolved),
+    RuntimeSnapshotReadSourceResolved(effects::RuntimeSnapshotReadSourceResolved),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
     SessionLifecycleTerminalRecovered(effects::SessionLifecycleTerminalRecovered),
@@ -1810,6 +1827,7 @@ pub enum EffectKind {
     LiveSessionAuthorityClassified,
     SessionStoreRecoverySourceResolved,
     RuntimeProjectionRollbackResolved,
+    RuntimeSnapshotReadSourceResolved,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
     SessionLifecycleTerminalRecovered,
@@ -1893,6 +1911,8 @@ pub enum TransitionId {
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
+    ResolveRuntimeSnapshotReadSourceStoreHead,
+    ResolveRuntimeSnapshotReadSourceSnapshot,
     ResolveRuntimeProjectionRollbackRebuild,
     ResolveRuntimeProjectionRollbackReject,
     ApplyPendingToolResults,

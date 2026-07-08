@@ -5608,8 +5608,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         // resets the per-session LLM state. Destroyed is intentionally absent:
         // RegisterSession is a resurrection input the DestroyedShapeInvariant
         // forbids, so the machine — not a shell preflight — rejects it there.
+        // Stopped is handled by the explicit revival arms below (2c/2d): a
+        // stopped executor is a fact about the previous runtime epoch, so a
+        // re-registration is the machine-owned resume intent, not a self-loop.
         transition RegisterSession {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired]
             on input RegisterSession { session_id }
             guard "new_session_binding" { self.session_id != Some(session_id) }
             update {
@@ -5634,14 +5637,77 @@ macro_rules! meerkat_catalog_machine_dsl {
         // 2b. RegisterSessionIdempotent: re-registering the SAME session
         // binding is a machine-owned no-op verdict. The shell stages
         // RegisterSession unconditionally (no "already registered?" probe);
-        // the machine decides whether this is a fresh binding (reset above)
-        // or an idempotent re-registration (no state change here).
+        // the machine decides whether this is a fresh binding (reset above),
+        // an idempotent re-registration (no state change here), or a revival
+        // of a stopped session (2c below).
         transition RegisterSessionIdempotent {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired]
             on input RegisterSession { session_id }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             update {}
             to Idle
+        }
+
+        // 2c. RegisterSessionResumesStopped: the machine-owned re-admission
+        // arc out of Stopped. Phase Stopped means "the runtime executor of
+        // the previous epoch exited after a stop request"; it is a fact about
+        // that epoch, not about a new registration intent. Re-registering the
+        // SAME session is the canonical resume seam (the shell stages
+        // RegisterSession unconditionally on every bindings preparation), so
+        // the machine revives the session to Idle while PRESERVING its
+        // identity, runtime bindings, and hydrated LLM/capability state —
+        // in deliberate contrast to UnregisterSessionStopped, which is the
+        // teardown arc out of Stopped and clears them. Without this arc,
+        // Stopped is an absorbing phase for resume and every phase-gated
+        // build input wedges (the 0.7.19–0.7.23 resume-strand class).
+        transition RegisterSessionResumesStopped {
+            on input RegisterSession { session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "same_session_binding" { self.session_id == Some(session_id) }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
+            update {
+                self.registration_phase = RegistrationPhase::Queuing;
+                self.runtime_stop_deferred = false;
+            }
+            to Idle
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
+        }
+
+        // 2d. RegisterSessionNewBindingFromStopped: keeps RegisterSession
+        // total over Stopped for a DIFFERENT session id. Entries are keyed by
+        // session id so this is unreachable in the shipped shell, but the
+        // machine still owns the verdict: a new tenant gets the full LLM
+        // reset AND cleared runtime bindings — the previous tenant's binding
+        // facts must not leak into a new session identity.
+        transition RegisterSessionNewBindingFromStopped {
+            on input RegisterSession { session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "new_session_binding" { self.session_id != Some(session_id) }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
+                self.registration_phase = RegistrationPhase::Queuing;
+                self.runtime_stop_deferred = false;
+                self.current_session_llm_identity = None;
+                self.current_session_capability_surface = None;
+                self.current_session_capability_surface_status =
+                    SessionLlmCapabilitySurfaceStatus::Unresolved;
+                self.current_session_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_previous_capability_surface = None;
+                self.session_llm_reconfigure_current_capability_surface = None;
+                self.session_llm_reconfigure_capability_changed = false;
+                self.session_llm_reconfigure_previous_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_current_capability_base_filter = ToolFilter::All;
+                self.session_llm_reconfigure_committed_visible_set_changed = false;
+                self.session_llm_reconfigure_revision_bumped = false;
+                self.session_llm_reconfigure_active_visibility_revision = 0;
+            }
+            to Idle
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-registered under a new session binding" }
         }
 
         transition StageDeferredSession {
@@ -6414,35 +6480,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
         }
-        // Stopped/Retired hydration: a durably-stopped (or retired-pending)
-        // session re-registered after a host restart still rebuilds its
-        // agent, and the build must mirror the resolved LLM identity /
-        // capability surface into the machine before public capability
-        // reads. Without these arms the resume build fails on the phase
-        // guard and background repair retries forever (same coverage as
-        // SetModelRoutingBaseline and PublishCommittedVisibleSet, which
-        // both admit Retired and Stopped).
-        transition HydrateSessionLlmStateStopped {
-            on input HydrateSessionLlmState {
-                current_identity, current_capability_surface,
-                current_capability_surface_status, current_capability_base_filter
-            }
-            guard { self.lifecycle_phase == Phase::Stopped }
-            guard "session_registered" { self.session_id != None }
-            guard "capability_base_filter_matches_surface" {
-                meerkat_session_llm_hydrated_capability_base_filter_matches(
-                    current_capability_surface,
-                    current_capability_surface_status,
-                    current_capability_base_filter) == true
-            }
-            update {
-                self.current_session_llm_identity = Some(current_identity);
-                self.current_session_capability_surface = current_capability_surface;
-                self.current_session_capability_surface_status = current_capability_surface_status;
-                self.current_session_capability_base_filter = current_capability_base_filter;
-            }
-            to Stopped
-        }
+        // Retired hydration: a retired-pending session re-registered after a
+        // host restart still rebuilds its agent during archive completion,
+        // and the build must mirror the resolved LLM identity / capability
+        // surface into the machine before public capability reads. A Stopped
+        // arm is deliberately ABSENT: the canonical seam revives a stopped
+        // session to Idle via RegisterSessionResumesStopped before any build
+        // input fires, so hydration at Stopped is an ordering bug that must
+        // guard-reject loudly (the per-input Stopped-tolerance arms were the
+        // 0.7.19–0.7.23 whack-a-mole and are retired with the revival arc).
         transition HydrateSessionLlmStateRetired {
             on input HydrateSessionLlmState {
                 current_identity, current_capability_surface,
@@ -6754,7 +6800,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // override stack and image-operation phase projection; the shell only
         // realizes provider / persistence mechanics from the effects.
         transition SetModelRoutingBaseline {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired]
             on input SetModelRoutingBaseline { baseline_model, realtime_capable }
             guard "session_registered" { self.session_id != None }
             update {
@@ -7359,7 +7405,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // 5. StagePersistentFilter: per-phase self-loop, guard session_registered
         transition StagePersistentFilter {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired]
             on input StagePersistentFilter { filter, witnesses }
             guard "session_registered" { self.session_id != None }
             update {}
@@ -7368,7 +7414,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // 6. RequestDeferredTools: per-phase self-loop, guard session_registered
         transition RequestDeferredTools {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired]
             on input RequestDeferredTools { authorities }
             guard "session_registered" { self.session_id != None }
             guard "deferred_authorities_non_empty" { authorities != EmptyMap }
@@ -7405,8 +7451,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Exact re-assertions of the current runtime binding are generated
         // idempotent no-ops with no RuntimeBound effect; new bindings emit
         // RuntimeBound from the generated authority path below.
+        // Stopped is deliberately absent from the PrepareBindings family:
+        // the canonical seam stages RegisterSession (revival) before any
+        // bindings preparation, so a PrepareBindings arriving at a Stopped
+        // machine is an ordering bug that must surface as a loud
+        // GuardRejected, never a silent phase-preserving rebind.
         transition PrepareBindingsIdempotent {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            per_phase [Initializing, Idle, Attached, Running, Retired]
             on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_exact" { self.active_runtime_id == Some(agent_runtime_id) }
@@ -7540,31 +7591,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.active_runtime_epoch_id = runtime_epoch_id;
             }
             to Retired
-            emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
-        }
-        // Stopped → Stopped (inline in hand-written catalog)
-        transition PrepareBindingsStopped {
-            on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
-            guard { self.lifecycle_phase == Phase::Stopped }
-            guard "session_matches_current" { self.session_id == Some(session_id) }
-            guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
-            guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
-            guard "generation_binding_absent_or_same" { self.active_runtime_generation == None || self.active_runtime_generation == generation }
-            guard "epoch_binding_absent_or_same" { self.active_runtime_epoch_id == None || self.active_runtime_epoch_id == runtime_epoch_id }
-            guard "typed_binding_identity_present" { generation != None || runtime_epoch_id != None }
-            guard "runtime_binding_not_already_exact" {
-                self.active_runtime_id != Some(agent_runtime_id)
-                || self.active_fence_token != Some(fence_token)
-                || self.active_runtime_generation != generation
-                || self.active_runtime_epoch_id != runtime_epoch_id
-            }
-            update {
-                self.active_runtime_id = Some(agent_runtime_id);
-                self.active_fence_token = Some(fence_token);
-                self.active_runtime_generation = generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-            }
-            to Stopped
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
 
@@ -8249,75 +8275,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Retired
             emit CommittedVisibleSetPublished { revision: active_visibility_revision }
         }
-        transition PublishCommittedVisibleSetStopped {
-            on input PublishCommittedVisibleSet {
-                active_filter, staged_filter,
-                active_requested_deferred_names, staged_requested_deferred_names,
-                active_deferred_authorities, staged_deferred_authorities,
-                active_visibility_revision, staged_visibility_revision
-            }
-            guard { self.lifecycle_phase == Phase::Stopped }
-            guard "session_registered" { self.session_id != None }
-            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
-            guard "equal_revision_requires_equal_active_and_staged_input" {
-                active_visibility_revision != staged_visibility_revision
-                || (active_filter == staged_filter
-                    && active_requested_deferred_names == staged_requested_deferred_names
-                    && active_deferred_authorities == staged_deferred_authorities)
-            }
-            guard "active_requested_subset_of_staged_requested" {
-                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
-            }
-            guard "active_deferred_authorities_cover_names" {
-                for_all(requested_name in active_requested_deferred_names, active_deferred_authorities.contains_key(requested_name))
-            }
-            guard "staged_deferred_authorities_cover_names" {
-                for_all(requested_name in staged_requested_deferred_names, staged_deferred_authorities.contains_key(requested_name))
-            }
-            guard "active_deferred_authorities_are_name_scoped" {
-                for_all(witnessed_name in active_deferred_authorities.keys(), active_requested_deferred_names.contains(witnessed_name))
-            }
-            guard "staged_deferred_authorities_are_name_scoped" {
-                for_all(witnessed_name in staged_deferred_authorities.keys(), staged_requested_deferred_names.contains(witnessed_name))
-            }
-            guard "active_deferred_authorities_have_identity" {
-                deferred_authorities_have_identity(active_requested_deferred_names, active_deferred_authorities)
-            }
-            guard "staged_deferred_authorities_have_identity" {
-                deferred_authorities_have_identity(staged_requested_deferred_names, staged_deferred_authorities)
-            }
-            guard "visibility_authority_matches_machine_catalog" {
-                meerkat_tool_visibility_publish_matches_catalog(
-                    active_filter, staged_filter,
-                    active_deferred_authorities, staged_deferred_authorities,
-                    self.filter_visibility_witnesses,
-                    self.deferred_visibility_authority_catalog,
-                    self.filter_visibility_authority_catalog)
-            }
-            update {
-                self.active_filter = active_filter;
-                self.staged_filter = staged_filter;
-                self.active_deferred_names = active_requested_deferred_names;
-                self.staged_deferred_names = staged_requested_deferred_names;
-                self.active_deferred_authorities = active_deferred_authorities;
-                self.staged_deferred_authorities = staged_deferred_authorities;
-                self.active_visibility_revision = active_visibility_revision;
-                self.staged_visibility_revision = staged_visibility_revision;
-                if active_visibility_revision > self.next_staged_visibility_revision {
-                    self.next_staged_visibility_revision = active_visibility_revision;
-                }
-            }
-            to Stopped
-            emit CommittedVisibleSetPublished { revision: active_visibility_revision }
-        }
 
-        // 14. Retire: from [Idle, Attached, Running] → Retired
+        // 14. Retire: from [Idle, Attached, Running, Stopped] → Retired.
+        // Stopped is admitted so disposal of an executor-stopped session
+        // (mob archive completion, durable retire) is a machine transition
+        // instead of a shell phase probe: a stopped runtime being retired is
+        // the terminal projection of the same session fact.
         transition RetireRequestedFromIdle {
             on input Retire { session_id }
             guard {
                 self.lifecycle_phase == Phase::Idle
                 || self.lifecycle_phase == Phase::Attached
                 || self.lifecycle_phase == Phase::Running
+                || self.lifecycle_phase == Phase::Stopped
             }
             guard "runtime_binding_present" {
                 self.active_runtime_id != None && self.active_fence_token != None
@@ -8334,6 +8304,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.lifecycle_phase == Phase::Idle
                 || self.lifecycle_phase == Phase::Attached
                 || self.lifecycle_phase == Phase::Running
+                || self.lifecycle_phase == Phase::Stopped
             }
             guard "runtime_binding_absent" {
                 self.active_runtime_id == None || self.active_fence_token == None
@@ -9354,11 +9325,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Retired
         }
+        // Stopped: machine-owned revival. An ensure-with-executor against a
+        // stopped session IS the resume intent (schedule delivery, mob
+        // re-dispatch): the previous epoch's executor exited, a new executor
+        // is being attached, so the machine re-admits to Attached and grants
+        // the active registration claim. The former empty self-loop silently
+        // swallowed the demand and left the session wedged in Stopped
+        // ("did not grant active executor registration").
         transition EnsureSessionWithExecutorStopped {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
-            update {}
-            to Stopped
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
+            update {
+                self.registration_phase = RegistrationPhase::Active;
+                self.runtime_stop_deferred = false;
+            }
+            to Attached
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for executor attach" }
         }
 
         // 19. SetSilentIntents: per-phase, guard session_registered
@@ -9391,14 +9374,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             update { self.silent_intent_overrides = intents; }
             to Retired
         }
-        // Stopped: no-op (no update)
-        transition SetSilentIntentsStopped {
-            on input SetSilentIntents { session_id, intents }
-            guard { self.lifecycle_phase == Phase::Stopped }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Stopped
-        }
+        // Stopped is deliberately absent: silent intents on a stopped
+        // session are staged post-revival (RegisterSessionResumesStopped),
+        // never against the Stopped phase.
 
         // 20. Abort: per-phase self-loop, guard session_registered
         transition Abort {

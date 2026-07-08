@@ -43,7 +43,11 @@ pub use error::StoreError;
 // Re-export the canonical trait, filter, and error from meerkat-core.
 // Custom storage backends depend only on meerkat-core; existing consumers
 // of meerkat-store see no change.
-pub use meerkat_core::{SessionFilter, SessionStore, SessionStoreError};
+pub use meerkat_core::{
+    IncrementalSessionStore, SessionFilter, SessionHead, SessionHeadCas, SessionStore,
+    SessionStoreError, TranscriptStrandId, head_canonical_plain_save_guard, session_head_cas_token,
+    strand_layout_for_history,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use artifact::FsArtifactStore;
@@ -69,4 +73,4 @@ pub use sqlite_store::SqliteSessionStore;
 pub use jsonl::JsonlStore;
 
 #[cfg(feature = "memory")]
-pub use memory::MemoryStore;
+pub use memory::{MemoryStore, MemoryStoreStats};

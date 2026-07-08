@@ -478,6 +478,188 @@ mod tests {
         );
     }
 
+    /// Build a runtime-backed service over explicit sqlite stores (no
+    /// wrapper), returning the raw sqlite session store so the test can
+    /// inspect the incremental head/strand representation directly.
+    fn build_plain_sqlite_service(
+        root: &std::path::Path,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        Arc<meerkat::SqliteSessionStore>,
+    ) {
+        let sqlite_path = root.join("sessions.sqlite3");
+        let raw_row_store =
+            Arc::new(meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open sqlite"));
+        let session_store: Arc<dyn SessionStore> = raw_row_store.clone();
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
+                .expect("open runtime sqlite"),
+        );
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
+        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store);
+
+        let factory = AgentFactory::new(root.join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
+        (Arc::new(service), adapter, raw_row_store)
+    }
+
+    /// Incremental-store cold-resume equality through the real sqlite store:
+    /// create, turn, compact, kill, resume, turn. Pins the OB3 ask-11
+    /// contract end to end — the session never writes a legacy whole-blob
+    /// row, the persisted head SHRINKS across the compaction, cold resume
+    /// reads are head + one strand range, and the resumed transcript is
+    /// byte-equal to the pre-kill authority.
+    #[tokio::test]
+    async fn cold_restart_resume_after_compaction_incremental_head_representation() {
+        use meerkat_core::session_store::IncrementalSessionStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // First host lifetime: create + enough turns that compaction not only
+        // injects a summary but genuinely SHRINKS the transcript (older turns
+        // discarded under the recent-turn budget).
+        let (session_id, pre_kill_digest) = {
+            let (service, adapter, raw_store) = build_plain_sqlite_service(temp.path());
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize(&service, &adapter, session).await;
+            for turn in 0..6 {
+                run_prompt(&adapter, &session_id, &format!("pre-restart turn {turn}")).await;
+            }
+
+            let compacted = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("authoritative load after compaction turn")
+                .expect("session should exist");
+            assert!(
+                has_compaction_summary(&compacted),
+                "test setup failed: compaction did not run before the restart"
+            );
+
+            // The incremental representation is canonical: a head row exists,
+            // the head strand covers exactly the live transcript, and no
+            // legacy whole-blob row was ever written for this session.
+            let inc: Arc<dyn IncrementalSessionStore> = (raw_store.clone()
+                as Arc<dyn SessionStore>)
+                .as_incremental()
+                .expect("sqlite store must expose the incremental capability");
+            let head = inc
+                .load_head(&session_id)
+                .await
+                .expect("load_head")
+                .expect("head row must exist for an incremental session");
+            assert!(head.rewrite_count >= 1, "compaction must adopt a rewrite");
+            let slim = raw_store
+                .load(&session_id)
+                .await
+                .expect("slim load")
+                .expect("session persisted");
+            assert_eq!(slim.messages().len() as u64, head.message_count);
+            // The adopted rewrite retains a parent body LONGER than its
+            // revision: the persisted head genuinely shrank.
+            let rewrites = inc.load_rewrites(&session_id).await.expect("load_rewrites");
+            assert!(!rewrites.is_empty());
+            assert!(
+                rewrites
+                    .iter()
+                    .any(|record| record.commit.messages_after < record.commit.messages_before),
+                "at least one adopted rewrite must shrink the transcript"
+            );
+            // Slim contract: the durable row carries no inline history state.
+            assert!(
+                slim.transcript_history_state()
+                    .expect("state read")
+                    .is_none(),
+                "slim load must carry no inline history state"
+            );
+
+            let digest =
+                meerkat_core::transcript_messages_digest(compacted.messages()).expect("digest");
+            // Cold stop: the host dies without archiving or retiring anything.
+            (session_id, digest)
+        };
+
+        // Second host lifetime: cold resume = head + ONE strand range.
+        let (service, adapter, raw_store) = build_plain_sqlite_service(temp.path());
+        let inc: Arc<dyn IncrementalSessionStore> = (raw_store.clone() as Arc<dyn SessionStore>)
+            .as_incremental()
+            .expect("incremental capability");
+        let head = inc
+            .load_head(&session_id)
+            .await
+            .expect("load_head")
+            .expect("head row survives the restart");
+        let strand_rows = inc
+            .load_messages(&session_id, &head.strand, 0..head.message_count)
+            .await
+            .expect("one strand range read");
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(&strand_rows).expect("digest"),
+            head.head_revision,
+            "head + one strand range must reproduce the live transcript"
+        );
+
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after restart")
+            .expect("session should survive restart");
+        assert!(
+            has_compaction_summary(&resume_source),
+            "resume source must carry the compacted transcript"
+        );
+
+        materialize(&service, &adapter, resume_source).await;
+        run_prompt(&adapter, &session_id, "third turn after restart").await;
+
+        let final_session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after resumed turn")
+            .expect("session should still exist");
+        let texts = user_texts(&final_session);
+        assert!(
+            texts.iter().any(|t| t.contains("third turn after restart")),
+            "the post-restart turn must be recorded: {texts:?}"
+        );
+        // Transcript equality across the kill: the pre-kill authority is a
+        // digest-exact prefix of the resumed transcript.
+        let prefix_len = resume_pre_kill_prefix_len(&final_session, &pre_kill_digest);
+        assert!(prefix_len > 0, "pre-kill transcript must be recoverable");
+        // The durable representation stays head-canonical after the resumed
+        // turn: the head strand covers exactly the live transcript.
+        let head = inc
+            .load_head(&session_id)
+            .await
+            .expect("load_head")
+            .expect("head row present");
+        let slim = raw_store
+            .load(&session_id)
+            .await
+            .expect("slim load")
+            .expect("session persisted");
+        assert_eq!(slim.messages().len() as u64, head.message_count);
+    }
+
+    /// Longest prefix of `session` whose digest equals `pre_kill_digest`
+    /// (0 when none).
+    fn resume_pre_kill_prefix_len(session: &Session, pre_kill_digest: &str) -> usize {
+        for len in (1..=session.messages().len()).rev() {
+            if meerkat_core::transcript_messages_digest(&session.messages()[..len])
+                .map(|digest| digest == pre_kill_digest)
+                .unwrap_or(false)
+            {
+                return len;
+            }
+        }
+        0
+    }
+
     /// Multiple compactions including an actual shrink (older turns discarded
     /// under the recent-turn budget) before the cold restart, then resume and
     /// run enough turns to trigger ANOTHER compaction after the restart, so

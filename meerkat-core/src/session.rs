@@ -1102,6 +1102,38 @@ pub fn session_metadata_document_from_slice(
     })
 }
 
+impl Session {
+    /// Rebuild a slim `Session` from persisted head-row parts.
+    ///
+    /// Used by [`crate::session_store::SessionHead::into_session`] to
+    /// materialize a session from an incremental store's head row plus its
+    /// strand messages. The envelope version is restored fail-closed through
+    /// the generated persistence version authority, exactly like
+    /// [`Session::deserialize`].
+    pub(crate) fn from_head_parts(
+        version: u32,
+        id: SessionId,
+        messages: Vec<Message>,
+        created_at: SystemTime,
+        updated_at: SystemTime,
+        metadata: serde_json::Map<String, serde_json::Value>,
+        usage: Usage,
+    ) -> Result<Self, String> {
+        let version =
+            session_persistence_version_authority::restore_session_envelope_version(version)
+                .map_err(|err| err.to_string())?;
+        Ok(Self {
+            version,
+            id,
+            messages: Arc::new(messages),
+            created_at,
+            updated_at,
+            metadata,
+            usage,
+        })
+    }
+}
+
 /// Metadata key used to store durable system-context control state.
 pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
 

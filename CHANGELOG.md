@@ -1,11 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/),
-and this project adheres to [Semantic Versioning](https://semver.org/).
+**Versioning policy (pre-1.0):** meerkat 0.x PATCH releases may contain
+breaking public-API changes — this project ships deliberate clean breaks
+instead of compatibility shims. Downstreams must EXACT-PIN the meerkat crate
+family (e.g. `meerkat = "=0.7.24"`) and bump deliberately. In exchange, every
+release that breaks public API declares it under a `### Breaking` heading
+naming the changed signatures (enforced by the `semver-breaks` release gate
+via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
+
+### Added
+
+- `semver-breaks` release-preflight gate (studio M3): cargo-semver-checks
+  runs against the last published crates.io baselines; detected public-API
+  breaks fail the release unless declared under a `### Breaking` changelog
+  heading. The exact-pin policy in this file's header is the other half of
+  the contract.
 
 ### Added
 

@@ -18,14 +18,19 @@
 //! [`SessionStore`] and the [`append_only_save_guard`] helper.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
-use crate::session::{SYSTEM_CONTEXT_SEPARATOR, SessionMeta};
+use crate::session::{
+    SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SYSTEM_CONTEXT_SEPARATOR, SessionMeta,
+    TranscriptRevisionBody,
+};
 use crate::time_compat::SystemTime;
-use crate::types::{Message, SessionId, SystemMessage};
+use crate::types::{Message, SessionId, SystemMessage, Usage};
 use crate::{
-    Session, TranscriptHistoryState, TranscriptRewriteCommit, TranscriptRewriteSelection,
-    transcript_messages_digest,
+    Session, TranscriptHistoryState, TranscriptRewriteCommit, TranscriptRewriteRecord,
+    TranscriptRewriteSelection, transcript_messages_digest,
 };
 
 /// Filter for listing sessions.
@@ -1481,6 +1486,693 @@ pub trait SessionStore: Send + Sync {
     async fn exists(&self, id: &SessionId) -> Result<bool, SessionStoreError> {
         Ok(self.load(id).await?.is_some())
     }
+
+    /// Typed capability accessor for the incremental persistence contract.
+    ///
+    /// Delegating wrappers MUST forward this; the default keeps plain
+    /// whole-blob stores on the compat path (the runtime silently degrades to
+    /// whole-blob persistence when a wrapper swallows the capability).
+    fn as_incremental(self: Arc<Self>) -> Option<Arc<dyn IncrementalSessionStore>> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental session persistence (OB3 ask 11): O(delta) writes, compaction
+// that SHRINKS the persisted head, retained history out-of-line.
+// ---------------------------------------------------------------------------
+
+/// Opaque id of an append-only message strand.
+///
+/// Minting rules:
+/// - [`TranscriptStrandId::root`] — a session's first strand;
+/// - [`TranscriptStrandId::from_rewrite`] — the strand created by adopting a
+///   transcript rewrite commit (named by the commit's revision digest);
+/// - [`TranscriptStrandId::rebase`] — `rebase:{digest}` strands minted for
+///   compat/equivalence representation rebases and for migrated rebookkept
+///   rewrite parents.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TranscriptStrandId(String);
+
+impl TranscriptStrandId {
+    /// A session's first strand.
+    pub fn root() -> Self {
+        Self("root".to_string())
+    }
+
+    /// The strand created by adopting a transcript rewrite commit.
+    pub fn from_rewrite(commit: &TranscriptRewriteCommit) -> Self {
+        Self(commit.revision.clone())
+    }
+
+    /// A compat/equivalence representation-rebase strand.
+    pub fn rebase(head_revision: &str) -> Self {
+        Self(format!("rebase:{head_revision}"))
+    }
+
+    /// Restore a persisted strand id (durable-format decoder for store rows).
+    pub fn from_persisted(raw: String) -> Self {
+        Self(raw)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TranscriptStrandId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Small durable head row: the whole session EXCEPT message bodies and
+/// retained revision bodies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionHead {
+    pub id: SessionId,
+    /// Session envelope version (`Session::version`).
+    pub version: u32,
+    pub strand: TranscriptStrandId,
+    /// `transcript_messages_digest` of the live messages.
+    pub head_revision: String,
+    /// Live message count == strand prefix covered by this head.
+    pub message_count: u64,
+    /// ADOPTED rewrite commits recorded for this session.
+    pub rewrite_count: u64,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+    pub usage: Usage,
+    /// Session metadata WITHOUT `SESSION_TRANSCRIPT_HISTORY_STATE_KEY`
+    /// (the constructor strips it; `save_head` rejects heads carrying it).
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+impl SessionHead {
+    /// Project a session onto its durable head row.
+    ///
+    /// Strips `SESSION_TRANSCRIPT_HISTORY_STATE_KEY` from the metadata —
+    /// retained history lives out-of-line in strand rows and rewrite records.
+    pub fn from_session(
+        session: &Session,
+        strand: TranscriptStrandId,
+        rewrite_count: u64,
+    ) -> Result<Self, SessionStoreError> {
+        let head_revision =
+            transcript_messages_digest(session.messages()).map_err(SessionStoreError::from)?;
+        let mut metadata = session.metadata().clone();
+        metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+        Ok(Self {
+            id: session.id().clone(),
+            version: session.version(),
+            strand,
+            head_revision,
+            message_count: session.messages().len() as u64,
+            rewrite_count,
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            usage: session.total_usage(),
+            metadata,
+        })
+    }
+
+    /// Rebuild a slim `Session` (no transcript-history metadata) from this
+    /// head plus its strand messages.
+    ///
+    /// Fails closed `Corrupted` if `digest(messages) != head_revision` or
+    /// `messages.len() != message_count`. The envelope version is restored
+    /// through the generated persistence version authority, exactly like
+    /// `Session::deserialize`.
+    pub fn into_session(self, messages: Vec<Message>) -> Result<Session, SessionStoreError> {
+        if messages.len() as u64 != self.message_count {
+            return Err(SessionStoreError::Corrupted(self.id));
+        }
+        let digest = transcript_messages_digest(&messages).map_err(SessionStoreError::from)?;
+        if digest != self.head_revision {
+            return Err(SessionStoreError::Corrupted(self.id));
+        }
+        let SessionHead {
+            id,
+            version,
+            created_at,
+            updated_at,
+            usage,
+            metadata,
+            ..
+        } = self;
+        Session::from_head_parts(
+            version, id, messages, created_at, updated_at, metadata, usage,
+        )
+        .map_err(|err| {
+            SessionStoreError::Serialization(format!(
+                "failed to restore session from head row: {err}"
+            ))
+        })
+    }
+}
+
+/// Stable compare token for a persisted session head row (mirror of
+/// [`session_projection_cas_token`] for the incremental contract).
+pub fn session_head_cas_token(head: &SessionHead) -> Result<String, SessionStoreError> {
+    let bytes = serde_json::to_vec(head).map_err(|err| {
+        SessionStoreError::Serialization(format!(
+            "failed to serialize session head CAS token: {err}"
+        ))
+    })?;
+    Ok(format!("head-sha256:{:x}", Sha256::digest(bytes)))
+}
+
+/// CAS expectation for incremental head writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionHeadCas {
+    /// No head row may exist yet.
+    Create,
+    /// The stored row's token must equal this.
+    IfToken(String),
+}
+
+/// Capability trait for O(delta) session persistence.
+///
+/// Every retained transcript body is a prefix of some strand: the parent body
+/// of commit `k` is a prefix of the strand commit `k-1` created (or the root
+/// strand), and the revision body of commit `k` is a prefix of the strand it
+/// creates. Retained history therefore costs zero duplicate storage on the
+/// live path, and compaction persists O(live-after) instead of a superset
+/// blob.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait IncrementalSessionStore: SessionStore {
+    /// Append messages to a strand. O(delta).
+    ///
+    /// Contiguity: `base_seq` must not exceed the strand's current row count
+    /// (0 only for a strand with no rows opens the strand). Existing
+    /// `(strand, seq)` rows are immutable: identical bytes => idempotent Ok;
+    /// different bytes => `TranscriptContinuityViolation`. Shrink is
+    /// structurally inexpressible (the `append_only_save_guard` port).
+    async fn append_messages(
+        &self,
+        id: &SessionId,
+        strand: &TranscriptStrandId,
+        base_seq: u64,
+        messages: &[Message],
+    ) -> Result<(), SessionStoreError>;
+
+    /// Record a transcript rewrite without advancing the head.
+    ///
+    /// Validates the record self-consistently (the
+    /// `validate_transcript_rewrite_record` semantics carried by
+    /// [`TranscriptRewriteRecord`]), CAS-compares `expected` against the
+    /// stored head token, requires `record.commit.parent_revision` to equal
+    /// the stored `head_revision` (else `TranscriptRevisionConflict` — the
+    /// `transcript_rewrite_save_guard` port), verifies the digest of the
+    /// parent strand rows `[0..messages_before)` equals `parent_revision`
+    /// (O(parent), rewrite-time only), then writes the commit at
+    /// `rewrite_idx = stored head.rewrite_count` (replacing any unadopted row
+    /// at that idx => idempotent retry) plus the new strand's base rows
+    /// (`revision_body.messages` under `from_rewrite(commit)`).
+    ///
+    /// Does NOT advance the head: adoption = a subsequent [`save_head`] with
+    /// `rewrite_count = idx + 1` and `strand = from_rewrite(commit)`. Returns
+    /// the implied next head for the caller to adopt.
+    ///
+    /// [`save_head`]: IncrementalSessionStore::save_head
+    async fn commit_rewrite(
+        &self,
+        id: &SessionId,
+        record: &TranscriptRewriteRecord,
+        expected: SessionHeadCas,
+    ) -> Result<SessionHead, SessionStoreError>;
+
+    /// CAS-guarded small head write.
+    ///
+    /// Guards: `expected` token match (mismatch =>
+    /// `TranscriptRevisionConflict`); metadata must not carry
+    /// `SESSION_TRANSCRIPT_HISTORY_STATE_KEY` (=> `InvalidTranscriptRewrite`);
+    /// strand rows must cover `[0, message_count)` (the head never points
+    /// past persisted rows); same-strand `message_count` must be monotonic
+    /// (=> `MonotonicityViolation`); `rewrite_count` may advance by at most
+    /// the recorded-but-unadopted commits. Strand-switch saves are the
+    /// authoritative-projection analog (CAS-trusted); `head_revision` on
+    /// plain appends is caller-attested, audited at the next `commit_rewrite`
+    /// and verified fail-closed on every `into_session` load.
+    async fn save_head(
+        &self,
+        head: &SessionHead,
+        expected: SessionHeadCas,
+    ) -> Result<(), SessionStoreError>;
+
+    async fn load_head(&self, id: &SessionId) -> Result<Option<SessionHead>, SessionStoreError>;
+
+    async fn load_messages(
+        &self,
+        id: &SessionId,
+        strand: &TranscriptStrandId,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<Message>, SessionStoreError>;
+
+    /// Adopted rewrites only (`idx < head.rewrite_count`), reconstructed as
+    /// full [`TranscriptRewriteRecord`]s from strand prefix ranges; never
+    /// read on resume. Each record must pass `TranscriptRewriteRecord::new`
+    /// validation.
+    async fn load_rewrites(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<TranscriptRewriteRecord>, SessionStoreError>;
+}
+
+/// Plain-save guard for head-canonical rows where retained history lives
+/// out-of-line: `previous_slim` is the slim materialization of the stored
+/// head; `stored_commits` are the adopted commits.
+///
+/// Admits: metadata-only update, prefix-preserving append, the
+/// system-context-append equivalence (driven through the canonical
+/// `SessionDocumentMachine` admission, same as [`append_only_save_guard`]),
+/// and transient-notice cleanup. Incoming history state, if present, must
+/// carry commits equal to `stored_commits` (extra commits =>
+/// `InvalidTranscriptRewrite` "route via save_transcript_rewrite") and pass
+/// session-level validation on its own bodies. ABSENT incoming state is OK —
+/// out-of-line history cannot be erased by a row write (a deliberate delta vs
+/// `append_only_save_guard`'s erase check).
+pub fn head_canonical_plain_save_guard(
+    incoming: &Session,
+    previous_slim: &Session,
+    stored_commits: &[TranscriptRewriteCommit],
+) -> Result<(), SessionStoreError> {
+    incoming
+        .validate_transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        })?;
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    let incoming_state = incoming.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        }
+    })?;
+    if let Some(state) = incoming_state.as_ref() {
+        if state.head != incoming_revision {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!(
+                    "incoming transcript graph head {} does not match current message digest {incoming_revision}",
+                    state.head
+                ),
+            });
+        }
+        if state.commits.as_slice() != stored_commits {
+            if state.commits.len() > stored_commits.len()
+                && state.commits[..stored_commits.len()] == *stored_commits
+            {
+                return Err(SessionStoreError::InvalidTranscriptRewrite {
+                    id: incoming.id().clone(),
+                    reason: "incoming plain save carries unadopted transcript rewrite commits; \
+                             route via save_transcript_rewrite"
+                        .to_string(),
+                });
+            }
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: "incoming plain save would change adopted transcript rewrite commits"
+                    .to_string(),
+            });
+        }
+    }
+
+    let previous_revision =
+        transcript_messages_digest(previous_slim.messages()).map_err(SessionStoreError::from)?;
+    if previous_revision == incoming_revision {
+        return Ok(());
+    }
+    let prev_len = previous_slim.messages().len();
+    let new_len = incoming.messages().len();
+    if new_len >= prev_len {
+        let incoming_prefix_revision = transcript_messages_digest(&incoming.messages()[..prev_len])
+            .map_err(SessionStoreError::from)?;
+        if incoming_prefix_revision == previous_revision {
+            return Ok(());
+        }
+    }
+    if incoming_preserves_conversation_tail_with_system_context_append(incoming, previous_slim)? {
+        return Ok(());
+    }
+    if incoming_preserves_prefix_after_transient_notice_cleanup(incoming, previous_slim)? {
+        return Ok(());
+    }
+    if new_len < prev_len {
+        return Err(SessionStoreError::MonotonicityViolation {
+            id: incoming.id().clone(),
+            prev_len,
+            new_len,
+        });
+    }
+    Err(SessionStoreError::TranscriptContinuityViolation {
+        id: incoming.id().clone(),
+        previous_revision,
+        incoming_revision,
+        reason: "incoming transcript neither preserves the persisted head-strand prefix nor \
+                 matches a machine-admitted equivalence shape"
+            .to_string(),
+    })
+}
+
+/// Shared `save_head` transition validator so guard semantics stay uniform
+/// across [`IncrementalSessionStore`] backends.
+///
+/// `stored` is the current row plus its CAS token; `new_strand_len` is the
+/// persisted row count of `head.strand`; `recorded_rewrites` is the total
+/// number of recorded rewrite rows (adopted + unadopted).
+pub fn validate_save_head_transition(
+    head: &SessionHead,
+    stored: Option<(&SessionHead, &str)>,
+    expected: &SessionHeadCas,
+    new_strand_len: u64,
+    recorded_rewrites: u64,
+) -> Result<(), SessionStoreError> {
+    if head
+        .metadata
+        .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+    {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: head.id.clone(),
+            reason: "session head must not inline transcript history state metadata".to_string(),
+        });
+    }
+    match (expected, stored) {
+        (SessionHeadCas::Create, None) => {}
+        (SessionHeadCas::Create, Some((_, token))) => {
+            return Err(SessionStoreError::TranscriptRevisionConflict {
+                id: head.id.clone(),
+                expected: "<create>".to_string(),
+                actual: token.to_string(),
+            });
+        }
+        (SessionHeadCas::IfToken(expected_token), Some((_, token))) => {
+            if expected_token != token {
+                return Err(SessionStoreError::TranscriptRevisionConflict {
+                    id: head.id.clone(),
+                    expected: expected_token.clone(),
+                    actual: token.to_string(),
+                });
+            }
+        }
+        (SessionHeadCas::IfToken(expected_token), None) => {
+            return Err(SessionStoreError::TranscriptRevisionConflict {
+                id: head.id.clone(),
+                expected: expected_token.clone(),
+                actual: "<missing>".to_string(),
+            });
+        }
+    }
+    if head.message_count > new_strand_len {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: head.id.clone(),
+            reason: format!(
+                "session head covers {} messages but strand {} only persists {new_strand_len} rows",
+                head.message_count, head.strand
+            ),
+        });
+    }
+    if let Some((stored_head, _)) = stored {
+        if stored_head.strand == head.strand && head.message_count < stored_head.message_count {
+            return Err(SessionStoreError::MonotonicityViolation {
+                id: head.id.clone(),
+                prev_len: usize::try_from(stored_head.message_count).unwrap_or(usize::MAX),
+                new_len: usize::try_from(head.message_count).unwrap_or(usize::MAX),
+            });
+        }
+        if head.rewrite_count < stored_head.rewrite_count {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: head.id.clone(),
+                reason: format!(
+                    "session head rewrite_count {} would retract adopted rewrite count {}",
+                    head.rewrite_count, stored_head.rewrite_count
+                ),
+            });
+        }
+    }
+    if head.rewrite_count > recorded_rewrites {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: head.id.clone(),
+            reason: format!(
+                "session head rewrite_count {} exceeds recorded rewrite commits {recorded_rewrites}",
+                head.rewrite_count
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Shared `commit_rewrite` transition validator.
+///
+/// `parent_prefix_digest` is the digest of the stored head strand's rows
+/// `[0..record.commit.messages_before)` — computed by the backend from its
+/// persisted rows, never caller-attested. Returns the implied next head for
+/// the caller to adopt via `save_head`.
+pub fn validate_commit_rewrite_transition(
+    id: &SessionId,
+    record: &TranscriptRewriteRecord,
+    stored: &SessionHead,
+    stored_token: &str,
+    expected: &SessionHeadCas,
+    parent_prefix_digest: &str,
+) -> Result<SessionHead, SessionStoreError> {
+    match expected {
+        SessionHeadCas::Create => {
+            return Err(SessionStoreError::TranscriptRevisionConflict {
+                id: id.clone(),
+                expected: "<create>".to_string(),
+                actual: stored_token.to_string(),
+            });
+        }
+        SessionHeadCas::IfToken(expected_token) => {
+            if expected_token != stored_token {
+                return Err(SessionStoreError::TranscriptRevisionConflict {
+                    id: id.clone(),
+                    expected: expected_token.clone(),
+                    actual: stored_token.to_string(),
+                });
+            }
+        }
+    }
+    TranscriptRewriteRecord::new(
+        record.commit.clone(),
+        record.parent_body.clone(),
+        record.revision_body.clone(),
+    )
+    .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+        id: id.clone(),
+        reason: format!("transcript rewrite record failed validation: {err}"),
+    })?;
+    if record.commit.parent_revision != stored.head_revision {
+        return Err(SessionStoreError::TranscriptRevisionConflict {
+            id: id.clone(),
+            expected: record.commit.parent_revision.clone(),
+            actual: stored.head_revision.clone(),
+        });
+    }
+    if parent_prefix_digest != record.commit.parent_revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!(
+                "persisted parent strand rows digest {parent_prefix_digest} does not match \
+                 commit parent revision {}",
+                record.commit.parent_revision
+            ),
+        });
+    }
+    Ok(SessionHead {
+        id: id.clone(),
+        version: stored.version,
+        strand: TranscriptStrandId::from_rewrite(&record.commit),
+        head_revision: record.commit.revision.clone(),
+        message_count: record.commit.messages_after as u64,
+        rewrite_count: stored.rewrite_count.saturating_add(1),
+        created_at: stored.created_at,
+        updated_at: record.commit.committed_at,
+        usage: stored.usage.clone(),
+        metadata: stored.metadata.clone(),
+    })
+}
+
+/// One rewrite edge in a [`StrandLayout`].
+#[derive(Debug, Clone)]
+pub struct StrandRewriteLayout {
+    pub commit: TranscriptRewriteCommit,
+    pub parent_strand: TranscriptStrandId,
+    pub parent_len: u64,
+    pub strand: TranscriptStrandId,
+    pub strand_len: u64,
+}
+
+/// Deterministic strand layout of a session's retained transcript history:
+/// the shared pure function behind read-only head synthesis and the one-time
+/// blob-to-head-canonical migration.
+#[derive(Debug, Clone)]
+pub struct StrandLayout {
+    /// Full (maximal) row vector per strand.
+    pub strands: Vec<(TranscriptStrandId, Vec<Message>)>,
+    /// Adopted rewrites, in commit order (`rewrite_idx` = position).
+    pub rewrites: Vec<StrandRewriteLayout>,
+    pub head_strand: TranscriptStrandId,
+    pub head_len: u64,
+}
+
+fn layout_messages_extend(
+    base: &[Message],
+    candidate: &[Message],
+) -> Result<bool, SessionStoreError> {
+    if candidate.len() < base.len() {
+        return Ok(false);
+    }
+    if base.is_empty() {
+        return Ok(true);
+    }
+    let base_digest = transcript_messages_digest(base).map_err(SessionStoreError::from)?;
+    let prefix_digest =
+        transcript_messages_digest(&candidate[..base.len()]).map_err(SessionStoreError::from)?;
+    Ok(base_digest == prefix_digest)
+}
+
+fn layout_find_or_insert(
+    id: &SessionId,
+    strands: &mut Vec<(TranscriptStrandId, Vec<Message>)>,
+    strand: TranscriptStrandId,
+    rows: Vec<Message>,
+) -> Result<usize, SessionStoreError> {
+    if let Some(index) = strands.iter().position(|(sid, _)| *sid == strand) {
+        if layout_messages_extend(&strands[index].1, &rows)? {
+            strands[index].1 = rows;
+        } else if !layout_messages_extend(&rows, &strands[index].1)? {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: id.clone(),
+                reason: format!(
+                    "retained transcript history maps divergent bodies onto strand {strand}"
+                ),
+            });
+        }
+        return Ok(index);
+    }
+    strands.push((strand, rows));
+    Ok(strands.len() - 1)
+}
+
+/// Lay out a session's retained transcript history as append-only strands.
+///
+/// Root strand → `from_rewrite` chain per adopted commit; rebookkept parents
+/// get their own `rebase:` strands from their retained bodies; the live
+/// vector extends the final strand (or, when it provably does not, its own
+/// `rebase:` strand). Pure — shared by read-only head synthesis and the
+/// in-transaction migration write.
+pub fn strand_layout_for_history(
+    id: &SessionId,
+    state: Option<&TranscriptHistoryState>,
+    live_messages: &[Message],
+) -> Result<StrandLayout, SessionStoreError> {
+    let mut strands: Vec<(TranscriptStrandId, Vec<Message>)> =
+        vec![(TranscriptStrandId::root(), Vec::new())];
+    let mut rewrites = Vec::new();
+    let mut current = 0usize;
+    let commits: &[TranscriptRewriteCommit] = state.map(|s| s.commits.as_slice()).unwrap_or(&[]);
+    for commit in commits {
+        let state = state.ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: "transcript rewrite commits without retained history state".to_string(),
+        })?;
+        let parent_body = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == commit.parent_revision)
+            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+                id: id.clone(),
+                reason: format!(
+                    "retained history omits parent revision body {}",
+                    commit.parent_revision
+                ),
+            })?;
+        let (parent_index, parent_len) =
+            if layout_messages_extend(&strands[current].1, &parent_body.messages)? {
+                strands[current].1 = parent_body.messages.clone();
+                (current, parent_body.messages.len())
+            } else {
+                let rebased = TranscriptStrandId::rebase(&commit.parent_revision);
+                let index =
+                    layout_find_or_insert(id, &mut strands, rebased, parent_body.messages.clone())?;
+                (index, parent_body.messages.len())
+            };
+        let revision_body = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == commit.revision)
+            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+                id: id.clone(),
+                reason: format!(
+                    "retained history omits new revision body {}",
+                    commit.revision
+                ),
+            })?;
+        let new_strand = TranscriptStrandId::from_rewrite(commit);
+        let new_index =
+            layout_find_or_insert(id, &mut strands, new_strand, revision_body.messages.clone())?;
+        rewrites.push(StrandRewriteLayout {
+            commit: commit.clone(),
+            parent_strand: strands[parent_index].0.clone(),
+            parent_len: parent_len as u64,
+            strand: strands[new_index].0.clone(),
+            strand_len: revision_body.messages.len() as u64,
+        });
+        current = new_index;
+    }
+    if layout_messages_extend(&strands[current].1, live_messages)? {
+        strands[current].1 = live_messages.to_vec();
+    } else {
+        let live_digest =
+            transcript_messages_digest(live_messages).map_err(SessionStoreError::from)?;
+        let rebased = TranscriptStrandId::rebase(&live_digest);
+        current = layout_find_or_insert(id, &mut strands, rebased, live_messages.to_vec())?;
+    }
+    Ok(StrandLayout {
+        head_strand: strands[current].0.clone(),
+        head_len: live_messages.len() as u64,
+        strands,
+        rewrites,
+    })
+}
+
+/// Reconstruct an adopted rewrite record from strand prefix ranges.
+///
+/// `parent_messages`/`revision_messages` are the backend's persisted rows
+/// `[0..parent_len)` / `[0..strand_len)` for the recorded strands. Body
+/// `created_at` is derived from the commit (bodies are content-addressed;
+/// the timestamp is bookkeeping).
+pub fn reconstruct_rewrite_record(
+    id: &SessionId,
+    commit: TranscriptRewriteCommit,
+    parent_messages: Vec<Message>,
+    revision_messages: Vec<Message>,
+) -> Result<TranscriptRewriteRecord, SessionStoreError> {
+    let parent_body = TranscriptRevisionBody {
+        revision: commit.parent_revision.clone(),
+        parent_revision: None,
+        messages: parent_messages,
+        created_at: commit.committed_at,
+    };
+    let revision_body = TranscriptRevisionBody {
+        revision: commit.revision.clone(),
+        parent_revision: Some(commit.parent_revision.clone()),
+        messages: revision_messages,
+        created_at: commit.committed_at,
+    };
+    TranscriptRewriteRecord::new(commit, parent_body, revision_body).map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!("persisted rewrite record failed reconstruction: {err}"),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -3396,5 +4088,254 @@ mod tests {
             append_only_save_guard(&incoming, Some(&previous)),
             Err(SessionStoreError::TranscriptContinuityViolation { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental session persistence (OB3 ask 11)
+    // -----------------------------------------------------------------------
+
+    #[allow(clippy::expect_used)]
+    fn compacted_session_fixture() -> (Session, Session, TranscriptRewriteCommit) {
+        let mut parent = Session::new();
+        parent.push(Message::User(UserMessage::text("turn one".to_string())));
+        parent.push(Message::User(UserMessage::text("turn two".to_string())));
+        parent.push(Message::User(UserMessage::text("turn three".to_string())));
+        let mut compacted = parent.clone();
+        let commit = compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 3 },
+                vec![Message::User(UserMessage::text(
+                    "[Context compacted] summary".to_string(),
+                ))],
+                crate::TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("compaction rewrite should commit");
+        (parent, compacted, commit)
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_head_from_session_strips_history_state_and_round_trips() {
+        let (_, compacted, _) = compacted_session_fixture();
+        assert!(
+            compacted
+                .metadata()
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "fixture must carry inline history state"
+        );
+        let head = SessionHead::from_session(&compacted, TranscriptStrandId::root(), 1)
+            .expect("head projection");
+        assert!(
+            !head
+                .metadata
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "SessionHead::from_session must strip the inline history state"
+        );
+        assert_eq!(head.message_count, compacted.messages().len() as u64);
+        assert_eq!(head.rewrite_count, 1);
+        assert_eq!(
+            head.head_revision,
+            transcript_messages_digest(compacted.messages()).expect("digest")
+        );
+
+        // CAS token is stable across a serialize round-trip.
+        let token = session_head_cas_token(&head).expect("token");
+        let round_tripped: SessionHead =
+            serde_json::from_slice(&serde_json::to_vec(&head).expect("serialize head"))
+                .expect("deserialize head");
+        assert_eq!(
+            session_head_cas_token(&round_tripped).expect("token"),
+            token,
+            "session head CAS token must be stable across serde round-trips"
+        );
+
+        // Slim rebuild carries no history metadata and preserves the transcript.
+        let slim = head
+            .into_session(compacted.messages().to_vec())
+            .expect("into_session");
+        assert!(
+            slim.transcript_history_state()
+                .expect("state read")
+                .is_none(),
+            "slim session must not carry transcript history metadata"
+        );
+        assert_eq!(slim.messages().len(), compacted.messages().len());
+        assert_eq!(slim.id(), compacted.id());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_head_into_session_fails_corrupted_on_tamper() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        let head = SessionHead::from_session(&session, TranscriptStrandId::root(), 0)
+            .expect("head projection");
+
+        // Tampered content.
+        let tampered = vec![Message::User(UserMessage::text("tampered".to_string()))];
+        assert!(matches!(
+            head.clone().into_session(tampered),
+            Err(SessionStoreError::Corrupted(_))
+        ));
+
+        // Wrong count.
+        assert!(matches!(
+            head.into_session(Vec::new()),
+            Err(SessionStoreError::Corrupted(_))
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn head_canonical_plain_save_guard_shapes() {
+        let mut previous = Session::new();
+        previous.push(Message::System(SystemMessage::new("base system")));
+        previous.push(Message::User(UserMessage::text("hello".to_string())));
+
+        // Plain append is admitted.
+        let mut appended = previous.clone();
+        appended.push(Message::User(UserMessage::text("more".to_string())));
+        head_canonical_plain_save_guard(&appended, &previous, &[]).expect("plain append admitted");
+
+        // Metadata-only update is admitted.
+        let mut metadata_only = previous.clone();
+        metadata_only.set_metadata("note", serde_json::json!("x"));
+        head_canonical_plain_save_guard(&metadata_only, &previous, &[])
+            .expect("metadata-only update admitted");
+
+        // Shrink without a commit is a MonotonicityViolation.
+        let mut shrunk = Session::with_id(previous.id().clone());
+        shrunk.push(Message::System(SystemMessage::new("base system")));
+        assert!(matches!(
+            head_canonical_plain_save_guard(&shrunk, &previous, &[]),
+            Err(SessionStoreError::MonotonicityViolation { .. })
+        ));
+
+        // System-context-append equivalence is admitted (machine-driven).
+        let mut context_appended = previous.clone();
+        context_appended
+            .set_system_prompt_with_source(
+                format!(
+                    "base system{SYSTEM_CONTEXT_SEPARATOR}[Runtime System Context]\nsource: unit-test\n\nextra context"
+                ),
+                crate::session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
+            )
+            .expect("runtime context append");
+        head_canonical_plain_save_guard(&context_appended, &previous, &[])
+            .expect("system-context append equivalence admitted");
+    }
+
+    /// ABSENT incoming history state is admitted by the head-canonical guard
+    /// (out-of-line history cannot be erased by a row write) — the deliberate
+    /// delta vs `append_only_save_guard`, which rejects the same shape as an
+    /// erase. The contrast assertion pins the RED behavior permanently.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn head_canonical_plain_save_guard_admits_absent_incoming_state() {
+        let (_, compacted, commit) = compacted_session_fixture();
+
+        // The slim materialization of the stored head (what an incremental
+        // backend reconstructs) plus one plain append with NO inline state.
+        let mut slim = Session::with_id(compacted.id().clone());
+        for message in compacted.messages() {
+            slim.push(message.clone());
+        }
+        assert!(
+            slim.transcript_history_state()
+                .expect("state read")
+                .is_none()
+        );
+        let mut incoming = slim.clone();
+        incoming.push(Message::User(UserMessage::text("next turn".to_string())));
+
+        head_canonical_plain_save_guard(&incoming, &slim, std::slice::from_ref(&commit))
+            .expect("absent incoming state must be admitted for head-canonical rows");
+
+        // RED contrast: append_only_save_guard rejects the equivalent shape
+        // when the previous row carried inline history state (the erase
+        // check at the whole-blob boundary).
+        let err = append_only_save_guard(&incoming, Some(&compacted))
+            .expect_err("append_only_save_guard must reject the erase shape");
+        assert!(
+            matches!(err, SessionStoreError::InvalidTranscriptRewrite { ref reason, .. }
+                if reason.contains("erase")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn head_canonical_plain_save_guard_rejects_extra_commit_and_admits_fat_round_trip() {
+        let (_, compacted, commit) = compacted_session_fixture();
+        let mut slim = Session::with_id(compacted.id().clone());
+        for message in compacted.messages() {
+            slim.push(message.clone());
+        }
+
+        // A fat round-trip (incoming carries exactly the adopted commits) is
+        // admitted.
+        head_canonical_plain_save_guard(&compacted, &slim, std::slice::from_ref(&commit))
+            .expect("commits-preserved fat round-trip admitted");
+
+        // Incoming state with an EXTRA (unadopted) commit must be routed via
+        // save_transcript_rewrite.
+        let mut extra = compacted;
+        extra
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text(
+                    "[Context compacted] second summary".to_string(),
+                ))],
+                crate::TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("second rewrite");
+        let err = head_canonical_plain_save_guard(&extra, &slim, std::slice::from_ref(&commit))
+            .expect_err("extra commit must be rejected on the plain path");
+        assert!(
+            matches!(err, SessionStoreError::InvalidTranscriptRewrite { ref reason, .. }
+                if reason.contains("save_transcript_rewrite")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn strand_layout_covers_compaction_chain_and_live_tail() {
+        let (_, mut compacted, commit) = compacted_session_fixture();
+        compacted.push(Message::User(UserMessage::text(
+            "post-compaction turn".to_string(),
+        )));
+        let state = compacted
+            .transcript_history_state()
+            .expect("state read")
+            .expect("state present");
+        let layout = strand_layout_for_history(compacted.id(), Some(&state), compacted.messages())
+            .expect("layout");
+        assert_eq!(layout.rewrites.len(), 1);
+        assert_eq!(
+            layout.head_strand,
+            TranscriptStrandId::from_rewrite(&commit)
+        );
+        assert_eq!(layout.head_len, compacted.messages().len() as u64);
+        // Root strand holds the parent body; the rewrite strand holds the
+        // revision body extended by the live tail.
+        let root_rows = &layout
+            .strands
+            .iter()
+            .find(|(sid, _)| *sid == TranscriptStrandId::root())
+            .expect("root strand")
+            .1;
+        assert_eq!(root_rows.len() as u64, layout.rewrites[0].parent_len);
+        let head_rows = &layout
+            .strands
+            .iter()
+            .find(|(sid, _)| *sid == layout.head_strand)
+            .expect("head strand")
+            .1;
+        assert_eq!(head_rows.len(), compacted.messages().len());
     }
 }

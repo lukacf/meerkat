@@ -306,7 +306,11 @@ pub use session_recovery::{
     build_recovered_session, has_build_only_turn_overrides, has_materialization_overrides,
     session_allows_first_turn_build_overrides,
 };
-pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
+pub use session_store::{
+    IncrementalSessionStore, SessionFilter, SessionHead, SessionHeadCas, SessionStore,
+    SessionStoreError, StrandLayout, StrandRewriteLayout, TranscriptStrandId,
+    head_canonical_plain_save_guard, session_head_cas_token, strand_layout_for_history,
+};
 pub use state::LoopState;
 pub use tool_catalog::{
     ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,

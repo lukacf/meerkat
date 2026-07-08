@@ -1,3 +1,9 @@
+---
+title: "Stopped-Phase Revival"
+description: "Root-cause design record for the 0.7.19–0.7.23 resume-strand class: machine-owned revival of stopped sessions and cold-load snapshot reconciliation"
+icon: "rotate-right"
+---
+
 # Stopped-Phase Revival — implementation plan (0.7.24)
 
 Root cause (verified, wf_63cf2cb3-27c + field forensics): the MeerkatMachine session

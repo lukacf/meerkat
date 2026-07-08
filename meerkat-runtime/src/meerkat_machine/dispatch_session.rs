@@ -1,4 +1,8 @@
 use super::*;
+use crate::input_state::StoredInputState;
+use crate::terminal_status::{
+    self, InteractionSelector, Sourced, TerminalWitnessSource, interaction_report,
+};
 use meerkat_core::ToolName;
 
 #[path = "../user_interrupt.rs"]
@@ -434,6 +438,70 @@ impl MeerkatMachine {
         ))
     }
 
+    /// Durable input-state witnesses for an UNREGISTERED session.
+    ///
+    /// Persistent machines answer from the RuntimeStore rows committed
+    /// atomically at every machine lifecycle boundary (rows are never
+    /// deleted, so terminal facts persist). A session with no lifecycle
+    /// record AND no input rows was never admitted and fails typed
+    /// `NotFound` — never an empty success. Ephemeral machines keep the
+    /// existing `NotReady` class: with no store there is no durable witness
+    /// to answer from.
+    pub(super) async fn durable_session_input_witnesses(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredInputState>, RuntimeDriverError> {
+        let Some(store) = self.store.as_ref() else {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            });
+        };
+        let runtime_id = Self::logical_runtime_id(session_id);
+        let witnesses = store.load_input_states(&runtime_id).await.map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "terminal-status witness read failed for {runtime_id}: {err}"
+            ))
+        })?;
+        if witnesses.is_empty() {
+            let lifecycle = store
+                .load_machine_lifecycle_record(&runtime_id)
+                .await
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "terminal-status lifecycle read failed for {runtime_id}: {err}"
+                    ))
+                })?;
+            if lifecycle.is_none() {
+                return Err(RuntimeDriverError::NotFound { runtime_id });
+            }
+        }
+        Ok(witnesses)
+    }
+
+    /// Input-state witnesses for a session: the live DSL-backed snapshot when
+    /// the session is registered, the durable store rows otherwise. Both
+    /// sides feed the same pure evaluators in [`crate::terminal_status`].
+    pub(super) async fn session_input_witnesses(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(TerminalWitnessSource, Vec<StoredInputState>), RuntimeDriverError> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).map(|entry| entry.driver.clone())
+        };
+        if let Some(driver) = driver {
+            let driver = driver.lock().await;
+            return Ok((
+                TerminalWitnessSource::LiveRuntime,
+                driver.as_driver().stored_input_states_snapshot()?,
+            ));
+        }
+        Ok((
+            TerminalWitnessSource::DurableStore,
+            self.durable_session_input_witnesses(session_id).await?,
+        ))
+    }
+
     pub(super) async fn execute_meerkat_machine_session_command(
         &self,
         command: MeerkatMachineCommand,
@@ -612,17 +680,27 @@ impl MeerkatMachine {
             } => {
                 let driver = {
                     let sessions = self.sessions.read().await;
-                    let entry = sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        })?;
-                    entry.driver.clone()
+                    sessions.get(&session_id).map(|entry| entry.driver.clone())
                 };
-                let driver = driver.lock().await;
-                Ok(MeerkatMachineCommandResult::InputState(
-                    driver.as_driver().stored_input_state(&input_id),
-                ))
+                match driver {
+                    Some(driver) => {
+                        let driver = driver.lock().await;
+                        Ok(MeerkatMachineCommandResult::InputState(
+                            driver.as_driver().stored_input_state(&input_id),
+                        ))
+                    }
+                    // Restart-first-class fallback: an unregistered session on
+                    // a persistent machine answers from the durable
+                    // RuntimeStore witnesses without reviving the runtime.
+                    None => {
+                        let witnesses = self.durable_session_input_witnesses(&session_id).await?;
+                        Ok(MeerkatMachineCommandResult::InputState(
+                            witnesses
+                                .into_iter()
+                                .find(|stored| stored.state.input_id == input_id),
+                        ))
+                    }
+                }
             }
             MeerkatMachineCommand::InputStateByIdempotencyKey {
                 session_id,
@@ -630,20 +708,84 @@ impl MeerkatMachine {
             } => {
                 let driver = {
                     let sessions = self.sessions.read().await;
-                    let entry = sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        })?;
-                    entry.driver.clone()
+                    sessions.get(&session_id).map(|entry| entry.driver.clone())
                 };
-                let driver = driver.lock().await;
-                let driver = driver.as_driver();
-                Ok(MeerkatMachineCommandResult::InputState(
-                    driver
-                        .input_id_for_idempotency_key(&idempotency_key)
-                        .and_then(|input_id| driver.stored_input_state(&input_id)),
+                match driver {
+                    Some(driver) => {
+                        let driver = driver.lock().await;
+                        let driver = driver.as_driver();
+                        Ok(MeerkatMachineCommandResult::InputState(
+                            driver
+                                .input_id_for_idempotency_key(&idempotency_key)
+                                .and_then(|input_id| driver.stored_input_state(&input_id)),
+                        ))
+                    }
+                    // Restart-first-class fallback: the persisted shell key is
+                    // the exact fact recovery re-enters as the machine-owned
+                    // idempotency binding, so the durable witness and the live
+                    // admission map cannot diverge.
+                    None => {
+                        let witnesses = self.durable_session_input_witnesses(&session_id).await?;
+                        Ok(MeerkatMachineCommandResult::InputState(
+                            terminal_status::find_by_idempotency_key(&witnesses, &idempotency_key)
+                                .cloned(),
+                        ))
+                    }
+                }
+            }
+            MeerkatMachineCommand::InteractionTerminalStatus {
+                session_id,
+                selector,
+            } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions.get(&session_id).map(|entry| entry.driver.clone())
+                };
+                let sourced = match driver {
+                    Some(driver) => {
+                        let driver = driver.lock().await;
+                        let driver = driver.as_driver();
+                        let bundle = match &selector {
+                            InteractionSelector::InputId(input_id) => {
+                                driver.stored_input_state(input_id)
+                            }
+                            // Live path: the machine-owned admission map is
+                            // the authority for key -> input resolution.
+                            InteractionSelector::IdempotencyKey(key) => driver
+                                .input_id_for_idempotency_key(key)
+                                .and_then(|input_id| driver.stored_input_state(&input_id)),
+                        };
+                        bundle.map(|bundle| Sourced {
+                            source: TerminalWitnessSource::LiveRuntime,
+                            report: interaction_report(&bundle),
+                        })
+                    }
+                    None => {
+                        let witnesses = self.durable_session_input_witnesses(&session_id).await?;
+                        let bundle = match &selector {
+                            InteractionSelector::InputId(input_id) => witnesses
+                                .iter()
+                                .find(|stored| &stored.state.input_id == input_id),
+                            InteractionSelector::IdempotencyKey(key) => {
+                                terminal_status::find_by_idempotency_key(&witnesses, key)
+                            }
+                        };
+                        bundle.map(|bundle| Sourced {
+                            source: TerminalWitnessSource::DurableStore,
+                            report: interaction_report(bundle),
+                        })
+                    }
+                };
+                Ok(MeerkatMachineCommandResult::InteractionTerminalStatus(
+                    sourced,
                 ))
+            }
+            MeerkatMachineCommand::RunTerminalStatus { session_id, run_id } => {
+                let (source, witnesses) = self.session_input_witnesses(&session_id).await?;
+                Ok(MeerkatMachineCommandResult::RunTerminalStatus(Sourced {
+                    source,
+                    report: terminal_status::evaluate_run(&run_id, &witnesses),
+                }))
             }
             MeerkatMachineCommand::ListActiveInputs { session_id } => {
                 let driver = {

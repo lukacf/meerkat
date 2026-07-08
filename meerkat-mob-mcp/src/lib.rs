@@ -187,14 +187,15 @@ pub struct KickoffMemberSnapshot {
     pub snapshot: meerkat_mob::MobMemberSnapshot,
 }
 
-fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob::MobId> {
-    // Read the typed durable identity directly. Old persisted rows written
-    // before `mob_member_binding` existed deserialize as `None` and are simply
-    // not owned (back-read safe) — they re-acquire a typed binding on the next
-    // build/resume. No comms_name string-split, no `mob:{id}` realm
-    // format-string, no magic-key peer_meta cross-check.
-    let metadata = session.session_metadata()?;
-    let binding = metadata.mob_member_binding.as_ref()?;
+fn persisted_mob_binding(
+    view: &meerkat_core::PersistedSessionMetadataView,
+) -> Option<meerkat_mob::MobId> {
+    // Read the typed durable identity directly off the metadata view. Old
+    // persisted rows written before `mob_member_binding` existed decode as
+    // `None` and are simply not owned (back-read safe) — they re-acquire a
+    // typed binding on the next build/resume. No comms_name string-split, no
+    // `mob:{id}` realm format-string, no magic-key peer_meta cross-check.
+    let binding = view.mob_member_binding()?;
     Some(meerkat_mob::MobId::from(binding.mob_id.as_str()))
 }
 
@@ -1145,9 +1146,11 @@ impl MobMcpState {
 
     #[doc(hidden)]
     pub async fn owns_persisted_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
-        let Some(session) = self
+        // Ownership routing needs only the typed identity facts on session
+        // metadata — read the metadata-only seam, never the full document.
+        let Some(view) = self
             .session_service()
-            .load_persisted_session(bridge_session_id)
+            .load_persisted_session_metadata(bridge_session_id)
             .await
             .ok()
             .flatten()
@@ -1155,7 +1158,7 @@ impl MobMcpState {
             return false;
         };
 
-        let Some(mob_id) = persisted_mob_binding(&session) else {
+        let Some(mob_id) = persisted_mob_binding(&view) else {
             return false;
         };
         match self.handle_for(&mob_id).await {
@@ -4524,6 +4527,17 @@ mod tests {
                 events: rx,
             })
         }
+
+        fn inject_with_interaction_id(
+            &self,
+            _interaction_id: InteractionId,
+            body: ContentInput,
+            source: PlainEventSource,
+            handling_mode: HandlingMode,
+            render_metadata: Option<RenderMetadata>,
+        ) -> Result<(), EventInjectorError> {
+            self.inject(body, source, handling_mode, render_metadata)
+        }
     }
 
     impl MockComms {
@@ -4740,6 +4754,12 @@ mod tests {
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
         start_turn_calls: AtomicU64,
+        /// Counting-wrapper guard state: full-document reads through
+        /// `load_persisted_session`.
+        persisted_full_loads: AtomicU64,
+        /// Counting-wrapper guard state: metadata-only reads through
+        /// `load_persisted_session_metadata`.
+        persisted_metadata_loads: AtomicU64,
         runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     }
 
@@ -4754,6 +4774,8 @@ mod tests {
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
                 start_turn_calls: AtomicU64::new(0),
+                persisted_full_loads: AtomicU64::new(0),
+                persisted_metadata_loads: AtomicU64::new(0),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             }
         }
@@ -5086,12 +5108,37 @@ mod tests {
             &self,
             session_id: &SessionId,
         ) -> Result<Option<Session>, SessionError> {
+            self.persisted_full_loads.fetch_add(1, Ordering::Relaxed);
             Ok(self
                 .persisted_sessions
                 .read()
                 .await
                 .get(session_id)
                 .cloned())
+        }
+
+        async fn load_persisted_session_metadata(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+            self.persisted_metadata_loads
+                .fetch_add(1, Ordering::Relaxed);
+            let Some(session) = self
+                .persisted_sessions
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            meerkat_core::PersistedSessionMetadataView::try_from_session(&session)
+                .map(Some)
+                .map_err(|err| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id} durable metadata failed typed restore: {err}"
+                    )))
+                })
         }
 
         async fn apply_runtime_turn(
@@ -5701,6 +5748,63 @@ mod tests {
         assert!(
             state.owns_persisted_bridge_session(&persisted_id).await,
             "persisted mob members must still route through mob ownership after restart even before a live handle is rehydrated"
+        );
+    }
+
+    /// Counting-wrapper guard (mobkit ask-24 clause 3): the persisted
+    /// ownership probe reads the metadata seam ONLY — exactly one
+    /// metadata-view load and ZERO full session-document loads. Regresses if
+    /// `owns_persisted_bridge_session` (or anything on its path) reaches for
+    /// `load_persisted_session` again.
+    #[tokio::test]
+    async fn test_owns_persisted_bridge_session_reads_metadata_seam_without_full_load() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
+        let state = Arc::new(MobMcpState::new(session_service));
+
+        let mut persisted = Session::new();
+        let persisted_id = persisted.id().clone();
+        let _ = persisted.set_session_metadata(SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: SessionTooling {
+                comms: ToolCategoryOverride::Enable,
+                ..SessionTooling::default()
+            },
+            keep_alive: false,
+            comms_name: Some("team/reviewer/alice".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "team".to_string(),
+                role: "reviewer".to_string(),
+                member: "alice".to_string(),
+            }),
+        });
+        svc.insert_persisted_session(persisted).await;
+
+        assert!(
+            state.owns_persisted_bridge_session(&persisted_id).await,
+            "the metadata seam must resolve ownership for a bound persisted session"
+        );
+        assert_eq!(
+            svc.persisted_full_loads.load(Ordering::Relaxed),
+            0,
+            "the ownership probe must not materialize the full session document"
+        );
+        assert_eq!(
+            svc.persisted_metadata_loads.load(Ordering::Relaxed),
+            1,
+            "the ownership probe reads exactly one metadata view"
         );
     }
 

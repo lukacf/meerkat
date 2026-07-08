@@ -876,24 +876,27 @@ async fn latest_persisted_session_for_member(
         role.as_str(),
         agent_identity.as_str(),
     )?;
+
+    // Candidate matching runs over the metadata-only read seam: the member
+    // identity facts (typed binding, comms name) live on session metadata, so
+    // scanning the realm never materializes full transcripts.
     let mut best: Option<(
         meerkat_core::time_compat::SystemTime,
         meerkat_core::types::SessionId,
-        meerkat_core::Session,
     )> = None;
 
     for summary in listed_sessions {
         if &summary.session_id == missing_session_id {
             continue;
         }
-        let Some(session) = session_service
-            .load_persisted_session(&summary.session_id)
+        let Some(view) = session_service
+            .load_persisted_session_metadata(&summary.session_id)
             .await?
         else {
             continue;
         };
         if !persisted_session_matches_member(
-            &session,
+            view.session_metadata.as_ref(),
             mob_id,
             role,
             agent_identity,
@@ -903,23 +906,33 @@ async fn latest_persisted_session_for_member(
         }
         let replace = best
             .as_ref()
-            .is_none_or(|(updated_at, _, _)| summary.updated_at > *updated_at);
+            .is_none_or(|(updated_at, _)| summary.updated_at > *updated_at);
         if replace {
-            best = Some((summary.updated_at, summary.session_id.clone(), session));
+            best = Some((summary.updated_at, summary.session_id.clone()));
         }
     }
 
-    Ok(best.map(|(_, session_id, session)| (session_id, session)))
+    let Some((_, winner_session_id)) = best else {
+        return Ok(None);
+    };
+    // Full-load ONLY the winner. A winner that vanishes between the metadata
+    // match and the full load reads as "no replacement" (`Ok(None)`) — the
+    // caller records the member's restore failure exactly as if no candidate
+    // had matched.
+    Ok(session_service
+        .load_persisted_session(&winner_session_id)
+        .await?
+        .map(|session| (winner_session_id, session)))
 }
 
 fn persisted_session_matches_member(
-    session: &meerkat_core::Session,
+    metadata: Option<&meerkat_core::SessionMetadata>,
     mob_id: &crate::ids::MobId,
     role: &crate::ids::ProfileName,
     agent_identity: &crate::ids::AgentIdentity,
     canonical_comms_name: &str,
 ) -> bool {
-    let Some(metadata) = session.session_metadata() else {
+    let Some(metadata) = metadata else {
         return false;
     };
     if metadata.mob_member_binding.as_ref().is_some_and(|binding| {
@@ -2419,6 +2432,7 @@ impl MobBuilder {
             wiring.dsl_authority.state().topology_epoch,
         ));
 
+        let mut per_spawn_external_tools_seed = BTreeMap::new();
         if resumed_state == MobState::Running {
             Self::reconcile_resume(
                 &definition,
@@ -2437,6 +2451,7 @@ impl MobBuilder {
                 &spawn_member_customizer,
                 storage.realm_profiles.clone(),
                 storage.runtime_metadata.clone(),
+                &mut per_spawn_external_tools_seed,
             )
             .await?;
         }
@@ -2471,6 +2486,7 @@ impl MobBuilder {
             default_external_tools_provider,
             spawn_member_customizer,
             storage.realm_profiles.clone(),
+            per_spawn_external_tools_seed,
             realtime_session_factory,
         ))
     }
@@ -2634,6 +2650,7 @@ impl MobBuilder {
         spawn_member_customizer: &Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+        per_spawn_external_tools_seed: &mut BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
     ) -> Result<(), MobError> {
         let pending_supervisor_accepted_peer_ids: std::collections::BTreeSet<String> =
             supervisor_bridge
@@ -2740,6 +2757,11 @@ impl MobBuilder {
                     "spawn customizer cannot change resume restore profile for '{}' from '{}' to '{}'",
                     entry.agent_identity, entry.role, restore_spec.role_name
                 )));
+            }
+            // Seed the actor's retention map so a later machine-authorized
+            // revival recomposes the customizer-supplied per-spawn overlay.
+            if let Some(tools) = restore_spec.external_tools.clone() {
+                per_spawn_external_tools_seed.insert(entry.agent_identity.clone(), tools);
             }
             let restore_profile_override = restore_spec.override_profile.clone();
             let restore_labels = restore_spec
@@ -3654,6 +3676,7 @@ impl MobBuilder {
             default_external_tools_provider,
             spawn_member_customizer,
             realm_profile_store,
+            BTreeMap::new(),
             realtime_session_factory,
         ))
     }
@@ -3673,6 +3696,7 @@ impl MobBuilder {
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
         spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
+        per_spawn_external_tools: BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> MobHandle {
         let run_store = authority_validating_mob_run_store(run_store);
@@ -3817,6 +3841,7 @@ impl MobBuilder {
             machine_state_watch_tx,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
+            per_spawn_external_tools: tokio::sync::RwLock::new(per_spawn_external_tools),
             spawn_member_customizer,
             realm_profile_store,
             composition_binding,

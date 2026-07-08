@@ -103,7 +103,73 @@ pub(crate) fn merge_batch_turn_metadata(
             }
         }
     }
+    // Batch-level peer-reply capability mint: every peer *message* delivery
+    // in the admitted batch contributes one typed reply capability. Minted
+    // AFTER the per-input fold so the scalar overlay merge above never sees a
+    // runtime-minted overlay (which would spuriously conflict across inputs).
+    let deliveries = inputs
+        .iter()
+        .filter_map(|(_, input)| crate::input::peer_reply_capability(input))
+        .collect::<Vec<_>>();
+    if !deliveries.is_empty() {
+        // `for_input` stamps `execution_kind` on every input, so a non-empty
+        // batch always folded into `Some`; a missing accumulator here is a
+        // logic error and fails closed with a typed error.
+        let Some(metadata) = acc.as_mut() else {
+            return Err(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                    field: "turn_tool_overlay",
+                    reason: "peer reply capability minted for a batch with no metadata accumulator",
+                },
+            );
+        };
+        attach_peer_reply_capabilities(metadata, deliveries)?;
+    }
     Ok(acc.filter(|m| !m.is_empty()))
+}
+
+/// Attach the batch's typed peer-reply capabilities to the accumulated turn
+/// metadata by composing a dispatch-context-only overlay into its turn tool
+/// overlay. Mutates the single accumulator minted by [`for_input`] — this is
+/// NOT a second `RuntimeTurnMetadata` construction site.
+fn attach_peer_reply_capabilities(
+    metadata: &mut meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata,
+    deliveries: Vec<meerkat_core::comms::PeerReplyCapability>,
+) -> Result<(), meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict;
+
+    let context = meerkat_core::comms::PeerReplyDispatchContext { deliveries };
+    let value = serde_json::to_value(&context).map_err(|error| {
+        tracing::error!(
+            error = %error,
+            "typed peer reply dispatch context failed to serialize"
+        );
+        TurnMetadataMergeConflict {
+            field: "turn_tool_overlay",
+            reason: "peer reply dispatch context failed to serialize",
+        }
+    })?;
+    let mut reply_overlay = meerkat_core::service::TurnToolOverlay::default();
+    reply_overlay.dispatch_context.insert(
+        meerkat_core::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
+        value,
+    );
+    let composed = meerkat_core::service::TurnToolOverlay::compose(
+        metadata.turn_tool_overlay.take(),
+        reply_overlay,
+    )
+    .map_err(|error| {
+        tracing::error!(
+            error = %error,
+            "peer reply overlay composition conflicted with an existing dispatch-context entry"
+        );
+        TurnMetadataMergeConflict {
+            field: "turn_tool_overlay",
+            reason: "peer reply dispatch context conflicted with an existing overlay entry",
+        }
+    })?;
+    metadata.turn_tool_overlay = Some(composed);
+    Ok(())
 }
 
 fn completion_terminal_observation(
@@ -2748,6 +2814,189 @@ mod tests {
             .expect("metadata should still carry execution kind");
 
         assert!(metadata.transcript_identity.is_empty());
+    }
+
+    fn admission_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
+        crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(input, true)
+            .expect("generated admission semantics")
+    }
+
+    fn reply_context_from_overlay(
+        overlay: &meerkat_core::service::TurnToolOverlay,
+    ) -> meerkat_core::comms::PeerReplyDispatchContext {
+        let value = overlay
+            .dispatch_context
+            .get(meerkat_core::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY)
+            .expect("comms.peer_reply dispatch context entry");
+        serde_json::from_value(value.clone()).expect("typed peer reply dispatch context")
+    }
+
+    /// Ask 26 keystone: a turn triggered by a peer message mints a typed
+    /// reply-capability overlay on the batch turn metadata (dispatch-context
+    /// only — no tool visibility restriction).
+    #[test]
+    fn peer_message_turn_mints_typed_reply_capability_overlay() {
+        let peer_uuid = uuid::Uuid::from_u128(0x42);
+        let interaction_uuid = uuid::Uuid::from_u128(7);
+        let mut input = make_peer_message(&peer_uuid.to_string(), "hello");
+        if let Input::Peer(peer) = &mut input {
+            peer.header.correlation_id = Some(crate::CorrelationId::from_uuid(interaction_uuid));
+        }
+        let semantics = admission_semantics(&input);
+        let inputs = vec![(InputId::new(), input)];
+
+        let metadata = merge_batch_turn_metadata(&inputs, &[semantics])
+            .expect("single input metadata cannot conflict")
+            .expect("peer message batch carries metadata");
+
+        let overlay = metadata
+            .turn_tool_overlay
+            .expect("peer message turn must mint a reply-capability overlay");
+        assert_eq!(overlay.allowed_tools, None);
+        assert_eq!(overlay.blocked_tools, None);
+        let context = reply_context_from_overlay(&overlay);
+        assert_eq!(context.deliveries.len(), 1);
+        let capability = &context.deliveries[0];
+        assert_eq!(
+            capability.peer_id,
+            meerkat_core::comms::PeerId::from_uuid(peer_uuid)
+        );
+        assert_eq!(capability.in_reply_to, InteractionId(interaction_uuid));
+        assert_eq!(capability.display_name.as_deref(), Some("analyst-rt"));
+        assert_eq!(
+            capability.kind,
+            meerkat_core::comms::PeerReplyDeliveryKind::Message
+        );
+    }
+
+    /// A batch with two peer message deliveries mints both capabilities, in
+    /// batch delivery order.
+    #[test]
+    fn peer_message_batch_mints_one_capability_per_delivery() {
+        let first_peer = uuid::Uuid::from_u128(0xA1);
+        let second_peer = uuid::Uuid::from_u128(0xA2);
+        let mut first = make_peer_message(&first_peer.to_string(), "hello");
+        let mut second = make_peer_message(&second_peer.to_string(), "again");
+        if let Input::Peer(peer) = &mut first {
+            peer.header.correlation_id =
+                Some(crate::CorrelationId::from_uuid(uuid::Uuid::from_u128(1)));
+        }
+        if let Input::Peer(peer) = &mut second {
+            peer.header.correlation_id =
+                Some(crate::CorrelationId::from_uuid(uuid::Uuid::from_u128(2)));
+        }
+        let semantics = vec![admission_semantics(&first), admission_semantics(&second)];
+        let inputs = vec![(InputId::new(), first), (InputId::new(), second)];
+
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .expect("peer message batch must merge")
+            .expect("peer message batch carries metadata");
+
+        let overlay = metadata
+            .turn_tool_overlay
+            .expect("two-delivery batch must mint a reply-capability overlay");
+        let context = reply_context_from_overlay(&overlay);
+        assert_eq!(
+            context
+                .deliveries
+                .iter()
+                .map(|capability| (capability.peer_id, capability.in_reply_to))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    meerkat_core::comms::PeerId::from_uuid(first_peer),
+                    InteractionId(uuid::Uuid::from_u128(1))
+                ),
+                (
+                    meerkat_core::comms::PeerId::from_uuid(second_peer),
+                    InteractionId(uuid::Uuid::from_u128(2))
+                ),
+            ],
+            "deliveries must preserve batch delivery order"
+        );
+    }
+
+    /// Non-message peer conventions and non-canonical peer ids mint no
+    /// overlay at the batch level.
+    #[test]
+    fn non_reply_eligible_batches_mint_no_overlay() {
+        let terminal =
+            make_terminal_peer_response(TEST_PEER_RESPONSE_ROUTE_ID, TEST_PEER_RESPONSE_REQUEST_ID);
+        let semantics = admission_semantics(&terminal);
+        let metadata = merge_batch_turn_metadata(&[(InputId::new(), terminal)], &[semantics])
+            .expect("terminal batch must merge")
+            .expect("terminal batch carries metadata");
+        assert!(
+            metadata.turn_tool_overlay.is_none(),
+            "terminal peer responses must not mint a reply capability"
+        );
+
+        let mut non_canonical = make_peer_message("peer-1", "hello");
+        if let Input::Peer(peer) = &mut non_canonical {
+            peer.header.correlation_id =
+                Some(crate::CorrelationId::from_uuid(uuid::Uuid::from_u128(3)));
+        }
+        let semantics = admission_semantics(&non_canonical);
+        let metadata = merge_batch_turn_metadata(&[(InputId::new(), non_canonical)], &[semantics])
+            .expect("non-canonical peer batch must merge")
+            .expect("non-canonical peer batch carries metadata");
+        assert!(
+            metadata.turn_tool_overlay.is_none(),
+            "a non-canonical peer id must not mint a reply capability"
+        );
+    }
+
+    /// The reply-capability overlay composes with a caller-supplied overlay
+    /// carrying an unrelated dispatch-context key (e.g. WorkGraph attention)
+    /// instead of replacing it.
+    #[test]
+    fn reply_capability_overlay_composes_with_existing_dispatch_context() {
+        let workgraph_overlay = meerkat_core::service::TurnToolOverlay {
+            allowed_tools: None,
+            blocked_tools: Some(vec![meerkat_core::types::ToolName::from("blocked_by_flow")]),
+            dispatch_context: std::collections::BTreeMap::from([(
+                "workgraph.attention_projection".to_string(),
+                serde_json::json!({"binding_id": "b"}),
+            )]),
+        };
+        let prompt = Input::Prompt(crate::input::PromptInput::new(
+            "carry the workgraph overlay",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    turn_tool_overlay: Some(workgraph_overlay),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let peer_uuid = uuid::Uuid::from_u128(0x51);
+        let mut peer = make_peer_message(&peer_uuid.to_string(), "hello");
+        if let Input::Peer(peer_input) = &mut peer {
+            peer_input.header.correlation_id =
+                Some(crate::CorrelationId::from_uuid(uuid::Uuid::from_u128(4)));
+        }
+        let semantics = vec![admission_semantics(&prompt), admission_semantics(&peer)];
+        let inputs = vec![(InputId::new(), prompt), (InputId::new(), peer)];
+
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .expect("prompt + peer message batch must merge")
+            .expect("batch carries metadata");
+
+        let overlay = metadata.turn_tool_overlay.expect("composed overlay");
+        assert_eq!(
+            overlay.blocked_tools,
+            Some(vec![meerkat_core::types::ToolName::from("blocked_by_flow")]),
+            "caller overlay facts must survive the reply-capability mint"
+        );
+        assert_eq!(
+            overlay.dispatch_context["workgraph.attention_projection"],
+            serde_json::json!({"binding_id": "b"})
+        );
+        let context = reply_context_from_overlay(&overlay);
+        assert_eq!(context.deliveries.len(), 1);
+        assert_eq!(
+            context.deliveries[0].peer_id,
+            meerkat_core::comms::PeerId::from_uuid(peer_uuid)
+        );
     }
 
     fn make_terminal_peer_response(peer_id: &str, request_id: &str) -> Input {

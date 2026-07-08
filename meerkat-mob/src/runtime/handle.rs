@@ -1898,7 +1898,11 @@ pub struct SpawnMemberSpec {
     /// provide binding authority; build paths that require a binding must reject
     /// the spawn instead of promoting an ambient fallback.
     pub auth_binding: Option<meerkat_core::AuthBindingRef>,
-    /// Per-spawn external tool overlay. In-process only and not persisted.
+    /// Per-spawn external tool overlay. In-process only; retained by the mob
+    /// actor for the member's lifetime so machine-authorized revival
+    /// recomposes it (replaced or cleared by respawn replacement semantics,
+    /// dropped at retire). Not persisted: re-supply across process restarts
+    /// via `SpawnMemberCustomizer` (`SpawnSource::Resume`).
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Typed prompt replacement for this spawn.
     pub system_prompt_override: Option<SpawnSystemPromptOverride>,
@@ -2472,6 +2476,7 @@ impl MobHandle {
                     content: spec.content,
                     origin: spec.origin,
                     injected_context: spec.injected_context,
+                    interaction_id: spec.interaction_id,
                     handling_mode,
                     render_metadata,
                     ack_mode,

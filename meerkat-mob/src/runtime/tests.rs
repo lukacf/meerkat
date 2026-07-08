@@ -1218,6 +1218,9 @@ struct MockSessionService {
     create_requests: RwLock<Vec<CreateSessionRecord>>,
     /// Records whether each create_session had external_tools configured.
     create_with_external_tools: RwLock<Vec<bool>>,
+    /// Records the declarative MCP server names per create_session call,
+    /// in call order.
+    mcp_server_names: RwLock<Vec<(SessionId, Vec<String>)>>,
     /// External tool dispatcher captured per session.
     external_tools_by_session: RwLock<HashMap<SessionId, Arc<dyn AgentToolDispatcher>>>,
     /// Optional per-comms-name behavior overrides.
@@ -1265,6 +1268,17 @@ struct MockSessionService {
     /// from the request's active lowering carrier (typed appends in runtime
     /// mode, the `injected_context` field + prompt in direct mode).
     start_turn_user_channel: RwLock<Vec<(SessionId, Vec<(bool, String)>)>>,
+    /// Per turn request: the typed runtime turn metadata carrier, so tests
+    /// can assert transcript identity stamping on the delivery path.
+    start_turn_metadata: RwLock<
+        Vec<(
+            SessionId,
+            Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+        )>,
+    >,
+    /// Interaction ids received through the SubscribableInjector's
+    /// caller-chosen-id entry point (autonomous submit-work delivery).
+    injected_interaction_ids: Arc<std::sync::Mutex<Vec<InteractionId>>>,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     cancel_after_boundary_supported: AtomicBool,
@@ -1313,6 +1327,7 @@ impl MockSessionService {
             prompts: RwLock::new(Vec::new()),
             create_requests: RwLock::new(Vec::new()),
             create_with_external_tools: RwLock::new(Vec::new()),
+            mcp_server_names: RwLock::new(Vec::new()),
             external_tools_by_session: RwLock::new(HashMap::new()),
             comms_behaviors: RwLock::new(HashMap::new()),
             missing_comms_sessions: RwLock::new(HashSet::new()),
@@ -1333,6 +1348,8 @@ impl MockSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             start_turn_prompts: RwLock::new(Vec::new()),
             start_turn_user_channel: RwLock::new(Vec::new()),
+            start_turn_metadata: RwLock::new(Vec::new()),
+            injected_interaction_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             cancel_after_boundary_supported: AtomicBool::new(true),
@@ -1450,8 +1467,28 @@ impl MockSessionService {
         self.start_turn_user_channel.read().await.clone()
     }
 
+    async fn recorded_start_turn_metadata(
+        &self,
+    ) -> Vec<(
+        SessionId,
+        Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    )> {
+        self.start_turn_metadata.read().await.clone()
+    }
+
+    fn recorded_injected_interaction_ids(&self) -> Vec<InteractionId> {
+        self.injected_interaction_ids
+            .lock()
+            .expect("injected interaction id mutex")
+            .clone()
+    }
+
     async fn recorded_external_tools_flags(&self) -> Vec<bool> {
         self.create_with_external_tools.read().await.clone()
+    }
+
+    async fn recorded_mcp_server_names(&self) -> Vec<(SessionId, Vec<String>)> {
+        self.mcp_server_names.read().await.clone()
     }
 
     async fn external_tool_names(&self, session_id: &SessionId) -> Vec<String> {
@@ -2061,6 +2098,22 @@ impl SessionService for MockSessionService {
                     .and_then(|build| build.budget_limits.clone()),
             });
 
+        let mcp_server_names: Vec<String> = req
+            .build
+            .as_ref()
+            .map(|build| {
+                build
+                    .mcp_servers
+                    .iter()
+                    .map(|server| server.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.mcp_server_names
+            .write()
+            .await
+            .push((session_id.clone(), mcp_server_names));
+
         // Record the prompt for test inspection
         self.prompts
             .write()
@@ -2138,6 +2191,10 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), user_channel));
+        self.start_turn_metadata
+            .write()
+            .await
+            .push((id.clone(), req.runtime.turn_metadata.clone()));
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
@@ -2456,6 +2513,7 @@ struct CountingInjector {
     fail: bool,
     fail_inject: bool,
     completed_result: String,
+    interaction_ids: Arc<std::sync::Mutex<Vec<InteractionId>>>,
 }
 
 impl EventInjector for CountingInjector {
@@ -2523,6 +2581,22 @@ impl SubscribableInjector for CountingInjector {
             events: rx,
         })
     }
+
+    fn inject_with_interaction_id(
+        &self,
+        interaction_id: InteractionId,
+        body: meerkat_core::types::ContentInput,
+        source: PlainEventSource,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        self.inject(body, source, handling_mode, render_metadata)?;
+        self.interaction_ids
+            .lock()
+            .expect("interaction id mutex")
+            .push(interaction_id);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2571,6 +2645,7 @@ impl SessionServiceCommsExt for MockSessionService {
             fail,
             fail_inject,
             completed_result,
+            interaction_ids: self.injected_interaction_ids.clone(),
         }))
     }
 
@@ -2612,6 +2687,7 @@ impl SessionServiceCommsExt for MockSessionService {
             fail,
             fail_inject,
             completed_result,
+            interaction_ids: self.injected_interaction_ids.clone(),
         }))
     }
 }
@@ -33238,6 +33314,109 @@ async fn test_turn_driven_submit_work_delivers_injected_context_before_work_cont
     );
 }
 
+/// Ask-15 addendum (turn-driven): a host-supplied `WorkSpec.interaction_id`
+/// is stamped into the delivered turn's
+/// `RuntimeTurnMetadata.transcript_identity`, so the runner persists it onto
+/// the committed transcript messages and history backfill can join them with
+/// the host's live interaction frames.
+#[tokio::test]
+async fn test_turn_driven_submit_work_interaction_id_stamps_transcript_identity() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-interaction-id");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let interaction_id = InteractionId(uuid::Uuid::new_v4());
+    handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("summarize the findings".to_string(), WorkOrigin::Internal)
+                .with_interaction_id(interaction_id),
+        )
+        .await
+        .expect("submit work with interaction id");
+
+    wait_for_start_turn_call_count(
+        &service,
+        1,
+        "turn-driven work with an interaction id should start a turn",
+    )
+    .await;
+
+    let records = service.recorded_start_turn_metadata().await;
+    let (_, metadata) = records.last().expect("one turn request recorded");
+    let metadata = metadata
+        .as_ref()
+        .expect("submit-work delivery must carry runtime turn metadata");
+    assert_eq!(
+        metadata.transcript_identity.interaction_id,
+        Some(interaction_id),
+        "the host-supplied interaction id must ride the turn's transcript identity"
+    );
+    assert_eq!(
+        metadata.transcript_identity.run_id, None,
+        "the concrete run id is stamped later by the runner, not the work lane"
+    );
+}
+
+/// Ask-15 addendum (autonomous): a host-supplied `WorkSpec.interaction_id`
+/// rides the injected inbox event, so the comms classification (and the
+/// runtime transcript identity derived from it) carries the SAME id as the
+/// host's live interaction frames instead of a fresh unrelated one.
+#[tokio::test]
+async fn test_autonomous_submit_work_interaction_id_reaches_inbox_injection() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("lead-interaction-id");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let interaction_id = InteractionId(uuid::Uuid::new_v4());
+    handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("do the thing".to_string(), WorkOrigin::External)
+                .with_interaction_id(interaction_id),
+        )
+        .await
+        .expect("submit keyed autonomous work");
+
+    assert_eq!(
+        service.recorded_injected_interaction_ids(),
+        vec![interaction_id],
+        "the autonomous inbox delivery must carry the host-supplied interaction id"
+    );
+}
+
 /// Ask 1 (design item 7), autonomous decision: the autonomous inbox path
 /// flows through comms plain events (no user-channel work boundary), so
 /// non-empty injected context is rejected fail-closed with a typed error —
@@ -36981,6 +37160,341 @@ async fn test_per_spawn_external_tools_are_not_restored_from_storage() {
         flags.last().copied(),
         Some(false),
         "per-spawn trait-object dispatchers must be supplied again by the upper layer on restore"
+    );
+}
+
+fn sample_definition_with_turn_driven_worker() -> MobDefinition {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .expect("worker profile should be inline")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    definition
+}
+
+/// M2 Wave-1 regression (D1): the per-spawn external-tools overlay must be
+/// retained by the actor and recomposed when machine-authorized revival
+/// rebuilds a discarded live session. Before the retention map,
+/// `materialize_revived_member_session` passed `None` to
+/// `external_tools_for_profile` and revived members silently lost their
+/// per-spawn tools.
+#[tokio::test]
+async fn test_revival_recomposes_per_spawn_external_tools_overlay() {
+    let (handle, service) = create_test_mob(sample_definition_with_turn_driven_worker()).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-1");
+    spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&["per_spawn_probe"])));
+    let spawned = handle.spawn_spec(spec).await.expect("spawn worker");
+    let bridge_session_id = handle
+        .resolve_bridge_session_id(&spawned.agent_identity)
+        .await
+        .expect("bridge session id");
+    assert!(
+        service
+            .external_tool_names(&bridge_session_id)
+            .await
+            .contains(&"per_spawn_probe".to_string()),
+        "sanity: the original create must expose the per-spawn overlay"
+    );
+
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+
+    handle
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("machine-authorized revival must rebuild the live session");
+
+    let revived_tool_names = service.external_tool_names(&bridge_session_id).await;
+    assert!(
+        revived_tool_names.contains(&"per_spawn_probe".to_string()),
+        "revival must recompose the retained per-spawn overlay: {revived_tool_names:?}"
+    );
+}
+
+/// M2 Wave-2 regression (D2): per-spawn declarative tooling carried on
+/// `SpawnMemberSpec.override_profile` must survive a cold process restart
+/// WITHOUT a `SpawnMemberCustomizer`. Before `MemberSpawnedEvent` carried
+/// `effective_profile_override`, roster replay projected `None` and the
+/// restore rebuilt the member from the definition profile, silently dropping
+/// per-spawn MCP servers.
+#[tokio::test]
+async fn test_cold_restart_restores_per_spawn_profile_override_without_customizer() {
+    let definition = sample_definition();
+    let mut override_profile = definition
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .expect("worker profile should be inline")
+        .clone();
+    override_profile.tools.mcp_servers = vec![meerkat_core::mcp_config::McpServerConfig::stdio(
+        "planner",
+        "/bin/echo",
+        vec![],
+        HashMap::new(),
+    )];
+
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-override");
+    spec.override_profile = Some(override_profile);
+    let spawned = handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn override worker");
+    let old_session_id = handle
+        .resolve_bridge_session_id(&spawned.agent_identity)
+        .await
+        .expect("bridge session id");
+
+    handle.stop().await.expect("stop");
+    MobSessionService::discard_live_session(service.as_ref(), &old_session_id)
+        .await
+        .expect("discard live session");
+
+    // Cold restart: rebuild the mob from durable storage with NO customizer.
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
+
+    let entry = resumed
+        .get_member(&AgentIdentity::from("w-override"))
+        .await
+        .expect("get member")
+        .expect("restored member");
+    let restored_override = entry
+        .effective_profile_override
+        .expect("replayed MemberSpawned must repopulate effective_profile_override");
+    assert_eq!(restored_override.tools.mcp_servers.len(), 1);
+    assert_eq!(restored_override.tools.mcp_servers[0].name, "planner");
+
+    let mcp_creates = service.recorded_mcp_server_names().await;
+    let (_, last_names) = mcp_creates
+        .last()
+        .expect("restore must re-create the member session");
+    assert!(
+        last_names.contains(&"planner".to_string()),
+        "restored member build must carry the per-spawn declarative MCP servers: {mcp_creates:?}"
+    );
+}
+
+struct RespawnOverlayCustomizer;
+
+impl SpawnMemberCustomizer for RespawnOverlayCustomizer {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if ctx.spawn_source == SpawnSource::Respawn {
+            spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&["respawn_tool"])));
+        }
+        Ok(())
+    }
+}
+
+/// Respawn replacement semantics for the retention map: the replacement
+/// spawn's overlay replaces the retired incarnation's entry, so a later
+/// machine-authorized revival composes the replacement tools, not the
+/// original spawn's.
+#[tokio::test]
+async fn test_respawn_replaces_retained_per_spawn_external_tools_for_revival() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(
+        sample_definition_with_turn_driven_worker(),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_spawn_member_customizer(Arc::new(RespawnOverlayCustomizer))
+    .create()
+    .await
+    .expect("create mob");
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-1");
+    spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&["tool_a"])));
+    handle.spawn_spec(spec).await.expect("spawn worker");
+
+    handle
+        .respawn(AgentIdentity::from("w-1"), None)
+        .await
+        .expect("respawn worker");
+    let respawn_session_id = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+        .await
+        .expect("respawn bridge session");
+
+    MobSessionService::discard_live_session(service.as_ref(), &respawn_session_id)
+        .await
+        .expect("discard live session");
+    handle
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("revive replacement".to_string()))
+        .await
+        .expect("revival after respawn");
+
+    let revived_tool_names = service.external_tool_names(&respawn_session_id).await;
+    assert!(
+        revived_tool_names.contains(&"respawn_tool".to_string()),
+        "revival after respawn must compose the replacement overlay: {revived_tool_names:?}"
+    );
+    assert!(
+        !revived_tool_names.contains(&"tool_a".to_string()),
+        "the retired incarnation's overlay must not leak into the replacement's revival: {revived_tool_names:?}"
+    );
+}
+
+/// Retention cleanup / no leak: the old incarnation's disposal
+/// (`dispose_remove_from_roster`) drops the retained overlay, and a
+/// replacement spawned WITHOUT external_tools keeps it absent (`None` =
+/// replacement semantics), so the new incarnation revives without the old
+/// tool. Direct fresh spawn of a retired identity is machine-rejected for
+/// the live actor (`identity_to_runtime` tombstones retired identities;
+/// only recovery replay clears them), so respawn is the live-path
+/// identity-reuse route this guards.
+#[tokio::test]
+async fn test_respawn_without_replacement_overlay_clears_retained_per_spawn_tools() {
+    let (handle, service) = create_test_mob(sample_definition_with_turn_driven_worker()).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-1");
+    spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&["stale_tool"])));
+    handle.spawn_spec(spec).await.expect("spawn worker");
+
+    handle
+        .respawn(AgentIdentity::from("w-1"), None)
+        .await
+        .expect("respawn worker without a replacement overlay");
+    let respawn_session_id = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+        .await
+        .expect("respawn bridge session");
+
+    MobSessionService::discard_live_session(service.as_ref(), &respawn_session_id)
+        .await
+        .expect("discard live session");
+    handle
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("revive fresh incarnation".to_string()))
+        .await
+        .expect("revival of fresh incarnation");
+
+    let revived_tool_names = service.external_tool_names(&respawn_session_id).await;
+    assert!(
+        !revived_tool_names.contains(&"stale_tool".to_string()),
+        "disposal must drop the retained overlay; the fresh incarnation revives clean: {revived_tool_names:?}"
+    );
+}
+
+struct ResumeOverlayCustomizer;
+
+impl SpawnMemberCustomizer for ResumeOverlayCustomizer {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if ctx.spawn_source == SpawnSource::Resume {
+            spec.external_tools = Some(Arc::new(MultiToolDispatcher::new(&[
+                "customizer_resume_probe",
+            ])));
+        }
+        Ok(())
+    }
+}
+
+/// Restore-seeded retention: tools attached by a `SpawnMemberCustomizer` at
+/// `SpawnSource::Resume` seed the actor's retention map, so a later
+/// machine-authorized revival in the restored incarnation recomposes them
+/// (guards the reconcile_resume -> MobActor construction seeding).
+#[tokio::test]
+async fn test_restore_seeded_per_spawn_tools_survive_machine_authorized_revival() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(sample_definition_with_turn_driven_worker(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let spawned = handle
+        .spawn_spec(SpawnMemberSpec::new("worker", "w-1"))
+        .await
+        .expect("spawn worker");
+    let old_session_id = handle
+        .resolve_bridge_session_id(&spawned.agent_identity)
+        .await
+        .expect("bridge session id");
+
+    handle.stop().await.expect("stop");
+    MobSessionService::discard_live_session(service.as_ref(), &old_session_id)
+        .await
+        .expect("discard live session");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .with_spawn_member_customizer(Arc::new(ResumeOverlayCustomizer))
+    .resume()
+    .await
+    .expect("resume");
+
+    let restored_session_id = resumed
+        .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+        .await
+        .expect("restored bridge session");
+    assert!(
+        service
+            .external_tool_names(&restored_session_id)
+            .await
+            .contains(&"customizer_resume_probe".to_string()),
+        "sanity: the restore build must compose the customizer overlay"
+    );
+
+    MobSessionService::discard_live_session(service.as_ref(), &restored_session_id)
+        .await
+        .expect("discard restored live session");
+    resumed
+        .member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("revive restored member".to_string()))
+        .await
+        .expect("revival after restore");
+
+    let revived_tool_names = service.external_tool_names(&restored_session_id).await;
+    assert!(
+        revived_tool_names.contains(&"customizer_resume_probe".to_string()),
+        "customizer-restored tools must survive machine-authorized revival: {revived_tool_names:?}"
     );
 }
 

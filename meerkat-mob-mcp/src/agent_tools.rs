@@ -539,6 +539,7 @@ impl AgentMobToolSurface {
                 let comms_tools: std::collections::HashSet<String> = [
                     "send",
                     "send_message",
+                    "reply_to_peer",
                     "send_request",
                     "send_response",
                     "peers",
@@ -646,14 +647,16 @@ impl AgentMobToolSurface {
     ///
     /// `Inherit`/absent resolves to this (parent) session's effective policy
     /// from `SessionMetadata.tooling.tool_access_policy` — the same field the
-    /// factory stamps at build. Every backend exposes the parent through
-    /// `load_persisted_session`: the persistent service reads the durable
-    /// snapshot and the ephemeral service exports the LIVE session (a
-    /// restricted ephemeral parent must never mint unrestricted children
-    /// because its policy was invisible to the read seam). A metadata READ
-    /// FAULT fails the spawn closed rather than silently minting an ungated
-    /// child; a genuinely absent parent session (host/operator-authored
-    /// spawn) resolves to unrestricted.
+    /// factory stamps at build. Every backend exposes the parent through the
+    /// metadata-only `load_persisted_session_metadata` seam: the persistent
+    /// service projects the durable metadata row and the ephemeral service
+    /// derives the view from the LIVE session (a restricted ephemeral parent
+    /// must never mint unrestricted children because its policy was invisible
+    /// to the read seam). A metadata READ FAULT — including corrupt durable
+    /// metadata, which the seam surfaces as `Err`, never `Ok(None)` — fails
+    /// the spawn closed rather than silently minting an ungated child; a
+    /// genuinely absent parent session (host/operator-authored spawn)
+    /// resolves to unrestricted.
     async fn resolve_child_tool_access_policy(
         &self,
         tool_name: &str,
@@ -668,28 +671,20 @@ impl AgentMobToolSurface {
         ) {
             return Ok(effective_child_tool_access_policy(requested, None));
         }
-        let parent_session = self
+        let parent_view = self
             .state
             .session_service()
-            .load_persisted_session(&self.owner_bridge_session_id)
+            .load_persisted_session_metadata(&self.owner_bridge_session_id)
             .await
             .map_err(|error| {
                 ToolError::execution_failed(format!(
-                    "tool '{tool_name}' parent tool access policy read failed: {error}"
+                    "tool '{tool_name}' parent tool access policy read failed; \
+                     refusing to resolve the child tool access policy: {error}"
                 ))
             })?;
-        let parent_effective = match parent_session.as_ref() {
-            Some(session) => session
-                .try_session_metadata()
-                .map_err(|error| {
-                    ToolError::execution_failed(format!(
-                        "tool '{tool_name}' parent session metadata is corrupt; \
-                         refusing to resolve the child tool access policy: {error}"
-                    ))
-                })?
-                .and_then(|metadata| metadata.tooling.tool_access_policy),
-            None => None,
-        };
+        let parent_effective = parent_view
+            .and_then(|view| view.session_metadata)
+            .and_then(|metadata| metadata.tooling.tool_access_policy);
         Ok(effective_child_tool_access_policy(
             requested,
             parent_effective,
@@ -2456,6 +2451,17 @@ mod tests {
                 id: interaction_id,
                 events: rx,
             })
+        }
+
+        fn inject_with_interaction_id(
+            &self,
+            _interaction_id: InteractionId,
+            body: ContentInput,
+            source: PlainEventSource,
+            handling_mode: HandlingMode,
+            render_metadata: Option<RenderMetadata>,
+        ) -> Result<(), EventInjectorError> {
+            self.inject(body, source, handling_mode, render_metadata)
         }
     }
 
@@ -4825,6 +4831,7 @@ mod tests {
         [
             "send",
             "send_message",
+            "reply_to_peer",
             "send_request",
             "send_response",
             "peers",
@@ -4942,7 +4949,7 @@ mod tests {
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 8, "should inherit all 8 parent tools");
+        assert_eq!(names.len(), 9, "should inherit all 9 parent tools");
         assert!(names.contains("send"));
         assert!(names.contains("read_file"));
         assert!(names.contains("bash"));
@@ -4957,7 +4964,7 @@ mod tests {
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 7, "hidden parent tools must not be inherited");
+        assert_eq!(names.len(), 8, "hidden parent tools must not be inherited");
         assert!(names.contains("read_file"));
         assert!(!names.contains("bash"));
     }
@@ -4991,7 +4998,7 @@ mod tests {
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
         assert!(!names.contains("bash"));
         assert!(!names.contains("write_file"));
         assert!(names.contains("read_file"));
@@ -5032,9 +5039,10 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Minimal;
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains("send"));
         assert!(names.contains("send_message"));
+        assert!(names.contains("reply_to_peer"));
         assert!(names.contains("send_request"));
         assert!(names.contains("send_response"));
         assert!(names.contains("peers"));

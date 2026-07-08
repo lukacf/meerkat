@@ -124,6 +124,48 @@ pub fn write_session_snapshot_in_txn(
     Ok(())
 }
 
+/// Map a row of the canonical metadata projection column set
+/// (`session_id, created_at_ms, updated_at_ms, message_count, total_tokens,
+/// metadata_json`) into a [`SessionMeta`]. Shared by `list` and `load_meta`
+/// so the two projections cannot drift.
+fn session_meta_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
+    let metadata_json = row.get::<_, JsonColumnBytes>(5)?.into_bytes();
+    let metadata = serde_json::from_slice(&metadata_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let id = parse_session_id(row.get(0)?).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    // Derived projection counters are stored as i64. A negative
+    // or out-of-range value is an impossible durable state, so
+    // fail closed with a typed Corrupted error rather than
+    // laundering it to usize::MAX/u64::MAX (terminal-truth
+    // store-metadata cluster). The canonical truth is in
+    // session_json; the caller can recover via load().
+    let message_count = usize::try_from(row.get::<_, i64>(3)?).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Integer,
+            Box::new(StoreError::Corrupted(id.clone())),
+        )
+    })?;
+    let total_tokens = u64::try_from(row.get::<_, i64>(4)?).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Integer,
+            Box::new(StoreError::Corrupted(id.clone())),
+        )
+    })?;
+    Ok(SessionMeta {
+        id,
+        created_at: millis_to_system_time(row.get(1)?),
+        updated_at: millis_to_system_time(row.get(2)?),
+        message_count,
+        total_tokens,
+        metadata,
+    })
+}
+
 fn load_session_snapshot_in_txn(
     tx: &Transaction<'_>,
     id: &SessionId,
@@ -224,55 +266,38 @@ impl SqliteSessionStore {
             )?;
             let rows = stmt.query_map(
                 params![created_after, updated_after, limit, offset],
-                |row| {
-                    let metadata_json = row.get::<_, JsonColumnBytes>(5)?.into_bytes();
-                    let metadata = serde_json::from_slice(&metadata_json).map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            5,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })?;
-                    let id = parse_session_id(row.get(0)?).map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })?;
-                    // Derived projection counters are stored as i64. A negative
-                    // or out-of-range value is an impossible durable state, so
-                    // fail closed with a typed Corrupted error rather than
-                    // laundering it to usize::MAX/u64::MAX (terminal-truth
-                    // store-metadata cluster). The canonical truth is in
-                    // session_json; the caller can recover via load().
-                    let message_count = usize::try_from(row.get::<_, i64>(3)?).map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Integer,
-                            Box::new(StoreError::Corrupted(id.clone())),
-                        )
-                    })?;
-                    let total_tokens = u64::try_from(row.get::<_, i64>(4)?).map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Integer,
-                            Box::new(StoreError::Corrupted(id.clone())),
-                        )
-                    })?;
-                    Ok(SessionMeta {
-                        id,
-                        created_at: millis_to_system_time(row.get(1)?),
-                        updated_at: millis_to_system_time(row.get(2)?),
-                        message_count,
-                        total_tokens,
-                        metadata,
-                    })
-                },
+                session_meta_from_row,
             )?;
 
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(StoreError::from)
+        })
+        .await
+        .map_err(StoreError::Join)?
+    }
+
+    async fn load_meta_impl(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        let path = self.path.clone();
+        let session_id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_connection(&path)?;
+            conn.query_row(
+                r"
+                SELECT
+                    session_id,
+                    created_at_ms,
+                    updated_at_ms,
+                    message_count,
+                    total_tokens,
+                    metadata_json
+                FROM sessions
+                WHERE session_id = ?1
+                ",
+                params![session_id],
+                session_meta_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
         })
         .await
         .map_err(StoreError::Join)?
@@ -392,6 +417,15 @@ impl SessionStore for SqliteSessionStore {
 
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
         self.list_impl(filter)
+            .await
+            .map_err(into_session_store_error)
+    }
+
+    /// Metadata-only partial read over the durable projection columns —
+    /// never touches `session_json`, so it survives a corrupt or unreadable
+    /// full session document.
+    async fn load_meta(&self, id: &SessionId) -> Result<Option<SessionMeta>, SessionStoreError> {
+        self.load_meta_impl(id)
             .await
             .map_err(into_session_store_error)
     }
@@ -643,6 +677,79 @@ mod tests {
                 .unwrap()
         );
         assert!(first.load(session.id()).await.unwrap().is_none());
+    }
+
+    /// The metadata projection columns are durable truth independent of the
+    /// full session document: a corrupt/unreadable `session_json` must fail
+    /// the full `load()` but MUST NOT take the metadata-only read seam down
+    /// with it. Under the trait-default `load_meta` (full load projected
+    /// through `SessionMeta::from`) this test is RED; the SQLite SQL
+    /// projection override makes it green.
+    #[tokio::test]
+    async fn load_meta_survives_corrupt_session_json() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let store = SqliteSessionStore::open(&path).unwrap();
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        store.save(&session).await.unwrap();
+
+        // Corrupt the full document column directly on disk.
+        let conn = open_connection(&path).unwrap();
+        conn.execute(
+            "UPDATE sessions SET session_json = X'DEADBEEF' WHERE session_id = ?1",
+            params![session.id().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .load(session.id())
+            .await
+            .expect_err("corrupt session_json must fail the full document load");
+
+        let meta = store
+            .load_meta(session.id())
+            .await
+            .expect("load_meta must project the metadata row without decoding session_json")
+            .expect("metadata row must still exist");
+        assert_eq!(meta.id, *session.id());
+        assert_eq!(meta.message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn load_meta_matches_list_row_and_reads_absent_as_none() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        session.set_metadata("caller_key", serde_json::json!("caller_value"));
+        store.save(&session).await.unwrap();
+
+        let listed = store.list(SessionFilter::default()).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let meta = store
+            .load_meta(session.id())
+            .await
+            .unwrap()
+            .expect("metadata row exists");
+        assert_eq!(meta.id, listed[0].id);
+        assert_eq!(meta.message_count, listed[0].message_count);
+        assert_eq!(meta.total_tokens, listed[0].total_tokens);
+        assert_eq!(meta.metadata, listed[0].metadata);
+        assert_eq!(
+            meta.metadata.get("caller_key"),
+            Some(&serde_json::json!("caller_value"))
+        );
+
+        assert!(
+            store
+                .load_meta(&meerkat_core::SessionId::new())
+                .await
+                .unwrap()
+                .is_none(),
+            "an absent session reads as None, not an error"
+        );
     }
 
     #[tokio::test]

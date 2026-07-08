@@ -93,7 +93,7 @@ impl AgentToolDispatcher for NoOpDispatcher {
 fn is_comms_tool(name: &str) -> bool {
     matches!(
         name,
-        "send" | "send_message" | "send_request" | "send_response" | "peers"
+        "send" | "send_message" | "reply_to_peer" | "send_request" | "send_response" | "peers"
     )
 }
 
@@ -504,6 +504,35 @@ mod tests {
         ));
         let view = router.trusted_peers_view();
         (router, view)
+    }
+
+    /// `reply_to_peer` routes through the comms dispatch path (never falling
+    /// through to an inner dispatcher's NotFound) and fails closed with the
+    /// typed no-capability error when the turn carries no reply context.
+    #[tokio::test]
+    async fn reply_to_peer_routes_as_comms_tool() {
+        assert!(is_comms_tool("reply_to_peer"));
+
+        let (router, trusted_peers) = test_router();
+        let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
+        let args_raw = serde_json::value::RawValue::from_string(
+            serde_json::json!({"body": "on it", "handling_mode": "queue"}).to_string(),
+        )
+        .expect("valid args");
+        let call = ToolCallView {
+            id: "reply-1",
+            name: "reply_to_peer",
+            args: &args_raw,
+        };
+
+        let result = dispatcher.dispatch(call).await;
+        let Err(ToolError::ExecutionFailed { message }) = result else {
+            panic!("expected comms-routed execution failure, got {result:?}");
+        };
+        assert!(
+            message.starts_with("no_reply_capability"),
+            "expected typed no_reply_capability error, got: {message}"
+        );
     }
 
     #[test]

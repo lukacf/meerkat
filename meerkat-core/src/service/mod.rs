@@ -1395,6 +1395,92 @@ impl TurnToolOverlay {
         self.dispatch_context.clear();
         self
     }
+
+    /// Compose an additional overlay into an optional existing overlay.
+    ///
+    /// This is the canonical composition path for every producer that layers
+    /// per-turn overlays (WorkGraph attention, runtime peer-reply
+    /// capabilities): allow-lists intersect, deny-lists union, and
+    /// dispatch-context entries merge key-wise. The same key carrying two
+    /// distinct values is a typed conflict — never a silent overwrite.
+    pub fn compose(
+        existing: Option<Self>,
+        overlay: Self,
+    ) -> Result<Self, TurnToolOverlayComposeError> {
+        let Some(existing) = existing else {
+            return Ok(overlay);
+        };
+        let allowed_tools = intersect_allowed_tools(existing.allowed_tools, overlay.allowed_tools);
+        let blocked_tools = union_blocked_tools(existing.blocked_tools, overlay.blocked_tools);
+        let dispatch_context =
+            merge_turn_dispatch_context(existing.dispatch_context, overlay.dispatch_context)?;
+        Ok(Self {
+            allowed_tools,
+            blocked_tools,
+            dispatch_context,
+        })
+    }
+}
+
+/// Typed error composing two per-turn tool overlays.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TurnToolOverlayComposeError {
+    /// Both overlays carry the same dispatch-context key with distinct values.
+    #[error("conflicting turn tool overlay dispatch context for {key}")]
+    ConflictingDispatchContext { key: String },
+}
+
+fn intersect_allowed_tools(
+    left: Option<Vec<crate::types::ToolName>>,
+    right: Option<Vec<crate::types::ToolName>>,
+) -> Option<Vec<crate::types::ToolName>> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let right = right.into_iter().collect::<BTreeSet<_>>();
+            Some(
+                left.into_iter()
+                    .filter(|name| right.contains(name))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            )
+        }
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn union_blocked_tools(
+    left: Option<Vec<crate::types::ToolName>>,
+    right: Option<Vec<crate::types::ToolName>>,
+) -> Option<Vec<crate::types::ToolName>> {
+    let blocked = left
+        .into_iter()
+        .flatten()
+        .chain(right.into_iter().flatten())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    (!blocked.is_empty()).then_some(blocked)
+}
+
+fn merge_turn_dispatch_context(
+    mut existing: BTreeMap<String, serde_json::Value>,
+    overlay: BTreeMap<String, serde_json::Value>,
+) -> Result<BTreeMap<String, serde_json::Value>, TurnToolOverlayComposeError> {
+    for (key, value) in overlay {
+        match existing.get(&key) {
+            Some(current) if current != &value => {
+                return Err(TurnToolOverlayComposeError::ConflictingDispatchContext { key });
+            }
+            Some(_) => {}
+            None => {
+                existing.insert(key, value);
+            }
+        }
+    }
+    Ok(existing)
 }
 
 /// Public caller-safe per-turn tool overlay.
@@ -2079,6 +2165,96 @@ impl dyn SessionService {
 )]
 mod tests {
     use super::*;
+
+    /// Canonical overlay composition: allow-lists intersect, deny-lists
+    /// union, and dispatch-context entries from distinct producers (e.g. the
+    /// WorkGraph attention key and the comms peer-reply key) coexist.
+    #[test]
+    fn turn_tool_overlay_compose_preserves_distinct_dispatch_context_keys() {
+        let existing = TurnToolOverlay {
+            allowed_tools: Some(vec![
+                crate::types::ToolName::from("workgraph_get"),
+                crate::types::ToolName::from("send_message"),
+            ]),
+            blocked_tools: Some(vec![crate::types::ToolName::from("blocked_by_flow")]),
+            dispatch_context: BTreeMap::from([(
+                "workgraph.attention_projection".to_string(),
+                serde_json::json!({"binding_id": "b"}),
+            )]),
+        };
+        let overlay = TurnToolOverlay {
+            allowed_tools: None,
+            blocked_tools: None,
+            dispatch_context: BTreeMap::from([(
+                crate::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
+                serde_json::json!({"deliveries": []}),
+            )]),
+        };
+
+        let composed = TurnToolOverlay::compose(Some(existing), overlay)
+            .unwrap_or_else(|err| unreachable!("distinct keys must compose: {err}"));
+
+        assert_eq!(
+            composed.allowed_tools,
+            Some(vec![
+                crate::types::ToolName::from("workgraph_get"),
+                crate::types::ToolName::from("send_message"),
+            ]),
+            "an overlay without an allow-list must pass the existing allow-list through unchanged"
+        );
+        assert_eq!(
+            composed.blocked_tools,
+            Some(vec![crate::types::ToolName::from("blocked_by_flow")])
+        );
+        assert_eq!(
+            composed.dispatch_context["workgraph.attention_projection"],
+            serde_json::json!({"binding_id": "b"})
+        );
+        assert_eq!(
+            composed.dispatch_context[crate::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY],
+            serde_json::json!({"deliveries": []})
+        );
+    }
+
+    #[test]
+    fn turn_tool_overlay_compose_without_existing_returns_overlay() {
+        let overlay = TurnToolOverlay {
+            allowed_tools: None,
+            blocked_tools: None,
+            dispatch_context: BTreeMap::from([(
+                crate::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
+                serde_json::json!({"deliveries": []}),
+            )]),
+        };
+
+        let composed = TurnToolOverlay::compose(None, overlay.clone())
+            .unwrap_or_else(|err| unreachable!("no existing overlay must compose: {err}"));
+        assert_eq!(composed, overlay);
+    }
+
+    #[test]
+    fn turn_tool_overlay_compose_refuses_conflicting_dispatch_context_key() {
+        let make = |value: serde_json::Value| TurnToolOverlay {
+            allowed_tools: None,
+            blocked_tools: None,
+            dispatch_context: BTreeMap::from([(
+                crate::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
+                value,
+            )]),
+        };
+
+        let err = TurnToolOverlay::compose(
+            Some(make(serde_json::json!({"deliveries": [1]}))),
+            make(serde_json::json!({"deliveries": [2]})),
+        )
+        .expect_err("distinct values under the same key must be a typed conflict");
+        assert_eq!(
+            err,
+            TurnToolOverlayComposeError::ConflictingDispatchContext {
+                key: crate::comms::COMMS_PEER_REPLY_DISPATCH_CONTEXT_KEY.to_string(),
+            }
+        );
+    }
 
     struct UnsupportedSessionService;
 

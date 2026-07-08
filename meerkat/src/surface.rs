@@ -65,7 +65,7 @@ use meerkat_contracts::{
 use meerkat_core::ConfigStoreMetadata;
 use meerkat_core::{AgentEvent, Config, PeerMeta};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 #[cfg(target_arch = "wasm32")]
@@ -95,6 +95,18 @@ pub enum WorkGraphAttentionTurnOverlayError {
     WorkGraph(#[from] crate::WorkGraphError),
     #[error("conflicting turn tool overlay dispatch context for {key}")]
     ConflictingDispatchContext { key: String },
+}
+
+impl From<meerkat_core::service::TurnToolOverlayComposeError>
+    for WorkGraphAttentionTurnOverlayError
+{
+    fn from(error: meerkat_core::service::TurnToolOverlayComposeError) -> Self {
+        match error {
+            meerkat_core::service::TurnToolOverlayComposeError::ConflictingDispatchContext {
+                key,
+            } => Self::ConflictingDispatchContext { key },
+        }
+    }
 }
 
 pub async fn inject_workgraph_attention_turn_overlay(
@@ -347,71 +359,12 @@ fn compose_turn_tool_overlay(
     existing: Option<meerkat_core::service::TurnToolOverlay>,
     attention: meerkat_core::service::TurnToolOverlay,
 ) -> Result<meerkat_core::service::TurnToolOverlay, WorkGraphAttentionTurnOverlayError> {
-    let Some(existing) = existing else {
-        return Ok(attention);
-    };
-    let allowed_tools = intersect_allowed_tools(existing.allowed_tools, attention.allowed_tools);
-    let blocked_tools = union_blocked_tools(existing.blocked_tools, attention.blocked_tools);
-    let dispatch_context =
-        merge_turn_dispatch_context(existing.dispatch_context, attention.dispatch_context)?;
-    Ok(meerkat_core::service::TurnToolOverlay {
-        allowed_tools,
-        blocked_tools,
-        dispatch_context,
-    })
-}
-
-fn intersect_allowed_tools(
-    left: Option<Vec<meerkat_core::types::ToolName>>,
-    right: Option<Vec<meerkat_core::types::ToolName>>,
-) -> Option<Vec<meerkat_core::types::ToolName>> {
-    match (left, right) {
-        (Some(left), Some(right)) => {
-            let right = right.into_iter().collect::<BTreeSet<_>>();
-            Some(
-                left.into_iter()
-                    .filter(|name| right.contains(name))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-            )
-        }
-        (Some(left), None) => Some(left),
-        (None, Some(right)) => Some(right),
-        (None, None) => None,
-    }
-}
-
-fn union_blocked_tools(
-    left: Option<Vec<meerkat_core::types::ToolName>>,
-    right: Option<Vec<meerkat_core::types::ToolName>>,
-) -> Option<Vec<meerkat_core::types::ToolName>> {
-    let blocked = left
-        .into_iter()
-        .flatten()
-        .chain(right.into_iter().flatten())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    (!blocked.is_empty()).then_some(blocked)
-}
-
-fn merge_turn_dispatch_context(
-    mut existing: BTreeMap<String, serde_json::Value>,
-    attention: BTreeMap<String, serde_json::Value>,
-) -> Result<BTreeMap<String, serde_json::Value>, WorkGraphAttentionTurnOverlayError> {
-    for (key, value) in attention {
-        match existing.get(&key) {
-            Some(current) if current != &value => {
-                return Err(WorkGraphAttentionTurnOverlayError::ConflictingDispatchContext { key });
-            }
-            Some(_) => {}
-            None => {
-                existing.insert(key, value);
-            }
-        }
-    }
-    Ok(existing)
+    // Single canonical composition path: core owns overlay composition
+    // semantics (`TurnToolOverlay::compose`); this surface only maps the typed
+    // conflict into its own error vocabulary.
+    Ok(meerkat_core::service::TurnToolOverlay::compose(
+        existing, attention,
+    )?)
 }
 
 /// Surface-specific facts used to build a read-only runtime host projection.

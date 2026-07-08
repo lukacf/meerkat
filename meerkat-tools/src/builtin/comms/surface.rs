@@ -65,11 +65,12 @@ impl CommsToolSurface {
 You can communicate with other agents using these tools:
 
 - **send_message**: Send a message to a peer. Always include `handling_mode` — use `"steer"` for normal collaboration.
+- **reply_to_peer**: Reply to the peer whose message triggered the current turn. Pre-addressed — no peer_id needed. Always include `handling_mode`. If several peer messages arrived this turn, set `reply_to` to one of the delivery ids listed by the ambiguity error.
 - **send_request**: Send a structured request (intent + params) and expect a correlated response. Always include `handling_mode`.
 - **send_response**: Reply to a previous request using its ID.
 - **peers**: List all visible peers. Always check peers first to see who is available.
 
-Use `send_message` for ordinary collaboration. Use `send_request` only when you need structured intent/params with a correlated reply."#
+Use `reply_to_peer` to answer an incoming peer message, `send_message` for ordinary outreach. Use `send_request` only when you need structured intent/params with a correlated reply."#
     }
 }
 

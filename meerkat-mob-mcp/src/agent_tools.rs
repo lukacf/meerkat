@@ -539,6 +539,7 @@ impl AgentMobToolSurface {
                 let comms_tools: std::collections::HashSet<String> = [
                     "send",
                     "send_message",
+                    "reply_to_peer",
                     "send_request",
                     "send_response",
                     "peers",
@@ -4825,6 +4826,7 @@ mod tests {
         [
             "send",
             "send_message",
+            "reply_to_peer",
             "send_request",
             "send_response",
             "peers",
@@ -4942,7 +4944,7 @@ mod tests {
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 8, "should inherit all 8 parent tools");
+        assert_eq!(names.len(), 9, "should inherit all 9 parent tools");
         assert!(names.contains("send"));
         assert!(names.contains("read_file"));
         assert!(names.contains("bash"));
@@ -4957,7 +4959,7 @@ mod tests {
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 7, "hidden parent tools must not be inherited");
+        assert_eq!(names.len(), 8, "hidden parent tools must not be inherited");
         assert!(names.contains("read_file"));
         assert!(!names.contains("bash"));
     }
@@ -4991,7 +4993,7 @@ mod tests {
         };
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
         assert!(!names.contains("bash"));
         assert!(!names.contains("write_file"));
         assert!(names.contains("read_file"));
@@ -5032,9 +5034,10 @@ mod tests {
         let tooling = meerkat_mob::SpawnTooling::Minimal;
         let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
         let names = inherited_allow_names(resolved);
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains("send"));
         assert!(names.contains("send_message"));
+        assert!(names.contains("reply_to_peer"));
         assert!(names.contains("send_request"));
         assert!(names.contains("send_response"));
         assert!(names.contains("peers"));

@@ -285,7 +285,7 @@ pub use service::{
 pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,
     DeferredToolLoadAuthority, InheritedToolVisibilityAuthority, PendingDeferredPrompt,
-    PendingSystemContextAppend, PendingToolResultsMessage,
+    PendingSystemContextAppend, PendingToolResultsMessage, PersistedSessionMetadataView,
     RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON, ResumedSystemPromptReconciliation,
     SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
     SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
@@ -293,12 +293,13 @@ pub use session::{
     SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
     SessionBuildState, SessionDeferredTurnState, SessionLifecycleTerminal, SessionLlmIdentity,
     SessionLlmIdentityOverride, SessionLlmIdentityOverrideError, SessionLlmRequestPolicy,
-    SessionMeta, SessionMetadata, SessionSystemContextState, SessionToolVisibilityState,
-    SessionTooling, SystemContextStageError, SystemContextStateHandle, ToolCategoryOverride,
-    ToolVisibilityWitness, TranscriptHistoryState, TranscriptRevisionBody, TranscriptRewriteRecord,
-    VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter, capability_base_filter_for_image_tool_results,
-    resolve_session_llm_identity_override, session_metadata_schema_version, session_version,
-    transcript_messages_digest,
+    SessionMeta, SessionMetadata, SessionMetadataDocument, SessionSystemContextState,
+    SessionToolVisibilityState, SessionTooling, SystemContextStageError, SystemContextStateHandle,
+    ToolCategoryOverride, ToolVisibilityWitness, TranscriptHistoryState, TranscriptRevisionBody,
+    TranscriptRewriteRecord, VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter,
+    capability_base_filter_for_image_tool_results, resolve_session_llm_identity_override,
+    session_metadata_document_from_slice, session_metadata_schema_version, session_version,
+    transcript_messages_digest, try_lifecycle_terminal_from_map, try_session_metadata_from_map,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, RecoveryBackendKind,

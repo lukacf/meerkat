@@ -876,24 +876,27 @@ async fn latest_persisted_session_for_member(
         role.as_str(),
         agent_identity.as_str(),
     )?;
+
+    // Candidate matching runs over the metadata-only read seam: the member
+    // identity facts (typed binding, comms name) live on session metadata, so
+    // scanning the realm never materializes full transcripts.
     let mut best: Option<(
         meerkat_core::time_compat::SystemTime,
         meerkat_core::types::SessionId,
-        meerkat_core::Session,
     )> = None;
 
     for summary in listed_sessions {
         if &summary.session_id == missing_session_id {
             continue;
         }
-        let Some(session) = session_service
-            .load_persisted_session(&summary.session_id)
+        let Some(view) = session_service
+            .load_persisted_session_metadata(&summary.session_id)
             .await?
         else {
             continue;
         };
         if !persisted_session_matches_member(
-            &session,
+            view.session_metadata.as_ref(),
             mob_id,
             role,
             agent_identity,
@@ -903,23 +906,33 @@ async fn latest_persisted_session_for_member(
         }
         let replace = best
             .as_ref()
-            .is_none_or(|(updated_at, _, _)| summary.updated_at > *updated_at);
+            .is_none_or(|(updated_at, _)| summary.updated_at > *updated_at);
         if replace {
-            best = Some((summary.updated_at, summary.session_id.clone(), session));
+            best = Some((summary.updated_at, summary.session_id.clone()));
         }
     }
 
-    Ok(best.map(|(_, session_id, session)| (session_id, session)))
+    let Some((_, winner_session_id)) = best else {
+        return Ok(None);
+    };
+    // Full-load ONLY the winner. A winner that vanishes between the metadata
+    // match and the full load reads as "no replacement" (`Ok(None)`) — the
+    // caller records the member's restore failure exactly as if no candidate
+    // had matched.
+    Ok(session_service
+        .load_persisted_session(&winner_session_id)
+        .await?
+        .map(|session| (winner_session_id, session)))
 }
 
 fn persisted_session_matches_member(
-    session: &meerkat_core::Session,
+    metadata: Option<&meerkat_core::SessionMetadata>,
     mob_id: &crate::ids::MobId,
     role: &crate::ids::ProfileName,
     agent_identity: &crate::ids::AgentIdentity,
     canonical_comms_name: &str,
 ) -> bool {
-    let Some(metadata) = session.session_metadata() else {
+    let Some(metadata) = metadata else {
         return false;
     };
     if metadata.mob_member_binding.as_ref().is_some_and(|binding| {

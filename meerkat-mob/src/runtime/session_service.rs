@@ -272,6 +272,35 @@ pub trait MobSessionService:
         Ok(None)
     }
 
+    /// Load the persisted session METADATA view when available.
+    ///
+    /// Metadata-only sibling of [`Self::load_persisted_session`] (mobkit
+    /// ask-24 clause 3): ownership routing, policy resolution, and presence
+    /// probes that only need session-authority metadata facts must not force
+    /// a full transcript materialization. Visibility parity with
+    /// `load_persisted_session` is part of the contract: whenever that method
+    /// returns `Ok(None)` (absent or archived), this one does too.
+    ///
+    /// Default: derives from `load_persisted_session`, so every backend
+    /// exposes the seam with identical visibility. Persistent services
+    /// override this with the metadata-only authoritative read. Corrupt
+    /// durable metadata is a read FAULT (`Err`), never `Ok(None)`.
+    async fn load_persisted_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        let Some(session) = self.load_persisted_session(session_id).await? else {
+            return Ok(None);
+        };
+        meerkat_core::PersistedSessionMetadataView::try_from_session(&session)
+            .map(Some)
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "session {session_id} durable metadata failed typed restore: {err}"
+                )))
+            })
+    }
+
     /// Archive a mob-owned session through the strongest lifecycle authority
     /// this service exposes. Runtime-backed persistent services override this
     /// to require a concrete `MeerkatMachine` archive protocol before writing
@@ -715,6 +744,30 @@ where
             return Ok(None);
         }
         Ok(Some(session))
+    }
+
+    /// Metadata-only authoritative read. Same visibility contract as
+    /// [`Self::load_persisted_session`] — the archived filter runs through
+    /// `session_archived_by_authority_with_terminal`, the terminal-fact
+    /// sibling of the full-session overload, so archived sessions read as
+    /// `None` on both seams.
+    async fn load_persisted_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        let Some(view) = self.load_authoritative_session_metadata(session_id).await? else {
+            return Ok(None);
+        };
+        if self
+            .session_archived_by_authority_with_terminal(
+                session_id,
+                view.lifecycle_terminal.as_ref(),
+            )
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(view))
     }
 
     async fn session_known_to_archive_authority(

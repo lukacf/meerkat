@@ -647,14 +647,16 @@ impl AgentMobToolSurface {
     ///
     /// `Inherit`/absent resolves to this (parent) session's effective policy
     /// from `SessionMetadata.tooling.tool_access_policy` — the same field the
-    /// factory stamps at build. Every backend exposes the parent through
-    /// `load_persisted_session`: the persistent service reads the durable
-    /// snapshot and the ephemeral service exports the LIVE session (a
-    /// restricted ephemeral parent must never mint unrestricted children
-    /// because its policy was invisible to the read seam). A metadata READ
-    /// FAULT fails the spawn closed rather than silently minting an ungated
-    /// child; a genuinely absent parent session (host/operator-authored
-    /// spawn) resolves to unrestricted.
+    /// factory stamps at build. Every backend exposes the parent through the
+    /// metadata-only `load_persisted_session_metadata` seam: the persistent
+    /// service projects the durable metadata row and the ephemeral service
+    /// derives the view from the LIVE session (a restricted ephemeral parent
+    /// must never mint unrestricted children because its policy was invisible
+    /// to the read seam). A metadata READ FAULT — including corrupt durable
+    /// metadata, which the seam surfaces as `Err`, never `Ok(None)` — fails
+    /// the spawn closed rather than silently minting an ungated child; a
+    /// genuinely absent parent session (host/operator-authored spawn)
+    /// resolves to unrestricted.
     async fn resolve_child_tool_access_policy(
         &self,
         tool_name: &str,
@@ -669,28 +671,20 @@ impl AgentMobToolSurface {
         ) {
             return Ok(effective_child_tool_access_policy(requested, None));
         }
-        let parent_session = self
+        let parent_view = self
             .state
             .session_service()
-            .load_persisted_session(&self.owner_bridge_session_id)
+            .load_persisted_session_metadata(&self.owner_bridge_session_id)
             .await
             .map_err(|error| {
                 ToolError::execution_failed(format!(
-                    "tool '{tool_name}' parent tool access policy read failed: {error}"
+                    "tool '{tool_name}' parent tool access policy read failed; \
+                     refusing to resolve the child tool access policy: {error}"
                 ))
             })?;
-        let parent_effective = match parent_session.as_ref() {
-            Some(session) => session
-                .try_session_metadata()
-                .map_err(|error| {
-                    ToolError::execution_failed(format!(
-                        "tool '{tool_name}' parent session metadata is corrupt; \
-                         refusing to resolve the child tool access policy: {error}"
-                    ))
-                })?
-                .and_then(|metadata| metadata.tooling.tool_access_policy),
-            None => None,
-        };
+        let parent_effective = parent_view
+            .and_then(|view| view.session_metadata)
+            .and_then(|metadata| metadata.tooling.tool_access_policy);
         Ok(effective_child_tool_access_policy(
             requested,
             parent_effective,

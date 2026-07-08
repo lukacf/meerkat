@@ -7,8 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.23] - 2026-07-08
+
+Meerkat 0.7.23 completes the never-run-member disposal arc for
+identity-first workers (upstream ask 21d), ships the end-to-end WorkGraph
+goals and attention wiring, and folds in the fixes from the pre-release
+adversarial review of that wiring.
+
+### Added
+
+- WorkGraph goals and attention are wired end to end (#850): goal creation
+  with attention bindings, machine-backed CAS reassignment on the
+  attention-scoped tool surface (with a server-injected authority witness —
+  callers cannot forge projections), per-turn attention overlays injected on
+  every runtime surface, escalate-only completion-policy transitions guarded
+  in the machine lattice, SQLite workgraph store hardening
+  (busy_timeout/FULL synchronous/IMMEDIATE transactions on all mutating
+  paths), and a fail-closed public MCP split for workgraph tools.
+
 ### Fixed
 
+- Identity-first mob workers no longer strand in archive-NotFound during
+  disposal (upstream ask 21d, #849): when the archive authority reports
+  NotFound for a session whose runtime is in the terminal Retired phase
+  while still registered, disposal completes (durable retire + runtime
+  unregister) instead of escalating. Stopped runtimes are deliberately
+  excluded — they are recoverable.
 - Scheduled prompt delivery no longer snapshots the WorkGraph attention
   projection at enqueue time (facade schedule host and CLI schedule host).
   A queued prompt behind a running turn that mutated its work item carried a

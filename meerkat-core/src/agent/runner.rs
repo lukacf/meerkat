@@ -2254,6 +2254,73 @@ mod skill_activation_effect_tests {
         );
     }
 
+    /// Ask-15 addendum pin: a committed turn's interaction id survives the
+    /// full persist → reload cycle on the transcript messages (the exact
+    /// read a console session-history backfill performs), so backfilled
+    /// frames can be stamped with the same id as the live
+    /// `InteractionComplete` frames.
+    #[tokio::test]
+    async fn transcript_interaction_id_survives_session_persist_reload() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_f00d));
+        let transcript_identity = crate::types::TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            run_id: None,
+        };
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "Commit me durably.".to_string().into(),
+                Vec::new(),
+                Vec::new(),
+                Some(transcript_identity),
+                tx,
+            )
+            .await
+            .expect("mock turn should complete");
+
+        // Persist + reload: the canonical session wire round-trip every
+        // session store implementation flows through.
+        let persisted = serde_json::to_value(agent.session())
+            .expect("session should serialize for persistence");
+        let reloaded: crate::session::Session =
+            serde_json::from_value(persisted).expect("persisted session should reload");
+
+        let user = reloaded
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::User(message) => Some(message),
+                _ => None,
+            })
+            .expect("reloaded transcript should carry the user message");
+        assert_eq!(
+            user.identity.interaction_id,
+            Some(interaction_id),
+            "the reloaded user message must carry the committed interaction id"
+        );
+
+        let assistant = reloaded
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::BlockAssistant(message) => Some(message),
+                _ => None,
+            })
+            .expect("reloaded transcript should carry the assistant message");
+        assert_eq!(
+            assistant.identity.interaction_id,
+            Some(interaction_id),
+            "the reloaded assistant message must carry the committed interaction id"
+        );
+        assert!(
+            assistant.identity.run_id.is_some(),
+            "the reloaded assistant message must keep the resolving run id"
+        );
+    }
+
     #[tokio::test]
     async fn append_assistant_blocks_effect_stamps_active_transcript_identity_and_run_id() {
         let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;

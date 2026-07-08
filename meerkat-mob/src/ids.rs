@@ -385,6 +385,17 @@ pub struct WorkSpec {
     /// reject it fail-closed with a typed [`crate::MobError`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub injected_context: Vec<meerkat_core::types::ContentInput>,
+    /// Host-supplied interaction identity for this unit of work.
+    ///
+    /// Ask-15 addendum: the delivery path carries this id to
+    /// `RuntimeTurnMetadata.transcript_identity` (turn-driven dispatch) or
+    /// stamps it onto the injected inbox event (autonomous dispatch), so the
+    /// transcript messages committed for this turn persist the SAME
+    /// interaction id the host's live `interaction_complete` frames carry —
+    /// history backfill can then join persisted and live frames without
+    /// content heuristics. Serde-additive: absent on old stored shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<meerkat_core::interaction::InteractionId>,
 }
 
 impl WorkSpec {
@@ -396,6 +407,7 @@ impl WorkSpec {
             content: content.into(),
             origin,
             injected_context: Vec::new(),
+            interaction_id: None,
         }
     }
 
@@ -405,6 +417,17 @@ impl WorkSpec {
         injected_context: Vec<meerkat_core::types::ContentInput>,
     ) -> Self {
         self.injected_context = injected_context;
+        self
+    }
+
+    /// Attach a host-supplied interaction id so the committed transcript
+    /// messages for this turn persist the same identity the host's live
+    /// interaction frames carry.
+    pub fn with_interaction_id(
+        mut self,
+        interaction_id: meerkat_core::interaction::InteractionId,
+    ) -> Self {
+        self.interaction_id = Some(interaction_id);
         self
     }
 }
@@ -431,6 +454,32 @@ impl WorkOrigin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_spec_interaction_id_is_serde_additive() {
+        // Absent field (the pre-ask-15 stored shape) deserializes to None,
+        // and None is skipped on serialization so old readers see the old
+        // shape unchanged.
+        let json = serde_json::to_value(WorkSpec::new(
+            "do the thing".to_string(),
+            WorkOrigin::Internal,
+        ))
+        .unwrap();
+        assert!(
+            json.get("interaction_id").is_none(),
+            "None must not serialize (serde-additive)"
+        );
+        let spec: WorkSpec = serde_json::from_value(json).unwrap();
+        assert!(spec.interaction_id.is_none());
+
+        // A carried id round-trips.
+        let id = meerkat_core::interaction::InteractionId(Uuid::new_v4());
+        let keyed =
+            WorkSpec::new("do the thing".to_string(), WorkOrigin::External).with_interaction_id(id);
+        let json = serde_json::to_value(&keyed).unwrap();
+        let parsed: WorkSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.interaction_id, Some(id));
+    }
 
     #[test]
     fn test_run_id_roundtrip_json() {

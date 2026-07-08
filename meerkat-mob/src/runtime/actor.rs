@@ -129,10 +129,38 @@ struct SubmitWorkDispatchRequest {
     /// Deliverable on queue-mode turn-driven dispatch (local and remote);
     /// autonomous inbox delivery and steer dispatch reject it fail-closed.
     injected_context: Vec<ContentInput>,
+    /// Host-supplied interaction identity for the delivered turn. Stamped
+    /// into `RuntimeTurnMetadata.transcript_identity` on turn-driven
+    /// dispatch and onto the injected inbox event on autonomous dispatch,
+    /// so the committed transcript messages persist the id the host's live
+    /// interaction frames carry (mobkit ask-15 addendum).
+    interaction_id: Option<meerkat_core::interaction::InteractionId>,
     handling_mode: meerkat_core::types::HandlingMode,
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     operation_id: Option<meerkat_core::ops::OperationId>,
+}
+
+/// Canonical turn-metadata carrier for submit-work delivery: render metadata
+/// and the host-supplied transcript interaction identity travel together;
+/// an empty pair stays `None` so metadata-less requests keep their shape.
+fn submit_work_turn_metadata(
+    render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    interaction_id: Option<meerkat_core::interaction::InteractionId>,
+) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    if render_metadata.is_none() && interaction_id.is_none() {
+        return None;
+    }
+    Some(
+        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            render_metadata,
+            transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                interaction_id,
+                run_id: None,
+            },
+            ..Default::default()
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -17962,6 +17990,7 @@ impl MobActor {
             content,
             origin,
             injected_context,
+            interaction_id,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -18167,6 +18196,7 @@ impl MobActor {
                 SubmitWorkDispatchRequest {
                     content,
                     injected_context,
+                    interaction_id,
                     handling_mode,
                     render_metadata,
                     ack_mode,
@@ -18284,6 +18314,8 @@ impl MobActor {
                     // Spawn kickoff is mob-internal coordination content; the
                     // injected-context slot belongs to the submit-work lane.
                     injected_context: Vec::new(),
+                    // Mob-internal kickoff carries no host interaction id.
+                    interaction_id: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     render_metadata: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
@@ -18421,6 +18453,7 @@ impl MobActor {
         let SubmitWorkDispatchRequest {
             content,
             injected_context,
+            interaction_id,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -18546,12 +18579,7 @@ impl MobActor {
                             handling_mode,
                             None,
                             Vec::new(),
-                            render_metadata.map(|render_metadata| {
-                                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                                    render_metadata: Some(render_metadata),
-                                    ..Default::default()
-                                }
-                            }),
+                            submit_work_turn_metadata(render_metadata, interaction_id),
                         ),
                     };
                     return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
@@ -18573,19 +18601,32 @@ impl MobActor {
                         capability: crate::error::MobMemberCapability::InteractionEventInjector,
                         context: "autonomous direct turn delivery",
                     })?;
-                injector
-                    .inject(
+                // A host-supplied interaction id rides the injected inbox
+                // event so the comms classification (and therefore the
+                // runtime transcript identity) carries the SAME id as the
+                // host's live interaction frames instead of minting a fresh
+                // unrelated one.
+                let inject_result = match interaction_id {
+                    Some(interaction_id) => injector.inject_with_interaction_id(
+                        interaction_id,
                         content,
                         meerkat_core::PlainEventSource::Rpc,
                         handling_mode,
                         render_metadata,
-                    )
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "autonomous dispatch inject failed for '{}': {}",
-                            entry.agent_identity, error
-                        ))
-                    })?;
+                    ),
+                    None => injector.inject(
+                        content,
+                        meerkat_core::PlainEventSource::Rpc,
+                        handling_mode,
+                        render_metadata,
+                    ),
+                };
+                inject_result.map_err(|error| {
+                    MobError::Internal(format!(
+                        "autonomous dispatch inject failed for '{}': {}",
+                        entry.agent_identity, error
+                    ))
+                })?;
                 Ok(SubmitWorkDispatchCompletion::Completed)
             }
             crate::MobRuntimeMode::TurnDriven => {
@@ -18623,12 +18664,7 @@ impl MobActor {
                         handling_mode,
                         None,
                         Vec::new(),
-                        render_metadata.map(|render_metadata| {
-                            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                                render_metadata: Some(render_metadata),
-                                ..Default::default()
-                            }
-                        }),
+                        submit_work_turn_metadata(render_metadata, interaction_id),
                     ),
                 };
                 tracing::debug!(

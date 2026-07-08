@@ -3477,6 +3477,9 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
         EphemeralRuntimeDriver::stored_input_state(self, input_id)
     }
+    fn stored_input_states_snapshot(&self) -> Result<Vec<StoredInputState>, RuntimeDriverError> {
+        EphemeralRuntimeDriver::stored_input_states_snapshot(self)
+    }
     fn input_id_for_idempotency_key(&self, idempotency_key: &str) -> Option<InputId> {
         EphemeralRuntimeDriver::input_id_for_idempotency_key(self, idempotency_key)
     }

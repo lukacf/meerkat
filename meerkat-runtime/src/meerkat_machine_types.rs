@@ -311,6 +311,21 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         idempotency_key: String,
     },
+    // Restart-first-class terminal-status read: same machine-owned authority
+    // read as `InputState`, but when the session is not registered a
+    // persistent machine answers from the durably committed input-state
+    // witnesses in the RuntimeStore instead of failing NotReady.
+    InteractionTerminalStatus {
+        session_id: SessionId,
+        selector: crate::terminal_status::InteractionSelector,
+    },
+    // Run-id-keyed terminal-status read over the same witnesses: the durable
+    // run-terminal truth is the set of inputs whose `last_run_id` references
+    // the run, evaluated by the canonical pure evaluator.
+    RunTerminalStatus {
+        session_id: SessionId,
+        run_id: RunId,
+    },
     ListActiveInputs {
         session_id: SessionId,
     },
@@ -491,6 +506,10 @@ pub(crate) enum MeerkatMachineCommandResult {
     OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
     Bindings(meerkat_core::SessionRuntimeBindings),
     InputState(Option<StoredInputState>),
+    InteractionTerminalStatus(
+        Option<crate::terminal_status::Sourced<crate::terminal_status::InteractionTerminalReport>>,
+    ),
+    RunTerminalStatus(crate::terminal_status::Sourced<crate::terminal_status::RunTerminalReport>),
     ActiveInputs(Vec<InputId>),
     LlmReconfigured(SessionLlmReconfigureReport),
     VisibilityRevision(meerkat_core::ToolScopeRevision),
@@ -1288,6 +1307,11 @@ impl MeerkatMachineCommandVariant {
             // Same machine-owned read route as `InputState` (the key
             // resolves through the generated admission map first).
             Self::InputStateByIdempotencyKey => Some(MeerkatMachineCatalogInput::InputState),
+            // Terminal-status queries are the same machine-owned read route
+            // as `InputState`: they evaluate the identical DSL-owned seed
+            // facts (live snapshot or their durable store witnesses).
+            Self::InteractionTerminalStatus => Some(MeerkatMachineCatalogInput::InputState),
+            Self::RunTerminalStatus => Some(MeerkatMachineCatalogInput::InputState),
             Self::ListActiveInputs => Some(MeerkatMachineCatalogInput::ListActiveInputs),
             Self::ReconfigureSessionLlmIdentity => {
                 Some(MeerkatMachineCatalogInput::ReconfigureSessionLlmIdentity)
@@ -1464,6 +1488,15 @@ const fn meerkat_machine_command_classification(
         // key resolves through the generated admission map, then the stored
         // input state is read identically.
         MeerkatMachineCommandVariant::InputStateByIdempotencyKey => {
+            MeerkatMachineCommandClassification::CatalogInput(
+                MeerkatMachineCatalogInput::InputState,
+            )
+        }
+        // Terminal-status reads evaluate the same DSL-owned seed facts as
+        // `InputState` (live snapshot for registered sessions, durable store
+        // witnesses otherwise) — same machine-owned read route.
+        MeerkatMachineCommandVariant::InteractionTerminalStatus
+        | MeerkatMachineCommandVariant::RunTerminalStatus => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::InputState,
             )

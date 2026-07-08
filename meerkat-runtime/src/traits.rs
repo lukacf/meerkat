@@ -149,6 +149,13 @@ pub trait RuntimeDriver: Send + Sync {
     /// Get the persisted shell+seed bundle for a specific input.
     fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState>;
 
+    /// Snapshot of every ledger entry paired with its DSL-owned seed.
+    ///
+    /// The live-runtime witness set for terminal-status evaluation: the same
+    /// facts a persistent store commits at every lifecycle boundary, read
+    /// from the DSL authority instead of disk.
+    fn stored_input_states_snapshot(&self) -> Result<Vec<StoredInputState>, RuntimeDriverError>;
+
     /// Resolve the machine-owned idempotency-key binding to its input id.
     ///
     /// Read-only reconciliation mirror of the generated admission map — it

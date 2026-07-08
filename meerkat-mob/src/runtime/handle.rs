@@ -2472,6 +2472,7 @@ impl MobHandle {
                     content: spec.content,
                     origin: spec.origin,
                     injected_context: spec.injected_context,
+                    interaction_id: spec.interaction_id,
                     handling_mode,
                     render_metadata,
                     ack_mode,

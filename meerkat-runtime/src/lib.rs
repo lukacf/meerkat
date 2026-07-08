@@ -90,6 +90,7 @@ pub mod runtime_state;
 pub mod service_ext;
 pub(crate) mod silent_intent;
 pub mod store;
+pub mod terminal_status;
 pub mod traits;
 
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata as RuntimeStampedTurnMetadata;

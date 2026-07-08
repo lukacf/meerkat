@@ -84,6 +84,24 @@ pub trait SubscribableInjector: EventInjector {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<InteractionSubscription, EventInjectorError>;
+
+    /// Inject an event stamped with a caller-chosen interaction id, without
+    /// reserving a subscriber channel.
+    ///
+    /// Unlike [`EventInjector::inject`] (fresh, unrelated interaction id
+    /// minted downstream), the injected event carries `interaction_id`, so
+    /// the transcript identity stamped at runtime admission joins with the
+    /// caller's live interaction frames — the seam mob work-lane delivery
+    /// uses to persist a host-supplied interaction id onto committed
+    /// transcript messages (mobkit ask-15 addendum).
+    fn inject_with_interaction_id(
+        &self,
+        interaction_id: crate::interaction::InteractionId,
+        content: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError>;
 }
 
 #[cfg(test)]

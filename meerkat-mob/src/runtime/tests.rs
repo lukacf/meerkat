@@ -1265,6 +1265,17 @@ struct MockSessionService {
     /// from the request's active lowering carrier (typed appends in runtime
     /// mode, the `injected_context` field + prompt in direct mode).
     start_turn_user_channel: RwLock<Vec<(SessionId, Vec<(bool, String)>)>>,
+    /// Per turn request: the typed runtime turn metadata carrier, so tests
+    /// can assert transcript identity stamping on the delivery path.
+    start_turn_metadata: RwLock<
+        Vec<(
+            SessionId,
+            Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+        )>,
+    >,
+    /// Interaction ids received through the SubscribableInjector's
+    /// caller-chosen-id entry point (autonomous submit-work delivery).
+    injected_interaction_ids: Arc<std::sync::Mutex<Vec<InteractionId>>>,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     cancel_after_boundary_supported: AtomicBool,
@@ -1333,6 +1344,8 @@ impl MockSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             start_turn_prompts: RwLock::new(Vec::new()),
             start_turn_user_channel: RwLock::new(Vec::new()),
+            start_turn_metadata: RwLock::new(Vec::new()),
+            injected_interaction_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             cancel_after_boundary_supported: AtomicBool::new(true),
@@ -1448,6 +1461,22 @@ impl MockSessionService {
 
     async fn recorded_start_turn_user_channel(&self) -> Vec<(SessionId, Vec<(bool, String)>)> {
         self.start_turn_user_channel.read().await.clone()
+    }
+
+    async fn recorded_start_turn_metadata(
+        &self,
+    ) -> Vec<(
+        SessionId,
+        Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    )> {
+        self.start_turn_metadata.read().await.clone()
+    }
+
+    fn recorded_injected_interaction_ids(&self) -> Vec<InteractionId> {
+        self.injected_interaction_ids
+            .lock()
+            .expect("injected interaction id mutex")
+            .clone()
     }
 
     async fn recorded_external_tools_flags(&self) -> Vec<bool> {
@@ -2138,6 +2167,10 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), user_channel));
+        self.start_turn_metadata
+            .write()
+            .await
+            .push((id.clone(), req.runtime.turn_metadata.clone()));
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
@@ -2456,6 +2489,7 @@ struct CountingInjector {
     fail: bool,
     fail_inject: bool,
     completed_result: String,
+    interaction_ids: Arc<std::sync::Mutex<Vec<InteractionId>>>,
 }
 
 impl EventInjector for CountingInjector {
@@ -2523,6 +2557,22 @@ impl SubscribableInjector for CountingInjector {
             events: rx,
         })
     }
+
+    fn inject_with_interaction_id(
+        &self,
+        interaction_id: InteractionId,
+        body: meerkat_core::types::ContentInput,
+        source: PlainEventSource,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        self.inject(body, source, handling_mode, render_metadata)?;
+        self.interaction_ids
+            .lock()
+            .expect("interaction id mutex")
+            .push(interaction_id);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2571,6 +2621,7 @@ impl SessionServiceCommsExt for MockSessionService {
             fail,
             fail_inject,
             completed_result,
+            interaction_ids: self.injected_interaction_ids.clone(),
         }))
     }
 
@@ -2612,6 +2663,7 @@ impl SessionServiceCommsExt for MockSessionService {
             fail,
             fail_inject,
             completed_result,
+            interaction_ids: self.injected_interaction_ids.clone(),
         }))
     }
 }
@@ -33235,6 +33287,109 @@ async fn test_turn_driven_submit_work_delivers_injected_context_before_work_cont
         ],
         "injected context must reach the member turn request as typed \
          injected-context entries before the work content, in order"
+    );
+}
+
+/// Ask-15 addendum (turn-driven): a host-supplied `WorkSpec.interaction_id`
+/// is stamped into the delivered turn's
+/// `RuntimeTurnMetadata.transcript_identity`, so the runner persists it onto
+/// the committed transcript messages and history backfill can join them with
+/// the host's live interaction frames.
+#[tokio::test]
+async fn test_turn_driven_submit_work_interaction_id_stamps_transcript_identity() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-interaction-id");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let interaction_id = InteractionId(uuid::Uuid::new_v4());
+    handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("summarize the findings".to_string(), WorkOrigin::Internal)
+                .with_interaction_id(interaction_id),
+        )
+        .await
+        .expect("submit work with interaction id");
+
+    wait_for_start_turn_call_count(
+        &service,
+        1,
+        "turn-driven work with an interaction id should start a turn",
+    )
+    .await;
+
+    let records = service.recorded_start_turn_metadata().await;
+    let (_, metadata) = records.last().expect("one turn request recorded");
+    let metadata = metadata
+        .as_ref()
+        .expect("submit-work delivery must carry runtime turn metadata");
+    assert_eq!(
+        metadata.transcript_identity.interaction_id,
+        Some(interaction_id),
+        "the host-supplied interaction id must ride the turn's transcript identity"
+    );
+    assert_eq!(
+        metadata.transcript_identity.run_id, None,
+        "the concrete run id is stamped later by the runner, not the work lane"
+    );
+}
+
+/// Ask-15 addendum (autonomous): a host-supplied `WorkSpec.interaction_id`
+/// rides the injected inbox event, so the comms classification (and the
+/// runtime transcript identity derived from it) carries the SAME id as the
+/// host's live interaction frames instead of a fresh unrelated one.
+#[tokio::test]
+async fn test_autonomous_submit_work_interaction_id_reaches_inbox_injection() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("lead-interaction-id");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let interaction_id = InteractionId(uuid::Uuid::new_v4());
+    handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("do the thing".to_string(), WorkOrigin::External)
+                .with_interaction_id(interaction_id),
+        )
+        .await
+        .expect("submit keyed autonomous work");
+
+    assert_eq!(
+        service.recorded_injected_interaction_ids(),
+        vec![interaction_id],
+        "the autonomous inbox delivery must carry the host-supplied interaction id"
     );
 }
 

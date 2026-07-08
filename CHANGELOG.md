@@ -44,8 +44,27 @@ policy with its release gate.
   (`Ok`/`NotFound`) instead of `NotReady { reason: Destroyed }`. Pollers
   that treated `NotReady` as "try again later" get truthful terminal
   answers after a host restart.
+- `meerkat_rpc::SessionRuntime::create_session` now takes
+  `self: &Arc<Self>` (callers holding a bare `&SessionRuntime` must hold an
+  `Arc`, which every runtime consumer already does). The gratuitous
+  `&mut self` receivers on `set_config_runtime`, `set_realm_config_source`,
+  `set_default_llm_client`, `set_agent_llm_client_decorator`, and
+  `set_skill_identity_roots` are relaxed to `&self` (they were interior
+  mutability all along).
 
 ### Fixed
+
+- Agent-authored schedules fire in embedded `SessionRuntime` hosts (field,
+  0.7.23: `meerkat_schedule_create` returned an id and the planner minted
+  occurrences, but they stayed pending 12+ hours past due). The runtime
+  binds the `meerkat_schedule_*` agent tools to its own schedule store at
+  construction, but only the RPC router's startup path spawned the firing
+  host — an embedder constructing `SessionRuntime` directly handed agents a
+  store nothing drives. The runtime now arms its firing host itself the
+  moment agent work can run (session creation and executor attach; atomic
+  fast path, loud warn + retry on start failure), so
+  tools-bound-but-undriven is no longer a representable topology.
+  REST/MCP/CLI already start their hosts eagerly and are unaffected.
 
 - A failed input batch no longer wedges the runtime queue when the machine's
   own failure realization resolves batch members out of the queued world

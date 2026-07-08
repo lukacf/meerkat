@@ -43,7 +43,7 @@ fn spawn_test_server(
         meerkat_runtime::store::SqliteRuntimeStore::new(store.path().to_path_buf()).unwrap(),
     ) as Arc<dyn meerkat_runtime::RuntimeStore>;
     let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(temp.path().join("blobs")));
-    let mut runtime = SessionRuntime::new(
+    let runtime = SessionRuntime::new(
         factory,
         config,
         10,
@@ -1243,7 +1243,7 @@ async fn e2e_scenario_22_transport_backpressure() {
         meerkat_runtime::store::SqliteRuntimeStore::new(store.path().to_path_buf()).unwrap(),
     ) as Arc<dyn meerkat_runtime::RuntimeStore>;
     let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(temp.path().join("blobs")));
-    let mut runtime = SessionRuntime::new(
+    let runtime = SessionRuntime::new(
         factory,
         config,
         10,

@@ -4179,7 +4179,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config,
             10,
@@ -4210,7 +4210,7 @@ mod tests {
         let mut config = Config::default();
         config.limits.max_sessions = Some(max_sessions);
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config.clone(),
             max_sessions,
@@ -4505,7 +4505,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config,
             10,
@@ -4536,7 +4536,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config,
             10,
@@ -4567,7 +4567,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config,
             10,
@@ -4711,7 +4711,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let mut runtime = SessionRuntime::new(
+        let runtime = SessionRuntime::new(
             factory,
             config,
             10,

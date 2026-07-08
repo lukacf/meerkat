@@ -329,7 +329,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&config_store),
         realm_paths.root.join("config_state.json"),
     ));
-    let mut runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
+    let runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
         factory,
         config.clone(),
         Arc::clone(&config_store),

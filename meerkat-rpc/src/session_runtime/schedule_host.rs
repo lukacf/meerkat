@@ -288,6 +288,45 @@ impl SessionRuntime {
         Ok(())
     }
 
+    /// Arm the schedule firing host as soon as this runtime can execute
+    /// agent work.
+    ///
+    /// The agent-facing `meerkat_schedule_*` tools installed at construction
+    /// bind to THIS runtime's schedule service — so a schedule authored
+    /// through them must have an in-process firing authority regardless of
+    /// whether the embedder wired the RPC router (which arms eagerly at
+    /// startup). Without this, a `SessionRuntime` embedded without the router
+    /// hands agents a schedule store nothing drives: `meerkat_schedule_create`
+    /// returns an id, the planner mints occurrences, and nothing ever claims
+    /// them (field, 0.7.23: agent-authored schedules stranded pending 12h+
+    /// past due while the embedder's own host drove a different store).
+    ///
+    /// Idempotent; cheap after the first success (atomic fast path). A start
+    /// failure is logged loudly and retried on the next arming call rather
+    /// than failing the session — the schedule rows are durable and fire once
+    /// the host comes up.
+    pub(super) async fn arm_schedule_host_for_agent_tools(self: &Arc<Self>) {
+        if self
+            .schedule_host_armed
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        match self.ensure_schedule_host_started().await {
+            Ok(()) => {
+                self.schedule_host_armed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to arm the schedule firing host; agent-authored schedules \
+                     will not fire until it starts"
+                );
+            }
+        }
+    }
+
     pub(super) async fn shutdown_schedule_host(&self) {
         let mut slot = self.schedule_host.lock().await;
         let Some(handle) = slot.take() else {
@@ -298,7 +337,7 @@ impl SessionRuntime {
     }
 
     pub(super) async fn materialize_scheduled_session(
-        &self,
+        self: &Arc<Self>,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {

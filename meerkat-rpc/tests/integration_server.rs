@@ -140,7 +140,7 @@ fn spawn_test_server() -> (
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
-    let mut runtime = SessionRuntime::new(
+    let runtime = SessionRuntime::new(
         factory,
         config,
         10,
@@ -189,7 +189,7 @@ fn spawn_test_server_with_client(
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
-    let mut runtime = SessionRuntime::new(
+    let runtime = SessionRuntime::new(
         factory,
         config,
         10,

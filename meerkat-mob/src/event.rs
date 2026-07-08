@@ -538,6 +538,12 @@ pub struct MemberSpawnedEvent {
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// Per-spawn effective profile override (from `SpawnTooling::Profile`
+    /// resolution) active at spawn. Durable so roster replay repopulates
+    /// `RosterEntry.effective_profile_override` across process restarts;
+    /// `None` means the definition profile keyed by `role` is authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_profile_override: Option<crate::profile::Profile>,
     /// Typed continuity evidence emitted at spawn finalization.
     #[serde(default, skip_serializing_if = "crate::event::is_ephemeral_continuity")]
     pub continuity_intent: crate::runtime::SpawnContinuityIntent,
@@ -563,6 +569,7 @@ impl MemberSpawnedEvent {
             role,
             runtime_mode: MobRuntimeMode::AutonomousHost,
             labels: BTreeMap::new(),
+            effective_profile_override: None,
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             bridge_member_ref: None,
         }
@@ -1299,6 +1306,94 @@ mod tests {
         event.runtime_mode = MobRuntimeMode::TurnDriven;
         event.labels = labels;
         roundtrip(&MobEventKind::MemberSpawned(event));
+    }
+
+    fn override_profile_with_mcp_servers() -> Profile {
+        Profile {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: None,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
+            skills: vec![],
+            tools: ToolConfig {
+                mcp_servers: vec![meerkat_core::mcp_config::McpServerConfig::stdio(
+                    "planner",
+                    "/bin/echo",
+                    vec![],
+                    std::collections::HashMap::new(),
+                )],
+                ..ToolConfig::default()
+            },
+            peer_description: "A worker".to_string(),
+            external_addressable: false,
+            backend: None,
+            runtime_mode: MobRuntimeMode::AutonomousHost,
+            max_inline_peer_notifications: None,
+            output_schema: None,
+            provider_params: None,
+        }
+    }
+
+    #[test]
+    fn test_member_spawned_effective_profile_override_roundtrip() {
+        let identity = AgentIdentity::from("coder");
+        let mut event = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(7),
+            AgentRuntimeId::initial(identity),
+            ProfileName::from("worker"),
+        );
+        event.effective_profile_override = Some(override_profile_with_mcp_servers());
+        roundtrip(&MobEventKind::MemberSpawned(event));
+    }
+
+    #[test]
+    fn test_member_spawned_without_override_serializes_without_the_field() {
+        let identity = AgentIdentity::from("coder");
+        let event = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(7),
+            AgentRuntimeId::initial(identity),
+            ProfileName::from("worker"),
+        );
+        let serialized =
+            serde_json::to_string(&MobEventKind::MemberSpawned(event)).expect("serialize");
+        assert!(
+            !serialized.contains("effective_profile_override"),
+            "None override must keep the wire shape byte-identical to pre-wave-2 events: {serialized}"
+        );
+    }
+
+    #[test]
+    fn test_member_spawned_pre_wave2_event_without_override_deserializes_to_none() {
+        let event: MobEvent = serde_json::from_value(json!({
+            "cursor": 1,
+            "timestamp": "2026-02-19T00:00:00Z",
+            "mob_id": "test-mob",
+            "kind": {
+                "type": "member_spawned",
+                "agent_identity": "researcher",
+                "generation": 0,
+                "fence_token": 1,
+                "agent_runtime_id": {
+                    "identity": "researcher",
+                    "generation": 0
+                },
+                "role": "worker",
+                "runtime_mode": "autonomous_host"
+            },
+        }))
+        .expect("pre-wave-2 stored event must stay readable");
+        match event.kind {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                assert_eq!(member_spawned.effective_profile_override, None);
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
+        }
     }
 
     #[test]

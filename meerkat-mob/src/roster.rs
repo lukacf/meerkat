@@ -186,7 +186,10 @@ impl Roster {
                     peer_id: None,
                     transport_public_key: None,
                     labels: member_spawned.labels.clone(),
-                    effective_profile_override: None,
+                    // Durable single owner: replay repopulates the per-spawn
+                    // override so restarts without a SpawnMemberCustomizer
+                    // keep per-spawn declarative tooling.
+                    effective_profile_override: member_spawned.effective_profile_override.clone(),
                 });
             }
             MobEventKind::MemberRetired { agent_identity, .. } => {

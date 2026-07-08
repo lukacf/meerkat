@@ -1003,6 +1003,9 @@ pub(super) struct PendingSpawn {
     /// Effective profile override from `SpawnTooling::Profile` resolution.
     /// Persisted in the roster so respawn/restore can use it.
     pub(super) effective_profile_override: Option<crate::profile::Profile>,
+    /// Per-spawn external-tool overlay carried to the finalize commit so the
+    /// actor retention map is updated in the same block as the roster insert.
+    pub(super) per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub(super) authorized_profile_material: AuthorizedSpawnProfileMaterial,
     pub(super) continuity_intent: super::handle::SpawnContinuityIntent,
     pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
@@ -1150,6 +1153,7 @@ struct SpawnFinalizeCtx {
     auto_wire_parent: bool,
     restore_wiring: Option<RestoreWiringPlan>,
     effective_profile_override: Option<crate::profile::Profile>,
+    per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
     continuity_intent: super::handle::SpawnContinuityIntent,
 }
@@ -1282,6 +1286,15 @@ pub(super) struct MobActor {
     /// authority inside the actor.
     pub(super) phase_watch_tx: tokio::sync::watch::Sender<MobState>,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    /// Per-spawn external-tool overlays (`SpawnMemberSpec.external_tools`)
+    /// retained for the member's lifetime so machine-authorized revival
+    /// recomposes the same dispatcher stack the spawn used. Entries are
+    /// written only in the spawn/respawn commit path (provisioning failure
+    /// never inserts), replaced or cleared by respawn replacement semantics,
+    /// and removed at disposal. RwLock: `dispose_remove_from_roster` runs on
+    /// `&self`.
+    pub(super) per_spawn_external_tools:
+        tokio::sync::RwLock<BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>>,
     pub(super) spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     /// Typed composition binding for the `meerkat_mob_seam` composition
@@ -5032,7 +5045,15 @@ impl MobActor {
             &profile,
             "revive_member_profile_authority",
         )?;
-        let external_tools = self.external_tools_for_profile(&profile, None)?;
+        // Revival inputs must equal spawn-time inputs: recompose the retained
+        // per-spawn overlay alongside profile bundles and mob-default tools.
+        let per_spawn_overlay = self
+            .per_spawn_external_tools
+            .read()
+            .await
+            .get(&agent_identity)
+            .cloned();
+        let external_tools = self.external_tools_for_profile(&profile, per_spawn_overlay)?;
         let mut config = build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
             base: build::BuildAgentConfigParams {
                 mob_id: &self.definition.id,
@@ -9030,6 +9051,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        per_spawn_external_tools.clone(),
                         authorized_profile_material.clone(),
                         continuity_intent.clone(),
                     ));
@@ -9120,6 +9142,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        per_spawn_external_tools.clone(),
                         authorized_profile_material.clone(),
                         continuity_intent.clone(),
                     ));
@@ -9285,6 +9308,7 @@ impl MobActor {
                 owner_bridge_session_id.clone(),
                 auto_wire_parent,
                 effective_profile_override,
+                per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
             ))
@@ -9304,6 +9328,7 @@ impl MobActor {
             spawn_owner_bridge_session_id,
             auto_wire_parent,
             effective_profile_override,
+            per_spawn_external_tools,
             authorized_profile_material,
             continuity_intent,
         ) = match prepare_result {
@@ -9375,6 +9400,7 @@ impl MobActor {
                 auto_wire_parent,
                 None,
                 effective_profile_override,
+                per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
             ))
@@ -9462,6 +9488,7 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring: None,
             effective_profile_override,
+            per_spawn_external_tools,
             authorized_profile_material,
             continuity_intent,
             progress: pending_progress.clone(),
@@ -9655,6 +9682,7 @@ impl MobActor {
                 auto_wire_parent,
                 restore_wiring,
                 effective_profile_override,
+                per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
                 progress: _,
@@ -9721,6 +9749,7 @@ impl MobActor {
                             auto_wire_parent,
                             restore_wiring,
                             effective_profile_override,
+                            per_spawn_external_tools,
                             authorized_profile_material,
                             continuity_intent,
                         ))
@@ -9837,7 +9866,8 @@ impl MobActor {
             agent_identity,
         )?;
         let runtime_mode = normalize_runtime_mode_for_binding(runtime_mode, &selected_binding);
-        let external_tools = self.external_tools_for_profile(&profile, per_spawn_external_tools)?;
+        let external_tools =
+            self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
         let labels = labels.unwrap_or_default();
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
@@ -9925,6 +9955,7 @@ impl MobActor {
             auto_wire_parent: false,
             restore_wiring: None,
             effective_profile_override: override_profile.clone(),
+            per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
             continuity_intent: continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
@@ -10018,6 +10049,7 @@ impl MobActor {
                 false,
                 None,
                 override_profile, // policy spawns usually use definition profiles; customizers may supply an override
+                per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
             ))
@@ -10111,6 +10143,7 @@ impl MobActor {
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
         effective_profile_override: Option<crate::profile::Profile>,
+        per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
         authorized_profile_material: AuthorizedSpawnProfileMaterial,
         continuity_intent: super::handle::SpawnContinuityIntent,
     ) -> Result<FinalizeSpawnOutcome, MobError> {
@@ -10134,6 +10167,7 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring,
             effective_profile_override,
+            per_spawn_external_tools,
             authorized_profile_material,
             continuity_intent,
         });
@@ -10375,6 +10409,10 @@ impl MobActor {
                     event.runtime_mode = runtime_mode;
                     event.labels = labels.clone();
                     event.continuity_intent = continuity_intent.clone();
+                    // Durable per-spawn declarative provenance: replay
+                    // repopulates RosterEntry.effective_profile_override so
+                    // restarts keep per-spawn tooling without a customizer.
+                    event.effective_profile_override = ctx.effective_profile_override.clone();
                     event
                 }),
             })
@@ -10467,6 +10505,7 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring,
             effective_profile_override,
+            per_spawn_external_tools,
             authorized_profile_material: _,
             continuity_intent: _,
         } = *ctx;
@@ -10563,6 +10602,17 @@ impl MobActor {
                 labels: labels.clone(),
                 effective_profile_override: effective_profile_override.clone(),
             });
+        }
+        {
+            // Same commit as the roster insert: retain the per-spawn overlay
+            // so machine-authorized revival recomposes it. `None` clears any
+            // prior incarnation's overlay (respawn replacement semantics).
+            let mut per_spawn = self.per_spawn_external_tools.write().await;
+            if let Some(dispatcher) = per_spawn_external_tools {
+                per_spawn.insert(identity.clone(), dispatcher);
+            } else {
+                per_spawn.remove(&identity);
+            }
         }
 
         // Row #314: record the machine-owned external-member rebind capability
@@ -14627,7 +14677,7 @@ impl MobActor {
             "MobActor::handle_respawn authorized replacement profile material"
         );
         let external_tools =
-            self.external_tools_for_profile(&profile, replacement_external_tools)?;
+            self.external_tools_for_profile(&profile, replacement_external_tools.clone())?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &snapshot.profile_name,
@@ -14735,6 +14785,7 @@ impl MobActor {
                 || !snapshot.restore_wiring.external_peers.is_empty())
             .then_some(snapshot.restore_wiring.clone()),
             effective_profile_override: replacement_profile_override.clone(),
+            per_spawn_external_tools: replacement_external_tools.clone(),
             authorized_profile_material: replacement_authorized_profile_material.clone(),
             continuity_intent: replacement_continuity_intent.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
@@ -14904,6 +14955,7 @@ impl MobActor {
                         || !snapshot.restore_wiring.external_peers.is_empty())
                     .then_some(snapshot.restore_wiring.clone()),
                     replacement_profile_override,
+                    replacement_external_tools,
                     replacement_authorized_profile_material,
                     replacement_continuity_intent,
                 ))
@@ -15746,6 +15798,13 @@ impl MobActor {
         let mut roster = self.roster.write().await;
         roster.remove_member(&ctx.agent_identity);
         drop(roster);
+        // Disposal ends the member's lifetime: drop the retained per-spawn
+        // overlay so host dispatchers are released and a later spawn of the
+        // same identity cannot revive with a stale tool surface.
+        self.per_spawn_external_tools
+            .write()
+            .await
+            .remove(&ctx.agent_identity);
         self.restore_diagnostics
             .write()
             .await

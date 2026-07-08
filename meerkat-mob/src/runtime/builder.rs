@@ -2419,6 +2419,7 @@ impl MobBuilder {
             wiring.dsl_authority.state().topology_epoch,
         ));
 
+        let mut per_spawn_external_tools_seed = BTreeMap::new();
         if resumed_state == MobState::Running {
             Self::reconcile_resume(
                 &definition,
@@ -2437,6 +2438,7 @@ impl MobBuilder {
                 &spawn_member_customizer,
                 storage.realm_profiles.clone(),
                 storage.runtime_metadata.clone(),
+                &mut per_spawn_external_tools_seed,
             )
             .await?;
         }
@@ -2471,6 +2473,7 @@ impl MobBuilder {
             default_external_tools_provider,
             spawn_member_customizer,
             storage.realm_profiles.clone(),
+            per_spawn_external_tools_seed,
             realtime_session_factory,
         ))
     }
@@ -2634,6 +2637,7 @@ impl MobBuilder {
         spawn_member_customizer: &Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+        per_spawn_external_tools_seed: &mut BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
     ) -> Result<(), MobError> {
         let pending_supervisor_accepted_peer_ids: std::collections::BTreeSet<String> =
             supervisor_bridge
@@ -2740,6 +2744,11 @@ impl MobBuilder {
                     "spawn customizer cannot change resume restore profile for '{}' from '{}' to '{}'",
                     entry.agent_identity, entry.role, restore_spec.role_name
                 )));
+            }
+            // Seed the actor's retention map so a later machine-authorized
+            // revival recomposes the customizer-supplied per-spawn overlay.
+            if let Some(tools) = restore_spec.external_tools.clone() {
+                per_spawn_external_tools_seed.insert(entry.agent_identity.clone(), tools);
             }
             let restore_profile_override = restore_spec.override_profile.clone();
             let restore_labels = restore_spec
@@ -3654,6 +3663,7 @@ impl MobBuilder {
             default_external_tools_provider,
             spawn_member_customizer,
             realm_profile_store,
+            BTreeMap::new(),
             realtime_session_factory,
         ))
     }
@@ -3673,6 +3683,7 @@ impl MobBuilder {
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
         spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
+        per_spawn_external_tools: BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> MobHandle {
         let run_store = authority_validating_mob_run_store(run_store);
@@ -3817,6 +3828,7 @@ impl MobBuilder {
             machine_state_watch_tx,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
+            per_spawn_external_tools: tokio::sync::RwLock::new(per_spawn_external_tools),
             spawn_member_customizer,
             realm_profile_store,
             composition_binding,

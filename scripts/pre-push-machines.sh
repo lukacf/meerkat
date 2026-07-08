@@ -14,6 +14,11 @@ if [ -n "$changed" ]; then
             "${ROOT}/scripts/buildbuddy-ci-lane" machine-authority || exit 1
     else
         "$CARGO" xtask machine-codegen --all || exit 1
-        "$CARGO" xtask machine-verify --all || exit 1
+        # Route verification through the canonical TLC lane: it owns the
+        # documented over-budget composition skips (meerkat_mob_seam /
+        # adaptive_mob_bundle full sweeps) and the bounded adaptive witness
+        # proof. A bare `machine-verify --all` runs the full mob-seam ci.cfg
+        # sweep, which does not fit a pre-push budget.
+        make -C "$ROOT" machine-verify || exit 1
     fi
 fi

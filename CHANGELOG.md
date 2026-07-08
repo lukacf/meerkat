@@ -13,6 +13,36 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Fixed
+
+- A failed input batch no longer wedges the runtime queue when the machine's
+  own failure realization resolves batch members out of the queued world
+  (field, 0.7.23 crew gateway: a steer-shaped input's third failed stage
+  attempt was abandoned by the machine's retry policy, the loop's
+  whole-batch defer sweep then hit "DSL rejected DeferInputBehindBacklog:
+  GuardRejected { phase: Attached }", dropped the pending wake, and stranded
+  the backlog for ~13 minutes until an unrelated external wake). The defer
+  sweep is now machine-owned-total: `DeferInputBehindBacklogAlreadyResolved`
+  accepts tracked members that provably left `Queued` (max-attempts
+  abandonment, boundary-applied members) as an explicit no-op, while a
+  tracked-but-lane-less input still claiming `Queued` stays a loud rejection
+  (projection corruption). The runtime loop's three batch-failure arms
+  (apply failure, primitive rejection, turn-state preparation failure) now
+  share one canonical backlog resolution: defer the failed batch and keep
+  draining other queued work in the same wake, park only when nothing else
+  is queued, and fail closed through the canonical executor-stop path — not
+  a silent wake-dropping return — if the defer genuinely breaks.
+
+### Changed
+
+- `make machine-verify` and the pre-push machine gate now route through the
+  canonical TLC lane (`xtask/tests/machine_verify_all_tlc_test.sh`), which
+  owns the documented over-budget composition skips (`meerkat_mob_seam` /
+  `adaptive_mob_bundle` full ci.cfg sweeps) and the bounded adaptive witness
+  proof. The previous bare `machine-verify --all` form ran the full mob-seam
+  state-space sweep, which fits no local or pre-push budget; the unbounded
+  sweep remains available on demand as `make machine-verify-full`.
+
 ### Added
 
 - `semver-breaks` release-preflight gate (studio M3): cargo-semver-checks

@@ -1739,6 +1739,19 @@ impl EphemeralRuntimeDriver {
     }
 
     #[cfg(test)]
+    pub(crate) fn increment_attempt_count_for_test(
+        &mut self,
+        input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::IncrementAttemptCount {
+                input_id: Self::dsl_key(input_id),
+            },
+            "IncrementAttemptCount(test)",
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn clear_admitted_runtime_semantics_for_test(&mut self, input_id: &InputId) {
         self.runtime_semantics.remove(input_id);
         if let Some(state) = self.ledger.get_mut(input_id) {
@@ -3713,6 +3726,133 @@ mod tests {
             first_seq > second_seq,
             "deferred order must be represented by generated admission sequence"
         );
+    }
+
+    /// Field class (0.7.23 crew gateway): the machine's own
+    /// max-attempts abandonment during a failed run's rollback must not turn
+    /// the loop's whole-batch defer sweep into a guard rejection — that
+    /// rejection wedged the runtime queue behind a dropped wake.
+    #[tokio::test]
+    async fn defer_is_total_over_machine_abandoned_batch_members() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("defer-abandoned"));
+
+        let poison = prompt_input("poison");
+        let poison_id = poison.id().clone();
+        driver.accept_input(poison).await.unwrap();
+
+        let innocent = prompt_input("innocent");
+        let innocent_id = innocent.id().clone();
+        driver.accept_input(innocent).await.unwrap();
+
+        let run_id = RunId::new();
+        driver
+            .contract_begin_run_authority(run_id.clone())
+            .expect("runtime run authority should begin through generated DSL");
+        for _ in 0..3 {
+            driver
+                .machine_realize_stage_batch(std::slice::from_ref(&poison_id), &run_id)
+                .unwrap();
+            driver
+                .rollback_staged(std::slice::from_ref(&poison_id))
+                .unwrap();
+        }
+        assert_eq!(
+            driver.input_phase(&poison_id),
+            Some(InputLifecycleState::Abandoned),
+            "retry policy must abandon the poison input at the generated cap"
+        );
+
+        driver
+            .defer_queued_inputs_behind_backlog(&[poison_id.clone(), innocent_id.clone()])
+            .expect(
+                "defer sweep must be total over batch members the machine already resolved \
+                 terminally",
+            );
+
+        assert_eq!(
+            driver.input_phase(&poison_id),
+            Some(InputLifecycleState::Abandoned),
+            "the no-op defer arm must not resurrect a terminally resolved input"
+        );
+        assert_eq!(driver.dsl_queue_lane(), vec![innocent_id]);
+    }
+
+    /// Batch members that were boundary-applied mid-run (Applied /
+    /// AppliedPendingConsumption, no lane entry) are the second trigger of
+    /// the same defer-wedge class: the failure rollback correctly skips
+    /// them, and the defer sweep must no-op on them.
+    #[tokio::test]
+    async fn defer_is_total_over_boundary_applied_batch_members() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("defer-applied"));
+
+        let applied = prompt_input("applied at boundary");
+        let applied_id = applied.id().clone();
+        driver.accept_input(applied).await.unwrap();
+
+        let staged = prompt_input("still staged");
+        let staged_id = staged.id().clone();
+        driver.accept_input(staged).await.unwrap();
+
+        let run_id = RunId::new();
+        driver
+            .contract_begin_run_authority(run_id.clone())
+            .expect("runtime run authority should begin through generated DSL");
+        driver
+            .machine_realize_stage_batch(&[applied_id.clone(), staged_id.clone()], &run_id)
+            .unwrap();
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::MarkApplied {
+                    input_id: EphemeralRuntimeDriver::dsl_key(&applied_id),
+                },
+                "MarkApplied",
+            )
+            .unwrap();
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::MarkAppliedPendingConsumption {
+                    input_id: EphemeralRuntimeDriver::dsl_key(&applied_id),
+                },
+                "MarkAppliedPendingConsumption",
+            )
+            .unwrap();
+
+        driver
+            .rollback_staged(&[applied_id.clone(), staged_id.clone()])
+            .unwrap();
+        assert_eq!(
+            driver.input_phase(&staged_id),
+            Some(InputLifecycleState::Queued)
+        );
+        assert_eq!(
+            driver.input_phase(&applied_id),
+            Some(InputLifecycleState::AppliedPendingConsumption)
+        );
+
+        driver
+            .defer_queued_inputs_behind_backlog(&[applied_id.clone(), staged_id.clone()])
+            .expect("defer sweep must be total over boundary-applied batch members");
+        assert_eq!(
+            driver.input_phase(&applied_id),
+            Some(InputLifecycleState::AppliedPendingConsumption),
+            "the no-op defer arm must not move a boundary-applied input"
+        );
+        assert_eq!(driver.dsl_queue_lane(), vec![staged_id]);
+    }
+
+    /// Totality must not blanket-absorb genuine corruption: an untracked
+    /// input in the defer sweep stays a loud typed rejection.
+    #[tokio::test]
+    async fn defer_rejects_untracked_inputs() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("defer-untracked"));
+
+        let queued = prompt_input("queued");
+        driver.accept_input(queued).await.unwrap();
+
+        let untracked = InputId::new();
+        driver
+            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&untracked))
+            .expect_err("an untracked input in the defer sweep is projection corruption");
     }
 
     #[tokio::test]

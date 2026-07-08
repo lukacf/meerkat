@@ -1201,6 +1201,69 @@ async fn maybe_inject_feed_wake(
     }
 }
 
+/// What the runtime loop should do with the backlog after a batch failed
+/// terminally and its surviving members were rolled back to their lanes.
+enum FailedBatchBacklogOutcome {
+    /// The failed batch was deferred behind the backlog — keep draining so
+    /// other queued work runs before the failed payload is retried.
+    ContinueProcessing,
+    /// Nothing else is queued: leave the failed batch queued for a future
+    /// wake instead of hot-looping on the same payload indefinitely.
+    Park,
+    /// Deferring the batch hit a genuine projection invariant break. The loop
+    /// was stopped through the canonical executor-stop path (a silent return
+    /// here strands the backlog behind a dropped wake); the payload is the
+    /// stop path's should_stop verdict.
+    Stopped(bool),
+}
+
+/// Canonical post-failure backlog handling for a terminally failed batch.
+///
+/// The machine's failure realization may have resolved individual batch
+/// members past the queued world (max-attempts abandonment, boundary-applied
+/// members) — the defer sweep is total over those via the machine's
+/// `DeferInputBehindBacklogAlreadyResolved` no-op arm, so a defer error here
+/// is projection corruption, never a machine-owned resolution.
+///
+/// Callers must drop any driver-authority guard before invoking this: the
+/// stop path can re-enter the machine (unregister) and acquire the same
+/// session mutation gate.
+async fn resolve_failed_batch_backlog(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    input_ids: &[InputId],
+) -> FailedBatchBacklogOutcome {
+    let defer_error = {
+        let mut d = driver.lock().await;
+        if !d.has_queued_input_outside(input_ids) {
+            return FailedBatchBacklogOutcome::Park;
+        }
+        match d.defer_queued_inputs_behind_backlog(input_ids) {
+            Ok(()) => {
+                d.take_wake_requested();
+                None
+            }
+            Err(err) => Some(err),
+        }
+    };
+    let Some(err) = defer_error else {
+        return FailedBatchBacklogOutcome::ContinueProcessing;
+    };
+    tracing::error!(
+        error = %err,
+        "failed to defer failed input batch behind backlog"
+    );
+    let should_stop = stop_runtime_loop_executor_from_dsl_effect(
+        driver,
+        completions,
+        executor,
+        format!("failed to defer failed input batch behind backlog: {err}"),
+    )
+    .await;
+    FailedBatchBacklogOutcome::Stopped(should_stop)
+}
+
 /// Process all queued inputs until the queue is empty.
 #[allow(clippy::too_many_arguments)]
 async fn process_queue(
@@ -1483,7 +1546,24 @@ async fn process_queue(
                             format!("runtime primitive rejected: {conflict}"),
                         )
                         .await;
-                        return false;
+                        // Same backlog semantics as a failed apply: other
+                        // queued work must not strand behind the rolled-back
+                        // batch until an unrelated external wake.
+                        drop(queue_authority_guard);
+                        match resolve_failed_batch_backlog(
+                            driver,
+                            completions,
+                            executor,
+                            &input_ids,
+                        )
+                        .await
+                        {
+                            FailedBatchBacklogOutcome::ContinueProcessing => continue,
+                            FailedBatchBacklogOutcome::Park => return false,
+                            FailedBatchBacklogOutcome::Stopped(should_stop) => {
+                                return should_stop;
+                            }
+                        }
                     }
                 };
                 if let Err(error) =
@@ -1524,7 +1604,17 @@ async fn process_queue(
                         format!("runtime turn-state preparation failed: {error}"),
                     )
                     .await;
-                    return false;
+                    // Same backlog semantics as a failed apply: other queued
+                    // work must not strand behind the rolled-back batch until
+                    // an unrelated external wake.
+                    drop(queue_authority_guard);
+                    match resolve_failed_batch_backlog(driver, completions, executor, &input_ids)
+                        .await
+                    {
+                        FailedBatchBacklogOutcome::ContinueProcessing => continue,
+                        FailedBatchBacklogOutcome::Park => return false,
+                        FailedBatchBacklogOutcome::Stopped(should_stop) => return should_stop,
+                    }
                 }
                 drop(queue_authority_guard);
 
@@ -1730,26 +1820,24 @@ async fn process_queue(
                             reason,
                         )
                         .await;
-                        let mut d = driver.lock().await;
-                        let should_continue = d.has_queued_input_outside(&input_ids);
-                        if should_continue {
-                            if let Err(err) = d.defer_queued_inputs_behind_backlog(&input_ids) {
-                                tracing::error!(
-                                    error = %err,
-                                    "failed to defer failed input batch behind backlog"
-                                );
-                                return false;
-                            }
-                            d.take_wake_requested();
-                        }
-                        drop(d);
-                        if should_continue {
-                            continue;
-                        }
-                        // Leave the failing input queued for a future wake instead of
-                        // hot-looping on the same payload indefinitely.
+                        // The stop path inside the backlog resolution can
+                        // re-enter the machine — never call it under the
+                        // authority guard (ask 21c deadlock pattern).
                         drop(terminal_authority_guard);
-                        return false;
+                        match resolve_failed_batch_backlog(
+                            driver,
+                            completions,
+                            executor,
+                            &input_ids,
+                        )
+                        .await
+                        {
+                            FailedBatchBacklogOutcome::ContinueProcessing => continue,
+                            FailedBatchBacklogOutcome::Park => return false,
+                            FailedBatchBacklogOutcome::Stopped(should_stop) => {
+                                return should_stop;
+                            }
+                        }
                     }
                 }
             }
@@ -3025,6 +3113,91 @@ mod tests {
             payload: Some(serde_json::json!({"ok": true})),
             handling_mode: None,
         })
+    }
+
+    /// Field class (0.7.23 crew gateway): a poison input reaching the
+    /// machine's max-attempts abandonment mid-wake must not wedge the queue.
+    /// Pre-fix, the whole-batch defer sweep hit `GuardRejected` on the
+    /// just-abandoned member ("failed to defer failed input batch behind
+    /// backlog"), the loop returned with the wake dropped, and the innocent
+    /// backlog stranded until an unrelated external wake (~13 minutes in the
+    /// field). Post-fix the same wake keeps draining: the poison terminalizes
+    /// as machine policy and the next queued input still gets its attempt.
+    #[tokio::test]
+    async fn max_attempts_abandonment_does_not_wedge_the_backlog() {
+        let driver = make_shared_ephemeral_driver("defer-wedge-class");
+        let poison_id =
+            accept_queued_input_id(&driver, make_peer_message("lead-rt", "poison steer")).await;
+        let innocent_id = accept_queued_input_id(
+            &driver,
+            make_terminal_peer_response(TEST_PEER_RESPONSE_ROUTE_ID, TEST_PEER_RESPONSE_REQUEST_ID),
+        )
+        .await;
+
+        // Two stage attempts already burned on earlier wakes: the next
+        // failure is the abandonment attempt — the exact field shape.
+        {
+            let mut guard = driver.lock().await;
+            match &mut *guard {
+                crate::meerkat_machine::DriverEntry::Ephemeral(d) => {
+                    d.increment_attempt_count_for_test(&poison_id).unwrap();
+                    d.increment_attempt_count_for_test(&poison_id).unwrap();
+                }
+                _ => panic!("expected ephemeral driver"),
+            }
+        }
+
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = crate::control_plane::test_support::ApplyFailingExecutor::new(
+            Arc::clone(&apply_calls),
+            Arc::clone(&stop_calls),
+        );
+        let (_effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
+        let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+
+        let should_stop = process_queue(
+            &driver,
+            &mut executor,
+            &mut effect_rx,
+            None,
+            &authority_binding,
+        )
+        .await;
+        assert!(
+            !should_stop,
+            "a machine-policy abandonment must not stop the runtime loop"
+        );
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
+
+        let guard = driver.lock().await;
+        match &*guard {
+            crate::meerkat_machine::DriverEntry::Ephemeral(d) => {
+                assert_eq!(
+                    d.input_phase(&poison_id),
+                    Some(crate::input_state::InputLifecycleState::Abandoned),
+                    "poison input must terminalize at the generated retry cap"
+                );
+                assert_eq!(d.input_attempt_count(&poison_id), 3);
+                assert_eq!(
+                    d.input_attempt_count(&innocent_id),
+                    1,
+                    "the same wake must keep draining past the abandoned poison — a zero \
+                     attempt count means the backlog wedged behind a dropped wake"
+                );
+                assert_eq!(
+                    d.input_phase(&innocent_id),
+                    Some(crate::input_state::InputLifecycleState::Queued),
+                    "the innocent input keeps its remaining machine-policy retries"
+                );
+            }
+            _ => panic!("expected ephemeral driver"),
+        }
+        assert_eq!(
+            apply_calls.load(Ordering::SeqCst),
+            2,
+            "one wake must attempt both the poison batch and the innocent batch"
+        );
     }
 
     async fn accept_queued_input_id(

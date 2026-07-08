@@ -386,6 +386,36 @@ jobs:
       - name: Add release target
         run: rustup target add ${{ matrix.target }}
 
+      # The 32GB fixed pagefile below plus the release build's target
+      # artifacts exhaust the hosted runner's C: drive deterministically
+      # (three consecutive v0.7.24 asset-lane failures: "There is not enough
+      # space on the disk"). Reclaim the preinstalled toolchains this build
+      # never uses before committing the pagefile.
+      - name: Reclaim Windows runner disk space
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $before = (Get-PSDrive -Name C).Free / 1GB
+          $targets = @(
+            'C:\Android',
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files\dotnet',
+            'C:\hostedtoolcache\windows\CodeQL',
+            'C:\Modules',
+            'C:\Program Files\MongoDB',
+            'C:\Program Files\PostgreSQL',
+            'C:\Program Files\Unity Hub',
+            'C:\selenium'
+          )
+          foreach ($t in $targets) {
+            if (Test-Path $t) {
+              Write-Host "Removing $t"
+              Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
+            }
+          }
+          $after = (Get-PSDrive -Name C).Free / 1GB
+          Write-Host ("C: free before {0:N1} GB, after {1:N1} GB" -f $before, $after)
+
       # Windows has no memory overcommit: rustc's peak commit on the large
       # generated crates (meerkat-machine-schema) exceeds the 16GB runner's
       # default commit limit and aborts with 0xc0000409 ("memory allocation

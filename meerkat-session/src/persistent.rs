@@ -56,6 +56,10 @@ use meerkat_core::session_document::{
     LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
     SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
 };
+use meerkat_core::session_store::{
+    IncrementalSessionStore, SessionHead, SessionHeadCas, TranscriptStrandId,
+    head_canonical_plain_save_guard, session_head_cas_token,
+};
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState, SessionLifecycleTerminal};
 use meerkat_core::{InputId, RunId};
@@ -384,6 +388,10 @@ struct CheckpointerGate {
 /// after `create_session` which already persists an initial snapshot.
 struct StoreCheckpointer {
     store: Arc<dyn SessionStore>,
+    /// Incremental capability of `store`, when it exposes one: checkpoints
+    /// then append O(delta) rows + one CAS-guarded head write instead of
+    /// rewriting the whole projection row.
+    incremental: Option<Arc<dyn IncrementalSessionStore>>,
     blob_store: Arc<dyn BlobStore>,
     event_store: Option<Arc<dyn EventStore>>,
     projector: Option<Arc<SessionProjector>>,
@@ -687,6 +695,450 @@ async fn append_transcript_rewrite_commit_events(
             error = %error,
             "failed to project transcript rewrite commit event"
         );
+    }
+    Ok(())
+}
+
+fn incremental_store_error(error: SessionStoreError) -> SessionError {
+    SessionError::Store(Box::new(error))
+}
+
+fn incremental_internal_error(message: String) -> SessionError {
+    SessionError::Agent(meerkat_core::error::AgentError::InternalError(message))
+}
+
+/// Recover the typed `SessionStoreError` from a projection failure so the
+/// fail-closed wrappers keep their existing error surface.
+fn session_error_into_store_error(error: SessionError) -> SessionStoreError {
+    match error {
+        SessionError::Store(source) => match source.downcast::<SessionStoreError>() {
+            Ok(store_error) => *store_error,
+            Err(source) => SessionStoreError::Internal(source.to_string()),
+        },
+        other => SessionStoreError::Internal(other.to_string()),
+    }
+}
+
+fn is_incremental_cas_conflict(error: &SessionError) -> bool {
+    matches!(
+        error,
+        SessionError::Store(source)
+            if matches!(
+                source.downcast_ref::<SessionStoreError>(),
+                Some(SessionStoreError::TranscriptRevisionConflict { .. })
+            )
+    )
+}
+
+/// Advance a head in place: same identity/envelope, new strand position.
+fn advance_session_head(
+    base: &SessionHead,
+    strand: TranscriptStrandId,
+    head_revision: String,
+    message_count: u64,
+) -> SessionHead {
+    SessionHead {
+        id: base.id.clone(),
+        version: base.version,
+        strand,
+        head_revision,
+        message_count,
+        rewrite_count: base.rewrite_count,
+        created_at: base.created_at,
+        updated_at: base.updated_at,
+        usage: base.usage.clone(),
+        metadata: base.metadata.clone(),
+    }
+}
+
+fn incremental_seed_head(
+    session: &Session,
+    strand: TranscriptStrandId,
+    rows: &[meerkat_core::Message],
+) -> Result<SessionHead, SessionError> {
+    let head_revision = meerkat_core::transcript_messages_digest(rows).map_err(|err| {
+        incremental_internal_error(format!(
+            "failed to digest incremental seed rows for session {}: {err}",
+            session.id()
+        ))
+    })?;
+    let mut metadata = session.metadata().clone();
+    metadata.remove(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
+    Ok(SessionHead {
+        id: session.id().clone(),
+        version: session.version(),
+        strand,
+        head_revision,
+        message_count: rows.len() as u64,
+        rewrite_count: 0,
+        created_at: session.created_at(),
+        updated_at: session.updated_at(),
+        usage: session.total_usage(),
+        metadata,
+    })
+}
+
+/// Read-only continuity preflight for the incremental projection write:
+/// verifies that `session` will be admitted by
+/// [`save_session_projection_incremental`] against the CURRENT head without
+/// performing any writes, so runtime-authority commits never advance ahead
+/// of a projection that would be rejected (the incremental replacement for
+/// `verify_authoritative_projection_persisted_continuity`).
+async fn verify_incremental_projection_continuity(
+    store: &dyn IncrementalSessionStore,
+    session: &Session,
+) -> Result<(), SessionStoreError> {
+    let id = session.id();
+    let state = session.transcript_history_state().map_err(|err| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        }
+    })?;
+    let commits: &[meerkat_core::TranscriptRewriteCommit] =
+        state.as_ref().map(|s| s.commits.as_slice()).unwrap_or(&[]);
+    let Some(head) = store.load_head(id).await? else {
+        // Seeding a fresh head: the write path validates the layout.
+        return Ok(());
+    };
+    let adopted = usize::try_from(head.rewrite_count)
+        .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+    if state.is_some() && commits.len() < adopted {
+        return Err(SessionStoreError::TranscriptRevisionConflict {
+            id: id.clone(),
+            expected: format!("{adopted} adopted transcript rewrite commits"),
+            actual: format!("{} incoming commits", commits.len()),
+        });
+    }
+    let pending = if commits.len() > adopted {
+        &commits[adopted..]
+    } else {
+        &[][..]
+    };
+    // Walk the pending chain: each commit must anchor on (or plainly extend)
+    // the cursor, exactly as the write path enforces.
+    let mut cursor_revision = head.head_revision.clone();
+    let mut cursor_count = usize::try_from(head.message_count)
+        .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+    for commit in pending {
+        if cursor_revision != commit.parent_revision {
+            let parent_body = session
+                .transcript_revision_body(&commit.parent_revision)
+                .map_err(SessionStoreError::from)?
+                .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+                    id: id.clone(),
+                    reason: format!(
+                        "missing parent transcript revision body {} for incremental rewrite",
+                        commit.parent_revision
+                    ),
+                })?;
+            let prefix_matches = parent_body.messages.len() >= cursor_count
+                && meerkat_core::transcript_messages_digest(&parent_body.messages[..cursor_count])
+                    .map_err(SessionStoreError::from)?
+                    == cursor_revision;
+            if !prefix_matches {
+                return Err(SessionStoreError::InvalidTranscriptRewrite {
+                    id: id.clone(),
+                    reason: format!(
+                        "transcript rewrite parent {} does not extend the persisted head {cursor_revision}",
+                        commit.parent_revision
+                    ),
+                });
+            }
+        }
+        cursor_revision = commit.revision.clone();
+        cursor_count = commit.messages_after;
+    }
+    // Tail admission mirrors the write path's head-canonical guard.
+    if pending.is_empty() {
+        let previous_rows = store
+            .load_messages(id, &head.strand, 0..head.message_count)
+            .await?;
+        let previous_slim = head.clone().into_session(previous_rows)?;
+        let stored_commits = &commits[..adopted.min(commits.len())];
+        if let Err(guard_error) =
+            head_canonical_plain_save_guard(session, &previous_slim, stored_commits)
+            && !runtime_projection_rollback_authorized(session, &previous_slim)?
+        {
+            return Err(guard_error);
+        }
+        return Ok(());
+    }
+    let last = &pending[pending.len() - 1];
+    let revision_body = session
+        .transcript_revision_body(&last.revision)
+        .map_err(SessionStoreError::from)?
+        .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!(
+                "missing transcript revision body {} for incremental rewrite",
+                last.revision
+            ),
+        })?;
+    let mut previous = Session::with_id(id.clone());
+    for message in revision_body.messages {
+        previous.push(message);
+    }
+    head_canonical_plain_save_guard(session, &previous, commits)
+}
+
+/// Incremental projection write: O(delta) appends + per-commit
+/// `commit_rewrite -> audit -> adopt` + one CAS-guarded head save.
+///
+/// Replaces `save_session_projection_allowing_internal_rewrite` (and its
+/// projection-rollback/quarantine dance) on stores that expose the
+/// incremental capability: the audit event is appended BEFORE head adoption,
+/// so an audit failure leaves the head un-advanced (the recorded-but-
+/// unadopted commit rows are inert) and a retry converges idempotently.
+///
+/// `pre_audited` carries commits whose `TranscriptRewriteCommitted` audit
+/// event the caller already appended (the runtime rewrite-chain path); they
+/// are adopted without re-auditing.
+async fn save_session_projection_incremental(
+    store: &dyn IncrementalSessionStore,
+    blob_store: &dyn BlobStore,
+    event_store: Option<&Arc<dyn EventStore>>,
+    projector: Option<&Arc<SessionProjector>>,
+    session: &Session,
+    pre_audited: &[meerkat_core::TranscriptRewriteCommit],
+) -> Result<(), SessionError> {
+    let id = session.id();
+    // Storage normalization for retained-body rows: inline media captured in
+    // rewrite bodies is externalized before it becomes a persisted row.
+    // Image canonicalization makes the transcript digests invariant under
+    // this rewrite, so record/prefix validation is unaffected.
+    let externalize_rows = |mut rows: Vec<meerkat_core::Message>| async move {
+        externalize_messages_from(blob_store, &mut rows, 0)
+            .await
+            .map_err(|err| {
+                incremental_internal_error(format!(
+                    "failed to externalize incremental projection rows: {err}"
+                ))
+            })?;
+        Ok::<_, SessionError>(rows)
+    };
+    let state = session.transcript_history_state().map_err(|err| {
+        incremental_internal_error(format!(
+            "failed to read transcript history for incremental projection save: {err}"
+        ))
+    })?;
+    let commits: &[meerkat_core::TranscriptRewriteCommit] =
+        state.as_ref().map(|s| s.commits.as_slice()).unwrap_or(&[]);
+
+    let mut head = match store.load_head(id).await.map_err(incremental_store_error)? {
+        Some(head) => head,
+        None => {
+            // Seed: the root strand holds the parent-most retained body (or
+            // the live vector when no rewrites were committed yet).
+            let root = TranscriptStrandId::root();
+            let root_rows: Vec<meerkat_core::Message> = match commits.first() {
+                Some(first) => {
+                    let rows = session
+                        .transcript_revision_body(&first.parent_revision)
+                        .map_err(|err| {
+                            incremental_internal_error(format!(
+                                "failed to read parent transcript revision body for incremental seed: {err}"
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            incremental_internal_error(format!(
+                                "missing parent transcript revision body {} for incremental seed",
+                                first.parent_revision
+                            ))
+                        })?
+                        .messages;
+                    externalize_rows(rows).await?
+                }
+                None => session.messages().to_vec(),
+            };
+            store
+                .append_messages(id, &root, 0, &root_rows)
+                .await
+                .map_err(incremental_store_error)?;
+            let seed = incremental_seed_head(session, root, &root_rows)?;
+            store
+                .save_head(&seed, SessionHeadCas::Create)
+                .await
+                .map_err(incremental_store_error)?;
+            seed
+        }
+    };
+
+    // Pending (recorded-in-session but not yet adopted-in-store) commits.
+    let adopted = usize::try_from(head.rewrite_count).map_err(|_| {
+        incremental_internal_error(format!(
+            "session {id} head rewrite_count {} exceeds addressable range",
+            head.rewrite_count
+        ))
+    })?;
+    if state.is_some() && commits.len() < adopted {
+        return Err(incremental_store_error(
+            SessionStoreError::TranscriptRevisionConflict {
+                id: id.clone(),
+                expected: format!("{adopted} adopted transcript rewrite commits"),
+                actual: format!("{} incoming commits", commits.len()),
+            },
+        ));
+    }
+    let pending = if commits.len() > adopted {
+        &commits[adopted..]
+    } else {
+        &[][..]
+    };
+    for commit in pending {
+        if head.head_revision != commit.parent_revision {
+            // The commit anchors past the persisted head: append the missing
+            // plain-append suffix from the retained parent body first. A
+            // parent that does NOT extend the persisted head fails closed.
+            let parent_body = session
+                .transcript_revision_body(&commit.parent_revision)
+                .map_err(|err| {
+                    incremental_internal_error(format!(
+                        "failed to read parent transcript revision body for incremental rewrite: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    incremental_internal_error(format!(
+                        "missing parent transcript revision body {} for incremental rewrite",
+                        commit.parent_revision
+                    ))
+                })?;
+            let parent_rows = externalize_rows(parent_body.messages).await?;
+            let head_count = usize::try_from(head.message_count).map_err(|_| {
+                incremental_internal_error(format!(
+                    "session {id} head message_count {} exceeds addressable range",
+                    head.message_count
+                ))
+            })?;
+            let prefix_matches = parent_rows.len() >= head_count
+                && meerkat_core::transcript_messages_digest(&parent_rows[..head_count]).map_err(
+                    |err| {
+                        incremental_internal_error(format!(
+                            "failed to digest rewrite parent prefix for session {id}: {err}"
+                        ))
+                    },
+                )? == head.head_revision;
+            if !prefix_matches {
+                return Err(incremental_store_error(
+                    SessionStoreError::InvalidTranscriptRewrite {
+                        id: id.clone(),
+                        reason: format!(
+                            "transcript rewrite parent {} does not extend the persisted head {}",
+                            commit.parent_revision, head.head_revision
+                        ),
+                    },
+                ));
+            }
+            store
+                .append_messages(
+                    id,
+                    &head.strand,
+                    head.message_count,
+                    &parent_rows[head_count..],
+                )
+                .await
+                .map_err(incremental_store_error)?;
+            let bridged = advance_session_head(
+                &head,
+                head.strand.clone(),
+                commit.parent_revision.clone(),
+                parent_rows.len() as u64,
+            );
+            let token = session_head_cas_token(&head).map_err(incremental_store_error)?;
+            store
+                .save_head(&bridged, SessionHeadCas::IfToken(token))
+                .await
+                .map_err(incremental_store_error)?;
+            head = bridged;
+        }
+        let mut record = transcript_rewrite_record_for_session(session, commit)?;
+        record.parent_body.messages = externalize_rows(record.parent_body.messages).await?;
+        record.revision_body.messages = externalize_rows(record.revision_body.messages).await?;
+        let token = session_head_cas_token(&head).map_err(incremental_store_error)?;
+        let next = store
+            .commit_rewrite(id, &record, SessionHeadCas::IfToken(token.clone()))
+            .await
+            .map_err(transcript_rewrite_store_error_to_session_error)?;
+        // Audit BEFORE adoption: an audit failure leaves the head
+        // un-advanced and the unadopted commit rows inert.
+        if !pre_audited.contains(commit) {
+            append_transcript_rewrite_commit_events(
+                event_store,
+                projector,
+                session,
+                std::slice::from_ref(commit),
+            )
+            .await?;
+        }
+        store
+            .save_head(&next, SessionHeadCas::IfToken(token))
+            .await
+            .map_err(incremental_store_error)?;
+        head = next;
+    }
+
+    // Tail: plain delta append when the live vector extends the head strand;
+    // otherwise a machine-admitted equivalence (or an authorized runtime
+    // rollback) rebases onto a fresh strand; anything else fails closed.
+    let live = session.messages();
+    let head_count = usize::try_from(head.message_count).map_err(|_| {
+        incremental_internal_error(format!(
+            "session {id} head message_count {} exceeds addressable range",
+            head.message_count
+        ))
+    })?;
+    let plain_append = live.len() >= head_count
+        && meerkat_core::transcript_messages_digest(&live[..head_count]).map_err(|err| {
+            incremental_internal_error(format!(
+                "failed to digest incoming transcript prefix for session {id}: {err}"
+            ))
+        })? == head.head_revision;
+    let final_strand = if plain_append {
+        if live.len() > head_count {
+            store
+                .append_messages(id, &head.strand, head.message_count, &live[head_count..])
+                .await
+                .map_err(incremental_store_error)?;
+        }
+        head.strand.clone()
+    } else {
+        let previous_rows = store
+            .load_messages(id, &head.strand, 0..head.message_count)
+            .await
+            .map_err(incremental_store_error)?;
+        let previous_slim = head
+            .clone()
+            .into_session(previous_rows)
+            .map_err(incremental_store_error)?;
+        let stored_commits = &commits[..adopted.min(commits.len())];
+        if let Err(guard_error) =
+            head_canonical_plain_save_guard(session, &previous_slim, stored_commits)
+            && !runtime_projection_rollback_authorized(session, &previous_slim)
+                .map_err(incremental_store_error)?
+        {
+            return Err(incremental_store_error(guard_error));
+        }
+        let live_digest = meerkat_core::transcript_messages_digest(live).map_err(|err| {
+            incremental_internal_error(format!(
+                "failed to digest incoming transcript for session {id}: {err}"
+            ))
+        })?;
+        let rebased = TranscriptStrandId::rebase(&live_digest);
+        store
+            .append_messages(id, &rebased, 0, live)
+            .await
+            .map_err(incremental_store_error)?;
+        rebased
+    };
+    let final_head = SessionHead::from_session(session, final_strand, head.rewrite_count)
+        .map_err(incremental_store_error)?;
+    let final_token = session_head_cas_token(&final_head).map_err(incremental_store_error)?;
+    let head_token = session_head_cas_token(&head).map_err(incremental_store_error)?;
+    if final_token != head_token {
+        store
+            .save_head(&final_head, SessionHeadCas::IfToken(head_token))
+            .await
+            .map_err(incremental_store_error)?;
     }
     Ok(())
 }
@@ -1316,16 +1768,34 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
                 return;
             }
         }
-        if let Err(e) = save_session_projection_allowing_internal_rewrite(
-            self.store.as_ref(),
-            self.blob_store.as_ref(),
-            self.event_store.as_ref(),
-            self.projector.as_ref(),
-            &persisted,
-        )
-        .await
-        {
-            tracing::warn!("Host-mode checkpoint failed: {e}");
+        let projection_result = if let Some(incremental) = self.incremental.as_ref() {
+            save_session_projection_incremental(
+                incremental.as_ref(),
+                self.blob_store.as_ref(),
+                self.event_store.as_ref(),
+                self.projector.as_ref(),
+                &persisted,
+                &[],
+            )
+            .await
+        } else {
+            save_session_projection_allowing_internal_rewrite(
+                self.store.as_ref(),
+                self.blob_store.as_ref(),
+                self.event_store.as_ref(),
+                self.projector.as_ref(),
+                &persisted,
+            )
+            .await
+        };
+        if let Err(e) = projection_result {
+            if is_incremental_cas_conflict(&e) {
+                // Best-effort checkpoint lost a head CAS race; the boundary
+                // persist reconciles.
+                tracing::warn!("Host-mode checkpoint skipped on head CAS conflict: {e}");
+            } else {
+                tracing::warn!("Host-mode checkpoint failed: {e}");
+            }
         } else if let Ok(mut last_saved_revision) = self.last_saved_revision.lock() {
             *last_saved_revision = Some(current_revision);
         }
@@ -1341,6 +1811,11 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
 pub struct PersistentSessionService<B: SessionAgentBuilder> {
     inner: EphemeralSessionService<B>,
     store: Arc<dyn SessionStore>,
+    /// Incremental capability of `store`, resolved once at construction via
+    /// `SessionStore::as_incremental`. When present, projection writes go
+    /// through the O(delta) incremental contract; the whole-blob compat path
+    /// remains for stores without the capability.
+    incremental: Option<Arc<dyn IncrementalSessionStore>>,
     runtime_store: Arc<dyn RuntimeStore>,
     blob_store: Arc<dyn BlobStore>,
     event_store: Option<Arc<dyn EventStore>>,
@@ -2928,7 +3403,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await?;
         {
             let runtime_store = &self.runtime_store;
-            if let Err(error) = verify_authoritative_projection_persisted_continuity(
+            if let Some(incremental) = self.incremental.as_ref() {
+                // Incremental stores replace the fuzzy continuity walks with
+                // the typed read-only continuity preflight against the head
+                // row, so the runtime writes below never advance ahead of a
+                // projection the CAS-guarded write would reject.
+                if let Err(error) =
+                    verify_incremental_projection_continuity(incremental.as_ref(), &session).await
+                {
+                    return Err(self
+                        .fail_closed_runtime_projection_preflight(session.id(), error)
+                        .await);
+                }
+            } else if let Err(error) = verify_authoritative_projection_persisted_continuity(
                 self.store.as_ref(),
                 self.blob_store.as_ref(),
                 &session,
@@ -3130,7 +3617,30 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         ))
                     })?;
             }
-            if let Err(error) =
+            if let Some(incremental) = self.incremental.clone() {
+                // Projection side: per-commit commit_rewrite -> adopt. The
+                // TranscriptRewriteCommitted audit events for `commits` were
+                // already appended in the runtime loop above, so they are
+                // adopted without re-auditing.
+                if let Err(error) = save_session_projection_incremental(
+                    incremental.as_ref(),
+                    self.blob_store.as_ref(),
+                    self.event_store.as_ref(),
+                    self.projector.as_ref(),
+                    &session,
+                    commits,
+                )
+                .await
+                {
+                    return Err(self
+                        .fail_closed_runtime_projection_update(
+                            session.id(),
+                            session_error_into_store_error(error),
+                            Some(latest_session_snapshot.as_slice()),
+                        )
+                        .await);
+                }
+            } else if let Err(error) =
                 save_audited_authoritative_projection_after_persisted_continuity_guard(
                     self.store.as_ref(),
                     self.blob_store.as_ref(),
@@ -3406,9 +3916,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
+        let incremental = store.clone().as_incremental();
         Self {
             inner: EphemeralSessionService::new(builder, active_session_capacity),
             store,
+            incremental,
             runtime_store,
             blob_store,
             event_store: None,
@@ -3860,7 +4372,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // `append_only_save_guard` would reject the very shrink the preflight
             // just proved legal (the source of the archive-time
             // `MonotonicityViolation` that strands compacted singletons).
-            let expected_current_revision =
+            //
+            // Incremental stores replace the fuzzy continuity walks with the
+            // typed read-only continuity preflight against the head row, so
+            // the runtime authority never commits ahead of a projection the
+            // CAS-guarded write below would reject.
+            let expected_current_revision = if let Some(incremental) = self.incremental.as_ref() {
+                if let Err(error) =
+                    verify_incremental_projection_continuity(incremental.as_ref(), &session).await
+                {
+                    return Err(self
+                        .fail_closed_runtime_projection_preflight(session.id(), error)
+                        .await);
+                }
+                None
+            } else {
                 match verify_authoritative_projection_persisted_continuity(
                     self.store.as_ref(),
                     self.blob_store.as_ref(),
@@ -3874,7 +4400,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             .fail_closed_runtime_projection_preflight(session.id(), error)
                             .await);
                     }
-                };
+                }
+            };
             let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                     "failed to serialize session snapshot for runtime persistence: {err}"
@@ -3893,7 +4420,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "runtime snapshot persistence failed: {err}"
                     )))
                 })?;
-            if let Err(error) = self
+            if let Some(incremental) = self.incremental.clone() {
+                if let Err(error) = save_session_projection_incremental(
+                    incremental.as_ref(),
+                    self.blob_store.as_ref(),
+                    self.event_store.as_ref(),
+                    self.projector.as_ref(),
+                    &session,
+                    &[],
+                )
+                .await
+                {
+                    return Err(self
+                        .fail_closed_runtime_projection_update(
+                            session.id(),
+                            session_error_into_store_error(error),
+                            Some(session_snapshot.as_slice()),
+                        )
+                        .await);
+                }
+            } else if let Err(error) = self
                 .store
                 .save_authoritative_projection_if_current_revision(
                     &session,
@@ -3941,6 +4487,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session: Session,
     ) -> Result<Session, SessionError> {
         let session = self.normalized_session_for_persistence(session).await?;
+        if let Some(incremental) = self.incremental.clone() {
+            save_session_projection_incremental(
+                incremental.as_ref(),
+                self.blob_store.as_ref(),
+                self.event_store.as_ref(),
+                self.projector.as_ref(),
+                &session,
+                &[],
+            )
+            .await?;
+            return Ok(session);
+        }
         save_session_projection_allowing_internal_rewrite(
             self.store.as_ref(),
             self.blob_store.as_ref(),
@@ -4082,15 +4640,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if *guard {
             return Ok(());
         }
-        if let Err(error) = save_session_projection_allowing_internal_rewrite(
-            self.store.as_ref(),
-            self.blob_store.as_ref(),
-            self.event_store.as_ref(),
-            self.projector.as_ref(),
-            &session,
-        )
-        .await
-        {
+        let projection_result = if let Some(incremental) = self.incremental.clone() {
+            save_session_projection_incremental(
+                incremental.as_ref(),
+                self.blob_store.as_ref(),
+                self.event_store.as_ref(),
+                self.projector.as_ref(),
+                &session,
+                &[],
+            )
+            .await
+        } else {
+            save_session_projection_allowing_internal_rewrite(
+                self.store.as_ref(),
+                self.blob_store.as_ref(),
+                self.event_store.as_ref(),
+                self.projector.as_ref(),
+                &session,
+            )
+            .await
+        };
+        if let Err(error) = projection_result {
             drop(guard);
             return match error {
                 SessionError::Store(store_error) => {
@@ -5104,6 +5674,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         });
         let checkpointer = Arc::new(StoreCheckpointer {
             store: Arc::clone(&self.store),
+            incremental: self.incremental.clone(),
             blob_store: Arc::clone(&self.blob_store),
             event_store: self.event_store.clone(),
             projector: self.projector.clone(),
@@ -5726,11 +6297,35 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
                 session.messages().to_vec()
             }
             None => {
-                return Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::ConfigError(format!(
-                        "transcript revision {revision} not found for session {id}",
-                    )),
-                ));
+                // Incremental stores keep retained bodies out-of-line: serve
+                // the requested revision from the store's rewrite records.
+                let mut fallback = None;
+                if let Some(incremental) = self.incremental.as_ref() {
+                    for record in incremental
+                        .load_rewrites(id)
+                        .await
+                        .map_err(|err| SessionError::Store(Box::new(err)))?
+                    {
+                        if record.commit.revision == revision {
+                            fallback = Some(record.revision_body.messages);
+                            break;
+                        }
+                        if record.commit.parent_revision == revision {
+                            fallback = Some(record.parent_body.messages);
+                            break;
+                        }
+                    }
+                }
+                match fallback {
+                    Some(messages) => messages,
+                    None => {
+                        return Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::ConfigError(format!(
+                                "transcript revision {revision} not found for session {id}",
+                            )),
+                        ));
+                    }
+                }
             }
         };
         Ok(SessionTranscriptRevisionPage::from_messages(
@@ -5759,7 +6354,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
         })?;
         // Pre-revision sessions carry no rewrite graph; their commit log is
         // legitimately empty while the head is the live message digest.
-        let commits = session
+        let mut commits = session
             .transcript_history_state()
             .map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
@@ -5768,6 +6363,20 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
             })?
             .map(|state| state.commits)
             .unwrap_or_default();
+        // Incremental stores keep retained history out-of-line: a slim
+        // resolved session carries no inline graph, so serve the adopted
+        // commits from the store's rewrite records.
+        if commits.is_empty()
+            && let Some(incremental) = self.incremental.as_ref()
+        {
+            commits = incremental
+                .load_rewrites(id)
+                .await
+                .map_err(|err| SessionError::Store(Box::new(err)))?
+                .into_iter()
+                .map(|record| record.commit)
+                .collect();
+        }
         let start = query.offset.unwrap_or(0).min(commits.len());
         let end = match query.limit {
             Some(limit) => start.saturating_add(limit).min(commits.len()),
@@ -9663,35 +10272,34 @@ mod tests {
                 if assistant.to_string() == "compacted assistant trace"
         ));
 
+        // Incremental-store contract: the durable row is slim; the head and
+        // retained rewrite bodies live out-of-line in the store's records.
         let saved = store
             .load(&session_id)
             .await
             .expect("load after rewrite")
             .expect("session exists");
-        let state = saved
-            .transcript_history_state()
-            .expect("history state should decode")
-            .expect("history state should exist");
-        assert_eq!(state.head, result.revision);
-        assert_eq!(state.commits.len(), 1);
-        assert_eq!(state.commits[0].parent_revision, parent_revision);
-        assert_eq!(state.revisions.len(), 2);
-        let parent_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == parent_revision)
-            .expect("parent revision body retained");
         assert_eq!(
-            serde_json::to_value(&parent_body.messages).expect("parent body serializes"),
+            saved.transcript_revision().expect("saved revision"),
+            result.revision
+        );
+        let inc = Arc::clone(&store)
+            .as_incremental()
+            .expect("memory store exposes the incremental capability");
+        let records = inc
+            .load_rewrites(&session_id)
+            .await
+            .expect("load_rewrites after rewrite");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].commit.parent_revision, parent_revision);
+        assert_eq!(records[0].commit.revision, result.revision);
+        assert_eq!(
+            serde_json::to_value(&records[0].parent_body.messages).expect("parent body serializes"),
             serde_json::to_value(&before.messages).expect("before history serializes")
         );
-        let rewritten_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == result.revision)
-            .expect("rewritten revision body retained");
         assert_eq!(
-            serde_json::to_value(&rewritten_body.messages).expect("rewritten body serializes"),
+            serde_json::to_value(&records[0].revision_body.messages)
+                .expect("rewritten body serializes"),
             serde_json::to_value(&after.messages).expect("after history serializes")
         );
 
@@ -9744,14 +10352,17 @@ mod tests {
             .await
             .expect("load after restore")
             .expect("session exists");
-        let restored_state = restored_saved
-            .transcript_history_state()
-            .expect("history state should decode")
-            .expect("history state should exist");
-        assert_eq!(restored_state.head, restored.revision);
-        assert_eq!(restored_state.commits.len(), 2);
         assert_eq!(
-            restored_state.commits[1].replacement_digest,
+            restored_saved.transcript_revision().expect("revision"),
+            restored.revision
+        );
+        let restored_records = inc
+            .load_rewrites(&session_id)
+            .await
+            .expect("load_rewrites after restore");
+        assert_eq!(restored_records.len(), 2);
+        assert_eq!(
+            restored_records[1].commit.replacement_digest,
             meerkat_core::transcript_messages_digest(&before.messages)
                 .expect("before history digest should compute")
         );
@@ -10123,21 +10734,22 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        let state = store
-            .load(&session_id)
+        // Incremental-store contract: the durable row is slim; the head and
+        // adopted commit facts live out-of-line.
+        let inc = Arc::clone(&store)
+            .as_incremental()
+            .expect("memory store exposes the incremental capability");
+        let head = inc
+            .load_head(&session_id)
             .await
-            .expect("load after failed restore")
-            .expect("session exists")
-            .transcript_history_state()
-            .expect("history state should decode")
-            .expect("history state should exist");
+            .expect("load_head after failed restore")
+            .expect("head exists");
         assert_eq!(
-            state.head, rewritten.revision,
+            head.head_revision, rewritten.revision,
             "a no-op restore must not advance the transcript head"
         );
         assert_eq!(
-            state.commits.len(),
-            1,
+            head.rewrite_count, 1,
             "a no-op restore must not append a rewrite commit"
         );
     }
@@ -12047,6 +12659,7 @@ mod tests {
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            incremental: None,
             blob_store: memory_blob_store(),
             event_store: None,
             projector: None,
@@ -12082,6 +12695,7 @@ mod tests {
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            incremental: None,
             blob_store: memory_blob_store(),
             event_store: None,
             projector: None,
@@ -12124,6 +12738,7 @@ mod tests {
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            incremental: None,
             blob_store: memory_blob_store(),
             event_store: None,
             projector: None,
@@ -19042,5 +19657,605 @@ mod tests {
             !snapshot.has_runtime_checkpoint_provenance(),
             "replay projection persist must not inject the stamp into the runtime snapshot"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental session persistence (OB3 ask 11)
+    // -----------------------------------------------------------------------
+
+    fn incremental_service_fixture() -> (
+        Arc<MemoryStore>,
+        Arc<dyn SessionStore>,
+        Arc<dyn RuntimeStore>,
+        PersistentSessionService<DummyBuilder>,
+    ) {
+        let memory_store = Arc::new(MemoryStore::new());
+        let store: Arc<dyn SessionStore> = memory_store.clone();
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        (memory_store, store, runtime_store, service)
+    }
+
+    fn incremental_handle(store: &Arc<MemoryStore>) -> Arc<dyn IncrementalSessionStore> {
+        Arc::clone(store)
+            .as_incremental()
+            .expect("memory store must expose the incremental capability")
+    }
+
+    fn user_message(text: &str) -> Message {
+        Message::User(UserMessage::text(text.to_string()))
+    }
+
+    /// 3-turn boundary flow on an incremental store: zero whole-blob saves,
+    /// per-turn delta rows, one head save per boundary.
+    #[tokio::test]
+    async fn incremental_boundary_flow_uses_delta_writes() {
+        let (memory_store, store, runtime_store, service) = incremental_service_fixture();
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let baseline = memory_store.stats().await;
+        assert_eq!(
+            baseline.whole_blob_saves, 0,
+            "the incremental path must never fall back to whole-blob saves on create"
+        );
+
+        let mut session = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .unwrap_or_else(|| Session::with_id(created.session_id.clone()));
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        for turn in 0..3u32 {
+            let before = memory_store.stats().await;
+            session.push(user_message(&format!("turn-{turn} question")));
+            session.push(user_message(&format!("turn-{turn} answer")));
+            runtime_store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&session)
+                            .expect("serialize runtime snapshot"),
+                    },
+                )
+                .await
+                .expect("runtime snapshot commit");
+            service
+                .save_normalized_session(session.clone())
+                .await
+                .expect("boundary persist should succeed");
+            let after = memory_store.stats().await;
+            assert_eq!(
+                after.appended_message_rows - before.appended_message_rows,
+                2,
+                "turn {turn} must append exactly the delta rows"
+            );
+            assert_eq!(
+                after.head_saves - before.head_saves,
+                1,
+                "turn {turn} must write exactly one head row"
+            );
+            assert_eq!(
+                after.whole_blob_saves, 0,
+                "no whole-blob saves on any boundary"
+            );
+        }
+
+        let final_stats = memory_store.stats().await;
+        assert_eq!(final_stats.whole_blob_saves, 0);
+        let slim = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("session persisted");
+        assert_eq!(slim.messages().len(), session.messages().len());
+    }
+
+    /// Compaction turn on the incremental store: exactly one commit_rewrite,
+    /// exactly one TranscriptRewriteCommitted audit event, and archive after
+    /// compaction succeeds (incremental twin of
+    /// test_compacted_session_persists_when_durable_projection_lagged_across_compaction).
+    #[tokio::test]
+    async fn incremental_compaction_single_commit_single_audit_then_archive() {
+        let memory_store = Arc::new(MemoryStore::new());
+        let store: Arc<dyn SessionStore> = memory_store.clone();
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+        let machine = MeerkatMachine::persistent(Arc::clone(&runtime_store), memory_blob_store());
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let mut parent = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .unwrap_or_else(|| Session::with_id(created.session_id.clone()));
+        for turn in 0..2 {
+            parent.push(user_message(&format!("turn-{turn} question")));
+            parent.push(user_message(&format!("turn-{turn} answer")));
+        }
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&parent)
+                        .expect("serialize parent runtime snapshot"),
+                },
+            )
+            .await
+            .expect("runtime snapshot commit");
+        service
+            .save_normalized_session(parent.clone())
+            .await
+            .expect("parent boundary persist");
+        let parent_revision = parent.transcript_revision().expect("parent revision");
+
+        let mut compacted = parent.clone();
+        compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 0,
+                    end: parent.messages().len(),
+                },
+                vec![user_message("[Context compacted] singleton summary")],
+                TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(parent_revision),
+            )
+            .expect("compaction rewrite should commit");
+        assert!(compacted.messages().len() < parent.messages().len());
+        let before = memory_store.stats().await;
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&compacted)
+                        .expect("serialize compacted runtime snapshot"),
+                },
+            )
+            .await
+            .expect("runtime snapshot commit");
+        service
+            .save_normalized_session(compacted.clone())
+            .await
+            .expect("compacted boundary persist");
+        let after = memory_store.stats().await;
+        assert_eq!(
+            after.rewrite_commits - before.rewrite_commits,
+            1,
+            "compaction must record exactly one rewrite commit"
+        );
+        assert_eq!(after.whole_blob_saves, 0);
+
+        // Exactly one TranscriptRewriteCommitted audit event.
+        let events = event_store
+            .read_from(&created.session_id, 0)
+            .await
+            .expect("event replay");
+        let rewrite_events = events
+            .iter()
+            .filter(|stored| matches!(stored.event, AgentEvent::TranscriptRewriteCommitted { .. }))
+            .count();
+        assert_eq!(rewrite_events, 1, "exactly one rewrite audit event");
+
+        // The persisted head SHRANK to the compacted transcript.
+        let slim = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("compacted projection should exist");
+        assert_eq!(slim.messages().len(), compacted.messages().len());
+
+        // Archive after compaction succeeds on the incremental store.
+        service
+            .archive_with_machine_protocol(
+                &created.session_id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect("archive after compaction must succeed on the incremental store");
+    }
+
+    /// Field-regression twin of the chained promptless resume refreshes
+    /// (session_store.rs test): two turn-less boots each committing a
+    /// resume-system-prompt-refresh rewrite, third boot runs a turn — the
+    /// boundary persist must be accepted and codeword recall stays intact.
+    #[tokio::test]
+    async fn incremental_chained_promptless_refreshes_then_turn() {
+        let (memory_store, store, runtime_store, service) = incremental_service_fixture();
+        let inc = incremental_handle(&memory_store);
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let mut session = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .unwrap_or_else(|| Session::with_id(created.session_id.clone()));
+        session.push(Message::System(meerkat_core::types::SystemMessage::new(
+            "member prompt roster v1",
+        )));
+        session.push(user_message("the codeword is birch seventeen"));
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        let commit_runtime = |session: &Session| SessionDelta {
+            session_snapshot: serde_json::to_vec(session).expect("serialize runtime snapshot"),
+        };
+        runtime_store
+            .commit_session_snapshot(&runtime_id, commit_runtime(&session))
+            .await
+            .expect("runtime snapshot commit");
+        service
+            .save_normalized_session(session.clone())
+            .await
+            .expect("base persist");
+        let system_index = session
+            .messages()
+            .iter()
+            .position(|message| matches!(message, Message::System(_)))
+            .expect("system message present");
+
+        // Boot 1 + Boot 2: turn-less system-prompt refreshes.
+        for version in ["v2", "v3"] {
+            let parent_revision = session.transcript_revision().expect("revision");
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange {
+                        start: system_index,
+                        end: system_index + 1,
+                    },
+                    vec![Message::System(meerkat_core::types::SystemMessage::new(
+                        format!("member prompt roster {version}"),
+                    ))],
+                    TranscriptRewriteReason::new("resume-system-prompt-refresh"),
+                    Some("agent-factory/resume".to_string()),
+                    Some(parent_revision),
+                )
+                .expect("refresh rewrite should commit");
+            runtime_store
+                .commit_session_snapshot(&runtime_id, commit_runtime(&session))
+                .await
+                .expect("runtime snapshot commit");
+            service
+                .save_normalized_session(session.clone())
+                .await
+                .expect("turn-less refresh persist must be accepted");
+        }
+
+        // Boot 3: the first turn finally runs.
+        session.push(user_message("what was the codeword?"));
+        session.push(user_message("birch seventeen"));
+        runtime_store
+            .commit_session_snapshot(&runtime_id, commit_runtime(&session))
+            .await
+            .expect("runtime snapshot commit");
+        service
+            .save_normalized_session(session.clone())
+            .await
+            .expect("post-refresh boundary persist must be accepted");
+
+        let head = inc
+            .load_head(&created.session_id)
+            .await
+            .expect("load_head")
+            .expect("head present");
+        assert_eq!(head.rewrite_count, 2, "both refresh commits adopted");
+        let slim = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("session persisted");
+        let texts: Vec<String> = slim
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("birch seventeen")),
+            "codeword recall must survive the refresh chain: {texts:?}"
+        );
+        assert!(
+            slim.messages()
+                .iter()
+                .any(|message| matches!(message, Message::System(system)
+                    if system.content.contains("roster v3"))),
+            "the final refreshed prompt must be persisted"
+        );
+    }
+
+    /// Checkpointer on the incremental store: mid-turn checkpoints append
+    /// deltas only; an unchanged checkpoint performs zero store calls; a
+    /// divergent (concurrently bumped) head skips the checkpoint and the
+    /// boundary persist still converges.
+    #[tokio::test]
+    async fn incremental_checkpointer_appends_deltas_and_skips() {
+        let memory_store = Arc::new(MemoryStore::new());
+        let store: Arc<dyn SessionStore> = memory_store.clone();
+        let inc = incremental_handle(&memory_store);
+        let gate = Arc::new(CheckpointerGate {
+            cancelled: Mutex::new(false),
+        });
+        let checkpointer = super::StoreCheckpointer {
+            store: Arc::clone(&store),
+            incremental: Some(Arc::clone(&inc)),
+            blob_store: memory_blob_store(),
+            event_store: None,
+            projector: None,
+            gate,
+            last_saved_revision: std::sync::Mutex::new(None),
+        };
+
+        let mut session = Session::new();
+        session.push(user_message("turn one"));
+        checkpointer.checkpoint(&session).await;
+        let seeded = memory_store.stats().await;
+        assert_eq!(seeded.appended_message_rows, 1);
+        assert_eq!(seeded.head_saves, 1);
+        assert_eq!(seeded.whole_blob_saves, 0);
+
+        // Delta append only.
+        session.push(user_message("turn one partial output"));
+        checkpointer.checkpoint(&session).await;
+        let appended = memory_store.stats().await;
+        assert_eq!(appended.appended_message_rows, 2);
+        assert_eq!(appended.head_saves, 2);
+
+        // Unchanged checkpoint performs zero store calls (the
+        // last_saved_revision skip returns before any store access).
+        checkpointer.checkpoint(&session).await;
+        assert_eq!(memory_store.stats().await, appended);
+
+        // Simulated concurrent head bump: another writer advances the head
+        // to a divergent continuation; the next checkpoint of the stale copy
+        // loses the head compare and skips (warn), leaving the newer head
+        // intact, and the boundary-style persist of the converged transcript
+        // still lands.
+        let mut newer = session.clone();
+        newer.push(user_message("winner append"));
+        store.save(&newer).await.expect("concurrent writer save");
+        let head_after_bump = inc
+            .load_head(session.id())
+            .await
+            .expect("load_head")
+            .expect("head present");
+
+        let mut stale = session.clone();
+        stale.push(user_message("loser append"));
+        checkpointer.checkpoint(&stale).await;
+        let after_skip = inc
+            .load_head(session.id())
+            .await
+            .expect("load_head")
+            .expect("head present");
+        assert_eq!(
+            after_skip.head_revision, head_after_bump.head_revision,
+            "a losing checkpoint must not move the head"
+        );
+
+        let mut converged = newer.clone();
+        converged.push(user_message("post-conflict boundary append"));
+        store
+            .save(&converged)
+            .await
+            .expect("boundary persist converges");
+        let final_head = inc
+            .load_head(session.id())
+            .await
+            .expect("load_head")
+            .expect("head present");
+        assert_eq!(final_head.message_count, converged.messages().len() as u64);
+    }
+
+    /// Audit-append failure during an incremental rewrite leaves the head
+    /// un-adopted (load_head unchanged, slim load still the parent), and a
+    /// retry converges idempotently — the structural-ordering twin of the
+    /// projection-rollback tests.
+    #[tokio::test]
+    async fn incremental_audit_failure_leaves_head_unadopted_and_retry_converges() {
+        let memory_store = Arc::new(MemoryStore::new());
+        let store: Arc<dyn SessionStore> = memory_store.clone();
+        let inc = incremental_handle(&memory_store);
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let event_store = Arc::new(RecordingEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store_trait,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let original = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("created session should exist");
+        let original_revision = original.transcript_revision().expect("revision");
+
+        let mut compacted = original.clone();
+        compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 0,
+                    end: original.messages().len(),
+                },
+                vec![user_message("[Context compacted] audit failure")],
+                TranscriptRewriteReason::new("compaction"),
+                Some("meerkat-core".to_string()),
+                Some(original_revision.clone()),
+            )
+            .expect("rewrite should commit");
+
+        event_store.fail_appends();
+        let err = service
+            .save_compatibility_projection_only(compacted.clone())
+            .await
+            .expect_err("audit append failure must fail the incremental rewrite persist");
+        assert!(
+            err.to_string()
+                .contains("synthetic transcript rewrite audit append failure"),
+            "unexpected error: {err}"
+        );
+
+        // Head NOT advanced: unadopted commit rows are inert.
+        let head = inc
+            .load_head(&created.session_id)
+            .await
+            .expect("load_head")
+            .expect("head present");
+        assert_eq!(
+            head.rewrite_count, 0,
+            "audit failure must not adopt the commit"
+        );
+        assert_eq!(head.head_revision, original_revision);
+        let slim = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("session persisted");
+        assert_eq!(
+            slim.transcript_revision().expect("revision"),
+            original_revision,
+            "the slim load must still serve the parent revision"
+        );
+
+        // Retry converges idempotently.
+        event_store.allow_appends();
+        service
+            .save_compatibility_projection_only(compacted.clone())
+            .await
+            .expect("retry must converge");
+        let head = inc
+            .load_head(&created.session_id)
+            .await
+            .expect("load_head")
+            .expect("head present");
+        assert_eq!(head.rewrite_count, 1);
+        let slim = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("session persisted");
+        assert_eq!(slim.messages().len(), compacted.messages().len());
+    }
+
+    /// Read fallbacks: list_transcript_revisions and the revision-body read
+    /// on a store-only slim incremental session are served from
+    /// load_rewrites/load_messages (red: a slim session used to yield an
+    /// empty commit list and a missing-revision error).
+    #[tokio::test]
+    async fn incremental_read_fallbacks_serve_out_of_line_history() {
+        let (memory_store, store, runtime_store, service) = incremental_service_fixture();
+        let inc = incremental_handle(&memory_store);
+        let _ = runtime_store;
+
+        // Store-only seeding through the incremental contract: root rows +
+        // head, one adopted compaction rewrite. The row carries session
+        // metadata so the canonical recovery-source verdict admits it.
+        let mut parent = recoverable_store_row();
+        parent.push(user_message("turn one"));
+        parent.push(user_message("turn two"));
+        let root = TranscriptStrandId::root();
+        inc.append_messages(parent.id(), &root, 0, parent.messages())
+            .await
+            .expect("seed rows");
+        let head = SessionHead::from_session(&parent, root, 0).expect("seed head");
+        inc.save_head(&head, SessionHeadCas::Create)
+            .await
+            .expect("seed head save");
+        let mut compacted = parent.clone();
+        let commit = compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![user_message("[compacted] summary")],
+                TranscriptRewriteReason::new("compaction"),
+                Some("test".to_string()),
+                None,
+            )
+            .expect("rewrite should commit");
+        let record =
+            transcript_rewrite_record_for_session(&compacted, &commit).expect("record for commit");
+        let token = session_head_cas_token(&head).expect("token");
+        let next = inc
+            .commit_rewrite(parent.id(), &record, SessionHeadCas::IfToken(token.clone()))
+            .await
+            .expect("commit rewrite");
+        inc.save_head(&next, SessionHeadCas::IfToken(token))
+            .await
+            .expect("adopt head");
+
+        // The store serves a SLIM session (no inline graph) — the reads must
+        // be answered from the out-of-line records.
+        let slim = store
+            .load(parent.id())
+            .await
+            .expect("load should succeed")
+            .expect("session persisted");
+        assert!(
+            slim.transcript_history_state()
+                .expect("state read")
+                .is_none(),
+            "store-only incremental sessions resolve slim"
+        );
+
+        let listed = service
+            .list_transcript_revisions(parent.id(), SessionTranscriptRevisionListQuery::default())
+            .await
+            .expect("list_transcript_revisions must be served from load_rewrites");
+        assert_eq!(listed.entries.len(), 1);
+        assert_eq!(listed.entries[0].revision, commit.revision);
+        assert_eq!(listed.entries[0].parent_revision, commit.parent_revision);
+
+        let page = service
+            .read_transcript_revision(
+                parent.id(),
+                SessionTranscriptRevisionQuery {
+                    revision: commit.parent_revision.clone(),
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("revision-body read must be served from load_messages");
+        assert_eq!(page.messages.len(), 2, "parent body served out-of-line");
     }
 }

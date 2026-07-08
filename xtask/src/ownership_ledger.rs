@@ -1861,8 +1861,45 @@ fn workspace_type_index(root: &Path) -> Result<BTreeSet<String>> {
     Ok(index)
 }
 
+fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
+    if !attr.path().is_ident("cfg") {
+        return false;
+    }
+    let mut is_test = false;
+    let _ = attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("test") {
+            is_test = true;
+        }
+        Ok(())
+    });
+    is_test
+}
+
+fn item_is_cfg_test(item: &Item) -> bool {
+    let attrs: &[syn::Attribute] = match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        _ => return false,
+    };
+    attrs.iter().any(attr_is_cfg_test)
+}
+
 fn collect_type_names(items: &[Item], index: &mut BTreeSet<String>) {
     for item in items {
+        if item_is_cfg_test(item) {
+            continue;
+        }
         match item {
             Item::Struct(item_struct) => {
                 index.insert(item_struct.ident.to_string());
@@ -2458,7 +2495,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "McpRouter.servers",
             Subsystem::Mcp,
             StateClass::CapabilityIndex,
-            "ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract",
             Some(contract(
                 "canonical surface state + live server handles",
                 "apply_staged completion, pending completion, removal finalization, shutdown",
@@ -2474,7 +2511,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             StateClass::DerivedProjection,
             "RouterProjectionSnapshot",
             Some(contract(
-                "ExternalToolSurfaceAuthority visibility + server manifests",
+                "ExternalToolSurfaceHandle visibility + server manifests",
                 "snapshot rebuild at every visibility/routing invalidation",
                 StalenessPolicy::Forbidden,
             )),
@@ -2488,7 +2525,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             StateClass::DerivedProjection,
             "RouterProjectionSnapshot",
             Some(contract(
-                "ExternalToolSurfaceAuthority visibility + server manifests",
+                "ExternalToolSurfaceHandle visibility + server manifests",
                 "snapshot rebuild at every visibility/routing invalidation",
                 StalenessPolicy::Forbidden,
             )),
@@ -2502,7 +2539,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             StateClass::DerivedProjection,
             "RouterProjectionSnapshot",
             Some(contract(
-                "ExternalToolSurfaceAuthority visibility + server manifests",
+                "ExternalToolSurfaceHandle visibility + server manifests",
                 "snapshot rebuild at every visibility/routing invalidation",
                 StalenessPolicy::Forbidden,
             )),
@@ -2514,9 +2551,9 @@ fn state_cells() -> Vec<StateCellEntry> {
             "RouterProjectionSnapshot.epoch",
             Subsystem::Mcp,
             StateClass::DerivedProjection,
-            "ExternalToolSurfaceAuthority snapshot_epoch",
+            "ExternalToolSurfaceHandle snapshot_epoch",
             Some(contract(
-                "ExternalToolSurfaceAuthority snapshot publication epoch",
+                "ExternalToolSurfaceHandle snapshot publication epoch",
                 "projection snapshot rebuild/publication",
                 StalenessPolicy::Forbidden,
             )),
@@ -2576,7 +2613,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "McpRouter.completed_updates",
             Subsystem::Mcp,
             StateClass::TransportBuffer,
-            "ExternalToolSurfaceAuthority lifecycle deltas",
+            "ExternalToolSurfaceHandle lifecycle deltas",
             None,
             EntryStatus::Closed,
             "queued lifecycle actions are transport-only buffers sourced from authority transitions",
@@ -2586,7 +2623,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "McpRouter.staged_payloads",
             Subsystem::Mcp,
             StateClass::TransportBuffer,
-            "ExternalToolSurfaceAuthority staged intent sequence",
+            "ExternalToolSurfaceHandle staged intent sequence",
             None,
             EntryStatus::Closed,
             "treat staged config payloads as transport-only buffers keyed by machine-owned staged intent, not as authoritative staged-order truth",
@@ -2988,7 +3025,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["surface_owner"],
-            "ExternalToolSurfaceAuthority",
+            "ExternalToolSurfaceHandle",
             &[
                 "removal-timeout policy mutation is applied only through canonical authority mutator with operating-phase guard",
             ],
@@ -3003,7 +3040,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["servers", "projection", "pending_obligations"],
-            "ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract",
             &["compatibility add path still drives authority and publishes projection snapshot"],
             &["compatibility surface cannot diverge from canonical staged/boundary semantics"],
             EntryStatus::Closed,
@@ -3014,7 +3051,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["staged_payloads", "surface_owner"],
-            "ExternalToolSurfaceAuthority staged intent sequence",
+            "ExternalToolSurfaceHandle staged intent sequence",
             &[
                 "stage-add intent and payload binding remain consistent with canonical staged intent truth",
             ],
@@ -3027,7 +3064,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["staged_payloads", "surface_owner"],
-            "ExternalToolSurfaceAuthority staged intent sequence",
+            "ExternalToolSurfaceHandle staged intent sequence",
             &["stage-remove intent is machine-owned and shell payload cache is kept consistent"],
             &["remove staging cannot bypass authority ordering semantics"],
             EntryStatus::Closed,
@@ -3038,7 +3075,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["staged_payloads", "surface_owner"],
-            "ExternalToolSurfaceAuthority staged intent sequence",
+            "ExternalToolSurfaceHandle staged intent sequence",
             &[
                 "stage-reload intent and payload replacement remain coupled to machine-owned staged truth",
             ],
@@ -3056,7 +3093,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "servers",
                 "projection",
             ],
-            "ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
             &[
                 "snapshot and boundary truth reflect applied staged intent through canonical staged ordering, obligation lineage, and published projection snapshots",
             ],
@@ -3074,7 +3111,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "projection",
                 "completed_updates",
             ],
-            "ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
             &["stale results are rejected and snapshot is atomically rebuilt"],
             &["pending lineage and snapshot freshness remain canonical"],
             EntryStatus::Closed,
@@ -3085,7 +3122,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["completed_updates"],
-            "ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract",
             &["lifecycle action draining surfaces only canonical authority-derived deltas"],
             &["drained updates do not mutate canonical lifecycle truth"],
             EntryStatus::Closed,
@@ -3096,7 +3133,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["completed_updates", "projection", "servers"],
-            "ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
             &[
                 "external update surface returns notices/pending strictly from canonical snapshot and pending lineage",
             ],
@@ -3109,7 +3146,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["servers", "projection"],
-            "ExternalToolSurfaceAuthority + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract",
             &[
                 "removal finalization uses authority-owned timing/inflight truth and publishes canonical snapshot updates before read return",
             ],
@@ -3122,7 +3159,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["servers", "projection", "ServerEntry.active_calls"],
-            "ExternalToolSurfaceAuthority",
+            "ExternalToolSurfaceHandle",
             &["routing uses published snapshot and inflight truth remains canonical"],
             &["visibility/routing do not read raw servers directly"],
             EntryStatus::Closed,
@@ -3138,7 +3175,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "pending_obligations",
                 "completed_updates",
             ],
-            "ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
             &["shutdown closes canonical surface lifecycle and drains shell transport resources"],
             &["no pending completion obligations survive terminal shutdown"],
             EntryStatus::Closed,
@@ -3162,7 +3199,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
             &["router", "has_pending"],
-            "ExternalToolSurfaceAuthority staged intent sequence",
+            "ExternalToolSurfaceHandle staged intent sequence",
             &[
                 "adapter stage-add forwards to canonical router boundary without introducing side truth",
             ],
@@ -3175,7 +3212,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
             &["router", "has_pending"],
-            "ExternalToolSurfaceAuthority staged intent sequence",
+            "ExternalToolSurfaceHandle staged intent sequence",
             &[
                 "adapter stage-remove forwards to canonical router boundary without introducing side truth",
             ],
@@ -3188,7 +3225,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
             &["router", "has_pending"],
-            "ExternalToolSurfaceAuthority staged intent sequence",
+            "ExternalToolSurfaceHandle staged intent sequence",
             &[
                 "adapter stage-reload forwards to canonical router boundary without introducing side truth",
             ],
@@ -3212,7 +3249,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
             &["router", "has_pending"],
-            "ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + RouterProjectionSnapshot publication contract",
             &["adapter lifecycle polling drains canonical router completion notices only"],
             &["adapter pending flag must mirror router pending/notices truth"],
             EntryStatus::Closed,
@@ -3223,7 +3260,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
             &["router", "has_pending"],
-            "ExternalToolSurfaceAuthority + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract",
             &[
                 "adapter forwards removal progression to canonical router and refreshes pending projection",
             ],
@@ -3236,7 +3273,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
             &["router", "has_pending"],
-            "ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
             &["wait loop reports readiness from canonical pending/notices state only"],
             &[
                 "timeout and readiness signaling cannot classify availability from non-canonical side state",
@@ -3249,7 +3286,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
             &["router", "has_pending"],
-            "ExternalToolSurfaceAuthority + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_completion/snapshot_alignment handoff protocols + RouterProjectionSnapshot publication contract",
             &["adapter shutdown drains router and clears pending projection state"],
             &["adapter cannot report pending work after router shutdown"],
             EntryStatus::Closed,
@@ -3936,7 +3973,7 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             Subsystem::Mcp,
             &["McpRouter.servers", "RouterProjectionSnapshot"],
             "routing and visible tools derive only from the atomically published snapshot",
-            "ExternalToolSurfaceAuthority + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract",
+            "ExternalToolSurfaceHandle + surface_snapshot_alignment handoff protocol + RouterProjectionSnapshot publication contract",
             "machine + ownership-ledger + router snapshot publication path",
             EntryStatus::Closed,
         ),
@@ -3945,10 +3982,10 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             Subsystem::Mcp,
             &[
                 "McpRouter.pending_obligations",
-                "ExternalToolSurfaceAuthority pending lineage + surface_completion obligations",
+                "ExternalToolSurfaceHandle pending lineage + surface_completion obligations",
             ],
             "pending result lineage and stale-result rejection are machine-owned",
-            "ExternalToolSurfaceAuthority pending lineage + surface_completion handoff protocol obligations",
+            "ExternalToolSurfaceHandle pending lineage + surface_completion handoff protocol obligations",
             "machine + handoff protocols + ownership-ledger + generated pending-result checks",
             EntryStatus::Closed,
         ),
@@ -4034,6 +4071,28 @@ mod tests {
         assert!(registry.state_cells.iter().any(|entry| {
             entry.class == StateClass::CapabilityIndex && entry.projection.is_some()
         }));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn workspace_type_index_excludes_cfg_test_declarations() {
+        let root = match repo_root() {
+            Ok(root) => root,
+            Err(err) => panic!("repo root: {err}"),
+        };
+        let index = match workspace_type_index(&root) {
+            Ok(index) => index,
+            Err(err) => panic!("workspace type index: {err}"),
+        };
+
+        assert!(
+            index.contains("ExternalToolSurfaceHandle"),
+            "production surface owner trait should resolve as a live anchor"
+        );
+        assert!(
+            !index.contains("ExternalToolSurfaceAuthority"),
+            "test-only compatibility authority must not satisfy live ownership anchors"
+        );
     }
 
     #[test]

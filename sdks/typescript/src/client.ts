@@ -193,6 +193,7 @@ import type {
   CreateScheduleRequest,
   EventSourceIdentity,
   HelpOptions,
+  ModelProfile,
   ModelsCatalog,
   MobEventsOptions,
   MobEventsResult,
@@ -4001,69 +4002,146 @@ export class MeerkatClient {
   }
 
   static parseModelsCatalog(data: Record<string, unknown>): ModelsCatalog {
-    const providersRaw = Array.isArray(data.providers)
-      ? (data.providers as Array<Record<string, unknown>>)
-      : [];
+    const context = "Invalid models/catalog response";
     const contractVersion = MeerkatClient.parseContractVersion(
       data.contract_version,
-      "Invalid models/catalog response",
+      context,
     );
+
+    const optionalNonNegativeIntegerField = (
+      raw: Record<string, unknown>,
+      field: string,
+      fieldContext: string,
+    ): number | undefined => {
+      if (!(field in raw) || raw[field] == null) {
+        return undefined;
+      }
+      return MeerkatClient.requireNonNegativeIntegerField(raw, field, fieldContext);
+    };
+
+    const defaultedBooleanField = (
+      raw: Record<string, unknown>,
+      field: string,
+      fieldContext: string,
+    ): boolean => {
+      if (!(field in raw)) {
+        return false;
+      }
+      return MeerkatClient.requireBooleanField(raw, field, fieldContext);
+    };
+
+    const parseProfile = (
+      raw: unknown,
+      profileContext: string,
+    ): ModelProfile | undefined => {
+      if (raw == null) {
+        return undefined;
+      }
+      const profile = MeerkatClient.requireRecord(raw, "profile", profileContext);
+      if (!("params_schema" in profile) || profile.params_schema === undefined) {
+        throw new MeerkatError("INVALID_RESPONSE", `${profileContext}: missing params_schema`);
+      }
+      return {
+        modelFamily: MeerkatClient.requireStringField(
+          profile,
+          "model_family",
+          profileContext,
+        ),
+        supportsTemperature: MeerkatClient.requireBooleanField(
+          profile,
+          "supports_temperature",
+          profileContext,
+        ),
+        supportsThinking: MeerkatClient.requireBooleanField(
+          profile,
+          "supports_thinking",
+          profileContext,
+        ),
+        supportsReasoning: MeerkatClient.requireBooleanField(
+          profile,
+          "supports_reasoning",
+          profileContext,
+        ),
+        vision: defaultedBooleanField(profile, "vision", profileContext),
+        imageInput: defaultedBooleanField(profile, "image_input", profileContext),
+        imageToolResults: defaultedBooleanField(
+          profile,
+          "image_tool_results",
+          profileContext,
+        ),
+        inlineVideo: defaultedBooleanField(profile, "inline_video", profileContext),
+        realtime: defaultedBooleanField(profile, "realtime", profileContext),
+        webSearch: defaultedBooleanField(profile, "supports_web_search", profileContext),
+        imageGeneration: defaultedBooleanField(
+          profile,
+          "image_generation",
+          profileContext,
+        ),
+        paramsSchema: profile.params_schema,
+      };
+    };
+
+    const providersRaw = MeerkatClient.requireRecordArray(
+      data.providers,
+      `${context}: providers`,
+    );
+
     return {
       contractVersion,
-      providers: providersRaw.map((provider) => ({
-        provider: String(provider.provider ?? ""),
-        defaultModelId: String(provider.default_model_id ?? ""),
-        models: Array.isArray(provider.models)
-          ? (provider.models as Array<Record<string, unknown>>).map((model) => ({
-              id: String(model.id ?? ""),
-              displayName: String(model.display_name ?? ""),
-              tier:
-                String(model.tier ?? "supported") === "recommended"
-                  ? "recommended"
-                  : "supported",
-              contextWindow:
-                model.context_window != null ? Number(model.context_window) : undefined,
-              maxOutputTokens:
-                model.max_output_tokens != null ? Number(model.max_output_tokens) : undefined,
-              serverId: model.server_id != null ? String(model.server_id) : undefined,
-              profile:
-                model.profile && typeof model.profile === "object"
-                  ? {
-                      modelFamily: String(
-                        (model.profile as Record<string, unknown>).model_family ?? "",
-                      ),
-                      supportsTemperature: Boolean(
-                        (model.profile as Record<string, unknown>).supports_temperature,
-                      ),
-                      supportsThinking: Boolean(
-                        (model.profile as Record<string, unknown>).supports_thinking,
-                      ),
-                      supportsReasoning: Boolean(
-                        (model.profile as Record<string, unknown>).supports_reasoning,
-                      ),
-                      vision: Boolean((model.profile as Record<string, unknown>).vision),
-                      imageInput: Boolean(
-                        (model.profile as Record<string, unknown>).image_input,
-                      ),
-                      imageToolResults: Boolean(
-                        (model.profile as Record<string, unknown>).image_tool_results,
-                      ),
-                      inlineVideo: Boolean(
-                        (model.profile as Record<string, unknown>).inline_video,
-                      ),
-                      realtime: Boolean((model.profile as Record<string, unknown>).realtime),
-                      webSearch: Boolean(
-                        (model.profile as Record<string, unknown>).supports_web_search,
-                      ),
-                      imageGeneration: Boolean(
-                        (model.profile as Record<string, unknown>).image_generation,
-                      ),
-                      paramsSchema: (model.profile as Record<string, unknown>).params_schema,
-                    }
-                  : undefined,
-            }))
-          : [],
-      })),
+      providers: providersRaw.map((provider, providerIndex) => {
+        const providerContext = `${context}: providers[${providerIndex}]`;
+        const modelsRaw = MeerkatClient.requireRecordArray(
+          provider.models,
+          `${providerContext}.models`,
+        );
+        return {
+          provider: MeerkatClient.requireStringField(
+            provider,
+            "provider",
+            providerContext,
+          ),
+          defaultModelId: MeerkatClient.requireStringField(
+            provider,
+            "default_model_id",
+            providerContext,
+          ),
+          models: modelsRaw.map((model, modelIndex) => {
+            const modelContext = `${providerContext}.models[${modelIndex}]`;
+            const tier = MeerkatClient.requireStringField(model, "tier", modelContext);
+            if (tier !== "recommended" && tier !== "supported") {
+              throw new MeerkatError(
+                "INVALID_RESPONSE",
+                `${modelContext}: tier must be recommended or supported`,
+              );
+            }
+            return {
+              id: MeerkatClient.requireStringField(model, "id", modelContext),
+              displayName: MeerkatClient.requireStringField(
+                model,
+                "display_name",
+                modelContext,
+              ),
+              tier,
+              contextWindow: optionalNonNegativeIntegerField(
+                model,
+                "context_window",
+                modelContext,
+              ),
+              maxOutputTokens: optionalNonNegativeIntegerField(
+                model,
+                "max_output_tokens",
+                modelContext,
+              ),
+              serverId: MeerkatClient.optionalStringField(
+                model,
+                "server_id",
+                modelContext,
+              ),
+              profile: parseProfile(model.profile, `${modelContext}.profile`),
+            };
+          }),
+        };
+      }),
     };
   }
 

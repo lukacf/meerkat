@@ -1469,7 +1469,6 @@ rust_library(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -1544,7 +1543,6 @@ rust_library(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -1636,7 +1634,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -1729,7 +1726,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -1856,7 +1852,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -1949,7 +1944,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2042,7 +2036,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2135,7 +2128,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2228,7 +2220,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2325,7 +2316,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2418,7 +2408,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2513,7 +2502,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2609,7 +2597,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2705,7 +2692,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2803,7 +2789,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2895,7 +2880,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -2988,7 +2972,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3083,7 +3066,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3180,7 +3162,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3273,7 +3254,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3367,7 +3347,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3460,7 +3439,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3553,7 +3531,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3647,7 +3624,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3740,7 +3716,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3833,7 +3808,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -3926,7 +3900,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [
@@ -4019,7 +3992,6 @@ rust_test(
         "embedded_skills/meerkat-platform/references/api_reference.md",
         "embedded_skills/meerkat-platform/references/migration_0_5.md",
         "embedded_skills/meerkat-platform/references/mobs.md",
-        "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
     ],
     srcs = [

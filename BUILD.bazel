@@ -444,7 +444,6 @@ test_suite(
         "//meerkat-mcp-server:mcp_binding_input_test",
         "//meerkat-mcp-server:meerkat_mcp_server_unit_test",
         "//meerkat-mcp-server:runtime_backed_ingress_test",
-        "//meerkat-mcp:lifecycle_contract_test",
         "//meerkat-mcp:meerkat_mcp_unit_test",
         "//meerkat-memory:meerkat_memory_unit_test",
         "//meerkat-mob-adaptive:meerkat_mob_adaptive_unit_test",

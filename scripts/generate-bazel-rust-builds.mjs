@@ -221,7 +221,7 @@ function rustLibraryCrateFeaturesFor(key, pkg) {
   const features = new Set(
     key === "meerkat-core" ? publicCoreCrateFeatures(key, pkg) : crateFeaturesFor(key, pkg),
   );
-  if (key === "meerkat-runtime") {
+  if (key === "meerkat-runtime" || key === "meerkat-mcp") {
     features.delete("test-support");
   }
   return [...features].sort();

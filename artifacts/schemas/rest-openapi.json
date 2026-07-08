@@ -11733,7 +11733,7 @@
   },
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.7.24"
+    "version": "0.7.25"
   },
   "openapi": "3.1.0",
   "paths": {

@@ -440,6 +440,7 @@ test_suite(
         "//meerkat-machine-schema:named_type_binding_covers_catalog_test",
         "//meerkat-machine-schema:peer_endpoint_structural_equivalence_test",
         "//meerkat-machine-schema:schema_contracts_test",
+        "//meerkat-machine-schema:stopped_phase_revival_lattice_test",
         "//meerkat-mcp-server:mcp_binding_input_test",
         "//meerkat-mcp-server:meerkat_mcp_server_unit_test",
         "//meerkat-mcp-server:runtime_backed_ingress_test",

@@ -1762,7 +1762,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(|e| SessionError::Store(Box::new(e)))?
         } else {
             match Self::load_runtime_session_snapshot_for_session(&self.runtime_store, id).await? {
-                Some(session) => Some(session),
+                Some(snapshot) => {
+                    // The committed runtime snapshot normally leads the
+                    // durable store head (it commits at the run boundary).
+                    // A torn shutdown can freeze it as a stale strict
+                    // prefix of the store head; loading the stale copy
+                    // makes every subsequent save trip the append-only
+                    // guard forever. The shell extracts the continuity
+                    // observation (the store head provably extends the
+                    // snapshot) and mirrors the machine-owned read-source
+                    // verdict; it decides nothing itself.
+                    let store_head = self
+                        .store
+                        .load(id)
+                        .await
+                        .map_err(|e| SessionError::Store(Box::new(e)))?;
+                    let session_is_live = self.inner.has_live_session(id).await?;
+                    Some(self.resolve_runtime_snapshot_read_source(
+                        id,
+                        snapshot,
+                        store_head,
+                        session_is_live,
+                    )?)
+                }
                 None => {
                     let store_projection = self
                         .store
@@ -2352,6 +2374,100 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// projection quarantine) and mirrors the canonical SessionDocumentMachine
     /// recovery-source verdict; it decides nothing. Fails closed if the machine
     /// emits no verdict.
+    /// Machine-owned read-source arbitration between the committed runtime
+    /// session snapshot and the durable store head. The shell computes the
+    /// pure observations — the store head strictly extends the snapshot
+    /// (same digest proof the append-only save guard uses), the head row's
+    /// intra-turn checkpoint provenance stamp, and in-process liveness —
+    /// and mirrors the `SessionDocumentMachine` verdict. A
+    /// stale-strict-prefix snapshot loading unreconciled on a COLD resume is
+    /// the permanent-save-rejection wedge: the frozen copy can never satisfy
+    /// the append-only guard against the longer persisted head.
+    fn resolve_runtime_snapshot_read_source(
+        &self,
+        id: &SessionId,
+        snapshot: Session,
+        store_head: Option<Session>,
+        session_is_live: bool,
+    ) -> Result<Session, SessionError> {
+        let store_head_is_runtime_checkpoint = store_head
+            .as_ref()
+            .is_some_and(Session::has_runtime_checkpoint_provenance);
+        let store_head_extends_snapshot = match store_head.as_ref() {
+            None => false,
+            Some(head) => {
+                let snapshot_len = snapshot.messages().len();
+                if head.messages().len() <= snapshot_len {
+                    false
+                } else {
+                    let snapshot_digest = meerkat_core::session::transcript_messages_digest(
+                        snapshot.messages(),
+                    )
+                    .map_err(|err| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to digest runtime snapshot transcript for session {id}: {err}"
+                        )))
+                    })?;
+                    let head_prefix_digest = meerkat_core::session::transcript_messages_digest(
+                        &head.messages()[..snapshot_len],
+                    )
+                    .map_err(|err| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to digest store head transcript prefix for session {id}: {err}"
+                        )))
+                    })?;
+                    snapshot_digest == head_prefix_digest
+                }
+            }
+        };
+        let mut authority = SessionDocumentMachineAuthority::new();
+        let effects = authority
+            .resolve_runtime_snapshot_read_source(
+                SessionDocumentKey::new(id.to_string()),
+                store_head_extends_snapshot,
+                store_head_is_runtime_checkpoint,
+                session_is_live,
+            )
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected runtime-snapshot read-source \
+                     resolution for session {id}: {err}"
+                )))
+            })?;
+        let read_from_store_head = effects
+            .iter()
+            .find_map(|effect| match effect {
+                SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
+                    read_from_store_head,
+                } => Some(*read_from_store_head),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority returned no runtime-snapshot \
+                     read-source verdict for session {id}"
+                )))
+            })?;
+        if read_from_store_head {
+            let head = store_head.ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "runtime-snapshot read-source verdict selected an absent store head for \
+                     session {id}"
+                )))
+            })?;
+            tracing::warn!(
+                session_id = %id,
+                snapshot_messages = snapshot.messages().len(),
+                store_messages = head.messages().len(),
+                "runtime session snapshot is a stale strict prefix of the durable store head; \
+                 loading the store head"
+            );
+            Ok(head)
+        } else {
+            Ok(snapshot)
+        }
+    }
+
     fn store_projection_recovery_source_resolved(
         &self,
         id: &SessionId,
@@ -12126,6 +12242,247 @@ mod tests {
         Ok(())
     }
 
+    /// Stale-snapshot wedge regression (homecore family-group:main, 0.7.23):
+    /// a torn shutdown froze the committed runtime session snapshot as a
+    /// STRICT PREFIX of the durable store head (snapshot at N messages,
+    /// store head at N+k). Load preferred the snapshot unconditionally, so
+    /// resume served the stale copy and every subsequent save tripped the
+    /// append-only guard ("new message count N is shorter than previously
+    /// persisted N+k") — permanently. The `SessionDocumentMachine` now owns
+    /// the read-source verdict: a store head that provably extends the
+    /// snapshot is the authoritative load source.
+    #[tokio::test]
+    async fn test_stale_prefix_runtime_snapshot_defers_to_extending_store_head() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let blob_store = memory_blob_store();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store_dyn,
+            Arc::clone(&blob_store),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let base = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("created session should exist");
+
+        // The runtime snapshot froze at N messages...
+        let mut snapshot_session = base.clone();
+        snapshot_session.push(Message::User(UserMessage::text(
+            "turn persisted in the runtime snapshot".to_string(),
+        )));
+        store
+            .save(&snapshot_session)
+            .await
+            .expect("save snapshot-era transcript");
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot_session)
+                        .expect("serialize snapshot"),
+                },
+            )
+            .await
+            .expect("commit runtime session snapshot");
+
+        // ...while the durable store head advanced past it before shutdown.
+        let mut head_session = snapshot_session.clone();
+        head_session.push(Message::User(UserMessage::text(
+            "later turn persisted only in the store head".to_string(),
+        )));
+        head_session.push(Message::User(UserMessage::text(
+            "final peer-comms turn before the upgrade shutdown".to_string(),
+        )));
+        store
+            .save(&head_session)
+            .await
+            .expect("save the advanced store head");
+
+        // Resume after restart must load the store head, not the stale
+        // prefix: a fresh service over the same stores has no live session,
+        // so the read routes through the durable load reconciliation.
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store.clone() as Arc<dyn RuntimeStore>,
+            Arc::clone(&blob_store),
+        );
+        let view = restarted
+            .read(&created.session_id)
+            .await
+            .expect("read should succeed");
+        assert_eq!(
+            view.state.message_count,
+            head_session.messages().len(),
+            "load must serve the extending store head, not the stale runtime snapshot"
+        );
+    }
+
+    /// Sibling pin: a checkpointer-STAMPED store head that ran ahead of the
+    /// snapshot is uncommitted intra-turn residue (its boundary commit never
+    /// landed) — the snapshot stays the authoritative read source and the
+    /// rollback region converges the row at save time.
+    #[tokio::test]
+    async fn test_checkpoint_stamped_ahead_store_head_stays_snapshot_served() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let blob_store = memory_blob_store();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store_dyn,
+            Arc::clone(&blob_store),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let base = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("created session should exist");
+
+        let mut snapshot_session = base.clone();
+        snapshot_session.push(Message::User(UserMessage::text(
+            "committed boundary turn".to_string(),
+        )));
+        store
+            .save(&snapshot_session)
+            .await
+            .expect("save snapshot-era transcript");
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot_session)
+                        .expect("serialize snapshot"),
+                },
+            )
+            .await
+            .expect("commit runtime session snapshot");
+
+        // The intra-turn checkpointer wrote ahead of the boundary commit...
+        let mut checkpoint_row = snapshot_session.clone();
+        checkpoint_row.push(Message::User(UserMessage::text(
+            "uncommitted intra-turn content".to_string(),
+        )));
+        checkpoint_row.set_runtime_checkpoint_provenance();
+        store
+            .save(&checkpoint_row)
+            .await
+            .expect("save checkpoint-stamped ahead row");
+
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store.clone() as Arc<dyn RuntimeStore>,
+            Arc::clone(&blob_store),
+        );
+        let view = restarted
+            .read(&created.session_id)
+            .await
+            .expect("read should succeed");
+        assert_eq!(
+            view.state.message_count,
+            snapshot_session.messages().len(),
+            "a checkpointer-stamped ahead row is uncommitted residue; the snapshot stays \
+             the authoritative read source"
+        );
+    }
+
+    /// Sibling pin: a runtime snapshot that is NOT a prefix of the store
+    /// head (genuine divergence) stays authoritative — the machine verdict
+    /// only defers to a store head that provably extends the snapshot.
+    #[tokio::test]
+    async fn test_diverged_runtime_snapshot_stays_authoritative() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let blob_store = memory_blob_store();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store_dyn,
+            Arc::clone(&blob_store),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let base = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("created session should exist");
+
+        // Store head grows with content the snapshot never saw...
+        let mut head_session = base.clone();
+        head_session.push(Message::User(UserMessage::text(
+            "store-only fork content".to_string(),
+        )));
+        head_session.push(Message::User(UserMessage::text(
+            "more store-only fork content".to_string(),
+        )));
+        store.save(&head_session).await.expect("save store head");
+
+        // ...while the runtime snapshot carries a shorter DIVERGED tail.
+        let mut snapshot_session = base.clone();
+        snapshot_session.push(Message::User(UserMessage::text(
+            "runtime-only diverged content".to_string(),
+        )));
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&created.session_id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&snapshot_session)
+                        .expect("serialize snapshot"),
+                },
+            )
+            .await
+            .expect("commit runtime session snapshot");
+
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store.clone() as Arc<dyn RuntimeStore>,
+            Arc::clone(&blob_store),
+        );
+        let view = restarted
+            .read(&created.session_id)
+            .await
+            .expect("read should succeed");
+        assert_eq!(
+            view.state.message_count,
+            snapshot_session.messages().len(),
+            "a diverged (non-prefix) runtime snapshot must stay the authoritative read source"
+        );
+    }
+
     #[tokio::test]
     async fn test_checkpoint_committed_runtime_snapshot_bridges_externalized_compaction_append() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -16469,6 +16826,11 @@ mod tests {
         );
     }
 
+    /// While the session is LIVE in-process, an out-of-band extending store
+    /// row must not hijack the runtime authority: the live runtime owns
+    /// truth and recommits past any transient snapshot lag. (The COLD-resume
+    /// counterpart — where the extending head IS served — is pinned by
+    /// `test_stale_prefix_runtime_snapshot_defers_to_extending_store_head`.)
     #[tokio::test]
     async fn test_authoritative_load_ignores_newer_raw_store_projection_when_runtime_exists() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -16686,56 +17048,34 @@ mod tests {
             runtime_store,
             memory_blob_store(),
         );
+        // COLD resume: the store row is an unstamped continuity-proven
+        // extension of the committed snapshot — per the machine read-source
+        // verdict it IS the authoritative resume source (a committed
+        // boundary save that outran the snapshot recommit is
+        // indistinguishable and preferring the frozen snapshot was the
+        // permanent-save-rejection wedge). The former expectation here —
+        // resume failing closed against the longer persisted row — WAS that
+        // wedge.
         let resume_source = restarted
             .load_authoritative_session(&result.session_id)
             .await
-            .expect("resume source should load from runtime authority")
-            .expect("runtime authority should remain present");
+            .expect("resume source should load")
+            .expect("resume source should remain present");
         assert_eq!(
             resume_source.messages().len(),
-            live.messages().len(),
-            "resume source must not be rebuilt from stale raw store fallback"
+            live.messages().len() + 1,
+            "cold resume must serve the continuity-proven store extension"
         );
-        assert!(
-            !resume_source.metadata().contains_key(SESSION_LABELS_KEY),
-            "resume source must not inherit raw store metadata"
-        );
-        let resume_error = restarted
+        restarted
             .create_session(resume_request(resume_source))
             .await
-            .expect_err(
-                "resume must fail closed when projection refresh would shrink stale raw state",
-            );
+            .expect("resume from the continuity-proven store head must succeed, not wedge");
         assert!(
-            matches!(resume_error, SessionError::Store(_)),
-            "stale projection refresh failure should surface as a store error, got {resume_error:?}"
-        );
-        assert!(
-            !restarted
+            restarted
                 .has_live_session(&result.session_id)
                 .await
-                .expect("status should succeed after failed resume"),
-            "failed projection refresh must discard the materialized live session"
-        );
-        let authoritative_after_failure = restarted
-            .load_authoritative_session(&result.session_id)
-            .await
-            .expect("authoritative load should still succeed after failed resume")
-            .expect("runtime authority should remain present after failed resume");
-        assert_eq!(
-            authoritative_after_failure.messages().len(),
-            live.messages().len(),
-            "failed projection refresh must not replace runtime-authoritative metadata"
-        );
-        let raw_after_failure = store
-            .load(&result.session_id)
-            .await
-            .expect("raw projection load should still succeed")
-            .expect("stale projection should remain present after failed resume");
-        assert_eq!(
-            raw_after_failure.messages().len(),
-            live.messages().len() + 1,
-            "failed projection refresh must not silently rewrite stale raw projection state"
+                .expect("status should succeed after resume"),
+            "resume from the store head must materialize a live session"
         );
     }
 

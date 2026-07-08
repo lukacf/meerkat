@@ -940,6 +940,26 @@ struct StagedSessionDslInput {
     effects: DslTransitionEffects,
 }
 
+impl StagedSessionDslInput {
+    /// True when the committed transition was a machine-owned revival of a
+    /// stopped session (`RegisterSessionResumesStopped` /
+    /// `EnsureSessionWithExecutorStopped`): the machine emits the typed
+    /// `RuntimeNotice { kind: Recover }` effect, and the shell keys the
+    /// durable lifecycle persist on it so a revived session is never left
+    /// durably `Stopped` for cross-process readers.
+    fn revived_stopped_session(&self) -> bool {
+        self.effects.as_slice().iter().any(|effect| {
+            matches!(
+                effect,
+                dsl::MeerkatMachineEffect::RuntimeNotice {
+                    kind: dsl::RuntimeNoticeKind::Recover,
+                    ..
+                }
+            )
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CommittedEffectDispatchFailure {
     PreserveCommittedDslState,

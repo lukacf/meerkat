@@ -670,6 +670,22 @@ RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, 
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
+ResolveRuntimeSnapshotReadSourceStoreHead(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live) ==
+    /\ phase = "Ready"
+    /\ ((store_head_extends_snapshot = TRUE) /\ (store_head_is_runtime_checkpoint = FALSE) /\ (session_is_live = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
+ResolveRuntimeSnapshotReadSourceSnapshot(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live) ==
+    /\ phase = "Ready"
+    /\ (IF (store_head_extends_snapshot = FALSE) THEN TRUE ELSE (IF (store_head_is_runtime_checkpoint = TRUE) THEN TRUE ELSE (session_is_live = TRUE)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
 ResolveRuntimeProjectionRollbackRebuild(session_id, row_continues_authority, row_is_runtime_checkpoint) ==
     /\ phase = "Ready"
     /\ ((row_continues_authority = TRUE) /\ (row_is_runtime_checkpoint = TRUE))
@@ -820,6 +836,8 @@ Next ==
     \/ \E stored_transcript_diverged \in BOOLEAN : \E live_has_uncommitted_transcript \in BOOLEAN : \E runtime_system_context_diverged \in BOOLEAN : \E stored_is_archived \in BOOLEAN : ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
+    \/ \E session_id \in SessionIdValues : \E store_head_extends_snapshot \in BOOLEAN : \E store_head_is_runtime_checkpoint \in BOOLEAN : \E session_is_live \in BOOLEAN : ResolveRuntimeSnapshotReadSourceStoreHead(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live)
+    \/ \E session_id \in SessionIdValues : \E store_head_extends_snapshot \in BOOLEAN : \E store_head_is_runtime_checkpoint \in BOOLEAN : \E session_is_live \in BOOLEAN : ResolveRuntimeSnapshotReadSourceSnapshot(session_id, store_head_extends_snapshot, store_head_is_runtime_checkpoint, session_is_live)
     \/ \E session_id \in SessionIdValues : \E row_continues_authority \in BOOLEAN : \E row_is_runtime_checkpoint \in BOOLEAN : ResolveRuntimeProjectionRollbackRebuild(session_id, row_continues_authority, row_is_runtime_checkpoint)
     \/ \E session_id \in SessionIdValues : \E row_continues_authority \in BOOLEAN : \E row_is_runtime_checkpoint \in BOOLEAN : ResolveRuntimeProjectionRollbackReject(session_id, row_continues_authority, row_is_runtime_checkpoint)
     \/ \E session_id \in SessionIdValues : \E result_count \in 0..2 : ApplyPendingToolResults(session_id, result_count)

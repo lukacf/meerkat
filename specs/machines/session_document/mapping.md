@@ -244,6 +244,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverSessionFromStoreUnrecoverable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveRuntimeSnapshotReadSourceStoreHead`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeSnapshotReadSourceSnapshot`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeProjectionRollbackRebuild`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -346,6 +352,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RuntimeProjectionRollbackResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeSnapshotReadSourceResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SessionToolResultsApplied`

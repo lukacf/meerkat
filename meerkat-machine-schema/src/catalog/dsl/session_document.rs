@@ -710,6 +710,37 @@ machine! {
             },
 
             // -----------------------------------------------------------
+            // Runtime-snapshot read-source region. On load, the committed
+            // runtime session snapshot normally leads the durable store head
+            // (it commits at the run boundary). A torn shutdown can freeze it
+            // as a STALE STRICT PREFIX of the store head (a completed turn's
+            // boundary save landed before the snapshot recommitted); loading
+            // the stale copy makes every subsequent save trip the append-only
+            // guard forever. The shell extracts three pure observations —
+            // the store head provably EXTENDS the snapshot (the snapshot's
+            // transcript digest equals the digest of the head's same-length
+            // prefix, the same continuity proof the save guard uses), the
+            // head row's typed intra-turn checkpoint provenance fact, and
+            // whether the session is LIVE in-process — and drives this
+            // input; THIS machine owns which copy is the authoritative read
+            // source. A checkpointer-stamped head is uncommitted intra-turn
+            // residue (its boundary commit never landed): the snapshot stays
+            // authoritative and the rollback region converges the row at
+            // save time. A live session keeps the snapshot too — its lag is
+            // transient and the live runtime recommits past it; only a COLD
+            // load (no live session: the torn-shutdown resume) defers to the
+            // extending head. A shorter, equal, or diverged head also keeps
+            // the snapshot. The shell mirrors the verdict and decides
+            // nothing.
+            // -----------------------------------------------------------
+            ResolveRuntimeSnapshotReadSource {
+                session_id: SessionId,
+                store_head_extends_snapshot: bool,
+                store_head_is_runtime_checkpoint: bool,
+                session_is_live: bool,
+            },
+
+            // -----------------------------------------------------------
             // Apply-pending-tool-results region (folded from the
             // meerkat-session ephemeral.rs `agent.apply_pending_tool_results`
             // call site). Staging already consults generated authority for the
@@ -888,6 +919,13 @@ machine! {
             RuntimeProjectionRollbackResolved {
                 disposition: Enum<RuntimeProjectionRollbackDisposition>,
             },
+
+            // Runtime-snapshot read-source verdict. The shell mirrors
+            // `read_from_store_head`: true loads the durable store head (the
+            // snapshot is a stale strict prefix), false keeps the runtime
+            // snapshot authoritative. Total over the observation, so it is
+            // emitted on both branches.
+            RuntimeSnapshotReadSourceResolved { read_from_store_head: bool },
 
             // Apply-pending-tool-results verdict. The shell mirrors
             // `applied_count` onto its `agent.apply_pending_tool_results` call:
@@ -1146,6 +1184,7 @@ machine! {
         disposition LiveSessionAuthorityClassified => local seam NoOwnerRealization,
         disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
         disposition RuntimeProjectionRollbackResolved => local seam NoOwnerRealization,
+        disposition RuntimeSnapshotReadSourceResolved => local seam NoOwnerRealization,
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
         disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
         disposition SessionLifecycleTerminalRecovered => local seam NoOwnerRealization,
@@ -3083,6 +3122,58 @@ machine! {
             update {}
             to Ready
             emit SessionStoreRecoverySourceResolved { recoverable: false }
+        }
+
+        // ===============================================================
+        // Runtime-snapshot read-source region. Both transitions read the
+        // pure observations (the store head provably extends the runtime
+        // snapshot; the head row carries the intra-turn checkpointer's
+        // provenance stamp; the session is live in-process) and resolve the
+        // authoritative load source. Total over the observation cube,
+        // emitted on both branches; the shell mirrors `read_from_store_head`
+        // and decides nothing. A stale-strict-prefix snapshot loading
+        // unreconciled on a COLD resume is the permanent-save-rejection
+        // wedge (append-only guard vs frozen snapshot); a
+        // checkpointer-stamped ahead row is uncommitted intra-turn residue
+        // and must NOT be served (the rollback region converges it at save
+        // time); a live session's snapshot lag is transient and the live
+        // runtime recommits past it.
+        // ===============================================================
+
+        transition ResolveRuntimeSnapshotReadSourceStoreHead {
+            on input ResolveRuntimeSnapshotReadSource {
+                session_id,
+                store_head_extends_snapshot,
+                store_head_is_runtime_checkpoint,
+                session_is_live
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && store_head_extends_snapshot == true
+                && store_head_is_runtime_checkpoint == false
+                && session_is_live == false
+            }
+            update {}
+            to Ready
+            emit RuntimeSnapshotReadSourceResolved { read_from_store_head: true }
+        }
+
+        transition ResolveRuntimeSnapshotReadSourceSnapshot {
+            on input ResolveRuntimeSnapshotReadSource {
+                session_id,
+                store_head_extends_snapshot,
+                store_head_is_runtime_checkpoint,
+                session_is_live
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (store_head_extends_snapshot == false
+                    || store_head_is_runtime_checkpoint == true
+                    || session_is_live == true)
+            }
+            update {}
+            to Ready
+            emit RuntimeSnapshotReadSourceResolved { read_from_store_head: false }
         }
 
         // ===============================================================

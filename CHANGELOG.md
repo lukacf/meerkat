@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The Stopped phase is no longer absorbing for resume — the root cause of
+  the entire 0.7.19–0.7.23 resume-strand class (field: "guard rejected
+  transition from phase Stopped for input::PublishLocalEndpoint", archive
+  NotFound strands, disposal escalations, wedged mob members retrying
+  forever). The machine now owns revival at the canonical resume seams:
+  `RegisterSession` on a same-session Stopped machine re-admits it to Idle
+  preserving identity, runtime bindings, and hydrated LLM state
+  (`RegisterSessionResumesStopped`); `EnsureSessionWithExecutor` on Stopped
+  re-admits to Attached and grants the active executor claim; `Retire`
+  admits Stopped so disposal of an executor-stopped session is a machine
+  transition (the mob durable-retire helper's shell phase probes are gone).
+  Both revival arms refuse while an unregister drain window is open, and a
+  machine-emitted `Recover` notice keys a durable lifecycle persist so a
+  revived session is never left durably `Stopped` for cross-process
+  readers. The accumulated per-input Stopped-tolerance arms
+  (`HydrateSessionLlmStateStopped`, `PrepareBindingsStopped`,
+  `PublishCommittedVisibleSetStopped`, `SetSilentIntentsStopped`, and the
+  Stopped admissions of `SetModelRoutingBaseline`/`StagePersistentFilter`/
+  `RequestDeferredTools`) are deleted outright: post-revival the resume
+  build never runs at Stopped, so a build input reaching a Stopped machine
+  is a loud typed rejection, never a silent self-loop.
+- Cold resume no longer wedges permanently when the committed runtime
+  session snapshot froze as a stale strict prefix of the durable store head
+  (a completed turn's boundary save landed before the snapshot recommitted
+  under a torn shutdown; every subsequent save then tripped the append-only
+  guard forever). The `SessionDocumentMachine` owns the read-source verdict
+  over three typed observations — the head provably extends the snapshot
+  (the save guard's own continuity proof), the head row's intra-turn
+  checkpoint provenance stamp, and in-process liveness. A cold load of an
+  unstamped continuity-proven extension serves the store head; stamped
+  ahead rows (uncommitted intra-turn residue), diverged rows, and live
+  sessions keep the snapshot authoritative.
+
+### Testing
+
+- Stopped-phase revival class battery: the machine-schema exit-lattice pin
+  (every arc out of Stopped is enumerated; the revival/teardown/disposal/
+  destruction set is exact), resume-intent totality and
+  no-tolerance-arms-return sweeps, runtime warm class tests (the exact
+  field repro: peer-comms install succeeds post-revival, rejected at
+  Stopped), the revival↔stop race pin (the historical error signature now
+  only means a raced stop), retire-from-Stopped, drain-window refusal in
+  both entry orders, and the mob stopped-member disposal sibling of the
+  ask-21d regression. Red-verified against the pre-fix machine.
+- Stale-snapshot read-source pins: cold strict-prefix defers to the head
+  (red-verified against the old unconditional snapshot preference),
+  checkpoint-stamped and diverged heads stay snapshot-served, live sessions
+  unaffected; the former fail-closed-resume expectation — which WAS the
+  field wedge — now pins a successful resume.
+
 ## [0.7.23] - 2026-07-08
 
 Meerkat 0.7.23 completes the never-run-member disposal arc for

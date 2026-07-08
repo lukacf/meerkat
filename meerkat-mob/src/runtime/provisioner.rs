@@ -939,15 +939,17 @@ impl SessionBackend {
                         // Complete the disposal instead.
                         use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
                         let runtime_state = adapter.runtime_state(session_id).await;
-                        // Retired ONLY: Stopped is documented as
-                        // recoverable (a stopped session re-registers and
-                        // resumes), and the durable-retire helper
-                        // early-returns for Stopped without retiring — so
-                        // tolerating it here would discard a recoverable
-                        // runtime with neither an archived document nor a
-                        // durable retire. Stopped keeps the fail-closed
-                        // escalation.
-                        if matches!(runtime_state, Ok(meerkat_runtime::RuntimeState::Retired)) {
+                        // Retired and Stopped both complete disposal: the
+                        // machine's Retire input admits Stopped, so the
+                        // durable-retire helper retires a stopped runtime
+                        // durably as a machine transition instead of the
+                        // former silent early-return. LIVE phases keep the
+                        // fail-closed escalation below.
+                        if matches!(
+                            runtime_state,
+                            Ok(meerkat_runtime::RuntimeState::Retired
+                                | meerkat_runtime::RuntimeState::Stopped)
+                        ) {
                             tracing::info!(
                                 session_id = %session_id,
                                 state = ?runtime_state,

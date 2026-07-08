@@ -41,9 +41,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RegisterSessionRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
-- `RegisterSessionStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: (unclaimed)
 - `RegisterSessionIdempotentIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -56,8 +53,11 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RegisterSessionIdempotentRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `RegisterSessionIdempotentStopped`
-  - anchors: (unclaimed)
+- `RegisterSessionResumesStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: (unclaimed)
+- `RegisterSessionNewBindingFromStopped`
+  - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
 - `StageDeferredSession`
   - anchors: `meerkat_machine`
@@ -224,9 +224,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `HydrateSessionLlmStateRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `HydrateSessionLlmStateStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `HydrateSessionLlmStateRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -258,9 +255,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SetModelRoutingBaselineRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: (unclaimed)
-- `SetModelRoutingBaselineStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
 - `RequestFiniteSwitchTurnApprovalUnavailableIdle`
@@ -527,9 +521,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StagePersistentFilterRetired`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
-- `StagePersistentFilterStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: (unclaimed)
 - `RequestDeferredToolsIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -540,9 +531,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RequestDeferredToolsRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: (unclaimed)
-- `RequestDeferredToolsStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
 - `PrepareBindingsIdempotentInitializing`
@@ -560,9 +548,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrepareBindingsIdempotentRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `PrepareBindingsIdempotentStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `PrepareBindingsInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -578,9 +563,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrepareBindingsRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
-- `PrepareBindingsStopped`
-  - anchors: `meerkat_machine`
-  - scenarios: (unclaimed)
 - `SetPeerIngressContextIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -948,9 +930,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PublishCommittedVisibleSetRetired`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `PublishCommittedVisibleSetStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RetireRequestedFromIdle`
@@ -1392,9 +1371,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SetSilentIntentsRetired`
-  - anchors: `meerkat_machine`
-  - scenarios: (unclaimed)
-- `SetSilentIntentsStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
 - `AbortIdle`

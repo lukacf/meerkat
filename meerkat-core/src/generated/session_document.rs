@@ -362,6 +362,12 @@ pub enum SessionDocumentInput {
         row_continues_authority: bool,
         row_is_runtime_checkpoint: bool,
     },
+    ResolveRuntimeSnapshotReadSource {
+        session_id: SessionDocumentKey,
+        store_head_extends_snapshot: bool,
+        store_head_is_runtime_checkpoint: bool,
+        session_is_live: bool,
+    },
     ApplyPendingToolResults {
         session_id: SessionDocumentKey,
         result_count: u64,
@@ -467,6 +473,9 @@ pub enum SessionDocumentEffect {
     },
     RuntimeProjectionRollbackResolved {
         disposition: RuntimeProjectionRollbackDisposition,
+    },
+    RuntimeSnapshotReadSourceResolved {
+        read_from_store_head: bool,
     },
     SessionToolResultsApplied {
         session_id: SessionDocumentKey,
@@ -599,6 +608,8 @@ enum SessionDocumentTransition {
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
+    ResolveRuntimeSnapshotReadSourceStoreHead,
+    ResolveRuntimeSnapshotReadSourceSnapshot,
     ResolveRuntimeProjectionRollbackRebuild,
     ResolveRuntimeProjectionRollbackReject,
     ApplyPendingToolResults,
@@ -2636,6 +2647,54 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
+                session_id,
+                store_head_extends_snapshot,
+                store_head_is_runtime_checkpoint,
+                session_is_live,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((store_head_extends_snapshot == true)
+                        && (store_head_is_runtime_checkpoint == false)
+                        && (session_is_live == false))
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceStoreHead);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((store_head_extends_snapshot == false)
+                        || (store_head_is_runtime_checkpoint == true)
+                        || (session_is_live == true))
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceSnapshot);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRuntimeSnapshotReadSource")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceStoreHead => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
+                                read_from_store_head: true,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceSnapshot => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved {
+                                read_from_store_head: false,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveRuntimeSnapshotReadSource_transition",
+                    }),
+                }
+            }
             SessionDocumentInput::ApplyPendingToolResults {
                 session_id,
                 result_count,
@@ -3212,6 +3271,21 @@ impl SessionDocumentMachineAuthority {
             session_id,
             row_continues_authority,
             row_is_runtime_checkpoint,
+        })
+    }
+
+    pub fn resolve_runtime_snapshot_read_source(
+        &mut self,
+        session_id: SessionDocumentKey,
+        store_head_extends_snapshot: bool,
+        store_head_is_runtime_checkpoint: bool,
+        session_is_live: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
+            session_id,
+            store_head_extends_snapshot,
+            store_head_is_runtime_checkpoint,
+            session_is_live,
         })
     }
 

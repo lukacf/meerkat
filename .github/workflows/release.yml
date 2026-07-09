@@ -891,7 +891,28 @@ jobs:
     needs: [publish_github_release]
     runs-on: ubuntu-latest
     steps:
+      # An assets-only backfill can target an OLD tag after a newer release
+      # has already shipped; pointing the tap at it would DOWNGRADE every
+      # `brew upgrade` user (field: the v0.7.24 backfill re-pointed the tap
+      # from 0.7.25 to 0.7.24). The tap must only ever track the repository's
+      # latest release.
+      - name: Require target tag to be the latest release
+        id: latest_guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          LATEST=$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)
+          if [ "${LATEST}" != "${RELEASE_TAG}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "target ${RELEASE_TAG} is not the latest release (${LATEST}); leaving the tap untouched"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout tap
+        if: steps.latest_guard.outputs.skip != 'true'
         uses: actions/checkout@v6
         with:
           repository: lukacf/homebrew-meerkat
@@ -899,6 +920,7 @@ jobs:
           path: homebrew-meerkat
 
       - name: Download checksums
+        if: steps.latest_guard.outputs.skip != 'true'
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
@@ -906,6 +928,7 @@ jobs:
           curl -fsSL "https://github.com/lukacf/meerkat/releases/download/${RELEASE_TAG}/checksums.sha256" -o checksums.sha256
 
       - name: Generate updated formula
+        if: steps.latest_guard.outputs.skip != 'true'
         env:
           VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
@@ -979,6 +1002,7 @@ jobs:
           } > homebrew-meerkat/rkat.rb
 
       - name: Commit and push formula
+        if: steps.latest_guard.outputs.skip != 'true'
         working-directory: homebrew-meerkat
         env:
           VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}

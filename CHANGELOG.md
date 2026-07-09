@@ -87,7 +87,9 @@ policy with its release gate.
   writes, with a one-time transparent migration on open. External tools
   reading `sessions.session_json` via direct SQL will not see content for
   sessions written by 0.7.25+ binaries; use the store API (or `load_meta`
-  for metadata-only reads).
+  for metadata-only reads). Migration note and the supported read paths are
+  documented in `docs/reference/session-contracts.mdx` ("Session storage
+  layout (0.7.25+)").
 - `session/input_state` / `session/input_status` for persistent sessions
   without a live runtime registration now answer from durable state
   (`Ok`/`NotFound`) instead of `NotReady { reason: Destroyed }`. Pollers

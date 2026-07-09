@@ -197,6 +197,63 @@ restart.
 
 Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
 
+### Session storage layout (0.7.25+): head-canonical strands
+
+Since 0.7.25 the SQLite session store persists sessions incrementally: the
+transcript lives in append-only `session_strand_messages` rows, rewrite
+history in `session_rewrites`, and a single `session_heads` row per session
+carries the canonical metadata, message count, and CAS token. Saving a long
+session appends O(delta) rows instead of rewriting a monolithic document.
+
+The canonical-representation rule, per session: **if a `session_heads` row
+exists, the head representation is canonical** and the legacy
+`sessions.session_json` blob (if any) is a frozen one-time migration archive
+— never read or written again. Sessions created by 0.7.25+ binaries may have
+no meaningful `sessions` blob row at all.
+
+<Warning>
+Downstream tooling that reads `sessions.session_json` via direct SQL sees
+empty or stale content for sessions written by 0.7.25+ binaries — silently,
+because the column still exists. Raw table reads were never a supported
+surface; use one of the typed read paths instead:
+
+- `SessionStore::load` — full canonical session document.
+- `SessionStore::load_meta` — metadata-only projection (no transcript
+  deserialization); `list` for filtered metadata.
+- The wire surfaces (`session/read`, `session/list`, REST equivalents).
+
+For forensic tooling that must read the raw database, the canonical shape is:
+resolve the `session_heads` row for the session, then read
+`session_strand_messages` rows for `(session_id, head.strand)` ordered by
+`seq` over `0..head.message_count`. Anything else is internal representation
+and may change without notice.
+</Warning>
+
+### Durable runtime lifecycle vocabulary (`runtime_states`)
+
+The runtime companion persists one lifecycle row per runtime. The full
+`runtime_state` vocabulary, with polling guidance:
+
+| State | Meaning | Busy? |
+|-------|---------|-------|
+| `initializing` | First state after creation. | No |
+| `idle` | No executor attached, ready to accept input. | No |
+| `attached` | Executor attached, runtime loop alive, waiting for input. | No |
+| `running` | A run is in progress. | **Yes** |
+| `retired` | Draining: no new input accepted, existing work finishes. | Transiently |
+| `stopped` | Stopped by runtime control. Non-terminal but quiescent: no work executes until the machine-owned revival re-admits the session on resume (0.7.24+). | **No** |
+| `destroyed` | Terminal. | No |
+
+Busy-detection loops must treat `stopped` and `destroyed` as not-busy:
+`stopped` means nothing is executing and nothing will execute without an
+explicit resume, so polling it as "busy" hangs until an external timeout.
+
+Prefer the typed status surfaces over raw row reads: since 0.7.25,
+`session/input_status` and `session/input_state` answer from durable state
+without requiring a live runtime registration, so a fresh host process
+reports truthful terminal outcomes (`Ok`/`NotFound`) for work finished
+before a restart.
+
 ## Config concurrency contract
 
 Config runtime uses generation CAS.

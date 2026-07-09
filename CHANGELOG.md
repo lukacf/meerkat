@@ -11,7 +11,16 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures (enforced by the `semver-breaks` release gate
 via cargo-semver-checks against the published baselines).
 
-## [Unreleased]
+## [0.7.26] - 2026-07-09
+
+Meerkat 0.7.26 closes the field bugs reported against 0.7.25's first week:
+the torn-shutdown save wedge on classic (non-incremental) session stores,
+the cold-revival re-bind rejection that broke identity-first member
+revival, the misleading "session not found" laundering in front of it, and
+the whole-mob blast radius of a single member's composition-dispatch
+rejection. It also documents the 0.7.25 storage-layout migration and the
+durable runtime_state vocabulary, and hardens the release pipeline's
+Homebrew tap update against assets-only backfills of old tags.
 
 ### Fixed
 

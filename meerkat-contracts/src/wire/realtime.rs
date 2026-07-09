@@ -53,6 +53,10 @@ pub enum RealtimeInputKind {
     Text,
     Audio,
     Video,
+    /// Still-image input (vision-capable realtime models, e.g.
+    /// `gpt-realtime-2`). Input-only: realtime image OUTPUT stays on the
+    /// image-generation operation lane, not the live channel.
+    Image,
 }
 
 /// Output modality kind.
@@ -132,6 +136,19 @@ pub struct RealtimeVideoChunk {
     pub data: String,
 }
 
+/// An opaque still-image chunk for vision-capable realtime models.
+///
+/// `mime_type` is the IANA type of the encoded bytes (`image/png`,
+/// `image/jpeg`, `image/webp`, …); `data` is the base64-encoded image —
+/// the provider seam renders it into the provider-native form (OpenAI
+/// Realtime: an `input_image` content part carrying a data URL).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RealtimeImageChunk {
+    pub mime_type: String,
+    pub data: String,
+}
+
 /// Modality-neutral provider input chunk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -140,4 +157,5 @@ pub enum RealtimeInputChunk {
     TextChunk(RealtimeTextChunk),
     AudioChunk(RealtimeAudioChunk),
     VideoChunk(RealtimeVideoChunk),
+    ImageChunk(RealtimeImageChunk),
 }

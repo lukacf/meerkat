@@ -3963,6 +3963,25 @@ async fn live_ws_send_text_chunk(
     Ok(())
 }
 
+async fn live_ws_send_image_chunk(
+    writer: &mut LiveWsWrite,
+    mime: &str,
+    data_b64: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let frame = json!({
+        "kind": "image",
+        "mime": mime,
+        "data": data_b64,
+    });
+    writer
+        .send(WsMessage::Text(frame.to_string().into()))
+        .await?;
+    Ok(())
+}
+
 async fn live_ws_next_text_frame(
     reader: &mut LiveWsRead,
     timeout_duration: Duration,
@@ -4491,6 +4510,154 @@ fn live_audio_silence_compression_preserves_short_pauses_and_caps_long_ones() {
         prepared.len() >= tone.len() * 3 + short_silence.len() + expected_long_silence,
         "compression should preserve signal and the bounded amount of long silence"
     );
+}
+
+// ===========================================================================
+// Scenario 91: Live adapter realtime IMAGE input (`gpt-realtime-2` vision):
+//              open a live channel, stage a solid-red PNG as an image chunk,
+//              ask for the dominant color by text, and require the answer to
+//              name it. Proves the image reaches the model through the
+//              conversation.item.create input_image lane end to end.
+// ===========================================================================
+
+/// 64x64 solid-red PNG (RGB8), generated deterministically; the model is
+/// asked for the dominant color so the assertion is content-based, not
+/// format-based.
+const SCENARIO_91_RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsKZeS0BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDgsqnc8OJg6Ln3AAAAAElFTkSuQmCC";
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_91_live_adapter_image_input_dominant_color()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    if openai_api_key().is_none() {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let scenario_name = "scenario-91-live-image-input";
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-91-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        eprintln!("[scenario 91] initialize");
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({
+                "client_info": {"name": "scenario-91-live-test", "version": "0.0.1"},
+            }),
+            10,
+        )
+        .await?;
+
+        eprintln!("[scenario 91] create session");
+        let create_result = pump
+            .call(
+                &mut rpc,
+                "session/create",
+                json!({
+                    "prompt": "You are a vision test assistant. When asked for the dominant color of an image the user sent, answer with exactly one word: the English color name. Nothing else.",
+                    "model": "gpt-realtime-2",
+                    "provider": "openai",
+                    "initial_turn": "deferred",
+                }),
+                30,
+            )
+            .await?;
+        let session_id = create_result["session_id"]
+            .as_str()
+            .ok_or("missing session_id")?
+            .to_string();
+        eprintln!("[scenario 91] session_id = {session_id}");
+
+        eprintln!("[scenario 91] live/open + WebSocket connect");
+        let (channel_id, mut ws_write, mut ws_read) =
+            live_open_and_connect(&mut pump, &mut rpc, &session_id).await?;
+        eprintln!("[scenario 91] channel_id = {channel_id}");
+
+        let _ready_capture =
+            collect_live_observations_until_ready_or_idle(&mut ws_read, 10).await?;
+
+        eprintln!("[scenario 91] stage red PNG image chunk");
+        live_ws_send_image_chunk(&mut ws_write, "image/png", SCENARIO_91_RED_PNG_B64).await?;
+
+        eprintln!("[scenario 91] ask for the dominant color by text");
+        let commit_capture = match send_live_text_and_wait_for_turn(
+            &mut ws_write,
+            &mut ws_read,
+            "What is the dominant color of the image I just sent? Answer with exactly one word.",
+            120,
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 91 image-color turn failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        let mut capture = commit_capture.clone();
+        capture.merge_from(settle_live_turn_after_input(&mut ws_read, &capture, 120).await?);
+
+        let combined = normalize_semantic_text(&format!(
+            "{} {}",
+            capture.output_text,
+            capture.input_finals.join(" ")
+        ));
+        eprintln!("[scenario 91] combined turn text: {combined}");
+        if !combined.to_lowercase().contains("red") {
+            return Err(format!(
+                "scenario 91: model did not identify the dominant color of the staged \
+                 image; combined text=`{combined}`: {capture:?}"
+            )
+            .into());
+        }
+        eprintln!("[scenario 91] PASS — model saw the image ({scenario_name})");
+
+        live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
 }
 
 // ===========================================================================

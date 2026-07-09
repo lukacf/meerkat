@@ -11,6 +11,26 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures (enforced by the `semver-breaks` release gate
 via cargo-semver-checks against the published baselines).
 
+## [Unreleased]
+
+### Added
+
+- Image input on the OpenAI Realtime live channel: `gpt-realtime-2` accepts
+  still images, and the live surface now carries them end to end — a
+  `LiveInputChunk::Image` (wire `kind: "image"`, base64 data) renders as a
+  provider `conversation.item.create` `input_image` data URL. An image is
+  staged CONTEXT for the turn that follows (server-VAD audio, explicit
+  commit, or a text chunk); it never synthesizes a response by itself.
+  `LiveChannelCapabilities.image_in` and the realtime capability
+  projection's new `RealtimeInputKind::Image` follow the bound model's
+  catalog `vision` fact, so clients feature-detect instead of
+  try-and-catch; non-vision realtime bindings keep the documented scoped
+  `image_input_not_implemented` rejection (channel survives), and non-image
+  MIME types reject typed before any provider send. New wire vocabulary:
+  `RealtimeImageChunk` + `RealtimeInputChunk::ImageChunk`. Covered by a new
+  live smoke scenario (91): stage a red PNG over the live WebSocket, ask
+  for the dominant color, require the model to name it.
+
 ## [0.7.26] - 2026-07-09
 
 Meerkat 0.7.26 closes the field bugs reported against 0.7.25's first week:

@@ -30847,12 +30847,21 @@
       },
       "RealtimeInputKind": {
         "description": "Input modality kind.",
-        "enum": [
-          "text",
-          "audio",
-          "video"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "text",
+              "audio",
+              "video"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "image",
+            "description": "Still-image input (vision-capable realtime models, e.g.\n`gpt-realtime-2`). Input-only: realtime image OUTPUT stays on the\nimage-generation operation lane, not the live channel.",
+            "type": "string"
+          }
+        ]
       },
       "RealtimeOutputKind": {
         "description": "Output modality kind.",
@@ -30968,6 +30977,22 @@
         ],
         "type": "object"
       },
+      "RealtimeImageChunk": {
+        "description": "An opaque still-image chunk for vision-capable realtime models.\n\n`mime_type` is the IANA type of the encoded bytes (`image/png`,\n`image/jpeg`, `image/webp`, …); `data` is the base64-encoded image —\nthe provider seam renders it into the provider-native form (OpenAI\nRealtime: an `input_image` content part carrying a data URL).",
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mime_type",
+          "data"
+        ],
+        "type": "object"
+      },
       "RealtimeTextChunk": {
         "description": "A text chunk for realtime ingress/egress.",
         "properties": {
@@ -31038,6 +31063,19 @@
           "kind"
         ],
         "type": "object"
+      },
+      {
+        "$ref": "#/$defs/RealtimeImageChunk",
+        "properties": {
+          "kind": {
+            "const": "image_chunk",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
       }
     ],
     "title": "RealtimeInputChunk"
@@ -31045,13 +31083,22 @@
   "RealtimeInputKind": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Input modality kind.",
-    "enum": [
-      "text",
-      "audio",
-      "video"
+    "oneOf": [
+      {
+        "enum": [
+          "text",
+          "audio",
+          "video"
+        ],
+        "type": "string"
+      },
+      {
+        "const": "image",
+        "description": "Still-image input (vision-capable realtime models, e.g.\n`gpt-realtime-2`). Input-only: realtime image OUTPUT stays on the\nimage-generation operation lane, not the live channel.",
+        "type": "string"
+      }
     ],
-    "title": "RealtimeInputKind",
-    "type": "string"
+    "title": "RealtimeInputKind"
   },
   "RealtimeOutputKind": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

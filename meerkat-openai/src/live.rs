@@ -1332,12 +1332,19 @@ fn openai_realtime_capabilities_for(
     let caps = meerkat_models::capabilities_for(identity.provider, &identity.model);
 
     let video = caps.is_some_and(|c| c.inline_video);
+    // Still-image input follows the catalog vision fact (`gpt-realtime-2`
+    // accepts image input on the realtime surface). Input-only: image
+    // OUTPUT stays on the image-generation operation lane.
+    let image = caps.is_some_and(|c| c.vision);
 
     let mut input_kinds = vec![RealtimeInputKind::Text, RealtimeInputKind::Audio];
     let mut output_kinds = vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio];
     if video {
         input_kinds.push(RealtimeInputKind::Video);
         output_kinds.push(RealtimeOutputKind::Video);
+    }
+    if image {
+        input_kinds.push(RealtimeInputKind::Image);
     }
 
     // Map the core-side turning-mode bools into the wire `RealtimeTurningMode`
@@ -2707,6 +2714,35 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 }
                 Ok(())
             }
+            RealtimeInputChunk::ImageChunk(chunk) => {
+                // A still image is staged CONTEXT for the next turn, in both
+                // turning modes: `conversation.item.create` with an
+                // `input_image` data URL, and no synthetic response. The
+                // turn that covers the image is driven by the input that
+                // follows it — a server-VAD audio commit, an explicit
+                // commit, or a text chunk (whose arm above creates the
+                // response) — mirroring how the OpenAI Realtime API treats
+                // image items.
+                let image_url = format!("data:{};base64,{}", chunk.mime_type, chunk.data);
+                self.raw_mut()?
+                    .send_raw(ClientEvent::ConversationItemCreate {
+                        event_id: None,
+                        previous_item_id: None,
+                        item: Box::new(Item::Message {
+                            id: Some(openai_realtime_synthetic_text_item_id()),
+                            status: None,
+                            phase: None,
+                            role: Role::User,
+                            content: vec![ContentPart::InputImage {
+                                image_url,
+                                detail: None,
+                            }],
+                        }),
+                    })
+                    .await?;
+                self.has_staged_input = true;
+                Ok(())
+            }
             RealtimeInputChunk::VideoChunk(_) => Err(LlmError::InvalidInputShape {
                 message: "openai realtime video input is not supported by the current adapter"
                     .to_string(),
@@ -3396,6 +3432,10 @@ pub struct OpenAiLiveAdapter {
     /// Synthetic injection callers who fire after the pump has exited
     /// get a typed `LiveAdapterError::Closed`.
     control_tx: Arc<StdMutex<Option<mpsc::Sender<LiveAdapterObservation>>>>,
+    /// Whether the bound model's capability projection admits still-image
+    /// input on this channel (catalog vision fact). Captured at
+    /// construction, advertised via `LiveChannelCapabilities.image_in`.
+    image_in: bool,
 }
 
 impl OpenAiLiveAdapter {
@@ -3429,6 +3469,7 @@ impl OpenAiLiveAdapter {
             status,
             pump_handle: StdMutex::new(None),
             control_tx: Arc::new(StdMutex::new(Some(control_tx.clone()))),
+            image_in: false,
         };
         (adapter, control_tx, audio_tx, cmd_rx)
     }
@@ -3441,6 +3482,13 @@ impl OpenAiLiveAdapter {
     /// `LiveAdapterObservation`s for downstream `LiveAdapterHost` consumption.
     #[must_use]
     pub fn new(session: OpenAiRealtimeSession) -> Self {
+        // Captured before the session moves into the pump: the channel
+        // capability advertisement follows the bound model's capability
+        // projection (catalog vision fact → Image input kind).
+        let image_in = session
+            .capabilities()
+            .input_kinds
+            .contains(&RealtimeInputKind::Image);
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         // R5-1: split lossy audio from reliable control. See struct field
         // docs above for capacity rationale.
@@ -3470,6 +3518,7 @@ impl OpenAiLiveAdapter {
             status,
             pump_handle: StdMutex::new(Some(pump_handle)),
             control_tx: adapter_control_slot,
+            image_in,
         }
     }
 }
@@ -3579,8 +3628,9 @@ impl LiveAdapter for OpenAiLiveAdapter {
     ///
     /// All audio/text in/out lanes, spoken-transcript output, and
     /// user-initiated barge-in are GA on the OpenAI Realtime surface.
-    /// `image_in` / `video_in` are reserved for `gpt-realtime-2` (image)
-    /// and Gemini Live (video) — `false` here. Provider-native resume is
+    /// `image_in` follows the bound model's capability projection (catalog
+    /// vision fact — `gpt-realtime-2` accepts still images); `video_in`
+    /// stays reserved for Gemini Live. Provider-native resume is
     /// not exposed yet (transcript-only seam handles continuation across
     /// reconnect, see `LiveContinuityMode::TranscriptOnly`).
     fn capabilities(&self) -> LiveChannelCapabilities {
@@ -3599,7 +3649,11 @@ impl LiveAdapter for OpenAiLiveAdapter {
             // genuine: the display-text lane (`text_out=true`) and
             // the spoken-transcript lane (`transcript_supported=true`).
             text_out: true,
-            image_in: false,
+            // Still-image input follows the bound model's capability
+            // projection (catalog vision fact — true for `gpt-realtime-2`,
+            // captured at adapter construction). Video remains reserved
+            // (Gemini Live).
+            image_in: self.image_in,
             video_in: false,
             transcript_supported: true,
             barge_in_supported: true,
@@ -4198,19 +4252,34 @@ async fn execute_openai_live_command(
                     use meerkat_contracts::RealtimeTextChunk;
                     RealtimeInputChunk::TextChunk(RealtimeTextChunk { text })
                 }
-                // T11 + R5-9 (FIX-OPENAI follow-up): image / video-frame
-                // variants are typed at the seam but not yet supported by
-                // OpenAI Realtime. Reject with the documented `reason`
-                // strings using the typed `LlmError::InvalidInputShape`
-                // variant — the pump (above) routes that variant to a
-                // scoped `LiveAdapterObservation::CommandRejected`
-                // (channel survives) rather than the terminal `Error`
-                // path. The classification is now structural — the pump
-                // never inspects the reason string.
-                LiveInputChunk::Image { .. } => {
-                    return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
-                        message: "image_input_not_implemented".to_string(),
-                    }));
+                // Still-image input: supported when the bound model's
+                // capability projection carries the Image input kind
+                // (catalog `vision` fact — `gpt-realtime-2`). A non-vision
+                // realtime model keeps the documented typed rejection
+                // (`image_input_not_implemented`) — scoped, channel
+                // survives, structural classification (T11 + R5-9 shape).
+                LiveInputChunk::Image { mime, data } => {
+                    if !session
+                        .capabilities()
+                        .input_kinds
+                        .contains(&RealtimeInputKind::Image)
+                    {
+                        return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
+                            message: "image_input_not_implemented".to_string(),
+                        }));
+                    }
+                    if !mime.starts_with("image/") {
+                        return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
+                            message: format!(
+                                "image_input_unsupported_mime: `{mime}` is not an image/* type"
+                            ),
+                        }));
+                    }
+                    use base64::Engine;
+                    RealtimeInputChunk::ImageChunk(meerkat_contracts::RealtimeImageChunk {
+                        mime_type: mime,
+                        data: base64::engine::general_purpose::STANDARD.encode(&data),
+                    })
                 }
                 LiveInputChunk::VideoFrame { .. } => {
                     return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
@@ -4839,6 +4908,15 @@ mod tests {
             caps.input_kinds.contains(&RealtimeInputKind::Video),
             row.inline_video,
             "Video input kind must follow the catalog inline_video flag"
+        );
+        assert_eq!(
+            caps.input_kinds.contains(&RealtimeInputKind::Image),
+            row.vision,
+            "Image input kind must follow the catalog vision flag"
+        );
+        assert!(
+            row.vision,
+            "gpt-realtime-2 accepts still-image input per the catalog row"
         );
 
         // #68: the realtime transport facts (turning modes, interrupt,
@@ -5625,7 +5703,12 @@ mod tests {
         let capabilities = opened.capabilities();
         assert_eq!(
             capabilities.input_kinds,
-            vec![RealtimeInputKind::Text, RealtimeInputKind::Audio]
+            vec![
+                RealtimeInputKind::Text,
+                RealtimeInputKind::Audio,
+                RealtimeInputKind::Image,
+            ],
+            "gpt-realtime-2's catalog vision fact adds the Image input kind"
         );
         assert_eq!(
             capabilities.output_kinds,
@@ -5642,6 +5725,165 @@ mod tests {
                 .contains(&RealtimeTurningMode::ExplicitCommit)
         );
         assert!(opened.close().await.is_ok(), "close should succeed");
+    }
+
+    /// Image input encoding: a `RealtimeInputChunk::ImageChunk` becomes a
+    /// `conversation.item.create` carrying an `input_image` data URL, and —
+    /// unlike text — never synthesizes a `response.create` in either
+    /// turning mode: the image is staged context for the turn that follows.
+    #[tokio::test]
+    async fn provider_neutral_session_stages_image_chunk_without_response() {
+        for turning_mode in [
+            RealtimeTurningMode::ProviderManaged,
+            RealtimeTurningMode::ExplicitCommit,
+        ] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let mut session = OpenAiRealtimeSession::new(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::clone(&seen),
+                    next_events: Arc::new(Mutex::new(VecDeque::new())),
+                }),
+                turning_mode,
+            );
+
+            session
+                .send_input(RealtimeInputChunk::ImageChunk(
+                    meerkat_contracts::RealtimeImageChunk {
+                        mime_type: "image/png".to_string(),
+                        data: "iVBORw0KGgo=".to_string(),
+                    },
+                ))
+                .await
+                .expect("image chunk should send");
+
+            let seen = seen.lock().await;
+            let item_create = seen
+                .iter()
+                .find_map(|event| match event {
+                    ClientEvent::ConversationItemCreate { item, .. } => Some(item),
+                    _ => None,
+                })
+                .expect("image chunk must create a conversation item");
+            match item_create.as_ref() {
+                Item::Message { role, content, .. } => {
+                    assert_eq!(*role, Role::User, "image item is user content");
+                    match content.as_slice() {
+                        [ContentPart::InputImage { image_url, .. }] => {
+                            assert_eq!(
+                                image_url, "data:image/png;base64,iVBORw0KGgo=",
+                                "image bytes must render as a typed data URL"
+                            );
+                        }
+                        other => panic!("expected a single input_image part, got {other:?}"),
+                    }
+                }
+                other => panic!("expected a message item, got {other:?}"),
+            }
+            assert!(
+                !seen
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::ResponseCreate { .. })),
+                "an image is staged context: it must not synthesize a response \
+                 ({turning_mode:?})"
+            );
+        }
+    }
+
+    /// Live-command gate: image input on a session whose bound model lacks
+    /// the Image capability (uncatalogued model → fail-closed base) keeps
+    /// the documented scoped rejection; an image chunk with a non-image
+    /// MIME rejects typed before any provider send.
+    #[tokio::test]
+    async fn live_command_image_input_gates_on_model_capability_and_mime() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session.set_current_identity(&SessionLlmIdentity {
+            model: "totally-unknown-realtime-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        });
+
+        let error = execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    mime: "image/png".to_string(),
+                    data: vec![1, 2, 3],
+                },
+            },
+        )
+        .await
+        .expect_err("image input on a non-vision model must reject");
+        match error {
+            OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape { message }) => {
+                assert_eq!(
+                    message, "image_input_not_implemented",
+                    "non-vision model keeps the documented scoped rejection reason"
+                );
+            }
+            other => panic!("expected typed InvalidInputShape, got {other:?}"),
+        }
+
+        // Vision-capable identity + bogus MIME: typed rejection, no send.
+        session.set_current_identity(&SessionLlmIdentity {
+            model: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        });
+        let error = execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    mime: "text/plain".to_string(),
+                    data: vec![1, 2, 3],
+                },
+            },
+        )
+        .await
+        .expect_err("a non-image MIME must reject typed");
+        match error {
+            OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape { message }) => {
+                assert!(
+                    message.starts_with("image_input_unsupported_mime"),
+                    "unexpected reason: {message}"
+                );
+            }
+            other => panic!("expected typed InvalidInputShape, got {other:?}"),
+        }
+        assert!(
+            seen.lock().await.is_empty(),
+            "rejected image inputs must not reach the provider socket"
+        );
+
+        // Vision-capable identity + image MIME: the gate admits and encodes.
+        execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    mime: "image/png".to_string(),
+                    data: vec![0x89, 0x50, 0x4e, 0x47],
+                },
+            },
+        )
+        .await
+        .expect("image input on gpt-realtime-2 must be admitted");
+        assert!(
+            seen.lock()
+                .await
+                .iter()
+                .any(|event| matches!(event, ClientEvent::ConversationItemCreate { .. })),
+            "admitted image must reach the provider as a conversation item"
+        );
     }
 
     #[tokio::test]
@@ -9067,14 +9309,18 @@ mod tests {
         ));
     }
 
-    /// T11: a `SendInput { LiveInputChunk::Image }` must be rejected with
-    /// the typed `LiveAdapterErrorCode::ConfigRejected` whose `reason` is
-    /// the documented `"image_input_not_implemented"` token. Routing this
-    /// onto the `ProviderError` path would force clients to parse English
-    /// to distinguish "OpenAI doesn't support image input on the realtime
-    /// surface" from a real provider outage.
+    /// T11 (updated for gpt-realtime-2 image support): a
+    /// `SendInput { LiveInputChunk::Image }` on a session whose bound model
+    /// lacks the Image capability (uncatalogued model → fail-closed base)
+    /// must be rejected with the typed
+    /// `LiveAdapterErrorCode::ConfigRejected` whose `reason` is the
+    /// documented `"image_input_not_implemented"` token. Routing this onto
+    /// the `ProviderError` path would force clients to parse English to
+    /// distinguish "this realtime binding doesn't support image input"
+    /// from a real provider outage. (Vision-capable bindings admit the
+    /// chunk — covered by the gate + encode tests above.)
     #[tokio::test(flavor = "current_thread")]
-    async fn send_input_image_chunk_is_rejected_as_config_rejected() {
+    async fn send_input_image_chunk_on_non_vision_model_is_rejected_as_config_rejected() {
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -9084,7 +9330,13 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity(&sample_realtime_identity());
+        session.set_current_identity(&SessionLlmIdentity {
+            model: "totally-unknown-realtime-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        });
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -9463,8 +9715,9 @@ mod tests {
         assert!(caps.barge_in_supported);
         assert!(caps.transcript_supported);
         assert!(
-            !caps.image_in,
-            "OpenAI Realtime does not yet accept image input (gpt-realtime-2 reserved)"
+            caps.image_in,
+            "the canonical realtime model (gpt-realtime-2) accepts still-image \
+             input; image_in follows its catalog vision fact"
         );
         assert!(
             !caps.video_in,

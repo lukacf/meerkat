@@ -2346,7 +2346,7 @@ export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" 
 
 export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
 
-export type RealtimeInputKind = "text" | "audio" | "video";
+export type RealtimeInputKind = "text" | "audio" | "video" | "image";
 
 export type RealtimeOutputKind = "text" | "audio" | "video";
 
@@ -2369,7 +2369,13 @@ export interface RealtimeInputChunkVideoChunk {
   kind: "video_chunk";
 }
 
-export type RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk;
+export interface RealtimeInputChunkImageChunk {
+  data: string;
+  mime_type: string;
+  kind: "image_chunk";
+}
+
+export type RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk | RealtimeInputChunkImageChunk;
 
 export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
 

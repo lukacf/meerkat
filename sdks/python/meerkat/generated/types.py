@@ -4526,7 +4526,7 @@ WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retir
 RealtimeTurningMode = Literal['provider_managed', 'explicit_commit']
 
 # Input modality kind.
-RealtimeInputKind = Literal['text', 'audio', 'video']
+RealtimeInputKind = Literal['text', 'audio', 'video'] | Literal['image']
 
 # Output modality kind.
 RealtimeOutputKind = Literal['text', 'audio', 'video']
@@ -4548,7 +4548,12 @@ class RealtimeInputChunkVideoChunk(TypedDict, total=False):
     mime_type: Required[str]
     kind: Required[Literal['video_chunk']]
 
-RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk
+class RealtimeInputChunkImageChunk(TypedDict, total=False):
+    data: Required[str]
+    mime_type: Required[str]
+    kind: Required[Literal['image_chunk']]
+
+RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk | RealtimeInputChunkImageChunk
 
 # Modality-tagged input chunk for `live/send_input`.
 #

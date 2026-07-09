@@ -162,9 +162,9 @@ pub use models::{
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{
-    RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
-    RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk, RealtimeTurningMode,
-    RealtimeVideoChunk,
+    RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeImageChunk,
+    RealtimeInputChunk, RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk,
+    RealtimeTurningMode, RealtimeVideoChunk,
 };
 pub use rest::{
     RestAppendSystemContextRequest, RestAuthBindingTestRequest, RestAuthProfileCreateRequest,

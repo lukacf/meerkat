@@ -285,6 +285,7 @@ pub use wire::{
     RealtimeAudioChunk,
     RealtimeAudioFormat,
     RealtimeCapabilities,
+    RealtimeImageChunk,
     RealtimeInputChunk,
     RealtimeInputKind,
     RealtimeOutputKind,

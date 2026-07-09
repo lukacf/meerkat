@@ -11,6 +11,23 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures (enforced by the `semver-breaks` release gate
 via cargo-semver-checks against the published baselines).
 
+## [Unreleased]
+
+### Fixed
+
+- The torn-shutdown save wedge now also clears on CLASSIC (non-incremental)
+  session stores (field, identity-first gateways on meerkat 0.7.25: resume
+  saves rejected with "message count 165 is shorter than previously
+  persisted 167" retried forever). 0.7.24's write-half rollback
+  (`ResolveRuntimeProjectionRollback` → `RebuildToAuthority`) was consulted
+  on the incremental head-canonical save path and the audited
+  authoritative-projection path, but external `SessionStore` implementations
+  route plain projection saves through the storage-normalization bridge —
+  which re-threw `MonotonicityViolation` against a checkpointer-stamped
+  ahead row on every retry. The bridge now consults the same machine-owned
+  arbitration and converges via the CAS projection write; unstamped or
+  content-forked rows keep failing closed.
+
 ## [0.7.25] - 2026-07-08
 
 Meerkat 0.7.25 is the outstanding-asks sweep: O(delta) incremental session

@@ -4500,7 +4500,7 @@ impl MobActor {
     pub(super) async fn flush_routed_effects(&mut self) -> Result<(), MobError> {
         use super::composition::dispatch_routed_effect;
         while let Some(effect) = self.pending_routed_effects.first().cloned() {
-            match dispatch_routed_effect(&self.composition_binding, effect).await {
+            match dispatch_routed_effect(&self.composition_binding, effect.clone()).await {
                 Ok(_outcome) => {
                     // Drop the head now that dispatch succeeded (or was a
                     // standalone no-op); keep subsequent queue entries
@@ -4508,28 +4508,89 @@ impl MobActor {
                     self.pending_routed_effects.remove(0);
                 }
                 Err(error) => {
-                    // Preserve the head + tail on failure so the operator
-                    // can inspect them; caller decides to retry or abort.
-                    return Err(error);
+                    // One member's typed rejection must not take down the
+                    // whole mob (field: a single revived member's
+                    // PrepareBindings guard rejection terminated the actor
+                    // task, killing every healthy sibling). Every routed
+                    // effect variant carries the target session, so a
+                    // session-scoped failure degrades THAT member through
+                    // the machine-owned restore-failure fact and the actor
+                    // keeps serving. A failure with no session scope (or an
+                    // unknown session) is a composition spine break and
+                    // stays fatal — the operator inspects the retained
+                    // head + tail.
+                    //
+                    // Destroy cleanup keeps the bubble-up contract: a failed
+                    // retire/destroy dispatch there must surface as an
+                    // incomplete destroy (retained roster + retry anchor),
+                    // never be absorbed as a per-member degradation.
+                    if self.destroy_cleanup_active {
+                        return Err(error);
+                    }
+                    let Some(session_id) = routed_effect_session_scope(effect.body()) else {
+                        return Err(error);
+                    };
+                    let Some(agent_identity) = self.member_identity_for_bridge_session(&session_id)
+                    else {
+                        return Err(error);
+                    };
+                    let reason = format!(
+                        "composition dispatch for bridge session '{session_id}' failed: {error}"
+                    );
+                    self.discard_pending_routed_effects_for_session(&session_id);
+                    // The failing head is session-scoped by construction, so
+                    // the discard above removed it; assert the loop advances.
+                    if self
+                        .pending_routed_effects
+                        .first()
+                        .is_some_and(|head| head.body() == effect.body())
+                    {
+                        return Err(error);
+                    }
+                    self.apply_dsl_signal(
+                        mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(&agent_identity),
+                            reason: reason.clone(),
+                        },
+                        "routed_effect_dispatch_failure_degrades_member",
+                    )?;
+                    self.restore_diagnostics.write().await.insert(
+                        agent_identity.clone(),
+                        super::handle::RestoreFailureDiagnostic {
+                            bridge_session_id: Some(session_id.clone()),
+                            reason: reason.clone(),
+                        },
+                    );
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %agent_identity,
+                        bridge_session_id = %session_id,
+                        reason = %reason,
+                        "session-scoped composition dispatch failed; member degraded, mob actor continues"
+                    );
                 }
             }
         }
         Ok(())
     }
 
+    /// Resolve the member identity currently bound to a bridge session, from
+    /// the machine-owned binding map.
+    fn member_identity_for_bridge_session(&self, session_id: &SessionId) -> Option<AgentIdentity> {
+        let dsl_session_id = mob_dsl::SessionId::from_domain(session_id);
+        self.dsl_authority
+            .state()
+            .member_session_bindings
+            .iter()
+            .find_map(|(identity, bound)| {
+                (bound == &dsl_session_id).then(|| AgentIdentity::from(identity.0.as_str()))
+            })
+    }
+
     fn discard_pending_routed_effects_for_session(&mut self, session_id: &SessionId) {
         let dsl_session_id = mob_dsl::SessionId::from_domain(session_id);
         self.pending_routed_effects.retain(|effect| {
-            !matches!(
-                effect.body(),
-                mob_dsl::MobMachineEffect::RequestRuntimeBinding {
-                    session_id,
-                    ..
-                }
-                | mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }
-                | mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id }
-                if session_id == &dsl_session_id
-            )
+            routed_effect_session_scope_dsl(effect.body()) != Some(&dsl_session_id)
         });
     }
 
@@ -20715,6 +20776,27 @@ impl MobActor {
     }
 }
 
+/// The bridge-session scope of a routed composition effect, in DSL form.
+/// Every effect variant the MobMachine routes to MeerkatMachine consumers
+/// carries its target session — this totality is what lets a dispatch
+/// failure degrade one member instead of terminating the actor.
+fn routed_effect_session_scope_dsl(
+    effect: &mob_dsl::MobMachineEffect,
+) -> Option<&mob_dsl::SessionId> {
+    match effect {
+        mob_dsl::MobMachineEffect::RequestRuntimeBinding { session_id, .. }
+        | mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }
+        | mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id }
+        | mob_dsl::MobMachineEffect::RequestRuntimeIngress { session_id, .. } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Domain-typed bridge-session scope of a routed composition effect.
+fn routed_effect_session_scope(effect: &mob_dsl::MobMachineEffect) -> Option<SessionId> {
+    routed_effect_session_scope_dsl(effect).and_then(|id| SessionId::parse(&id.0).ok())
+}
+
 fn revival_error_means_session_already_live(
     error: &MobError,
     bridge_session_id: &SessionId,
@@ -20799,6 +20881,57 @@ mod runtime_observation_tests {
         };
 
         assert!(foreign_runtime_observation(authority.state(), &signal).is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod routed_effect_containment_tests {
+    use super::*;
+
+    /// Containment precondition: every effect variant the MobMachine routes
+    /// to MeerkatMachine consumers carries its target bridge session, so a
+    /// dispatch failure always resolves to ONE member instead of terminating
+    /// the mob actor task (field: one revived member's PrepareBindings guard
+    /// rejection killed every healthy sibling).
+    #[test]
+    fn every_routed_effect_variant_is_session_scoped() {
+        let session = mob_dsl::SessionId::from("019f0000-0000-7000-8000-000000000001");
+        let runtime_id = mob_dsl::AgentRuntimeId("identity:1".to_string());
+        let routed = [
+            mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                session_id: session.clone(),
+                agent_identity: mob_dsl::AgentIdentity::from("worker-1"),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: mob_dsl::FenceToken(1),
+                generation: None,
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                session_id: session.clone(),
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+                session_id: session.clone(),
+            },
+            mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+                session_id: session.clone(),
+                agent_runtime_id: runtime_id,
+                fence_token: mob_dsl::FenceToken(1),
+                generation: None,
+                work_id: mob_dsl::WorkId::from("work-1"),
+                origin: mob_dsl::WorkOrigin::External,
+            },
+        ];
+        for effect in &routed {
+            assert_eq!(
+                routed_effect_session_scope_dsl(effect),
+                Some(&session),
+                "routed effect must expose its session scope: {effect:?}"
+            );
+            assert!(
+                routed_effect_session_scope(effect).is_some(),
+                "session scope must parse to a domain session id"
+            );
+        }
     }
 }
 

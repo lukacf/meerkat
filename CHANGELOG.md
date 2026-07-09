@@ -15,6 +15,38 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- Cold revival of a stopped session re-binds under its fresh registration
+  epoch (field, HomeCore on 0.7.24/0.7.25 identity-first gateways: member
+  revival failed terminally with "session not found in runtime adapter
+  after registration" / "DSL rejected PrepareBindings: GuardRejected
+  { phase: Attached }"). The 0.7.24 revival arcs preserved the runtime
+  binding tuple — but that tuple is epoch-scoped: phase Stopped proves the
+  bound epoch's executor exited, and a cold revival registers under a
+  freshly minted epoch, so every `PrepareBindings` arm (all guarded
+  absent-or-same) rejected the re-bind by construction. Warm revivals
+  (same process, same epoch) passed, which is why the 0.7.24 class tests
+  were green. The revival arcs (`RegisterSessionResumesStopped`,
+  `EnsureSessionWithExecutorStopped`) now clear the dead epoch's binding
+  tuple while preserving session identity and hydrated LLM/capability
+  state; the next `PrepareBindings` / mob `RequestRuntimeBinding` binds the
+  new epoch. Red-verified with a torn-shutdown cold-restart class test.
+- `MeerkatMachine::prepare_local_session_bindings` no longer launders every
+  preparation failure into "session not found in runtime adapter after
+  registration": typed machine rejections (e.g. a `PrepareBindings` guard)
+  now surface verbatim as `RuntimeBindingsError::PrepareFailed` — the
+  misleading not-found string cost the field a debugging cycle.
+- One member's typed composition-dispatch rejection no longer terminates
+  the whole mob actor task ("composition dispatch failed; terminating mob
+  actor task" killed every healthy sibling). Every routed effect carries
+  its target bridge session, so a session-scoped dispatch failure now
+  degrades that member through the machine-owned restore-failure fact
+  (`RecoverMemberRestoreFailure` + restore diagnostic) and drops the
+  member's queued effects, while the actor keeps serving. Failures with no
+  session scope, unknown sessions, and destroy-cleanup dispatch failures
+  keep the fatal/bubble-up contract (incomplete destroy stays retryable).
+  Adjacent gap fixed: the per-session routed-effect discard now also covers
+  `RequestRuntimeIngress`.
+
 - The torn-shutdown save wedge now also clears on CLASSIC (non-incremental)
   session stores (field, identity-first gateways on meerkat 0.7.25: resume
   saves rejected with "message count 165 is shorter than previously

@@ -5655,11 +5655,23 @@ macro_rules! meerkat_catalog_machine_dsl {
         // SAME session is the canonical resume seam (the shell stages
         // RegisterSession unconditionally on every bindings preparation), so
         // the machine revives the session to Idle while PRESERVING its
-        // identity, runtime bindings, and hydrated LLM/capability state —
-        // in deliberate contrast to UnregisterSessionStopped, which is the
-        // teardown arc out of Stopped and clears them. Without this arc,
-        // Stopped is an absorbing phase for resume and every phase-gated
-        // build input wedges (the 0.7.19–0.7.23 resume-strand class).
+        // identity and hydrated LLM/capability state — in deliberate contrast
+        // to UnregisterSessionStopped, which is the teardown arc out of
+        // Stopped and clears them. Without this arc, Stopped is an absorbing
+        // phase for resume and every phase-gated build input wedges (the
+        // 0.7.19–0.7.23 resume-strand class).
+        //
+        // The runtime binding tuple is NOT preserved: it is epoch-scoped —
+        // Stopped proves the bound epoch's executor exited, and a cold
+        // revival registers under a freshly minted epoch, so every
+        // `PrepareBindings` arm (all guarded absent-or-same) would reject
+        // the re-bind by construction (field, 0.7.25 identity-first
+        // gateways: "DSL rejected PrepareBindings: GuardRejected { phase:
+        // Attached }", laundered upstream into "session not found in
+        // runtime adapter after registration"). Clearing the dead epoch's
+        // binding here is truthful and lets the very next PrepareBindings /
+        // mob RequestRuntimeBinding bind the new epoch; warm revivals
+        // re-bind the same way on their next bindings preparation.
         transition RegisterSessionResumesStopped {
             on input RegisterSession { session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
@@ -5668,6 +5680,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
@@ -9339,6 +9355,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.registration_phase = RegistrationPhase::Active;
                 self.runtime_stop_deferred = false;
+                // Epoch-scoped binding facts of the exited executor's epoch
+                // are cleared on revival — see RegisterSessionResumesStopped.
+                // The next PrepareBindings binds the new epoch's tuple.
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.active_runtime_generation = None;
+                self.active_runtime_epoch_id = None;
             }
             to Attached
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for executor attach" }

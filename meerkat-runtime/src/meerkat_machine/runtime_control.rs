@@ -1697,7 +1697,15 @@ impl MeerkatMachine {
                 );
                 Err(RuntimeBindingsError::SessionNotFound(session_id))
             }
-            Err(_) => Err(RuntimeBindingsError::SessionNotFound(session_id)),
+            // Never launder the real preparation failure into "session not
+            // found": a typed machine rejection (e.g. a PrepareBindings
+            // guard) must reach the caller verbatim — the field spent a
+            // debugging cycle on "not found in runtime adapter after
+            // registration" that was actually a binding guard rejection.
+            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
+                session_id,
+                err.to_string(),
+            )),
         }
     }
 }

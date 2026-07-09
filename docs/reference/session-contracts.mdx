@@ -249,7 +249,7 @@ Busy-detection loops must treat `stopped` and `destroyed` as not-busy:
 explicit resume, so polling it as "busy" hangs until an external timeout.
 
 Prefer the typed status surfaces over raw row reads: since 0.7.25,
-`session/input_status` and `session/input_state` answer from durable state
+`session/input_status` answers from durable state
 without requiring a live runtime registration, so a fresh host process
 reports truthful terminal outcomes (`Ok`/`NotFound`) for work finished
 before a restart.

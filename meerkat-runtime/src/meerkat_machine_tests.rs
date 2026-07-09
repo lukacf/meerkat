@@ -3773,12 +3773,62 @@ async fn stopped_session_retire_completes_durably() {
     );
 }
 
+/// Cold-revival class (the 0.7.25 identity-first field wedge): a process
+/// dies with a session durably Stopped AND still carrying its runtime
+/// binding (no unregister ran — the torn case). A fresh machine over the
+/// same store recovers that state, revival re-admits the session, and the
+/// new registration epoch's `PrepareBindings` MUST bind. Pre-fix the
+/// revival preserved the dead epoch's tuple and every re-bind was
+/// guard-rejected ("DSL rejected PrepareBindings: GuardRejected"),
+/// laundered upstream into "session not found in runtime adapter after
+/// registration".
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn cold_revival_rebinds_after_torn_shutdown_with_bound_stopped_state() {
+    let store =
+        Arc::new(crate::store::InMemoryRuntimeStore::new()) as Arc<dyn crate::store::RuntimeStore>;
+    let session_id = SessionId::new();
+
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    first
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("first-epoch prepare_bindings registers and binds");
+    first
+        .stop_runtime_executor(&session_id, "host shutdown")
+        .await
+        .expect("stop should succeed");
+    // Torn shutdown: the process dies here — no unregister ever runs, so the
+    // durable row keeps phase Stopped with the first epoch's binding tuple.
+    drop(first);
+
+    let restarted = MeerkatMachine::persistent(store, memory_blob_store());
+    let resumed = restarted.prepare_bindings(session_id.clone()).await.expect(
+        "cold-revival prepare_bindings must revive AND re-bind the session under \
+             the fresh registration epoch — a rejected re-bind is the field wedge",
+    );
+    let revived = restarted
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist after cold revival");
+    assert_ne!(
+        revived.control.phase,
+        RuntimeState::Stopped,
+        "cold revival must leave the visible runtime phase live"
+    );
+    resumed
+        .model_routing()
+        .hydrate_llm_capability_surface(&test_llm_identity(), None, &meerkat_core::ToolFilter::All)
+        .expect("resume build hydration succeeds after cold revival");
+}
+
 /// Machine-level revival semantics: the revival arms preserve session
-/// identity and runtime bindings (contrast: `UnregisterSessionStopped`
-/// clears them), and both revival arms refuse while an unregister drain
-/// window is open.
+/// identity and hydrated LLM/capability state while clearing the
+/// epoch-scoped runtime binding tuple (Stopped proves the bound epoch's
+/// executor exited; the next `PrepareBindings` binds the new epoch), and
+/// both revival arms refuse while an unregister drain window is open.
 #[test]
-fn revival_arms_preserve_identity_and_refuse_while_draining() {
+fn revival_arms_preserve_identity_clear_epoch_binding_and_refuse_while_draining() {
     use crate::meerkat_machine::dsl as mm_dsl;
 
     let stopped_state = || mm_dsl::MeerkatMachineState {
@@ -3789,8 +3839,36 @@ fn revival_arms_preserve_identity_and_refuse_while_draining() {
         active_runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-1".to_string())),
         ..Default::default()
     };
+    let assert_epoch_binding_cleared = |state: &mm_dsl::MeerkatMachineState, arc: &str| {
+        assert_eq!(
+            state.active_runtime_id, None,
+            "{arc}: the runtime binding is epoch-scoped; Stopped proves the bound \
+             epoch's executor exited, so revival must clear it (a preserved dead \
+             binding makes every PrepareBindings re-bind guard-rejected — the \
+             0.7.25 identity-first cold-revival wedge)"
+        );
+        assert_eq!(state.active_fence_token, None, "{arc}: fence cleared");
+        assert_eq!(
+            state.active_runtime_generation, None,
+            "{arc}: generation cleared"
+        );
+        assert_eq!(
+            state.active_runtime_epoch_id, None,
+            "{arc}: epoch id cleared"
+        );
+    };
+    // The new epoch's binding, as the shell/mob presents it after revival —
+    // deliberately different from the dead epoch's tuple in every field.
+    let rebind_input = || mm_dsl::MeerkatMachineInput::PrepareBindings {
+        agent_runtime_id: mm_dsl::AgentRuntimeId("runtime-2".to_string()),
+        fence_token: mm_dsl::FenceToken(4),
+        generation: None,
+        runtime_epoch_id: Some(mm_dsl::RuntimeEpochId("epoch-2".to_string())),
+        session_id: mm_dsl::SessionId("session-revive".to_string()),
+    };
 
-    // RegisterSession revival: Stopped → Idle preserving identity/bindings.
+    // RegisterSession revival: Stopped → Idle preserving identity, clearing
+    // the dead epoch's binding tuple; the new epoch then binds cleanly.
     let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(stopped_state())
         .expect("stopped state must be recoverable");
     mm_dsl::MeerkatMachineMutator::apply(
@@ -3809,18 +3887,21 @@ fn revival_arms_preserve_identity_and_refuse_while_draining() {
         Some(mm_dsl::SessionId("session-revive".to_string())),
         "revival must preserve the session identity"
     );
-    assert_eq!(
-        authority.state().active_runtime_id,
-        Some(mm_dsl::AgentRuntimeId("runtime-1".to_string())),
-        "revival must preserve the runtime binding"
+    assert_epoch_binding_cleared(authority.state(), "RegisterSession revival");
+    mm_dsl::MeerkatMachineMutator::apply(&mut authority, rebind_input()).expect(
+        "the fresh epoch's PrepareBindings must bind a revived session — a \
+         rejected re-bind is the cold-revival wedge class",
     );
     assert_eq!(
-        authority.state().active_fence_token,
-        Some(mm_dsl::FenceToken(3)),
-        "revival must preserve the fence binding"
+        authority.state().active_runtime_epoch_id,
+        Some(mm_dsl::RuntimeEpochId("epoch-2".to_string())),
+        "re-bind must adopt the new epoch's tuple"
     );
 
-    // EnsureSessionWithExecutor revival: Stopped → Attached + Active.
+    // EnsureSessionWithExecutor revival: Stopped → Attached + Active, with
+    // the same epoch-binding clear; the re-bind is admissible AT ATTACHED —
+    // the exact field rejection signature (PrepareBindings GuardRejected
+    // { phase: Attached }).
     let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(stopped_state())
         .expect("stopped state must be recoverable");
     mm_dsl::MeerkatMachineMutator::apply(
@@ -3838,6 +3919,16 @@ fn revival_arms_preserve_identity_and_refuse_while_draining() {
         authority.state().registration_phase,
         mm_dsl::RegistrationPhase::Active,
         "executor revival must grant the active registration claim"
+    );
+    assert_epoch_binding_cleared(authority.state(), "EnsureSessionWithExecutor revival");
+    mm_dsl::MeerkatMachineMutator::apply(&mut authority, rebind_input()).expect(
+        "the fresh epoch's PrepareBindings must bind at Attached after executor \
+         revival — the exact field rejection this class test kills",
+    );
+    assert_eq!(
+        authority.state().lifecycle_phase,
+        mm_dsl::MeerkatPhase::Attached,
+        "re-bind at Attached self-loops"
     );
 
     // Both revivals refuse while the unregister drain window is open: the

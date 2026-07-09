@@ -1414,6 +1414,35 @@ async fn save_session_projection_with_storage_normalization_bridge(
 ) -> Result<(), SessionStoreError> {
     match store.save(session).await {
         Ok(()) => Ok(()),
+        // Write half of the torn-shutdown wedge for CLASSIC (non-incremental)
+        // stores (field, meerkat 0.7.25 / identity-first gateways): the
+        // intra-turn checkpointer left a stamped row AHEAD of the committed
+        // authority, and this authority save trips the store's append-only
+        // guard. The incremental head-canonical path and the audited
+        // authoritative-projection path already consult the machine-owned
+        // rollback here; without this arm, external `SessionStore`
+        // implementations wedge permanently on resume (every retry re-throws
+        // MonotonicityViolation). The `SessionDocumentMachine` — not this
+        // shell — owns the disposition; `RebuildToAuthority` requires the
+        // row to be a faithful continuation of the authority AND to carry
+        // the checkpointer's own provenance stamp, so genuine forks and
+        // out-of-band divergence keep failing closed.
+        Err(error @ SessionStoreError::MonotonicityViolation { .. }) => {
+            let Some(previous) = store.load(session.id()).await? else {
+                return Err(error);
+            };
+            let previous_projection_token =
+                meerkat_core::session_store::session_projection_cas_token(&previous)?;
+            if runtime_projection_rollback_authorized(session, &previous)? {
+                return store
+                    .save_authoritative_projection_if_current_revision(
+                        session,
+                        Some(previous_projection_token),
+                    )
+                    .await;
+            }
+            Err(error)
+        }
         Err(
             error @ (SessionStoreError::TranscriptContinuityViolation { .. }
             | SessionStoreError::InvalidTranscriptRewrite { .. }),
@@ -19594,6 +19623,97 @@ mod tests {
             !runtime_projection_rollback_authorized(&authority, &forked_row)
                 .expect("rollback resolution should succeed"),
             "a stamped row that forks from the authority must not be rebuilt"
+        );
+    }
+
+    /// Bug B-2 class pin (field: identity-first gateways, meerkat 0.7.25):
+    /// the WRITE half of the torn-shutdown wedge must clear on CLASSIC
+    /// (non-incremental) stores too. The incremental head-canonical path and
+    /// the audited authoritative-projection path already consult the
+    /// machine-owned rollback; external `SessionStore` implementations route
+    /// plain projection saves through the storage-normalization bridge,
+    /// where a stamped ahead row previously re-threw MonotonicityViolation
+    /// on every resume save — permanently stranding the session.
+    #[tokio::test]
+    async fn classic_store_projection_bridge_converges_stamped_ahead_row() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let blob_store = memory_blob_store();
+
+        let mut authority = Session::new();
+        authority.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+
+        // The intra-turn checkpointer wrote ahead of the boundary commit and
+        // a host kill froze the row there.
+        let mut ahead_row = authority.clone();
+        ahead_row.push(Message::User(UserMessage::text(
+            "checkpointed but uncommitted".to_string(),
+        )));
+        ahead_row.set_runtime_checkpoint_provenance();
+        store
+            .save(&ahead_row)
+            .await
+            .expect("persist stamped ahead row");
+
+        save_session_projection_with_storage_normalization_bridge(
+            store.as_ref(),
+            blob_store.as_ref(),
+            &authority,
+        )
+        .await
+        .expect(
+            "the authority save must converge the stamped ahead row instead of wedging on \
+             MonotonicityViolation",
+        );
+
+        let persisted = store
+            .load(authority.id())
+            .await
+            .expect("load should succeed")
+            .expect("row should exist");
+        assert_eq!(
+            persisted.messages().len(),
+            authority.messages().len(),
+            "the row must be rebuilt onto committed truth (unacknowledged tail discarded)"
+        );
+        assert!(
+            !persisted.has_runtime_checkpoint_provenance(),
+            "the converged row is boundary-committed content, not a checkpointer write"
+        );
+    }
+
+    /// Sibling fail-closed pin: an ahead row WITHOUT the checkpointer's
+    /// stamp is out-of-band divergence — the classic-store bridge must keep
+    /// rejecting the shrink.
+    #[tokio::test]
+    async fn classic_store_projection_bridge_keeps_unstamped_shrink_fail_closed() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let blob_store = memory_blob_store();
+
+        let mut authority = Session::new();
+        authority.push(Message::User(UserMessage::text(
+            "committed turn".to_string(),
+        )));
+        let mut unstamped_row = authority.clone();
+        unstamped_row.push(Message::User(UserMessage::text(
+            "out-of-band appended".to_string(),
+        )));
+        store
+            .save(&unstamped_row)
+            .await
+            .expect("persist unstamped ahead row");
+
+        let error = save_session_projection_with_storage_normalization_bridge(
+            store.as_ref(),
+            blob_store.as_ref(),
+            &authority,
+        )
+        .await
+        .expect_err("an unstamped ahead row must keep the shrink fail-closed");
+        assert!(
+            matches!(error, SessionStoreError::MonotonicityViolation { .. }),
+            "expected MonotonicityViolation, got {error:?}"
         );
     }
 

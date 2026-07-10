@@ -689,7 +689,7 @@ Gates: `make machine-codegen` / `machine-check-drift` / `machine-verify`, `runti
 ### 16.4 Wire deltas (meerkat-contracts; rides the §7 V4 protocol bump)
 
 New `BridgeCommand` variants (member-addressed, V4-required, `deny_unknown_fields`):
-- `OpenMemberLiveChannel(BridgeLiveOpenPayload { supervisor, epoch, protocol_version, turning_mode: Option<RealtimeTurningMode>, transport: Option<LiveOpenTransport> })` — mirrors `LiveOpenParams` minus `session_id` (wire/live.rs:123-129; identity addressing replaces it).
+- `OpenMemberLiveChannel(BridgeLiveOpenPayload { supervisor, epoch, protocol_version, turning_mode: Option<RealtimeTurningMode>, transport: Option<LiveOpenTransport>, seed_max_chars: Option<usize> })` — mirrors `LiveOpenParams` minus `session_id` (wire/live.rs:123-129; identity addressing replaces it).
 - `CloseMemberLiveChannel(BridgeLiveChannelPayload { supervisor, epoch, protocol_version, channel_id })`
 - `MemberLiveChannelStatus(BridgeLiveChannelPayload)`
 - `ControlMemberLiveChannel(BridgeLiveControlPayload { supervisor, epoch, protocol_version, channel_id, verb: BridgeLiveControlVerb })` with `BridgeLiveControlVerb = CommitInput | Interrupt | Truncate(mirror of live/truncate params) | Refresh`.

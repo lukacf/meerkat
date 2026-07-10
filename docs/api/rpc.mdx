@@ -112,7 +112,7 @@ subset.
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
-| `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live audio/text channel with model-gated image input |
+| `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live channel; optionally bound its serialized seed messages |
 | `live/webrtc/answer` | Live | `LiveWebrtcAnswerParams` | `LiveWebrtcAnswerResult` | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Live | `LiveChannelParams` | `LiveStatusResult` | Get the status of a live channel |
 | `live/close` | Live | `LiveChannelParams` | `LiveCloseResult` | Close a live channel |
@@ -1172,6 +1172,30 @@ Create a session on a realtime-capable model and call `live/open`:
 
 `live/open` returns a `LiveOpenResult` with transport bootstrap (e.g. WebSocket URL), `WireLiveChannelCapabilities`, and `WireLiveContinuityMode`.
 
+<ParamField body="session_id" type="string" required>
+  Session whose canonical history seeds the live channel.
+</ParamField>
+
+<ParamField body="turning_mode" type="provider_managed | explicit_commit | null" default="null">
+  Optional input-turning mode. Omitted preserves provider-managed behavior.
+</ParamField>
+
+<ParamField body="transport" type="websocket | webrtc | null" default="null">
+  Optional live transport. Omitted uses the server default.
+</ParamField>
+
+<ParamField body="seed_max_chars" type="usize | null" default="null">
+  Optional positive serialized-character budget for the core-owned seed
+  message window. Omitted preserves the complete canonical history. When
+  present, core selects a recent whole-turn suffix. The resolved root prompt
+  is never dropped and must fit; an existing compaction-summary head may also
+  be retained. Any truncation returns degraded continuity. Zero is rejected.
+</ParamField>
+
+Runtime system context and the canonical multimodal sidecars remain outside
+the message window. Image identity, tombstones, and aggregate accounting stay
+complete even when older seed messages are omitted.
+
 ### live/status
 
 Read the current state of a live channel.
@@ -1259,7 +1283,7 @@ transport details.
 
 | Method | Purpose |
 |--------|---------|
-| `live/open` | Open a live audio/text channel with model-gated image input |
+| `live/open` | Open a live channel; optional positive `seed_max_chars` bounds serialized whole-turn seed messages |
 | `live/webrtc/answer` | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Get the status of a live channel |
 | `live/close` | Close a live channel |

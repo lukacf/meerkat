@@ -1162,11 +1162,18 @@ void liveChannel;
 const liveOpts: LiveChannelOptions = { turningMode: "explicit_commit" };
 void liveOpts;
 
+// The convenience wrapper exposes the bounded serialized seed as camelCase.
+const liveSeedWindowOpts: LiveChannelOptions = { seedMaxChars: 24_000 };
+// @ts-expect-error seedMaxChars is numeric; the server validates positivity.
+const liveInvalidSeedWindowOpts: LiveChannelOptions = { seedMaxChars: "24000" };
+void liveSeedWindowOpts;
+void liveInvalidSeedWindowOpts;
+
 // LiveChannel with options
 const liveChannelWithOpts: LiveChannel = LiveChannel.session(
   mockClient,
   "session_456",
-  { turningMode: "provider_managed" },
+  { turningMode: "provider_managed", seedMaxChars: 24_000 },
 );
 void liveChannelWithOpts;
 

@@ -35,6 +35,7 @@ use meerkat_core::{
     PendingSystemContextAppend, Session, SessionLlmIdentity, SessionToolVisibilityState,
 };
 use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
+use std::num::NonZeroUsize;
 
 use crate::session_runtime::errors::LiveOpenPrecheckError;
 
@@ -107,6 +108,7 @@ pub fn build_live_projection_snapshot_for_runtime(
         runtime_system_context: open_config.runtime_system_context.clone(),
         user_content_identities: open_config.user_content_identities.clone(),
         user_content_tombstones: open_config.user_content_tombstones.clone(),
+        canonical_user_image_decoded_bytes: open_config.canonical_user_image_decoded_bytes,
         transcript_rewrite_generation: open_config.transcript_rewrite_generation,
     }
 }
@@ -386,22 +388,281 @@ pub fn realtime_projection_root_system_message(
     if content.trim().is_empty() {
         Ok(None)
     } else {
-        Ok(Some(Message::System(SystemMessage::new(content))))
+        // Projection must not mint ephemeral metadata: seed-window sizing is
+        // a pure function of canonical session state. Reuse the durable lead
+        // timestamp when there is one, otherwise the stable session creation
+        // timestamp. `SystemMessage::new` would stamp wall-clock time and make
+        // an exact-boundary window nondeterministic across identical opens.
+        let created_at = match session.messages().first() {
+            Some(Message::System(system)) => system.created_at,
+            Some(Message::SystemNotice(notice)) => notice.created_at,
+            _ => session.created_at().into(),
+        };
+        Ok(Some(Message::System(SystemMessage {
+            content,
+            mutation_kind: meerkat_core::SystemPromptMutationKind::Unspecified,
+            created_at,
+        })))
     }
 }
 
-/// Project a session's transcript for realtime delivery: prepend or
-/// rewrite the lead message with [`realtime_projection_root_system_message`]
-/// when one is available.
-pub fn realtime_projection_messages(session: &Session) -> Result<Vec<Message>, SessionError> {
+/// Caller-selected bound for the canonical transcript seed used by a live
+/// provider open. The count is over the serialized projected messages, after
+/// root-prompt resolution and image hydration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveSeedWindow {
+    max_chars: NonZeroUsize,
+}
+
+impl LiveSeedWindow {
+    pub fn new(max_chars: usize) -> Result<Self, LiveSeedProjectionError> {
+        NonZeroUsize::new(max_chars)
+            .map(|max_chars| Self { max_chars })
+            .ok_or(LiveSeedProjectionError::ZeroWindow)
+    }
+
+    #[must_use]
+    pub fn max_chars(self) -> usize {
+        self.max_chars.get()
+    }
+}
+
+/// Completeness of a provider replay seed relative to canonical history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveSeedProjectionStatus {
+    Complete,
+    Windowed {
+        dropped_messages: usize,
+        included_compaction_summary: bool,
+    },
+}
+
+impl LiveSeedProjectionStatus {
+    #[must_use]
+    pub fn has_known_gaps(self) -> bool {
+        matches!(self, Self::Windowed { .. })
+    }
+}
+
+/// Selected realtime seed plus the typed completeness fact consumed by the
+/// live/open continuity projection.
+#[derive(Debug, Clone)]
+pub struct LiveSeedMessageProjection {
+    pub messages: Vec<Message>,
+    pub status: LiveSeedProjectionStatus,
+}
+
+/// Failures selecting a bounded live seed before any channel/provider state is
+/// minted.
+#[derive(Debug, thiserror::Error)]
+pub enum LiveSeedProjectionError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error("live seed window must be greater than zero")]
+    ZeroWindow,
+    #[error(
+        "live seed root requires {required_chars} serialized characters, exceeding the requested {max_chars}-character window"
+    )]
+    RootExceedsWindow {
+        required_chars: usize,
+        max_chars: usize,
+    },
+    #[error("failed to serialize live seed projection: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("live seed projection size overflowed usize")]
+    SizeOverflow,
+}
+
+/// Provider-neutral open projection: the mechanical provider config plus the
+/// canonical seed-completeness fact used by public continuity reporting.
+#[derive(Debug, Clone)]
+pub struct RealtimeSessionOpenProjection {
+    pub open_config: RealtimeSessionOpenConfig,
+    pub seed_status: LiveSeedProjectionStatus,
+}
+
+/// Typed failure at the live-open projection boundary. Surfaces classify seed
+/// policy rejection directly instead of recovering its class from strings or
+/// JSON-shaped session errors.
+#[derive(Debug, thiserror::Error)]
+pub enum RealtimeSessionOpenProjectionError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error(transparent)]
+    Seed(#[from] LiveSeedProjectionError),
+}
+
+fn realtime_projection_messages_full_with_root_resolution(
+    session: &Session,
+) -> Result<(Vec<Message>, bool), SessionError> {
     let mut projected = session.messages().to_vec();
-    if let Some(root_system) = realtime_projection_root_system_message(session)? {
+    let resolved_root = realtime_projection_root_system_message(session)?;
+    let has_resolved_root = resolved_root.is_some();
+    if let Some(root_system) = resolved_root {
         match projected.first() {
             Some(Message::System(_) | Message::SystemNotice(_)) => projected[0] = root_system,
             _ => projected.insert(0, root_system),
         }
     }
-    Ok(projected)
+    Ok((projected, has_resolved_root))
+}
+
+fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
+    realtime_projection_messages_full_with_root_resolution(session).map(|(projected, _)| projected)
+}
+
+/// Project a session's complete transcript for realtime delivery. This keeps
+/// the pre-seed-window behavior for Rust callers that do not request a bound.
+pub fn realtime_projection_messages(session: &Session) -> Result<Vec<Message>, SessionError> {
+    realtime_projection_messages_full(session)
+}
+
+fn serialized_message_chars(message: &Message) -> Result<usize, LiveSeedProjectionError> {
+    Ok(serde_json::to_string(message)?.chars().count())
+}
+
+fn checked_message_chars(
+    costs: &[usize],
+    mut range: std::ops::Range<usize>,
+) -> Result<usize, LiveSeedProjectionError> {
+    range.try_fold(0usize, |total, index| {
+        total
+            .checked_add(costs[index])
+            .ok_or(LiveSeedProjectionError::SizeOverflow)
+    })
+}
+
+/// Select a bounded, deterministic projection. Existing typed compaction
+/// summary content is the optional head; the tail is retained only at complete
+/// conversational-turn boundaries, with contiguous injected context glued to
+/// the user message it accompanied.
+pub fn realtime_projection_messages_with_window(
+    session: &Session,
+    window: LiveSeedWindow,
+) -> Result<LiveSeedMessageProjection, LiveSeedProjectionError> {
+    let (projected, has_resolved_root) =
+        realtime_projection_messages_full_with_root_resolution(session)?;
+    let costs = projected
+        .iter()
+        .map(serialized_message_chars)
+        .collect::<Result<Vec<_>, _>>()?;
+    let total_chars = checked_message_chars(&costs, 0..costs.len())?;
+    if total_chars <= window.max_chars() {
+        return Ok(LiveSeedMessageProjection {
+            messages: projected,
+            status: LiveSeedProjectionStatus::Complete,
+        });
+    }
+
+    let root_len = usize::from(has_resolved_root);
+    let root_chars = checked_message_chars(&costs, 0..root_len)?;
+    if root_chars > window.max_chars() {
+        return Err(LiveSeedProjectionError::RootExceedsWindow {
+            required_chars: root_chars,
+            max_chars: window.max_chars(),
+        });
+    }
+
+    let mut selected = vec![false; projected.len()];
+    selected
+        .iter_mut()
+        .take(root_len)
+        .for_each(|keep| *keep = true);
+    let mut remaining = window.max_chars() - root_chars;
+
+    let summary_index = (root_len..projected.len()).rev().find(|index| {
+        matches!(
+            &projected[*index],
+            Message::User(user) if user.transcript_role.is_compaction_summary()
+        )
+    });
+    let included_compaction_summary = summary_index.is_some_and(|index| {
+        if costs[index] <= remaining {
+            selected[index] = true;
+            remaining -= costs[index];
+            true
+        } else {
+            false
+        }
+    });
+    let tail_start = summary_index.map_or(root_len, |index| index + 1);
+
+    let mut turn_starts = Vec::new();
+    for index in tail_start..projected.len() {
+        if matches!(
+            &projected[index],
+            Message::User(user) if user.transcript_role.is_conversational()
+        ) {
+            let mut start = index;
+            while start > tail_start
+                && matches!(
+                    &projected[start - 1],
+                    Message::User(user) if user.transcript_role.is_injected_context()
+                )
+            {
+                start -= 1;
+            }
+            turn_starts.push(start);
+        }
+    }
+
+    if !turn_starts.is_empty() {
+        let mut retained_suffix_start = None;
+        for turn_index in (0..turn_starts.len()).rev() {
+            let start = turn_starts[turn_index];
+            let end = turn_starts
+                .get(turn_index + 1)
+                .copied()
+                .unwrap_or(projected.len());
+            let turn_chars = checked_message_chars(&costs, start..end)?;
+            if turn_chars > remaining {
+                break;
+            }
+            remaining -= turn_chars;
+            retained_suffix_start = Some(start);
+        }
+        if let Some(start) = retained_suffix_start {
+            selected
+                .iter_mut()
+                .take(projected.len())
+                .skip(start)
+                .for_each(|keep| *keep = true);
+        }
+    }
+
+    let retained_count = selected.iter().filter(|keep| **keep).count();
+    let dropped_messages = projected.len().saturating_sub(retained_count);
+    let messages = projected
+        .into_iter()
+        .zip(selected)
+        .filter_map(|(message, keep)| keep.then_some(message))
+        .collect();
+    Ok(LiveSeedMessageProjection {
+        messages,
+        status: LiveSeedProjectionStatus::Windowed {
+            dropped_messages,
+            included_compaction_summary,
+        },
+    })
+}
+
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
+fn open_projection_error_to_compat_session_error(
+    error: RealtimeSessionOpenProjectionError,
+) -> SessionError {
+    match error {
+        RealtimeSessionOpenProjectionError::Session(error)
+        | RealtimeSessionOpenProjectionError::Seed(LiveSeedProjectionError::Session(error)) => {
+            error
+        }
+        RealtimeSessionOpenProjectionError::Seed(error) => {
+            SessionError::Agent(AgentError::InternalError(error.to_string()))
+        }
+    }
 }
 
 /// Project a session's runtime system context into the realtime
@@ -487,11 +748,14 @@ mod orchestrator {
 
     use super::{
         LiveChannelCloseFailure, LiveChannelRefreshFailure, LiveConfigPropagationReport,
-        LiveHotSwapSkipReason, build_live_projection_snapshot_for_runtime,
-        live_channel_identity_swap_context, live_channel_identity_swap_reason,
-        live_channel_requires_close_for_identity_change, precheck_identity,
-        realtime_projection_messages, realtime_projection_root_system_message,
-        realtime_projection_runtime_system_context, should_apply_global_model_hot_swap,
+        LiveHotSwapSkipReason, LiveSeedMessageProjection, LiveSeedProjectionStatus, LiveSeedWindow,
+        RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError,
+        build_live_projection_snapshot_for_runtime, live_channel_identity_swap_context,
+        live_channel_identity_swap_reason, live_channel_requires_close_for_identity_change,
+        open_projection_error_to_compat_session_error, precheck_identity,
+        realtime_projection_messages, realtime_projection_messages_with_window,
+        realtime_projection_root_system_message, realtime_projection_runtime_system_context,
+        should_apply_global_model_hot_swap,
     };
 
     use crate::service_factory::FactoryAgentBuilder;
@@ -761,13 +1025,14 @@ mod orchestrator {
             Ok(())
         }
 
-        /// Project the owning live session into the provider-backed
-        /// realtime open seam.
-        pub async fn realtime_session_open_config(
+        /// Project the owning live session into the provider-backed realtime
+        /// open seam, optionally selecting a bounded canonical seed.
+        pub async fn realtime_session_open_projection(
             &self,
             session_id: &SessionId,
             turning_mode: meerkat_contracts::RealtimeTurningMode,
-        ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+            seed_window: Option<LiveSeedWindow>,
+        ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
             // Acquire process-wide custody before the persistent service can
             // hydrate blob-backed image history. The take-once slot carried on
             // the returned config transfers this same lease through provider
@@ -778,45 +1043,68 @@ mod orchestrator {
                     SessionError::Agent(AgentError::InternalError(error.to_string()))
                 })?;
             Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
-            let session = match self
+            let (session, canonical_user_image_decoded_bytes) = match self
                 .service
-                .export_realtime_open_session_snapshot(session_id)
+                .export_realtime_open_session_snapshot_with_image_usage(session_id)
                 .await
             {
-                Ok(session) => session,
+                Ok(snapshot) => snapshot,
                 Err(SessionError::NotFound { .. }) => {
                     Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
                     self.service
-                        .export_realtime_open_session_snapshot(session_id)
+                        .export_realtime_open_session_snapshot_with_image_usage(session_id)
                         .await?
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             };
             let llm_identity = self.service.live_session_llm_identity(session_id).await?;
             let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
             let transcript_rewrite_generation = session
                 .transcript_rewrite_generation()
                 .map_err(|err| SessionError::Agent(AgentError::InternalError(err.to_string())))?;
-            Ok(RealtimeSessionOpenConfig::new(
-                turning_mode,
-                llm_identity,
-                visible_tools,
-                realtime_projection_messages(&session)?,
-            )
-            .with_open_projection_lease(open_projection_lease)
-            .with_runtime_system_context(realtime_projection_runtime_system_context(&session)?)
-            .with_user_content_identities(session.realtime_user_content_identities())
-            .with_user_content_tombstones(session.realtime_user_content_tombstones())
-            .with_transcript_rewrite_generation(transcript_rewrite_generation)
-            .with_system_prompt(
-                match realtime_projection_root_system_message(&session)? {
+            let seed_projection = match seed_window {
+                Some(window) => realtime_projection_messages_with_window(&session, window)?,
+                None => LiveSeedMessageProjection {
+                    messages: realtime_projection_messages(&session)?,
+                    status: LiveSeedProjectionStatus::Complete,
+                },
+            };
+            let open_config =
+                RealtimeSessionOpenConfig::new(
+                    turning_mode,
+                    llm_identity,
+                    visible_tools,
+                    seed_projection.messages,
+                )
+                .with_open_projection_lease(open_projection_lease)
+                .with_runtime_system_context(realtime_projection_runtime_system_context(&session)?)
+                .with_user_content_identities(session.realtime_user_content_identities())
+                .with_user_content_tombstones(session.realtime_user_content_tombstones())
+                .with_canonical_user_image_decoded_bytes(canonical_user_image_decoded_bytes)
+                .with_transcript_rewrite_generation(transcript_rewrite_generation)
+                .with_system_prompt(match realtime_projection_root_system_message(&session)? {
                     Some(Message::System(system)) => Some(system.content),
                     // `realtime_projection_root_system_message` only ever yields a
                     // `Message::System` (or `None`); any other shape means there is
                     // no root system prompt to project onto the typed field.
                     _ => None,
-                },
-            ))
+                });
+            Ok(RealtimeSessionOpenProjection {
+                open_config,
+                seed_status: seed_projection.status,
+            })
+        }
+
+        /// Compatibility wrapper retaining the pre-window full-history config.
+        pub async fn realtime_session_open_config(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+        ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+            self.realtime_session_open_projection(session_id, turning_mode, None)
+                .await
+                .map(|projection| projection.open_config)
+                .map_err(open_projection_error_to_compat_session_error)
         }
 
         /// Build a live open config for a session that may be deferred
@@ -827,6 +1115,17 @@ mod orchestrator {
             turning_mode: meerkat_contracts::RealtimeTurningMode,
         ) -> Result<RealtimeSessionOpenConfig, SessionError> {
             self.realtime_session_open_config(session_id, turning_mode)
+                .await
+        }
+
+        /// Build a live-open projection with an optional per-open seed window.
+        pub async fn live_open_projection_for_session(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            seed_window: Option<LiveSeedWindow>,
+        ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
+            self.realtime_session_open_projection(session_id, turning_mode, seed_window)
                 .await
         }
 
@@ -1454,9 +1753,18 @@ mod orchestrator {
 
 #[cfg(test)]
 mod prompt_truth_tests {
-    use super::build_live_projection_snapshot_for_runtime;
-    use meerkat_core::types::{Message, SessionId, SystemMessage, UserMessage};
-    use meerkat_core::{Provider, SessionLlmIdentity};
+    use super::{
+        LiveSeedProjectionError, LiveSeedProjectionStatus, LiveSeedWindow,
+        build_live_projection_snapshot_for_runtime, realtime_projection_messages,
+        realtime_projection_messages_with_window, serialized_message_chars,
+    };
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, SessionId, StopReason, SystemMessage,
+        UserMessage,
+    };
+    use meerkat_core::{
+        Provider, Session, SessionBuildState, SessionLlmIdentity, SystemPromptOverride,
+    };
     use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 
     fn test_identity() -> SessionLlmIdentity {
@@ -1467,6 +1775,223 @@ mod prompt_truth_tests {
             self_hosted_server_id: None,
             auth_binding: None,
         }
+    }
+
+    fn assistant_text(content: &str) -> Message {
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: content.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        ))
+    }
+
+    fn window_test_session() -> Session {
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState::default())
+            .expect("test build state must serialize");
+        session.push_batch(vec![
+            Message::System(SystemMessage::new("resolved root")),
+            Message::User(UserMessage::compaction_summary("prior history summary")),
+            Message::User(UserMessage::injected_context("old injected context")),
+            Message::User(UserMessage::text("old user turn")),
+            assistant_text("old assistant turn"),
+            Message::User(UserMessage::injected_context("new injected context")),
+            Message::User(UserMessage::text("new user turn")),
+            assistant_text("new assistant turn"),
+        ]);
+        session
+    }
+
+    fn disabled_root_test_session() -> Session {
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState {
+                system_prompt: SystemPromptOverride::Disable,
+                ..Default::default()
+            })
+            .expect("test build state must serialize");
+        session.push_batch(vec![
+            Message::System(SystemMessage::new("stale disabled root")),
+            Message::User(UserMessage::text("current user turn")),
+            assistant_text("current assistant turn"),
+        ]);
+        session
+    }
+
+    #[test]
+    fn live_seed_window_rejects_zero() {
+        assert!(matches!(
+            LiveSeedWindow::new(0),
+            Err(LiveSeedProjectionError::ZeroWindow)
+        ));
+    }
+
+    #[test]
+    fn live_seed_window_preserves_full_projection_when_it_fits() {
+        let session = window_test_session();
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let full_chars = full
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialized costs")
+            .into_iter()
+            .sum();
+
+        let projection = realtime_projection_messages_with_window(
+            &session,
+            LiveSeedWindow::new(full_chars).expect("positive window"),
+        )
+        .expect("bounded projection");
+
+        assert_eq!(projection.messages, full);
+        assert_eq!(projection.status, LiveSeedProjectionStatus::Complete);
+    }
+
+    #[test]
+    fn live_seed_window_does_not_charge_a_disabled_stale_system_lead_as_root() {
+        let session = disabled_root_test_session();
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let tail_budget = full[1..]
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialized tail costs")
+            .into_iter()
+            .sum::<usize>();
+
+        let projection = realtime_projection_messages_with_window(
+            &session,
+            LiveSeedWindow::new(tail_budget).expect("positive window"),
+        )
+        .expect("a disabled stale lead must not cause root-too-small rejection");
+
+        assert_eq!(projection.messages, full[1..]);
+        assert_eq!(
+            projection.status,
+            LiveSeedProjectionStatus::Windowed {
+                dropped_messages: 1,
+                included_compaction_summary: false,
+            }
+        );
+    }
+
+    #[test]
+    fn live_seed_window_is_deterministic_at_an_exact_boundary() {
+        let session = window_test_session();
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let full_chars = full
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialized costs")
+            .into_iter()
+            .sum::<usize>();
+        let window = LiveSeedWindow::new(full_chars - 1).expect("positive boundary window");
+
+        let first = realtime_projection_messages_with_window(&session, window)
+            .expect("first bounded projection");
+        let second = realtime_projection_messages_with_window(&session, window)
+            .expect("second bounded projection");
+
+        assert_eq!(first.messages, second.messages);
+        assert_eq!(first.status, second.status);
+        assert!(first.status.has_known_gaps());
+    }
+
+    #[test]
+    fn live_seed_window_keeps_root_summary_and_newest_complete_turn() {
+        let session = window_test_session();
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let costs = full
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialized costs");
+        let budget = costs[0] + costs[1] + costs[5..].iter().sum::<usize>();
+
+        let projection = realtime_projection_messages_with_window(
+            &session,
+            LiveSeedWindow::new(budget).expect("positive window"),
+        )
+        .expect("bounded projection");
+
+        let mut expected = full[..2].to_vec();
+        expected.extend_from_slice(&full[5..]);
+        assert_eq!(projection.messages, expected);
+        let selected_chars = projection
+            .messages
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("selected serialized costs")
+            .into_iter()
+            .sum::<usize>();
+        assert!(selected_chars <= budget);
+        assert_eq!(
+            projection.status,
+            LiveSeedProjectionStatus::Windowed {
+                dropped_messages: 3,
+                included_compaction_summary: true,
+            }
+        );
+    }
+
+    #[test]
+    fn live_seed_window_never_keeps_a_partial_newest_turn() {
+        let session = window_test_session();
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let costs = full
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialized costs");
+        let latest_turn_chars = costs[5..].iter().sum::<usize>();
+        let budget = costs[0] + costs[1] + latest_turn_chars - 1;
+
+        let projection = realtime_projection_messages_with_window(
+            &session,
+            LiveSeedWindow::new(budget).expect("positive window"),
+        )
+        .expect("bounded projection");
+
+        assert_eq!(projection.messages.len(), 2);
+        assert!(matches!(projection.messages[0], Message::System(_)));
+        assert!(matches!(
+            &projection.messages[1],
+            Message::User(user) if user.transcript_role.is_compaction_summary()
+        ));
+        assert_eq!(
+            projection.status,
+            LiveSeedProjectionStatus::Windowed {
+                dropped_messages: 6,
+                included_compaction_summary: true,
+            }
+        );
+    }
+
+    #[test]
+    fn live_seed_window_fails_when_resolved_root_cannot_fit() {
+        let session = window_test_session();
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let root_chars = serialized_message_chars(&full[0]).expect("root cost");
+
+        let error = realtime_projection_messages_with_window(
+            &session,
+            LiveSeedWindow::new(root_chars - 1).expect("positive window"),
+        )
+        .expect_err("root must not be silently dropped");
+
+        assert!(matches!(
+            error,
+            LiveSeedProjectionError::RootExceedsWindow {
+                required_chars,
+                max_chars,
+            } if required_chars == root_chars && max_chars == root_chars - 1
+        ));
     }
 
     /// R10: the runtime-side snapshot builder must surface the typed

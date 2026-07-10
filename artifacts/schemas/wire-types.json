@@ -24335,6 +24335,15 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `live/open`.\n\nR3-1 (P1): `turning_mode` lets callers pick between the provider-managed\n(server-VAD) flow and the explicit-commit flow. The G9 typed text-only\n`live/commit_input { response_modality: text }` path requires\n`ExplicitCommit` because the OpenAI realtime API rejects\n`input_audio_buffer.commit` unless the session was opened with explicit\ncommit semantics (server VAD owns commits otherwise). Pre-R3-1 the\nhandler hard-coded `ProviderManaged`, which made the typed text-only\npath unreachable on a public channel — calling it killed the channel\ninstead of producing sideband text.\n\nDefault (`None`) preserves the prior wire shape: callers that omit the\nfield get `ProviderManaged`, matching the legacy behavior.",
     "properties": {
+      "seed_max_chars": {
+        "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn suffix\nwindow. The resolved root prompt must fit and is never dropped; an\nexisting compaction-summary head may be retained. If any history is\nomitted, the open result reports degraded continuity rather than\npretending the bounded replay was complete.\n\nRuntime system context and canonical multimodal identity, tombstone,\nand accounting state remain full sidecars outside this message window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",
+        "format": "uint",
+        "minimum": 1,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
       "session_id": {
         "type": "string"
       },

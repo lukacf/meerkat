@@ -15,6 +15,10 @@ via cargo-semver-checks against the published baselines).
 
 ### Breaking
 
+- `meerkat_contracts::LiveOpenParams` gained the optional
+  `seed_max_chars` field. Downstream Rust struct literals must initialize it;
+  omitting the field on the wire preserves the complete-history realtime seed,
+  while a positive value requests a bounded complete-turn suffix.
 - `meerkat_contracts::RealtimeInputKind` gained the exhaustive `Image`
   variant and `meerkat_contracts::RealtimeInputChunk` gained the exhaustive
   `ImageChunk(RealtimeImageChunk)` variant. Downstream Rust matches over
@@ -51,11 +55,12 @@ via cargo-semver-checks against the published baselines).
   `(&RealtimeExternalSessionTarget, &RealtimeSessionOpenConfig)` instead of
   separate identity and turning-mode arguments. `RealtimeSessionOpenConfig`
   struct literals must also initialize `user_content_identities`,
-  `user_content_tombstones`, and `transcript_rewrite_generation`.
+  `user_content_tombstones`, `canonical_user_image_decoded_bytes`, and
+  `transcript_rewrite_generation`.
 - `meerkat_core::LiveProjectionSnapshot` struct literals must initialize the
-  new `user_content_identities`, `user_content_tombstones`, and
-  `transcript_rewrite_generation` fields used by exact-retry and live rewrite
-  guards.
+  new `user_content_identities`, `user_content_tombstones`,
+  `canonical_user_image_decoded_bytes`, and `transcript_rewrite_generation`
+  fields used by exact-retry, image-budget, and live rewrite guards.
 - `WireLiveAdapterObservation::RealtimeTranscript.event` now uses the
   public-safe `WireRealtimeTranscriptEvent` Rust type instead of the internal
   `RealtimeTranscriptEvent`. Its serialized/schema shape preserves the public

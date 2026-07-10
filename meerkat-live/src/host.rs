@@ -3881,6 +3881,7 @@ mod tests {
             runtime_system_context: vec![],
             user_content_identities: vec![],
             user_content_tombstones: vec![],
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
 

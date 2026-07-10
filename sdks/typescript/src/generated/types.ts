@@ -2861,6 +2861,7 @@ export interface RealtimeImageChunk {
 }
 
 export interface LiveOpenParams {
+  seed_max_chars?: number;
   session_id: string;
   transport?: "websocket" | "webrtc";
   turning_mode?: RealtimeTurningMode;

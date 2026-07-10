@@ -3419,6 +3419,7 @@ class MeerkatClient:
         session_id: str,
         turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
         transport: Literal["websocket", "webrtc"] | None = None,
+        seed_max_chars: int | None = None,
     ) -> dict[str, Any]:
         """Open a live audio/text channel with model-gated image input.
 
@@ -3444,12 +3445,23 @@ class MeerkatClient:
         opened with explicit-commit semantics. Defaults to ``None``,
         which omits the field on the wire — the server treats omitted as
         ``"provider_managed"`` for back-compat.
+
+        ``seed_max_chars`` optionally bounds serialized provider seed messages
+        and requests a core-owned, whole-turn suffix. Omitting it preserves
+        the full canonical seed. The resolved root prompt is never dropped
+        and must fit; an existing compaction summary may be retained as the
+        head. Any truncation is reported as degraded continuity. Runtime
+        system context and canonical image identity, tombstone, and accounting
+        sidecars remain complete outside the message window. When provided,
+        the value must be positive; the server rejects zero.
         """
         params: dict[str, Any] = {"session_id": session_id}
         if turning_mode is not None:
             params["turning_mode"] = turning_mode
         if transport is not None:
             params["transport"] = transport
+        if seed_max_chars is not None:
+            params["seed_max_chars"] = seed_max_chars
         return await self._request("live/open", params)
 
     async def live_webrtc_answer(

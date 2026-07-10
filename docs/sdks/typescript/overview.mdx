@@ -158,6 +158,7 @@ await client.connect({ liveWs: true });
 const session = await client.createSession("Open a live channel");
 const channel = LiveChannel.session(client, session.id, {
   turningMode: "explicit_commit",
+  seedMaxChars: 24_000,
 });
 
 const openResult = await channel.open();
@@ -177,6 +178,13 @@ await channel.close();
 Image keys are required, caller-stable, and session-scoped. See
 [Live Channels](/guides/realtime#sending-image-input) for same-key replay,
 conflict handling, and reconnect hydration limits.
+
+`seedMaxChars` maps to `live/open.seed_max_chars`. Use a positive value to
+bound serialized seed messages and request a core-selected whole-turn suffix;
+omit it for the complete canonical seed. The resolved root must fit; an existing
+compaction summary may be retained, and any truncation reports
+degraded continuity. Canonical image identity, tombstone, and accounting
+sidecars remain complete. The server rejects zero.
 
 ### Mob methods
 

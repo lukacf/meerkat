@@ -8,6 +8,9 @@ use std::sync::Arc;
 #[cfg(feature = "live-webrtc")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use meerkat::session_runtime::live_orchestration::{
+    LiveSeedProjectionError, RealtimeSessionOpenProjectionError,
+};
 use meerkat_client::realtime_session::RealtimeSessionFactory;
 use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
@@ -746,6 +749,7 @@ fn build_live_projection_snapshot(
         runtime_system_context: open_config.runtime_system_context.clone(),
         user_content_identities: open_config.user_content_identities.clone(),
         user_content_tombstones: open_config.user_content_tombstones.clone(),
+        canonical_user_image_decoded_bytes: open_config.canonical_user_image_decoded_bytes,
         transcript_rewrite_generation: open_config.transcript_rewrite_generation,
     }
 }
@@ -756,15 +760,59 @@ fn build_live_projection_snapshot(
 ///   conversation.
 /// - `TranscriptOnly` if seed messages are present — the adapter has been
 ///   handed canonical history to seed its provider session, so continuity
-///   exists at the transcript level. Provider-native resume (full
+///   exists at the transcript level.
+/// - `Degraded` whenever the seed projection reports known gaps, including
+///   when a tight window retains no replay messages.
+///
+/// Provider-native resume (full
 ///   provider-side continuation of the previous response) is not yet
 ///   wired; that becomes `Provider` once `LiveAudioConfig` and
 ///   provider-resume metadata are threaded through the snapshot.
-fn continuity_from_snapshot(snapshot: &LiveProjectionSnapshot) -> LiveContinuityMode {
-    if snapshot.seed_messages.is_empty() {
+fn continuity_from_snapshot(
+    snapshot: &LiveProjectionSnapshot,
+    seed_status: meerkat::session_runtime::live_orchestration::LiveSeedProjectionStatus,
+) -> LiveContinuityMode {
+    if seed_status.has_known_gaps() {
+        LiveContinuityMode::Degraded
+    } else if snapshot.seed_messages.is_empty() {
         LiveContinuityMode::Fresh
     } else {
         LiveContinuityMode::TranscriptOnly
+    }
+}
+
+fn live_seed_window_from_params(
+    id: Option<RpcId>,
+    seed_max_chars: Option<usize>,
+) -> Result<Option<meerkat::session_runtime::live_orchestration::LiveSeedWindow>, Box<RpcResponse>>
+{
+    match seed_max_chars {
+        Some(max_chars) => {
+            meerkat::session_runtime::live_orchestration::LiveSeedWindow::new(max_chars)
+                .map(Some)
+                .map_err(|projection_error| {
+                    Box::new(RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        projection_error.to_string(),
+                    ))
+                })
+        }
+        None => Ok(None),
+    }
+}
+
+fn live_open_projection_error_code(error: &RealtimeSessionOpenProjectionError) -> i32 {
+    match error {
+        RealtimeSessionOpenProjectionError::Seed(
+            LiveSeedProjectionError::ZeroWindow | LiveSeedProjectionError::RootExceedsWindow { .. },
+        ) => crate::error::INVALID_PARAMS,
+        RealtimeSessionOpenProjectionError::Session(_)
+        | RealtimeSessionOpenProjectionError::Seed(
+            LiveSeedProjectionError::Session(_)
+            | LiveSeedProjectionError::Serialization(_)
+            | LiveSeedProjectionError::SizeOverflow,
+        ) => crate::error::INTERNAL_ERROR,
     }
 }
 
@@ -977,19 +1025,24 @@ pub async fn handle_live_open(
     let turning_mode = parsed
         .turning_mode
         .unwrap_or(RealtimeTurningMode::ProviderManaged);
-    let prepared_open_config = match runtime
-        .live_open_config_for_session(&session_id, turning_mode)
+    // Validate the caller-controlled window before minting a candidate
+    // channel id or asking machine authority to admit a live open.
+    let seed_window = match live_seed_window_from_params(id.clone(), parsed.seed_max_chars) {
+        Ok(seed_window) => seed_window,
+        Err(response) => return *response,
+    };
+    let prepared_projection = match runtime
+        .live_open_projection_for_session(&session_id, turning_mode, seed_window)
         .await
     {
-        Ok(config) => config,
+        Ok(projection) => projection,
         Err(err) => {
-            return RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("failed to build session config: {err}"),
-            );
+            let code = live_open_projection_error_code(&err);
+            return RpcResponse::error(id, code, format!("failed to build session config: {err}"));
         }
     };
+    let seed_status = prepared_projection.seed_status;
+    let prepared_open_config = prepared_projection.open_config;
     let live_open_identity = prepared_open_config.llm_identity.clone();
 
     let candidate_channel_id = LiveChannelId::random_uuid();
@@ -1157,7 +1210,7 @@ pub async fn handle_live_open(
                     open_config,
                     resolved_audio_config.clone(),
                 );
-                continuity = continuity_from_snapshot(&snapshot);
+                continuity = continuity_from_snapshot(&snapshot, seed_status);
             }
             Err(err) => {
                 close_live_channel_after_open_failure(host, runtime, &session_id, &channel_id)
@@ -2334,6 +2387,7 @@ mod tests {
             session_id: "sess-123".into(),
             turning_mode: None,
             transport: None,
+            seed_max_chars: None,
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -2346,6 +2400,7 @@ mod tests {
             session_id: "sess-123".into(),
             turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
             transport: None,
+            seed_max_chars: Some(24_000),
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -2379,14 +2434,13 @@ mod tests {
     }
 
     #[test]
-    fn continuity_from_snapshot_never_synthesizes_provider_native_resume() {
+    fn continuity_from_snapshot_tracks_seed_completeness_without_provider_resume() {
         // T12: `ProviderNativeResume { provider_session_id }` is reserved
-        // for a future provider that surfaces a resume id. No provider
-        // Meerkat ships today does, so the open-time helper must only emit
-        // `Fresh` (empty seed) or `TranscriptOnly` (any seed messages) —
-        // never `ProviderNativeResume` and never `Degraded` (the latter is
-        // only set on canonical-replay failure further up the open path).
-        use meerkat_core::Provider;
+        // for a future provider that surfaces a resume id. A complete seed
+        // is `Fresh` when empty and `TranscriptOnly` when non-empty. A
+        // windowed seed has known canonical-history gaps and must be
+        // `Degraded`, even when the retained provider seed is empty.
+        use meerkat::session_runtime::live_orchestration::LiveSeedProjectionStatus;
         use meerkat_core::live_adapter::LiveProjectionSnapshot;
         use meerkat_core::types::{Message, SessionId, UserMessage};
 
@@ -2402,20 +2456,72 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         assert_eq!(
-            super::continuity_from_snapshot(&empty),
+            super::continuity_from_snapshot(&empty, LiveSeedProjectionStatus::Complete),
             LiveContinuityMode::Fresh
         );
 
         let seeded = LiveProjectionSnapshot {
             seed_messages: vec![Message::User(UserMessage::text("hi".to_string()))],
-            ..empty
+            ..empty.clone()
         };
         assert_eq!(
-            super::continuity_from_snapshot(&seeded),
+            super::continuity_from_snapshot(&seeded, LiveSeedProjectionStatus::Complete),
             LiveContinuityMode::TranscriptOnly
+        );
+
+        let windowed = LiveSeedProjectionStatus::Windowed {
+            dropped_messages: 3,
+            included_compaction_summary: false,
+        };
+        assert_eq!(
+            super::continuity_from_snapshot(&empty, windowed),
+            LiveContinuityMode::Degraded,
+            "known gaps must stay degraded even when no replay messages fit"
+        );
+        assert_eq!(
+            super::continuity_from_snapshot(&seeded, windowed),
+            LiveContinuityMode::Degraded,
+            "a retained suffix must not conceal omitted canonical history"
+        );
+    }
+
+    #[test]
+    fn zero_live_seed_window_is_invalid_params_before_channel_creation() {
+        let response = *super::live_seed_window_from_params(Some(RpcId::Num(30)), Some(0))
+            .expect_err("zero is not a valid live seed window");
+        let rpc_error = response.error.expect("typed JSON-RPC error");
+        assert_eq!(rpc_error.code, error::INVALID_PARAMS);
+        assert_eq!(
+            rpc_error.message,
+            "live seed window must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn typed_live_seed_projection_errors_map_without_string_reclassification() {
+        use meerkat::session_runtime::live_orchestration::{
+            LiveSeedProjectionError, RealtimeSessionOpenProjectionError,
+        };
+
+        let too_small =
+            RealtimeSessionOpenProjectionError::Seed(LiveSeedProjectionError::RootExceedsWindow {
+                required_chars: 11,
+                max_chars: 10,
+            });
+        assert_eq!(
+            super::live_open_projection_error_code(&too_small),
+            error::INVALID_PARAMS
+        );
+
+        let internal =
+            RealtimeSessionOpenProjectionError::Seed(LiveSeedProjectionError::SizeOverflow);
+        assert_eq!(
+            super::live_open_projection_error_code(&internal),
+            error::INTERNAL_ERROR
         );
     }
 
@@ -2913,6 +3019,7 @@ mod tests {
             runtime_system_context: vec![],
             user_content_identities: vec![],
             user_content_tombstones: vec![],
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         let acceptance = host
@@ -3093,6 +3200,7 @@ mod tests {
                 runtime_system_context: vec![],
                 user_content_identities: vec![],
                 user_content_tombstones: vec![],
+                canonical_user_image_decoded_bytes: None,
                 transcript_rewrite_generation: 0,
             };
             snapshot.snapshot_version = host

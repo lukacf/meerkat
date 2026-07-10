@@ -295,6 +295,18 @@ pub async fn hydrate_user_images_for_realtime_projection(
     messages: &mut [Message],
     max_decoded_bytes: usize,
 ) -> Result<(), RealtimeUserImageHydrationError> {
+    hydrate_user_images_for_realtime_projection_with_usage(blob_store, messages, max_decoded_bytes)
+        .await
+        .map(|_| ())
+}
+
+/// Hydrate realtime user images and return the full canonical decoded-byte
+/// usage independently of any later provider seed selection.
+pub async fn hydrate_user_images_for_realtime_projection_with_usage(
+    blob_store: &dyn BlobStore,
+    messages: &mut [Message],
+    max_decoded_bytes: usize,
+) -> Result<usize, RealtimeUserImageHydrationError> {
     struct HydratedImage {
         message_index: usize,
         block_index: usize,
@@ -417,7 +429,7 @@ pub async fn hydrate_user_images_for_realtime_projection(
             },
         };
     }
-    Ok(())
+    Ok(decoded_total)
 }
 
 fn decoded_realtime_image_len(

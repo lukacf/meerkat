@@ -51,6 +51,13 @@ icon: "bolt"
 Before your first run, set up provider credentials. The fastest path is environment variables; for realm-scoped bindings and OAuth flows, see [Auth](/guides/auth) and [Providers](/concepts/providers).
 </Note>
 
+<Warning>
+Meerkat's OpenAI/global default, `gpt-5.6-sol`, is currently limited to
+preview-enabled API organizations and Codex workspaces. If the relevant account
+context does not have GPT-5.6 preview access, explicitly select the broadly
+available `gpt-5.5` model.
+</Warning>
+
 ## Run an agent
 
 <Tabs>
@@ -125,7 +132,7 @@ Same code, different model. The provider is resolved from the model registry:
 
 ```bash
 rkat run --model claude-sonnet-4-6 "Explain monads"
-rkat run --model gpt-5.5 "Explain monads"
+rkat run --model gpt-5.6-sol "Explain monads"
 rkat run --model gemini-3.5-flash "Explain monads"
 ```
 

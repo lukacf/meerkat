@@ -30,9 +30,13 @@ const CATALOG_PROVIDERS: &[Provider] = &[Provider::Anthropic, Provider::Gemini, 
 /// [`CATALOG_PROVIDERS`]).
 const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
 
-/// Default model ID per provider. First recommended model wins.
+/// Explicit default model ID per provider. This product policy is independent
+/// of [`ModelTier`].
 const DEFAULT_ANTHROPIC: &str = "claude-opus-4-8";
-const DEFAULT_OPENAI: &str = "gpt-5.5";
+// Deliberate product policy: GPT-5.6 Sol is the OpenAI/global default even
+// while OpenAI limits access to preview-enabled API organizations and Codex
+// workspaces. Operators without preview access must explicitly pin GPT-5.5.
+const DEFAULT_OPENAI: &str = "gpt-5.6-sol";
 const DEFAULT_GEMINI: &str = "gemini-3.5-flash";
 
 /// Default model table consumed by [`ModelCatalog::default_model`].
@@ -148,8 +152,8 @@ pub fn canonical() -> ModelCatalog {
         providers: CATALOG_PROVIDERS,
         default_models: DEFAULT_MODELS,
         image_generation_defaults: IMAGE_GENERATION_DEFAULTS,
-        // Global default preserves the pre-extraction template behavior
-        // (fresh configs talked to gpt-5.5).
+        // OpenAI owns the global default recommendation, so fresh sessions and
+        // provider-scoped selection move together when that recommendation changes.
         global_default_model: DEFAULT_OPENAI,
         provider_priority: PROVIDER_PRIORITY,
     }

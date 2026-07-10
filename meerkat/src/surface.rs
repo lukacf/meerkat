@@ -1431,6 +1431,57 @@ family = "gemma-4"
         assert!(gpt.supports_web_search);
         assert!(gpt.image_generation);
 
+        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let model = catalog
+                .providers
+                .iter()
+                .find(|provider| provider.provider == "openai")
+                .and_then(|provider| provider.models.iter().find(|model| model.id == model_id))
+                .unwrap_or_else(|| panic!("missing public catalog model openai:{model_id}"));
+            assert_eq!(model.context_window, Some(1_050_000));
+            assert_eq!(model.max_output_tokens, Some(128_000));
+            let profile = model
+                .profile
+                .as_ref()
+                .unwrap_or_else(|| panic!("missing public profile openai:{model_id}"));
+            assert!(profile.vision);
+            assert!(profile.image_input);
+            assert!(profile.image_tool_results);
+            assert!(profile.image_generation);
+            assert!(profile.supports_reasoning);
+            assert!(profile.supports_web_search);
+            assert!(!profile.supports_temperature);
+
+            let properties = profile.params_schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("missing params schema properties for {model_id}"));
+            let effort = properties["reasoning_effort"]["enum"]
+                .as_array()
+                .expect("reasoning effort enum");
+            assert!(effort.iter().any(|value| value == "max"));
+            assert!(!effort.iter().any(|value| value == "ultra"));
+            assert_eq!(
+                properties["reasoning_mode"]["enum"],
+                serde_json::json!(["standard", "pro"])
+            );
+            assert_eq!(
+                properties["reasoning_context"]["enum"],
+                serde_json::json!(["auto", "current_turn", "all_turns"])
+            );
+            assert_eq!(
+                properties["text_verbosity"]["enum"],
+                serde_json::json!(["low", "medium", "high"])
+            );
+            assert_eq!(
+                properties["prompt_cache_options"]["properties"]["mode"]["enum"],
+                serde_json::json!(["implicit", "explicit"])
+            );
+            assert_eq!(
+                properties["prompt_cache_options"]["properties"]["ttl"]["enum"],
+                serde_json::json!(["30m"])
+            );
+        }
+
         let realtime = find_profile("openai", "gpt-realtime-2");
         // gpt-realtime-2 accepts text + audio + image input per
         // OpenAI's model docs (`developers.openai.com/api/docs/models/gpt-realtime-2`),

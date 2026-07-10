@@ -173,7 +173,7 @@ Meerkat fields and OpenAI lowering:
 | `provider_params.output_compression` | `0` to `100` | Advanced OpenAI override. Applies only when the universal `format` is `jpeg` or `webp`. |
 | `provider_params.moderation` | `auto`, `low` | Advanced GPT Image moderation strictness override. Omit it for OpenAI's default filtering. |
 | `provider_params.action` | `auto`, `generate`, `edit` | Advanced hosted Responses image-tool override. Normal Meerkat calls should use top-level `intent` and omit `action`; Images API routes reject it. |
-| `provider_params.reasoning_effort` | `none`, `low`, `medium`, `high`, `xhigh` | Hosted `gpt-image-2` route only. Lowered to OpenAI `reasoning.effort`. |
+| `provider_params.reasoning_effort` | Backing model's advertised effort ladder | Hosted Responses route only. The current `gpt-image-2` default is backed by GPT-5.4 and stops at `xhigh`; GPT-5.6 text-model routes also accept `max`. |
 | `provider_params.web_search` | `true`, `false`, `null`, or object | Hosted `gpt-image-2` route only. `true`/`{}` enables OpenAI `web_search`; object values may include OpenAI web-search options such as `search_context_size`, `filters`, `user_location`, `external_web_access`, and `return_token_budget`. |
 
 Model behavior:

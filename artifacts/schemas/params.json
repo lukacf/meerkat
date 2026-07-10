@@ -3506,6 +3506,43 @@
         "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
         "type": "string"
       },
+      "OpenAiPromptCacheMode": {
+        "description": "Request-wide GPT-5.6 prompt-cache breakpoint policy.",
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "OpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "description": "GPT-5.6 request-wide prompt-cache controls.",
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Automatic (`implicit`) or explicit-only cache breakpoint placement."
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+          }
+        },
+        "type": "object"
+      },
       "OpenAiPromptCacheRetention": {
         "description": "Typed shape of OpenAI's prompt-cache retention hint.",
         "oneOf": [
@@ -3520,6 +3557,39 @@
             "type": "string"
           }
         ]
+      },
+      "OpenAiPromptCacheTtl": {
+        "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "OpenAiReasoningContext": {
+        "description": "Which available reasoning items GPT-5.6 may render into the next sample.",
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "OpenAiReasoningMode": {
+        "description": "GPT-5.6 Responses execution mode.",
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "OpenAiTextVerbosity": {
+        "description": "Default level of detail for OpenAI text output.",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
       },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
@@ -3819,6 +3889,17 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 request-wide prompt-cache policy and minimum TTL."
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -3845,6 +3926,17 @@
                 ],
                 "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
               },
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 persisted-reasoning context selection."
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
@@ -3855,6 +3947,17 @@
                   }
                 ],
                 "description": "Reasoning-effort level for o-series and GPT-5 models."
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiReasoningMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 Responses execution mode (`standard` or `pro`)."
               },
               "seed": {
                 "description": "Deterministic-sampling seed.",
@@ -3895,6 +3998,17 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Default GPT-5.6 text-output detail level."
               },
               "thinking": {
                 "anyOf": [
@@ -4050,7 +4164,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -9976,10 +10091,72 @@
         ],
         "type": "string"
       },
+      "WireOpenAiPromptCacheMode": {
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireOpenAiPromptCacheRetention": {
         "enum": [
           "in_memory",
           "24h"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheTtl": {
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningContext": {
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningMode": {
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiTextVerbosity": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -10170,6 +10347,16 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -10185,10 +10372,30 @@
                 "type": "string"
               },
               "reasoning": true,
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningMode"
                   },
                   {
                     "type": "null"
@@ -10228,6 +10435,16 @@
                 "type": [
                   "boolean",
                   "null"
+                ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "thinking": true,
@@ -10344,7 +10561,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -12229,10 +12447,72 @@
         ],
         "type": "string"
       },
+      "WireOpenAiPromptCacheMode": {
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireOpenAiPromptCacheRetention": {
         "enum": [
           "in_memory",
           "24h"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheTtl": {
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningContext": {
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningMode": {
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiTextVerbosity": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -12423,6 +12703,16 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -12438,10 +12728,30 @@
                 "type": "string"
               },
               "reasoning": true,
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningMode"
                   },
                   {
                     "type": "null"
@@ -12481,6 +12791,16 @@
                 "type": [
                   "boolean",
                   "null"
+                ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "thinking": true,
@@ -12597,7 +12917,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -13115,10 +13436,72 @@
         ],
         "type": "string"
       },
+      "WireOpenAiPromptCacheMode": {
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireOpenAiPromptCacheRetention": {
         "enum": [
           "in_memory",
           "24h"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheTtl": {
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningContext": {
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningMode": {
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiTextVerbosity": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -13309,6 +13692,16 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -13324,10 +13717,30 @@
                 "type": "string"
               },
               "reasoning": true,
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningMode"
                   },
                   {
                     "type": "null"
@@ -13367,6 +13780,16 @@
                 "type": [
                   "boolean",
                   "null"
+                ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "thinking": true,
@@ -13483,7 +13906,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -15378,10 +15802,72 @@
         },
         "type": "object"
       },
+      "WireOpenAiPromptCacheMode": {
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireOpenAiPromptCacheRetention": {
         "enum": [
           "in_memory",
           "24h"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheTtl": {
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningContext": {
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningMode": {
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiTextVerbosity": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -15572,6 +16058,16 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -15587,10 +16083,30 @@
                 "type": "string"
               },
               "reasoning": true,
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningMode"
                   },
                   {
                     "type": "null"
@@ -15630,6 +16146,16 @@
                 "type": [
                   "boolean",
                   "null"
+                ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "thinking": true,
@@ -15746,7 +16272,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -16873,10 +17400,72 @@
         ],
         "type": "string"
       },
+      "WireOpenAiPromptCacheMode": {
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireOpenAiPromptCacheRetention": {
         "enum": [
           "in_memory",
           "24h"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheTtl": {
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningContext": {
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningMode": {
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiTextVerbosity": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
         ],
         "type": "string"
       },
@@ -17067,6 +17656,16 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -17082,10 +17681,30 @@
                 "type": "string"
               },
               "reasoning": true,
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningMode"
                   },
                   {
                     "type": "null"
@@ -17125,6 +17744,16 @@
                 "type": [
                   "boolean",
                   "null"
+                ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "thinking": true,
@@ -17241,7 +17870,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -21296,6 +21926,43 @@
         "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
         "type": "string"
       },
+      "OpenAiPromptCacheMode": {
+        "description": "Request-wide GPT-5.6 prompt-cache breakpoint policy.",
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "OpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "description": "GPT-5.6 request-wide prompt-cache controls.",
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Automatic (`implicit`) or explicit-only cache breakpoint placement."
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+          }
+        },
+        "type": "object"
+      },
       "OpenAiPromptCacheRetention": {
         "description": "Typed shape of OpenAI's prompt-cache retention hint.",
         "oneOf": [
@@ -21310,6 +21977,39 @@
             "type": "string"
           }
         ]
+      },
+      "OpenAiPromptCacheTtl": {
+        "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "OpenAiReasoningContext": {
+        "description": "Which available reasoning items GPT-5.6 may render into the next sample.",
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "OpenAiReasoningMode": {
+        "description": "GPT-5.6 Responses execution mode.",
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "OpenAiTextVerbosity": {
+        "description": "Default level of detail for OpenAI text output.",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
       },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
@@ -21609,6 +22309,17 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 request-wide prompt-cache policy and minimum TTL."
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -21635,6 +22346,17 @@
                 ],
                 "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
               },
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 persisted-reasoning context selection."
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
@@ -21645,6 +22367,17 @@
                   }
                 ],
                 "description": "Reasoning-effort level for o-series and GPT-5 models."
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiReasoningMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 Responses execution mode (`standard` or `pro`)."
               },
               "seed": {
                 "description": "Deterministic-sampling seed.",
@@ -21685,6 +22418,17 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Default GPT-5.6 text-output detail level."
               },
               "thinking": {
                 "anyOf": [
@@ -21840,7 +22584,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },
@@ -23399,6 +24144,43 @@
         "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
         "type": "string"
       },
+      "OpenAiPromptCacheMode": {
+        "description": "Request-wide GPT-5.6 prompt-cache breakpoint policy.",
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "OpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "description": "GPT-5.6 request-wide prompt-cache controls.",
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Automatic (`implicit`) or explicit-only cache breakpoint placement."
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+          }
+        },
+        "type": "object"
+      },
       "OpenAiPromptCacheRetention": {
         "description": "Typed shape of OpenAI's prompt-cache retention hint.",
         "oneOf": [
@@ -23413,6 +24195,39 @@
             "type": "string"
           }
         ]
+      },
+      "OpenAiPromptCacheTtl": {
+        "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "OpenAiReasoningContext": {
+        "description": "Which available reasoning items GPT-5.6 may render into the next sample.",
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "OpenAiReasoningMode": {
+        "description": "GPT-5.6 Responses execution mode.",
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "OpenAiTextVerbosity": {
+        "description": "Default level of detail for OpenAI text output.",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
       },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
@@ -23712,6 +24527,17 @@
                   "null"
                 ]
               },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 request-wide prompt-cache policy and minimum TTL."
+              },
               "prompt_cache_retention": {
                 "anyOf": [
                   {
@@ -23738,6 +24564,17 @@
                 ],
                 "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
               },
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 persisted-reasoning context selection."
+              },
               "reasoning_effort": {
                 "anyOf": [
                   {
@@ -23748,6 +24585,17 @@
                   }
                 ],
                 "description": "Reasoning-effort level for o-series and GPT-5 models."
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiReasoningMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "GPT-5.6 Responses execution mode (`standard` or `pro`)."
               },
               "seed": {
                 "description": "Deterministic-sampling seed.",
@@ -23788,6 +24636,17 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Default GPT-5.6 text-output detail level."
               },
               "thinking": {
                 "anyOf": [
@@ -23943,7 +24802,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ],
         "type": "string"
       },

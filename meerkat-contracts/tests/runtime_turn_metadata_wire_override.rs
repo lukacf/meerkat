@@ -205,11 +205,12 @@ fn wire_metadata_provider_tag_preserves_provider_native_fields() {
 }
 
 #[test]
-fn wire_metadata_openai_reasoning_effort_none_and_xhigh_round_trip() {
+fn wire_metadata_openai_reasoning_effort_none_xhigh_and_max_round_trip() {
     use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag, ReasoningEffort};
     for (effort, wire_effort) in [
         (ReasoningEffort::None, "none"),
         (ReasoningEffort::XHigh, "xhigh"),
+        (ReasoningEffort::Max, "max"),
     ] {
         let provider_params = ProviderParamsOverride {
             provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
@@ -242,6 +243,72 @@ fn wire_metadata_openai_reasoning_effort_none_and_xhigh_round_trip() {
         };
         assert_eq!(tag.reasoning_effort, Some(effort));
     }
+}
+
+#[test]
+fn wire_metadata_openai_gpt_56_advanced_params_round_trip() {
+    use meerkat_core::lifecycle::run_primitive::{
+        OpenAiPromptCacheOptions, OpenAiProviderTag, ProviderTag, ReasoningEffort,
+    };
+    use meerkat_core::model_profile::capabilities::{
+        OpenAiPromptCacheMode, OpenAiPromptCacheTtl, OpenAiReasoningContext, OpenAiReasoningMode,
+        OpenAiTextVerbosity,
+    };
+
+    let provider_params = ProviderParamsOverride {
+        provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            reasoning_effort: Some(ReasoningEffort::Max),
+            reasoning_mode: Some(OpenAiReasoningMode::Pro),
+            reasoning_context: Some(OpenAiReasoningContext::AllTurns),
+            text_verbosity: Some(OpenAiTextVerbosity::High),
+            prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let wire: WireRuntimeTurnMetadata = RuntimeTurnMetadata {
+        provider_params: Some(TurnMetadataOverride::Set(provider_params)),
+        ..Default::default()
+    }
+    .into();
+
+    let json = serde_json::to_value(&wire).expect("serialize wire metadata");
+    let tag = &json["provider_params"]["value"]["provider_tag"];
+    assert_eq!(tag["reasoning_effort"], serde_json::json!("max"));
+    assert_eq!(tag["reasoning_mode"], serde_json::json!("pro"));
+    assert_eq!(tag["reasoning_context"], serde_json::json!("all_turns"));
+    assert_eq!(tag["text_verbosity"], serde_json::json!("high"));
+    assert_eq!(
+        tag["prompt_cache_options"],
+        serde_json::json!({"mode": "explicit", "ttl": "30m"})
+    );
+
+    let round_tripped: RuntimeTurnMetadata =
+        serde_json::from_value::<WireRuntimeTurnMetadata>(json)
+            .expect("deserialize wire metadata")
+            .into();
+    let Some(TurnMetadataOverride::Set(params)) = round_tripped.provider_params else {
+        panic!("provider params set override expected");
+    };
+    let Some(ProviderTag::OpenAi(tag)) = params.provider_tag else {
+        panic!("openai provider tag expected");
+    };
+    assert_eq!(tag.reasoning_mode, Some(OpenAiReasoningMode::Pro));
+    assert_eq!(
+        tag.reasoning_context,
+        Some(OpenAiReasoningContext::AllTurns)
+    );
+    assert_eq!(tag.text_verbosity, Some(OpenAiTextVerbosity::High));
+    assert_eq!(
+        tag.prompt_cache_options,
+        Some(OpenAiPromptCacheOptions {
+            mode: Some(OpenAiPromptCacheMode::Explicit),
+            ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+        })
+    );
 }
 
 #[test]

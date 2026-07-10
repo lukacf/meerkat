@@ -191,11 +191,62 @@ fn claude_fable_5_in_catalog_without_changing_default_ladder() {
         allowed_models(Provider::Anthropic).any(|id| id == "claude-fable-5"),
         "claude-fable-5 must be in the Anthropic allowlist"
     );
-    // The default-model ladder is deliberately unchanged: Opus 4.8 remains
-    // the Anthropic and global default even though Fable 5 is the more
-    // capable (and more expensive) model.
+    // The Anthropic default remains Opus 4.8 even though Fable 5 is the more
+    // capable (and more expensive) model. The cross-provider global default
+    // is independently owned by the OpenAI recommendation.
     assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-4-8"));
-    assert_eq!(global_default_model(), "gpt-5.5");
+    assert_eq!(global_default_model(), "gpt-5.6-sol");
+}
+
+#[test]
+fn gpt_56_family_is_cataloged_and_sol_owns_the_openai_default() {
+    for (id, display_name) in [
+        ("gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra"),
+        ("gpt-5.6-luna", "GPT-5.6 Luna"),
+        ("gpt-5.6", "GPT-5.6 Sol"),
+    ] {
+        let entry = entry_for(Provider::OpenAI, id)
+            .unwrap_or_else(|| panic!("{id} must be in the catalog"));
+        assert_eq!(entry.provider, "openai");
+        assert_eq!(entry.display_name, display_name);
+        assert_eq!(
+            entry.tier,
+            meerkat_core::model_profile::catalog::ModelTier::Supported
+        );
+        assert_eq!(entry.context_window, Some(1_050_000));
+        assert_eq!(entry.max_output_tokens, Some(128_000));
+        assert!(allowed_models(Provider::OpenAI).any(|model| model == id));
+        assert_eq!(infer_provider(id), Some(Provider::OpenAI));
+
+        let profile = profile_for(Provider::OpenAI, id)
+            .unwrap_or_else(|| panic!("{id} must have a model profile"));
+        assert_eq!(profile.model_family, "gpt-5");
+        assert!(profile.vision);
+        assert!(profile.image_input);
+        assert!(profile.image_tool_results);
+        assert!(profile.image_generation);
+        assert!(profile.supports_reasoning);
+        assert!(profile.supports_web_search);
+        assert!(!profile.inline_video);
+        assert!(!profile.realtime);
+        assert!(!profile.supports_temperature);
+    }
+
+    assert_eq!(default_model(Provider::OpenAI), Some("gpt-5.6-sol"));
+    assert_eq!(global_default_model(), "gpt-5.6-sol");
+}
+
+#[test]
+fn gpt_55_rows_remain_broadly_available_production_recommendations() {
+    for id in ["gpt-5.5", "gpt-5.5-pro"] {
+        let entry = entry_for(Provider::OpenAI, id)
+            .unwrap_or_else(|| panic!("{id} must remain in the catalog"));
+        assert_eq!(
+            entry.tier,
+            meerkat_core::model_profile::catalog::ModelTier::Recommended
+        );
+    }
 }
 
 #[test]
@@ -271,7 +322,7 @@ fn openai_text_models_route_through_hosted_image_tool() {
 
 #[test]
 fn global_default_and_provider_priority_are_catalog_owned() {
-    assert_eq!(global_default_model(), "gpt-5.5");
+    assert_eq!(global_default_model(), "gpt-5.6-sol");
 
     let priority = provider_priority();
     assert_eq!(
@@ -797,6 +848,77 @@ mod schema {
         assert!(values.contains("xhigh"), "opus 4.8 must advertise xhigh");
         assert!(values.contains("low"));
         assert!(values.contains("max"));
+    }
+
+    #[test]
+    fn gpt_56_family_advertises_api_max_effort_not_codex_ultra_mode() {
+        for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"] {
+            let caps = capabilities_for(Provider::OpenAI, id)
+                .unwrap_or_else(|| panic!("{id} capability row"));
+            let schema = build_params_schema(caps);
+            let values = enum_values_for(&schema, "reasoning_effort")
+                .unwrap_or_else(|| panic!("{id} reasoning_effort enum"));
+
+            assert_eq!(
+                values,
+                ["none", "low", "medium", "high", "xhigh", "max"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                "{id} must advertise the model API effort ladder"
+            );
+            assert!(
+                !values.contains("ultra"),
+                "Codex ultra is multi-agent orchestration, not reasoning.effort"
+            );
+
+            let expected = |values: &[&str]| {
+                values
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(
+                enum_values_for(&schema, "reasoning_mode").expect("reasoning_mode enum"),
+                expected(&["standard", "pro"])
+            );
+            assert_eq!(
+                enum_values_for(&schema, "reasoning_context").expect("reasoning_context enum"),
+                expected(&["auto", "current_turn", "all_turns"])
+            );
+            assert_eq!(
+                enum_values_for(&schema, "text_verbosity").expect("text_verbosity enum"),
+                expected(&["low", "medium", "high"])
+            );
+
+            let cache = schema
+                .get("properties")
+                .and_then(|properties| properties.get("prompt_cache_options"))
+                .unwrap_or_else(|| panic!("{id} prompt_cache_options schema"));
+            let cache_enum = |name: &str| {
+                cache
+                    .get("properties")
+                    .and_then(|properties| properties.get(name))
+                    .and_then(|property| property.get("enum"))
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| panic!("{id} prompt_cache_options.{name} enum"))
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(cache_enum("mode"), expected(&["implicit", "explicit"]));
+            assert_eq!(cache_enum("ttl"), expected(&["30m"]));
+            assert!(cache.get("minProperties").is_none());
+
+            let keys = property_keys(&schema);
+            for unsupported in ["seed", "frequency_penalty", "presence_penalty"] {
+                assert!(
+                    !keys.contains(unsupported),
+                    "{id} Responses metadata must not advertise {unsupported}"
+                );
+            }
+        }
     }
 
     #[test]

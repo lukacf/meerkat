@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
 use crate::connection::AuthBindingRef;
+use crate::model_profile::capabilities::{
+    OpenAiPromptCacheMode, OpenAiPromptCacheTtl, OpenAiReasoningContext, OpenAiReasoningMode,
+    OpenAiTextVerbosity,
+};
 use crate::provider::Provider;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
@@ -461,6 +465,19 @@ pub enum OpenAiPromptCacheRetention {
     TwentyFourHours,
 }
 
+/// GPT-5.6 request-wide prompt-cache controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiPromptCacheOptions {
+    /// Automatic (`implicit`) or explicit-only cache breakpoint placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<OpenAiPromptCacheMode>,
+    /// Minimum cache lifetime. GPT-5.6 currently accepts only `30m`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<OpenAiPromptCacheTtl>,
+}
+
 /// Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -469,6 +486,15 @@ pub struct OpenAiProviderTag {
     /// Reasoning-effort level for o-series and GPT-5 models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// GPT-5.6 Responses execution mode (`standard` or `pro`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_mode: Option<OpenAiReasoningMode>,
+    /// GPT-5.6 persisted-reasoning context selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_context: Option<OpenAiReasoningContext>,
+    /// Default GPT-5.6 text-output detail level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_verbosity: Option<OpenAiTextVerbosity>,
     /// Deterministic-sampling seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
@@ -507,6 +533,9 @@ pub struct OpenAiProviderTag {
     /// OpenAI prompt-cache retention hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_retention: Option<OpenAiPromptCacheRetention>,
+    /// GPT-5.6 request-wide prompt-cache policy and minimum TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_options: Option<OpenAiPromptCacheOptions>,
     /// Internal override: force-enable temperature for this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_temperature_override: Option<bool>,
@@ -602,6 +631,7 @@ pub enum ReasoningEffort {
     High,
     #[serde(rename = "xhigh")]
     XHigh,
+    Max,
 }
 
 impl ReasoningEffort {
@@ -612,6 +642,7 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }
@@ -809,6 +840,9 @@ impl ProviderTag {
             }
             (Self::OpenAi(target), Self::OpenAi(default)) => {
                 fill(&mut target.reasoning_effort, &default.reasoning_effort);
+                fill(&mut target.reasoning_mode, &default.reasoning_mode);
+                fill(&mut target.reasoning_context, &default.reasoning_context);
+                fill(&mut target.text_verbosity, &default.text_verbosity);
                 fill(&mut target.seed, &default.seed);
                 fill(&mut target.frequency_penalty, &default.frequency_penalty);
                 fill(&mut target.presence_penalty, &default.presence_penalty);
@@ -826,6 +860,17 @@ impl ProviderTag {
                     &mut target.prompt_cache_retention,
                     &default.prompt_cache_retention,
                 );
+                match (
+                    target.prompt_cache_options.as_mut(),
+                    default.prompt_cache_options.as_ref(),
+                ) {
+                    (Some(target), Some(default)) => {
+                        fill(&mut target.mode, &default.mode);
+                        fill(&mut target.ttl, &default.ttl);
+                    }
+                    (None, Some(default)) => target.prompt_cache_options = Some(*default),
+                    _ => {}
+                }
                 fill(
                     &mut target.supports_temperature_override,
                     &default.supports_temperature_override,
@@ -2230,6 +2275,57 @@ mod tests {
         };
         assert_eq!(tag.store, Some(false));
         assert_eq!(tag.prompt_cache_key.as_deref(), Some("default-key"));
+    }
+
+    #[test]
+    fn openai_advanced_params_serde_and_field_merge_round_trip() {
+        let explicit: ProviderParamsOverride = serde_json::from_value(serde_json::json!({
+            "provider_tag": {
+                "provider": "open_ai",
+                "reasoning_effort": "max",
+                "reasoning_mode": "pro",
+                "prompt_cache_options": { "mode": "explicit" }
+            }
+        }))
+        .expect("advanced OpenAI params parse");
+        let carrier = ProviderParamsCarrier {
+            params: explicit,
+            tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_mode: Some(OpenAiReasoningMode::Standard),
+                reasoning_context: Some(OpenAiReasoningContext::AllTurns),
+                text_verbosity: Some(OpenAiTextVerbosity::High),
+                prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                    mode: Some(OpenAiPromptCacheMode::Implicit),
+                    ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                }),
+                ..Default::default()
+            })),
+        };
+
+        let effective = carrier.effective_params().expect("merge succeeds");
+        let Some(ProviderTag::OpenAi(ref tag)) = effective.provider_tag else {
+            panic!("openai tag expected");
+        };
+        assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::Max));
+        assert_eq!(tag.reasoning_mode, Some(OpenAiReasoningMode::Pro));
+        assert_eq!(
+            tag.reasoning_context,
+            Some(OpenAiReasoningContext::AllTurns)
+        );
+        assert_eq!(tag.text_verbosity, Some(OpenAiTextVerbosity::High));
+        assert_eq!(
+            tag.prompt_cache_options,
+            Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            })
+        );
+
+        let json = serde_json::to_value(&effective).expect("serialize merged params");
+        assert_eq!(
+            json["provider_tag"]["prompt_cache_options"]["ttl"],
+            serde_json::json!("30m")
+        );
     }
 
     /// K2 invariant: the carrier's durable face is exactly the typed override

@@ -5092,9 +5092,12 @@ impl LoginProvider {
     /// `catalog::default_model`; see `ensure_cli_interactive_oauth_config`).
     /// Because it must match what prior builds persisted, it deliberately
     /// retains retired model IDs (e.g. `claude-opus-4-6`) that no longer exist
-    /// in the catalog, so it cannot — and must not — be catalog-bound. Append
-    /// the prior sample model here whenever a provider's default changes; never
-    /// remove entries.
+    /// in the catalog, so it cannot — and must not — be catalog-bound. Append a
+    /// prior sample only when it is no longer a valid supported operator pin
+    /// and auto-healing is intentional. A still-supported prior default (for
+    /// example `gpt-5.5`) must stay out because persisted binding config has no
+    /// provenance bit that distinguishes an old synthesized value from an
+    /// explicit user choice. Never remove entries once admitted.
     ///
     /// Covered by `test_cli_interactive_oauth_config_heals_legacy_provider_default_models`
     /// and `test_cli_interactive_oauth_config_heals_legacy_anthropic_opus_defaults`.
@@ -15186,6 +15189,36 @@ mod tests {
                 .get("openai_oauth")
                 .and_then(|binding| binding.default_model.as_deref()),
             meerkat_models::default_model(meerkat_core::Provider::OpenAI)
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_oauth_config_preserves_supported_explicit_openai_pin() {
+        let mut config = Config::default();
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::OpenAi,
+            &mut config
+        ));
+
+        let realm = config.realm.get_mut("global").expect("global realm");
+        realm
+            .binding
+            .get_mut("openai_oauth")
+            .expect("openai oauth binding")
+            .default_model = Some("gpt-5.5".to_string());
+
+        assert!(!ensure_cli_interactive_oauth_config(
+            LoginProvider::OpenAi,
+            &mut config
+        ));
+        let realm = config.realm.get("global").expect("global realm");
+        assert_eq!(
+            realm
+                .binding
+                .get("openai_oauth")
+                .and_then(|binding| binding.default_model.as_deref()),
+            Some("gpt-5.5")
         );
     }
 

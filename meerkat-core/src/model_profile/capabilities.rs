@@ -14,6 +14,107 @@
 
 use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
+use serde::{Deserialize, Serialize};
+
+/// GPT-5.6 Responses execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiReasoningMode {
+    Standard,
+    Pro,
+}
+
+impl OpenAiReasoningMode {
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Pro => "pro",
+        }
+    }
+}
+
+/// Which available reasoning items GPT-5.6 may render into the next sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiReasoningContext {
+    Auto,
+    CurrentTurn,
+    AllTurns,
+}
+
+impl OpenAiReasoningContext {
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::CurrentTurn => "current_turn",
+            Self::AllTurns => "all_turns",
+        }
+    }
+}
+
+/// Default level of detail for OpenAI text output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiTextVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+impl OpenAiTextVerbosity {
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Request-wide GPT-5.6 prompt-cache breakpoint policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiPromptCacheMode {
+    Implicit,
+    Explicit,
+}
+
+impl OpenAiPromptCacheMode {
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Implicit => "implicit",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+/// Minimum lifetime for GPT-5.6 prompt-cache entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum OpenAiPromptCacheTtl {
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+}
+
+impl OpenAiPromptCacheTtl {
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::ThirtyMinutes => "30m",
+        }
+    }
+}
+
+/// Accepted GPT-5.6-specific Responses parameter values for one model row.
+#[derive(Debug, Clone, Copy)]
+pub struct OpenAiResponsesParamCapabilities {
+    pub reasoning_modes: &'static [OpenAiReasoningMode],
+    pub reasoning_contexts: &'static [OpenAiReasoningContext],
+    pub text_verbosity_levels: &'static [OpenAiTextVerbosity],
+    pub prompt_cache_modes: &'static [OpenAiPromptCacheMode],
+    pub prompt_cache_ttls: &'static [OpenAiPromptCacheTtl],
+    /// Whether deprecated `prompt_cache_retention: "in_memory"` is accepted.
+    /// GPT-5.6 permits only the independent `24h` retention policy.
+    pub supports_in_memory_prompt_cache_retention: bool,
+}
 
 /// Full per-model capability record.
 ///
@@ -28,7 +129,8 @@ use crate::model_profile::catalog::ModelTier;
 ///   the model's realtime bidirectional transport can actually do; only
 ///   meaningful when `realtime` is true
 /// - sampling (`supports_temperature`, `supports_top_p`, `supports_top_k`)
-/// - reasoning (`thinking`, `supports_reasoning`, `effort_levels`)
+/// - reasoning (`thinking`, `supports_reasoning`, `effort_levels`,
+///   `openai_responses_params`)
 /// - features (`supports_web_search`, `supports_inference_geo`,
 ///   `supports_compaction`, `supports_structured_output`,
 ///   `supports_legacy_penalties`, `supports_thinking_budget_legacy`)
@@ -113,6 +215,9 @@ pub struct ModelCapabilities {
     /// `reasoning.effort`; the two schemas live in different request shapes but
     /// share the typed [`EffortLevel`] vocabulary.
     pub effort_levels: &'static [EffortLevel],
+    /// GPT-5.6-specific Responses parameter vocabularies. `None` means the row
+    /// does not advertise these newer controls.
+    pub openai_responses_params: Option<OpenAiResponsesParamCapabilities>,
 
     // ── Features ──────────────────────────────────────────────────────
     /// Provider-native web search tool support.
@@ -224,7 +329,7 @@ pub enum EffortLevel {
     High,
     /// Extended-high reasoning effort.
     Xhigh,
-    /// Maximum reasoning effort (Anthropic-only top tier).
+    /// Maximum reasoning effort (Anthropic and GPT-5.6 top tier).
     Max,
 }
 
@@ -272,5 +377,20 @@ mod tests {
         assert_eq!(EffortLevel::High.as_wire_str(), "high");
         assert_eq!(EffortLevel::Xhigh.as_wire_str(), "xhigh");
         assert_eq!(EffortLevel::Max.as_wire_str(), "max");
+    }
+
+    #[test]
+    fn openai_responses_parameter_wire_values_are_pinned() {
+        assert_eq!(OpenAiReasoningMode::Standard.as_wire_str(), "standard");
+        assert_eq!(OpenAiReasoningMode::Pro.as_wire_str(), "pro");
+        assert_eq!(OpenAiReasoningContext::Auto.as_wire_str(), "auto");
+        assert_eq!(
+            OpenAiReasoningContext::CurrentTurn.as_wire_str(),
+            "current_turn"
+        );
+        assert_eq!(OpenAiReasoningContext::AllTurns.as_wire_str(), "all_turns");
+        assert_eq!(OpenAiTextVerbosity::High.as_wire_str(), "high");
+        assert_eq!(OpenAiPromptCacheMode::Explicit.as_wire_str(), "explicit");
+        assert_eq!(OpenAiPromptCacheTtl::ThirtyMinutes.as_wire_str(), "30m");
     }
 }

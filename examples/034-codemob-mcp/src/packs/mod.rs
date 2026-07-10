@@ -198,7 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn built_in_pack_defaults_use_current_generation_models() {
+    fn built_in_pack_defaults_preserve_intentional_model_diversity() {
         let registry = PackRegistry::new();
         let mut models = Vec::new();
 
@@ -214,11 +214,11 @@ mod tests {
 
         assert!(
             models.iter().any(|model| model == "gpt-5.5"),
-            "OpenAI default should include gpt-5.5: {models:?}"
+            "the deliberately prior-generation OpenAI role should remain in the pack mix: {models:?}"
         );
         assert!(
             models.iter().any(|model| model == "claude-opus-4-8"),
-            "Anthropic default should include claude-opus-4-8: {models:?}"
+            "the Anthropic role mix should include claude-opus-4-8: {models:?}"
         );
         assert!(
             !models.iter().any(|model| model == "gpt-5.2"),

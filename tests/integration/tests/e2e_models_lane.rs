@@ -226,6 +226,7 @@ fn effort_provider_params(
                 "medium" => ReasoningEffort::Medium,
                 "high" => ReasoningEffort::High,
                 "xhigh" => ReasoningEffort::XHigh,
+                "max" => ReasoningEffort::Max,
                 _ => return None,
             };
             Some(ProviderTag::OpenAi(OpenAiProviderTag {
@@ -245,6 +246,11 @@ async fn effort_levels_accepted() {
 
     for (entry, api_key) in for_each_catalog_model_with_key() {
         let caps = caps_for(entry);
+        // Realtime models advertise effort for their bidirectional transport,
+        // not the request/response client exercised by this lane.
+        if caps.realtime {
+            continue;
+        }
         if caps.effort_levels.is_empty() {
             continue;
         }
@@ -267,9 +273,13 @@ async fn effort_levels_accepted() {
             }
         };
         for level in levels {
-            let params = match effort_provider_params(entry.provider, level.as_wire_str()) {
-                Some(p) => p,
-                None => continue,
+            let Some(params) = effort_provider_params(entry.provider, level.as_wire_str()) else {
+                failures.push(format!(
+                    "{} effort={}: advertised effort has no typed provider mapping",
+                    entry.id,
+                    level.as_wire_str()
+                ));
+                continue;
             };
             eprintln!(
                 "-- effort model={} provider={} effort={}",

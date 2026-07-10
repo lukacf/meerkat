@@ -5,7 +5,11 @@
 //! `openai.com/index/*`, and the Codex model index.
 
 use meerkat_core::Provider;
-use meerkat_core::model_profile::capabilities::{EffortLevel, ModelCapabilities, ThinkingSupport};
+use meerkat_core::model_profile::capabilities::{
+    EffortLevel, ModelCapabilities, OpenAiPromptCacheMode, OpenAiPromptCacheTtl,
+    OpenAiReasoningContext, OpenAiReasoningMode, OpenAiResponsesParamCapabilities,
+    OpenAiTextVerbosity, ThinkingSupport,
+};
 use meerkat_core::model_profile::catalog::ModelTier;
 
 /// Reasoning-effort levels accepted by recent GPT-5.x models (5.4, 5.5, 5.5-pro).
@@ -21,6 +25,40 @@ const GPT5_RECENT_EFFORT: &[EffortLevel] = &[
     EffortLevel::High,
     EffortLevel::Xhigh,
 ];
+
+/// Reasoning-effort levels accepted by the GPT-5.6 family.
+///
+/// Source: https://developers.openai.com/api/docs/guides/latest-model
+/// (`max` is the new API effort value; Codex `ultra` is a separate
+/// multi-agent product mode, not a `reasoning.effort` wire value).
+const GPT56_EFFORT: &[EffortLevel] = &[
+    EffortLevel::None,
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+    EffortLevel::Max,
+];
+
+const GPT56_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponsesParamCapabilities {
+    reasoning_modes: &[OpenAiReasoningMode::Standard, OpenAiReasoningMode::Pro],
+    reasoning_contexts: &[
+        OpenAiReasoningContext::Auto,
+        OpenAiReasoningContext::CurrentTurn,
+        OpenAiReasoningContext::AllTurns,
+    ],
+    text_verbosity_levels: &[
+        OpenAiTextVerbosity::Low,
+        OpenAiTextVerbosity::Medium,
+        OpenAiTextVerbosity::High,
+    ],
+    prompt_cache_modes: &[
+        OpenAiPromptCacheMode::Implicit,
+        OpenAiPromptCacheMode::Explicit,
+    ],
+    prompt_cache_ttls: &[OpenAiPromptCacheTtl::ThirtyMinutes],
+    supports_in_memory_prompt_cache_retention: false,
+};
 
 /// Reasoning-effort levels accepted by GPT-5.3 Codex.
 ///
@@ -52,6 +90,169 @@ const REALTIME_2_EFFORT: &[EffortLevel] = &[
 
 /// Capability rows for OpenAI catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
+    // GPT-5.6 Sol / Terra / Luna (plus the official Sol alias)
+    //
+    // Sources:
+    //   - https://developers.openai.com/api/docs/models/gpt-5.6-sol
+    //   - https://developers.openai.com/api/docs/models/gpt-5.6-terra
+    //   - https://developers.openai.com/api/docs/models/gpt-5.6-luna
+    //   - https://developers.openai.com/api/docs/guides/latest-model
+    //
+    // Availability remains a limited preview for selected trusted partners
+    // and organizations. All three expose a 1,050,000-token context window, 128,000-token max
+    // output, text+image input, text output, Responses/Chat Completions/Batch,
+    // structured outputs, function calling, image generation, and web search.
+    // GPT-5.6 defaults to medium reasoning and adds the `max` effort tier.
+    // Sampling and legacy penalty/seed fields stay conservative: the current
+    // Responses Create contract does not establish model-specific support for
+    // them. The 600s timeout is the existing Meerkat operational default for
+    // standard frontier OpenAI requests.
+    ModelCapabilities {
+        id: "gpt-5.6-sol",
+        provider: Provider::OpenAI,
+        display_name: "GPT-5.6 Sol",
+        tier: ModelTier::Supported,
+        model_family: "gpt-5",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: true,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT56_EFFORT,
+        openai_responses_params: Some(GPT56_RESPONSES_PARAMS),
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
+    ModelCapabilities {
+        id: "gpt-5.6-terra",
+        provider: Provider::OpenAI,
+        display_name: "GPT-5.6 Terra",
+        tier: ModelTier::Supported,
+        model_family: "gpt-5",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: true,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT56_EFFORT,
+        openai_responses_params: Some(GPT56_RESPONSES_PARAMS),
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
+    ModelCapabilities {
+        id: "gpt-5.6-luna",
+        provider: Provider::OpenAI,
+        display_name: "GPT-5.6 Luna",
+        tier: ModelTier::Supported,
+        model_family: "gpt-5",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: true,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT56_EFFORT,
+        openai_responses_params: Some(GPT56_RESPONSES_PARAMS),
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
+    // Official alias: gpt-5.6 routes to gpt-5.6-sol.
+    // Keep it catalog-owned so selection does not fall back to prefix inference.
+    ModelCapabilities {
+        id: "gpt-5.6",
+        provider: Provider::OpenAI,
+        display_name: "GPT-5.6 Sol",
+        tier: ModelTier::Supported,
+        model_family: "gpt-5",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: true,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT56_EFFORT,
+        openai_responses_params: Some(GPT56_RESPONSES_PARAMS),
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
     // GPT-5.5
     //
     // Successor to GPT-5.4. Capability shape is a catalog-owned row so
@@ -82,6 +283,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT5_RECENT_EFFORT,
+        openai_responses_params: None,
         supports_web_search: true,
         supports_inference_geo: false,
         supports_compaction: false,
@@ -121,6 +323,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT5_RECENT_EFFORT,
+        openai_responses_params: None,
         supports_web_search: true,
         supports_inference_geo: false,
         supports_compaction: false,
@@ -140,7 +343,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     https://developers.openai.com/api/docs/guides/reasoning
     //
     // Demoted to Supported with the GPT-5.5 release; remains a fully
-    // supported choice but the catalog default points at 5.5.
+    // supported choice while the current catalog default is GPT-5.6 Sol.
     ModelCapabilities {
         id: "gpt-5.4",
         provider: Provider::OpenAI,
@@ -170,6 +373,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT5_RECENT_EFFORT,
+        openai_responses_params: None,
         supports_web_search: true,
         supports_inference_geo: false,
         supports_compaction: false,
@@ -215,6 +419,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT5_RECENT_EFFORT,
+        openai_responses_params: None,
         supports_web_search: true,
         supports_inference_geo: false,
         supports_compaction: true,
@@ -259,6 +464,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT5_3_CODEX_EFFORT,
+        openai_responses_params: None,
         supports_web_search: false,
         supports_inference_geo: false,
         supports_compaction: false,
@@ -328,6 +534,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: REALTIME_2_EFFORT,
+        openai_responses_params: None,
         supports_web_search: false,
         supports_inference_geo: false,
         supports_compaction: false,

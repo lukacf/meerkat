@@ -3525,31 +3525,65 @@ impl MobBuilder {
                 if broken_members.contains(&peer_member_identity) {
                     if let (Some(comms_a), Some(local_peer_id)) =
                         (local_comms.as_ref(), local_peer_id.as_ref())
-                        && let Some(stale_peer) = current_peers
+                    {
+                        let generated_peers = comms_a
+                            .trusted_peer_projection_snapshot_for_source(
+                                meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+                            )
+                            .await
+                            .map_err(|error| {
+                                MobError::WiringError(format!(
+                                    "resume failed to read generated trust for broken member '{}': {error}",
+                                    peer_entry.agent_identity
+                                ))
+                            })?;
+                        if let Some(stale_peer) = generated_peers
                             .iter()
                             .find(|peer| peer.name.as_str() == name_b)
                             .cloned()
-                    {
-                        match resume_member_observed_cleanup_authority(
-                            dsl_authority,
-                            topology_epoch,
-                            edge,
-                            &entry.agent_identity,
-                            local_peer_id,
-                            &peer_entry.agent_identity,
-                            &stale_peer.peer_id,
-                            "resume_member_trust_cleanup_observed",
-                        ) {
-                            Ok(authority) => {
-                                resume_trust_mutations.push(ResumeTrustMutation {
-                                    comms: Arc::clone(comms_a),
-                                    operation: ResumeTrustMutationOperation::Remove(
-                                        stale_peer.peer_id.to_string(),
-                                    ),
-                                    authority,
-                                });
+                        {
+                            let observed_endpoint =
+                                crate::machines::mob_machine::MemberPeerEndpoint::from(&stale_peer);
+                            match dsl_authority
+                                .state()
+                                .member_peer_endpoints
+                                .get(peer_dsl_identity)
+                            {
+                                Some(existing) if existing != &observed_endpoint => {
+                                    return Err(MobError::WiringError(format!(
+                                        "resume generated trust disagrees on the retained peer endpoint for broken member '{}'",
+                                        peer_entry.agent_identity
+                                    )));
+                                }
+                                Some(_) => {}
+                                None => register_seeded_member_peer(
+                                    dsl_authority,
+                                    &peer_entry.agent_identity,
+                                    &stale_peer,
+                                    "resume_register_broken_member_peer_from_generated_trust",
+                                )?,
                             }
-                            Err(error) => return Err(error),
+                            match resume_member_observed_cleanup_authority(
+                                dsl_authority,
+                                topology_epoch,
+                                edge,
+                                &entry.agent_identity,
+                                local_peer_id,
+                                &peer_entry.agent_identity,
+                                &stale_peer.peer_id,
+                                "resume_member_trust_cleanup_observed",
+                            ) {
+                                Ok(authority) => {
+                                    resume_trust_mutations.push(ResumeTrustMutation {
+                                        comms: Arc::clone(comms_a),
+                                        operation: ResumeTrustMutationOperation::Remove(
+                                            stale_peer.peer_id.to_string(),
+                                        ),
+                                        authority,
+                                    });
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                     }
                     continue;

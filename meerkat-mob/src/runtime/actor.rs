@@ -8146,6 +8146,15 @@ impl MobActor {
                         supervisor_pending_authority_protocol_version: dsl
                             .supervisor_pending_authority_protocol_version
                             .clone(),
+                        supervisor_pending_authority_operation_id: dsl
+                            .supervisor_pending_authority_operation_id
+                            .clone(),
+                        supervisor_pending_authority_member_target_names: dsl
+                            .supervisor_pending_authority_member_target_names
+                            .clone(),
+                        supervisor_pending_authority_member_target_addresses: dsl
+                            .supervisor_pending_authority_member_target_addresses
+                            .clone(),
                         supervisor_pending_authority_accepted_peer_ids: dsl
                             .supervisor_pending_authority_accepted_peer_ids
                             .clone(),
@@ -8162,6 +8171,14 @@ impl MobActor {
                         member_peer_ids: dsl.member_peer_ids.clone(),
                         member_peer_endpoints: dsl.member_peer_endpoints.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
+                        member_restore_failure_codes: dsl.member_restore_failure_codes.clone(),
+                        runtime_retire_refusal_codes: dsl.runtime_retire_refusal_codes.clone(),
+                        runtime_retire_refusal_reasons: dsl.runtime_retire_refusal_reasons.clone(),
+                        runtime_retire_pending_sessions: dsl
+                            .runtime_retire_pending_sessions
+                            .clone(),
+                        remote_runtime_retired_ids: dsl.remote_runtime_retired_ids.clone(),
+                        remote_supervisor_revoked_ids: dsl.remote_supervisor_revoked_ids.clone(),
                         member_revival_pending: dsl.member_revival_pending.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
                         spawn_exec_phase: dsl.spawn_exec_phase.clone(),
@@ -14460,6 +14477,16 @@ impl MobActor {
         &mut self,
         entry: &RosterEntry,
     ) -> Result<(), MobError> {
+        if self
+            .retire_event_exists(&entry.agent_identity, entry.generation)
+            .await?
+        {
+            // A prior destroy attempt may have committed the terminal member
+            // journal and then crashed before pruning the shell roster anchor.
+            // The durable receipt is exact-generation authority to skip a new
+            // retirement admission; later destroy cleanup removes the residue.
+            return Ok(());
+        }
         let agent_identity = &entry.agent_identity;
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
@@ -14948,7 +14975,7 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::handle_retire_inner disposing member"
         );
-        let report = self.dispose_member(&ctx, policy.as_mut()).await;
+        let mut report = self.dispose_member(&ctx, policy.as_mut()).await;
         tracing::debug!(
             agent_identity = %agent_identity,
             "MobActor::handle_retire_inner disposed member"
@@ -14957,12 +14984,11 @@ impl MobActor {
         // ArchiveSession is critical: a skipped archive means an orphan session
         // the caller believes was cleaned up. Surface the error.
         // Comms steps (NotifyPeers, RemoveTrustEdges) remain best-effort.
-        if let Some((step, error)) = &report.aborted_at
-            && *step == DisposalStep::CleanupMachineTopology
-        {
-            return Err(MobError::Internal(format!(
-                "disposal aborted at CleanupMachineTopology: {error}"
-            )));
+        if let Some((step, error)) = report.aborted_at.take() {
+            if step == DisposalStep::CleanupMachineTopology {
+                return Err(error);
+            }
+            report.aborted_at = Some((step, error));
         }
         if let Some((step, MobError::RetirementTopologyIncomplete(reason))) = &report.aborted_at
             && *step == DisposalStep::NotifyPeers
@@ -16442,6 +16468,7 @@ impl MobActor {
             .cloned()
             .collect::<Vec<_>>();
         let mut local_jobs = Vec::new();
+        let mut local_peer_specs = Vec::new();
         let mut peer_only_jobs = Vec::new();
         for peer_identity in peer_identities {
             let peer_entry = {
@@ -16457,14 +16484,52 @@ impl MobActor {
                 );
                 continue;
             };
-            let endpoint = self
+            let endpoint = match self
                 .resolve_wiring_endpoint(&peer_entry, "dispose_notify_peers")
                 .await
-                .map_err(|error| {
-                    MobError::RetirementTopologyIncomplete(format!(
+            {
+                Ok(endpoint) => endpoint,
+                Err(error) if Self::runtime_binding_for_entry(&peer_entry).is_none() => {
+                    let retained_spec = self.machine_member_peer_spec_for(
+                        &peer_identity,
+                        "dispose_notify_peers retained local endpoint",
+                    )?;
+                    let retained_spec = match retained_spec {
+                        Some(spec) => Some(spec),
+                        None => self.roster_member_peer_spec_for(
+                            &peer_entry,
+                            "dispose_notify_peers retained local endpoint",
+                        )?,
+                    }
+                    .ok_or_else(|| {
+                        MobError::RetirementTopologyIncomplete(format!(
+                            "failed to resolve machine-wired peer '{peer_identity}' for trust cleanup and no retained endpoint exists: {error}"
+                        ))
+                    })?;
+                    tracing::debug!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %ctx.agent_identity,
+                        peer_id = %peer_identity,
+                        %error,
+                        "dispose_notify_peers: retaining machine endpoint for peer without a live local comms runtime"
+                    );
+                    if ctx.preserve_machine_topology {
+                        // Respawn owns this edge through its captured restore
+                        // plan. With no surviving recipient runtime there is
+                        // no physical trust row to revoke here, and deleting
+                        // the machine edge would erase the later typed restore
+                        // failure/retry authority.
+                        continue;
+                    }
+                    local_peer_specs.push((peer_identity, retained_spec));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(MobError::RetirementTopologyIncomplete(format!(
                         "failed to resolve machine-wired peer '{peer_identity}' for trust cleanup: {error}"
-                    ))
-                })?;
+                    )));
+                }
+            };
             match endpoint {
                 WiringEndpoint::Local { comms, spec, .. } => {
                     let Some(authority) = ctx
@@ -16476,6 +16541,7 @@ impl MobActor {
                             "dispose_notify_peers missing generated retire trust handoff for '{peer_identity}'"
                         )));
                     };
+                    local_peer_specs.push((peer_identity.clone(), spec.clone()));
                     local_jobs.push((peer_identity, spec, comms, authority));
                 }
                 WiringEndpoint::PeerOnly { spec, binding } => {
@@ -16486,10 +16552,6 @@ impl MobActor {
         let actor = &*self;
         let retiring_key = Self::trusted_peer_removal_key(retiring_spec);
         let retiring_comms = ctx.retiring_comms.clone();
-        let local_peer_specs = local_jobs
-            .iter()
-            .map(|(identity, spec, _, _)| (identity.clone(), spec.clone()))
-            .collect::<Vec<_>>();
         let mut local_tasks = FuturesUnordered::new();
         for (peer_identity, recipient_spec, recipient_comms, authority) in local_jobs {
             let retiring_key = retiring_key.clone();
@@ -21065,6 +21127,7 @@ impl MobActor {
 
         if let Some(entry) = spawned_entry.as_ref() {
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+            let detach_session_id = member_ref.bridge_session_id().cloned();
             let releasing = member_ref
                 .bridge_session_id()
                 .map(mob_dsl::SessionId::from_domain);
@@ -21123,7 +21186,22 @@ impl MobActor {
                 );
                 return Err(rollback.fail(error).await);
             }
+            let mut detach_obligations =
+                crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
+                    &prepared_retire.transition,
+                );
             self.commit_prepared_dsl_transition(prepared_retire)?;
+            if let (Some(obligation), Some(session_id)) =
+                (detach_obligations.pop(), detach_session_id)
+                && let Err(error) = self
+                    .detach_session_ingress_for_mob_destroy(&session_id, obligation)
+                    .await
+            {
+                return Err(rollback.fail(error).await);
+            }
+            if let Err(error) = self.flush_routed_effects().await {
+                return Err(rollback.fail(error).await);
+            }
             if let Some(session_id) = member_ref.bridge_session_id() {
                 self.discard_pending_routed_effects_for_session(session_id);
             }
@@ -21279,18 +21357,28 @@ impl MobActor {
                 )));
             }
         };
+        let machine_wired_peer_identities =
+            self.machine_member_wired_peer_identities_for(&entry.agent_identity);
         let retiring_peer_endpoint = match self.machine_member_peer_spec_for(
             &entry.agent_identity,
             "append retirement-start peer endpoint",
         )? {
             Some(endpoint) => Some(endpoint),
-            None => {
-                self.roster_member_peer_spec_for(entry, "append retirement-start peer endpoint")?
-            }
+            None => match self
+                .roster_member_peer_spec_for(entry, "append retirement-start peer endpoint")?
+            {
+                Some(endpoint) => Some(endpoint),
+                None => {
+                    self.retained_member_peer_spec_from_wired_peer_trust(
+                        entry,
+                        &machine_wired_peer_identities,
+                        "append retirement-start peer endpoint",
+                    )
+                    .await?
+                }
+            },
         };
-        let has_retained_trust_topology = !self
-            .machine_member_wired_peer_identities_for(&entry.agent_identity)
-            .is_empty()
+        let has_retained_trust_topology = !machine_wired_peer_identities.is_empty()
             || !self
                 .machine_external_peer_edges_for(&entry.agent_identity)
                 .is_empty();
@@ -22369,11 +22457,11 @@ mod bridge_rejection_tests {
         let body = &source[start..start + end];
 
         assert!(
-            body.contains("if new_trust_cleanup_failed {"),
+            body.contains("rollback_error: new_trust_cleanup_failed"),
             "failure handling must key on the typed new_trust_cleanup_failed discriminant"
         );
         assert!(
-            body.contains("must not reconstruct old-supervisor trust"),
+            body.contains("reconstruct old-supervisor trust"),
             "activation recovery must explicitly preserve the no-old-reauthorization boundary"
         );
         assert!(

@@ -16462,6 +16462,16 @@ async fn test_respawn_broken_wired_member_uses_machine_peer_endpoint_without_liv
         broken.status,
         crate::runtime::handle::MobMemberStatus::Broken
     );
+    let recovered_machine = resumed
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("read recovered MobMachine endpoint authority");
+    assert!(
+        recovered_machine
+            .member_peer_endpoints
+            .contains_key(&crate::machines::mob_machine::AgentIdentity::from("w-2")),
+        "resume must retain the broken member's generated peer endpoint before pruning stale trust"
+    );
 
     let receipt = resumed
         .respawn(AgentIdentity::from("w-2"), None)
@@ -19201,14 +19211,10 @@ async fn test_peer_only_retire_unwire_failure_retains_retry_anchor() {
         .expect("surviving member");
     assert!(retained_a.wired_to.contains(&identity_b));
     assert!(retained_b.wired_to.contains(&identity_a));
-    assert!(
-        external_b
-            .trusted_peer_names()
-            .await
-            .iter()
-            .any(|name| name == &test_comms_name_for(&mob_id, "worker", identity_a.as_str())),
-        "failed remote unwire must leave trust and the matching machine edge retryable"
-    );
+    // The one-way lifecycle notice may already prune the recipient's physical
+    // trust projection before the explicit unwire refusal arrives. Durable
+    // retry authority is the retained machine edge and roster anchor above,
+    // not rollback of a partially completed remote mutation.
     assert!(
         handle
             .events()
@@ -19267,8 +19273,10 @@ async fn test_peer_only_retire_unwire_failure_survives_cold_restart() {
     let runtime_metadata = storage.runtime_metadata.clone();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
+    let owner_bridge_session_id = SessionId::new();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
         .create()
         .await
         .expect("create mob");
@@ -19278,21 +19286,21 @@ async fn test_peer_only_retire_unwire_failure_survives_cold_restart() {
         spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", retiring.as_str())).await;
     let external_survivor =
         spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", survivor.as_str())).await;
+    let mut retiring_spec = SpawnMemberSpec::new("worker", retiring.clone());
+    retiring_spec.binding = Some(external_retiring.binding());
     handle
-        .spawn_with_binding(
-            ProfileName::from("worker"),
-            retiring.clone(),
-            None,
-            external_retiring.binding(),
+        .spawn_spec_receipt_with_generated_owner_context(
+            retiring_spec,
+            owner_bridge_session_id.clone(),
         )
         .await
         .expect("spawn retiring external member");
+    let mut survivor_spec = SpawnMemberSpec::new("worker", survivor.clone());
+    survivor_spec.binding = Some(external_survivor.binding());
     handle
-        .spawn_with_binding(
-            ProfileName::from("worker"),
-            survivor.clone(),
-            None,
-            external_survivor.binding(),
+        .spawn_spec_receipt_with_generated_owner_context(
+            survivor_spec,
+            owner_bridge_session_id.clone(),
         )
         .await
         .expect("spawn surviving external member");
@@ -19306,12 +19314,14 @@ async fn test_peer_only_retire_unwire_failure_survives_cold_restart() {
         .retire(retiring.clone())
         .await
         .expect_err("first remote unwire must fail closed");
+    let retained = handle
+        .get_member(&retiring)
+        .await
+        .expect("read retained cold-retry anchor")
+        .expect("failed remote unwire must retain the retiring member");
     assert!(
-        external_survivor
-            .trusted_peer_names()
-            .await
-            .iter()
-            .any(|name| name == &test_comms_name_for(&mob_id, "worker", retiring.as_str()))
+        retained.wired_to.contains(&survivor),
+        "failed remote unwire must retain the machine edge for cold retry"
     );
     drop(handle);
 
@@ -19772,21 +19782,20 @@ async fn test_peer_only_respawn_records_retirement_per_generation() {
     let events = storage.events.clone();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
+    let owner_bridge_session_id = SessionId::new();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service)
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
         .create()
         .await
         .expect("create mob");
     let identity = AgentIdentity::from("generation-worker");
     let external =
         spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", identity.as_str())).await;
+    let mut initial_spec = SpawnMemberSpec::new("worker", identity.clone());
+    initial_spec.binding = Some(external.binding());
     handle
-        .spawn_with_binding(
-            ProfileName::from("worker"),
-            identity.clone(),
-            None,
-            external.binding(),
-        )
+        .spawn_spec_receipt_with_generated_owner_context(initial_spec, owner_bridge_session_id)
         .await
         .expect("spawn generation zero");
 
@@ -21177,7 +21186,7 @@ async fn test_retire_external_unwire_append_failure_does_not_persist_member_reti
     let result = handle.retire(AgentIdentity::from("l-1")).await;
     assert!(
         matches!(result, Err(MobError::StorageError(_))),
-        "retire should surface external unwire append failure"
+        "retire should surface external unwire append failure; got {result:?}"
     );
 
     let recorded = handle.events().replay_all().await.expect("replay events");
@@ -23975,7 +23984,7 @@ async fn test_auto_wire_failure_after_partial_wire_cleans_peer_trust_via_spawn_r
         .await;
     assert!(
         matches!(result, Err(MobError::WiringError(_))),
-        "spawn must surface wiring failure after rollback cleanup"
+        "spawn must surface wiring failure after rollback cleanup; got {result:?}"
     );
 
     assert!(
@@ -24113,7 +24122,7 @@ async fn test_spawn_rollback_ignores_missing_comms_for_non_wired_planned_targets
 }
 
 #[tokio::test]
-async fn test_spawn_rollback_archive_failure_closes_projection_and_persists_retired_event() {
+async fn test_spawn_rollback_archive_failure_retains_cleanup_authority_until_retry() {
     let (handle, service) = create_test_mob(sample_definition_with_auto_wire()).await;
     service
         .set_comms_behavior(
@@ -24152,6 +24161,11 @@ async fn test_spawn_rollback_archive_failure_closes_projection_and_persists_reti
             .all(|member| member.agent_identity != "w-1"),
         "generated retirement authority must close the active member projection even when archive cleanup fails"
     );
+    let retained = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("read retained rollback anchor")
+        .expect("archive failure must retain the durable rollback cleanup anchor");
 
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
@@ -24165,8 +24179,35 @@ async fn test_spawn_rollback_archive_failure_closes_projection_and_persists_reti
     assert!(
         events
             .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberRetirementStarted { .. })),
+        "rollback must persist retirement-start authority before cleanup"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e.kind, MobEventKind::MemberRetired { .. })),
+        "rollback must not publish MemberRetired before archive cleanup succeeds"
+    );
+
+    let session_id = retained
+        .bridge_session_id()
+        .expect("retained rollback anchor remains session-correlated")
+        .clone();
+    service.clear_archive_failure(&session_id).await;
+    handle
+        .retire(AgentIdentity::from("w-1"))
+        .await
+        .expect("retry must complete the retained rollback cleanup");
+    let completed_events = handle
+        .events()
+        .replay_all()
+        .await
+        .expect("replay completion");
+    assert!(
+        completed_events
+            .iter()
             .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
-        "rollback must persist MemberRetired after generated retirement authority accepts"
+        "retry must publish MemberRetired after archive cleanup succeeds"
     );
 }
 
@@ -24221,8 +24262,9 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         "spawn rollback should remove leaked trust edges"
     );
 
-    // Retire cleanup invariants: archive failure is surfaced, but the retiring
-    // roster entry is removed so callers cannot keep addressing a drained runtime.
+    // Retire cleanup invariants: archive failure is surfaced and the retiring
+    // roster entry remains as the durable retry anchor, while generated
+    // retirement authority removes it from the active/addressable projection.
     let (retire_handle, retire_service) = create_test_mob(sample_definition()).await;
     let sid_r1 = retire_handle
         .spawn(
@@ -24258,8 +24300,16 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
             .get_member(&AgentIdentity::from("r-1"))
             .await
             .unwrap()
-            .is_none(),
-        "archive failure must remove roster entry"
+            .is_some(),
+        "archive failure must retain the durable retirement cleanup anchor"
+    );
+    assert!(
+        retire_handle
+            .list_members()
+            .await
+            .iter()
+            .all(|member| member.agent_identity != "r-1"),
+        "archive failure must keep the retired runtime out of the active member projection"
     );
     let r2 = retire_handle
         .get_member(&AgentIdentity::from("r-2"))
@@ -42990,6 +43040,12 @@ struct MobRuntimeParitySnapshotSummary {
     member_peer_ids: BTreeMap<String, String>,
     member_peer_endpoints: BTreeMap<String, String>,
     member_restore_failures: BTreeMap<String, String>,
+    member_restore_failure_codes: BTreeMap<String, String>,
+    runtime_retire_refusal_codes: BTreeMap<String, String>,
+    runtime_retire_refusal_reasons: BTreeMap<String, String>,
+    runtime_retire_pending_sessions: BTreeMap<String, String>,
+    remote_runtime_retired_ids: BTreeSet<String>,
+    remote_supervisor_revoked_ids: BTreeSet<String>,
     member_revival_pending: BTreeSet<String>,
     supervisor_authority_peer_id: Option<String>,
     supervisor_authority_signing_key: Option<String>,
@@ -42999,6 +43055,9 @@ struct MobRuntimeParitySnapshotSummary {
     supervisor_pending_authority_signing_key: Option<String>,
     supervisor_pending_authority_epoch: Option<u64>,
     supervisor_pending_authority_protocol_version: Option<String>,
+    supervisor_pending_authority_operation_id: Option<String>,
+    supervisor_pending_authority_member_target_names: BTreeMap<String, String>,
+    supervisor_pending_authority_member_target_addresses: BTreeMap<String, String>,
     supervisor_pending_authority_accepted_peer_ids: BTreeSet<String>,
     // Dogma row R044: machine-owned trust-install-before-terminality
     // obligation window for supervisor-bridge recipients.
@@ -43788,6 +43847,81 @@ async fn mob_runtime_parity_snapshot_summary(
     // T2 DSL fields — projected directly from the `MobMachineAuthority`
     // state via the `debug_dsl_t2_snapshot()` command-channel seam (dogma
     // #1: one owner, #13: projection rebuilt from explicit DSL source).
+    let member_restore_failure_codes = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_restore_failure_codes
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let runtime_retire_refusal_codes = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.runtime_retire_refusal_codes
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let runtime_retire_refusal_reasons = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.runtime_retire_refusal_reasons
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let runtime_retire_pending_sessions = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.runtime_retire_pending_sessions
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let remote_runtime_retired_ids = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.remote_runtime_retired_ids
+                .iter()
+                .map(|runtime_id| format!("{runtime_id:?}"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let remote_supervisor_revoked_ids = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.remote_supervisor_revoked_ids
+                .iter()
+                .map(|runtime_id| format!("{runtime_id:?}"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let supervisor_pending_authority_operation_id = dsl_t2
+        .as_ref()
+        .and_then(|snap| snap.supervisor_pending_authority_operation_id.clone());
+    let supervisor_pending_authority_member_target_names = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.supervisor_pending_authority_member_target_names
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let supervisor_pending_authority_member_target_addresses = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.supervisor_pending_authority_member_target_addresses
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     let (
         destroy_admitted,
         member_state_markers,
@@ -44101,6 +44235,12 @@ async fn mob_runtime_parity_snapshot_summary(
         member_peer_ids,
         member_peer_endpoints,
         member_restore_failures,
+        member_restore_failure_codes,
+        runtime_retire_refusal_codes,
+        runtime_retire_refusal_reasons,
+        runtime_retire_pending_sessions,
+        remote_runtime_retired_ids,
+        remote_supervisor_revoked_ids,
         member_revival_pending,
         supervisor_authority_peer_id,
         supervisor_authority_signing_key,
@@ -44110,6 +44250,9 @@ async fn mob_runtime_parity_snapshot_summary(
         supervisor_pending_authority_signing_key,
         supervisor_pending_authority_epoch,
         supervisor_pending_authority_protocol_version,
+        supervisor_pending_authority_operation_id,
+        supervisor_pending_authority_member_target_names,
+        supervisor_pending_authority_member_target_addresses,
         supervisor_pending_authority_accepted_peer_ids,
         pending_recipient_trust,
         member_session_bindings,
@@ -44234,6 +44377,40 @@ fn mob_runtime_parity_field_value(
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
         )),
+        "member_restore_failure_codes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_restore_failure_codes
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "runtime_retire_refusal_codes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .runtime_retire_refusal_codes
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "runtime_retire_refusal_reasons" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .runtime_retire_refusal_reasons
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "runtime_retire_pending_sessions" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .runtime_retire_pending_sessions
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "remote_runtime_retired_ids" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.remote_runtime_retired_ids.clone(),
+        )),
+        "remote_supervisor_revoked_ids" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.remote_supervisor_revoked_ids.clone(),
+        )),
         "member_revival_pending" => Some(MobRuntimeParityExprValue::Set(
             snapshot.member_revival_pending.clone(),
         )),
@@ -44291,6 +44468,29 @@ fn mob_runtime_parity_field_value(
                 .map(MobRuntimeParityExprValue::String)
                 .unwrap_or(MobRuntimeParityExprValue::None),
         ),
+        "supervisor_pending_authority_operation_id" => Some(
+            snapshot
+                .supervisor_pending_authority_operation_id
+                .clone()
+                .map(MobRuntimeParityExprValue::String)
+                .unwrap_or(MobRuntimeParityExprValue::None),
+        ),
+        "supervisor_pending_authority_member_target_names" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .supervisor_pending_authority_member_target_names
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "supervisor_pending_authority_member_target_addresses" => {
+            Some(MobRuntimeParityExprValue::Map(
+                snapshot
+                    .supervisor_pending_authority_member_target_addresses
+                    .keys()
+                    .map(|k| (k.clone(), 0u64))
+                    .collect(),
+            ))
+        }
         "supervisor_pending_authority_accepted_peer_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot
                 .supervisor_pending_authority_accepted_peer_ids

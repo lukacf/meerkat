@@ -320,7 +320,7 @@ rkat blob get <BLOB-ID> --output meerkat.png
 
 ### Live channels (caller-initiated)
 
-- `live/open` — open a live audio/text channel with model-gated image input
+- `live/open` — open a live audio/text channel with model-gated image input; optional positive `seed_max_chars` bounds serialized whole-turn seed messages
 - `live/status` — get the status of a live channel
 - `live/close` — close a live channel
 - `live/send_input` — send an audio, text, or model-supported image chunk to a live channel
@@ -330,6 +330,15 @@ rkat blob get <BLOB-ID> --output meerkat.png
 - `live/refresh` — apply mutable session config (instructions/tools/audio) to an open live channel
 
 Set `model: "gpt-realtime-2"` on `session/create` and call `live/open` to open a live channel; capability is gated on `ModelCapabilities.realtime`. Check the returned `capabilities.image_in` boolean before calling `live/send_input` with `{ "kind": "image", "idempotency_key": "turn-42-diagram", "mime": "image/png", "data": "<base64>" }`. Image input is staged context for the next text, audio, or explicitly committed response. `status: "sent"` is queue acceptance only; wait for `user_content_committed` with the matching key for durable success. An exact same-key replay returns the prior receipt without resending provider input; different MIME/bytes reject with `image_input_idempotency_conflict`. Commit staged text/audio before submitting an image (`image_input_requires_commit`). Canonical live image history is capped at 40 MiB decoded in aggregate; new input that would cross it rejects before provider send as `image_input_history_budget_exceeded`. Legacy/out-of-band overflow, missing blobs, and content-address mismatches fail `live/open`; reconnect never trims accepted image context.
+
+`live/open.seed_max_chars` is optional. Omission preserves the full canonical
+seed. A positive value bounds serialized seed messages and requests a recent
+whole-turn suffix; zero is rejected. The resolved root prompt is never dropped
+and must fit, an existing compaction-summary head may be retained, and any
+truncation reports degraded continuity. Runtime system context and full
+canonical image identity, tombstone, and accounting sidecars stay outside the
+message window.
+
 The `live/*` methods require at least one configured live transport: `rkat-rpc --live-ws <addr>` for WebSocket and/or the WebRTC listener flags for WebRTC.
 
 ### Auth (realm/binding model)
@@ -542,7 +551,7 @@ Client methods:
 
 Live channel helpers:
 
-- `live_open(session_id)` → `LiveOpenResult`
+- `live_open(session_id, seed_max_chars=None)` → `LiveOpenResult`
 - `live_status(session_id)` / `live_close(session_id)`
 - `live_send_input_text(session_id, text)` / `live_send_input_audio(session_id, data)`
 - `live_commit_input(session_id)` / `live_interrupt(session_id)` / `live_truncate(session_id, ...)`
@@ -631,7 +640,8 @@ Client methods:
 
 Live channel helpers:
 
-- `liveOpen(params)` / `liveStatus(params)` / `liveClose(params)`
+- `liveOpen({ session_id, seed_max_chars? })` / `liveStatus(params)` / `liveClose(params)`
+- `LiveChannel.session(client, sessionId, { seedMaxChars? })` — session-bound convenience wrapper
 - `liveSendInput(params)` / `liveSendInputImage(params)` / `liveSendInputVideoFrame(params)`
 - `liveCommitInput(params)` / `liveInterrupt(params)` / `liveTruncate(params)`
 - `liveRefresh(params)`

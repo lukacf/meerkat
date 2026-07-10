@@ -209,7 +209,12 @@ from meerkat import LiveChannel, MeerkatClient
 client = MeerkatClient()
 await client.connect(live_ws=True)
 session = await client.create_session("Open a live channel")
-channel = LiveChannel.session(client, session.id, turning_mode="explicit_commit")
+channel = LiveChannel.session(
+    client,
+    session.id,
+    turning_mode="explicit_commit",
+    seed_max_chars=24_000,
+)
 opened = await channel.open()
 await channel.send_input_text("hello")
 await channel.commit_input(response_modality="text")
@@ -220,7 +225,7 @@ await client.close()
 
 Direct `MeerkatClient` helper names mirror the RPC methods:
 
-- `live_open(session_id, turning_mode=None)`
+- `live_open(session_id, turning_mode=None, transport=None, seed_max_chars=None)`
 - `live_status(channel_id)`
 - `live_close(channel_id)`
 - `live_send_input_text(channel_id, text)`
@@ -235,6 +240,12 @@ Direct `MeerkatClient` helper names mirror the RPC methods:
 `live_send_input_image` requires a caller-stable, session-scoped key. Its
 return value proves queue acceptance only; durable success is the later
 `user_content_committed` observation carrying that same key.
+
+Pass a positive `seed_max_chars` to bound serialized seed messages and request
+a core-owned whole-turn suffix at open time. Omission preserves the complete
+seed; zero is rejected. The resolved root must fit; an existing compaction
+summary may be retained, and any truncation reports degraded continuity.
+Canonical image identity, tombstone, and accounting sidecars remain complete.
 
 ## Capability and error model
 

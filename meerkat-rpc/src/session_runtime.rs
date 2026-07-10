@@ -167,7 +167,8 @@ impl ArchiveRuntimeMobState for RpcMobStateAdapter {
 // `meerkat::session_runtime::live_orchestration`. Re-exported here so
 // the existing call-sites and tests resolve the same symbols.
 use meerkat::session_runtime::live_orchestration::{
-    LiveConfigPropagationReport, build_live_projection_snapshot_for_runtime,
+    LiveConfigPropagationReport, LiveSeedWindow, RealtimeSessionOpenProjection,
+    RealtimeSessionOpenProjectionError, build_live_projection_snapshot_for_runtime,
     live_channel_requires_close_for_identity_change, realtime_projection_messages,
     realtime_projection_root_system_message, realtime_projection_runtime_system_context,
 };
@@ -3061,6 +3062,21 @@ impl SessionRuntime {
         turning_mode: meerkat_contracts::RealtimeTurningMode,
     ) -> Result<RealtimeSessionOpenConfig, SessionError> {
         self.realtime_session_open_config(session_id, turning_mode)
+            .await
+    }
+
+    /// Build a live-open projection with an optional caller-selected seed
+    /// window while preserving the full canonical sidecars.
+    pub async fn live_open_projection_for_session(
+        &self,
+        session_id: &SessionId,
+        turning_mode: meerkat_contracts::RealtimeTurningMode,
+        seed_window: Option<LiveSeedWindow>,
+    ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .live_open_projection_for_session(session_id, turning_mode, seed_window)
             .await
     }
 

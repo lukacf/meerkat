@@ -3056,6 +3056,7 @@ instead of producing sideband text.
 Default (`None`) preserves the prior wire shape: callers that omit the
 field get `ProviderManaged`, matching the legacy behavior."""
     session_id: str
+    seed_max_chars: Optional[int] = None
     transport: Optional[Literal['websocket', 'webrtc']] = None
     turning_mode: Optional[RealtimeTurningMode] = None
 

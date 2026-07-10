@@ -3832,6 +3832,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<Session, SessionError> {
+        self.export_realtime_open_session_snapshot_with_image_usage(id)
+            .await
+            .map(|(session, _)| session)
+    }
+
+    /// Export the authoritative realtime-open snapshot together with the full
+    /// canonical decoded-image usage. Seed-window projection may omit old
+    /// messages, but image admission must continue to account for every
+    /// committed canonical image independently of the selected replay seed.
+    pub async fn export_realtime_open_session_snapshot_with_image_usage(
+        &self,
+        id: &SessionId,
+    ) -> Result<(Session, usize), SessionError> {
         self.export_realtime_open_session_snapshot_with_image_budget(
             id,
             MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
@@ -3843,7 +3856,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         max_image_bytes: usize,
-    ) -> Result<Session, SessionError> {
+    ) -> Result<(Session, usize), SessionError> {
         // A provider ACK may have reached the durable metadata-only image
         // anchor immediately before a crash. Resolve that anchor before
         // constructing provider seed history: deferring recovery until the
@@ -3862,15 +3875,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 ));
             }
         }
-        session
-            .hydrate_realtime_user_images(self.blob_store.as_ref(), max_image_bytes)
+        let canonical_user_image_decoded_bytes = session
+            .hydrate_realtime_user_images_with_usage(self.blob_store.as_ref(), max_image_bytes)
             .await
             .map_err(|err| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                     "failed to hydrate realtime history images before provider projection: {err}"
                 )))
             })?;
-        Ok(session)
+        Ok((session, canonical_user_image_decoded_bytes))
     }
 
     /// Export the authoritative session for an in-place realtime refresh.
@@ -15569,10 +15582,11 @@ mod tests {
             .await
             .expect("commit durable runtime snapshot");
 
-        let realtime_snapshot = service
-            .export_realtime_open_session_snapshot(&created.session_id)
+        let (realtime_snapshot, canonical_user_image_decoded_bytes) = service
+            .export_realtime_open_session_snapshot_with_image_usage(&created.session_id)
             .await
             .expect("realtime provider projection should hydrate durable image bytes");
+        assert_eq!(canonical_user_image_decoded_bytes, 24);
         assert!(matches!(
             realtime_snapshot.messages(),
             [Message::User(user), Message::ToolResults { results, .. }]

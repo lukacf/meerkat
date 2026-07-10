@@ -64,6 +64,15 @@ export interface LiveChannelOptions {
   readonly turningMode?: RealtimeTurningMode;
   /** Transport to request from `live/open`. Missing uses the server default. */
   readonly transport?: LiveOpenTransport;
+  /**
+   * Positive serialized-character budget for a core-owned, whole-turn seed
+   * message window. Missing preserves the full canonical seed. The resolved
+   * root is never dropped and must fit; runtime context and canonical image
+   * sidecars stay outside the window. Truncation reports degraded continuity.
+   *
+   * Zero is invalid and is rejected by the server.
+   */
+  readonly seedMaxChars?: number;
 }
 
 export class LiveChannel {
@@ -71,6 +80,7 @@ export class LiveChannel {
   readonly sessionId: string;
   readonly turningMode?: RealtimeTurningMode;
   readonly transport?: LiveOpenTransport;
+  readonly seedMaxChars?: number;
 
   /** The channel id assigned by the server after `open()`. */
   private _channelId: string | undefined;
@@ -84,6 +94,7 @@ export class LiveChannel {
     this.sessionId = sessionId;
     this.turningMode = options?.turningMode;
     this.transport = options?.transport;
+    this.seedMaxChars = options?.seedMaxChars;
   }
 
   /**
@@ -108,14 +119,21 @@ export class LiveChannel {
    *
    * The returned {@link LiveOpenResult} contains `transport` (URL + token
    * for the caller to connect externally), `capabilities`, and `continuity`.
+   * When `seedMaxChars` is set, any whole-turn truncation is surfaced as
+   * degraded continuity; full canonical image sidecars remain attached.
    */
   async open(): Promise<LiveOpenResult> {
-    const params: LiveOpenParams = { session_id: this.sessionId };
+    const params: LiveOpenParams = {
+      session_id: this.sessionId,
+    };
     if (this.turningMode != null) {
       params.turning_mode = this.turningMode;
     }
     if (this.transport != null) {
       params.transport = this.transport;
+    }
+    if (this.seedMaxChars != null) {
+      params.seed_max_chars = this.seedMaxChars;
     }
     const result = await this.client.liveOpen(params);
     this._channelId = result.channel_id;

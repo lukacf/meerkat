@@ -52,11 +52,13 @@ class LiveChannel:
         *,
         turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
         transport: Literal["websocket", "webrtc"] | None = None,
+        seed_max_chars: int | None = None,
     ) -> None:
         self._client = client
         self._session_id = session_id
         self._turning_mode = turning_mode
         self._transport = transport
+        self._seed_max_chars = seed_max_chars
         self._channel_id: str | None = None
 
     @classmethod
@@ -67,13 +69,19 @@ class LiveChannel:
         *,
         turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
         transport: Literal["websocket", "webrtc"] | None = None,
+        seed_max_chars: int | None = None,
     ) -> LiveChannel:
-        """Create a ``LiveChannel`` bound to a standalone session."""
+        """Create a ``LiveChannel`` bound to a standalone session.
+
+        ``seed_max_chars`` requests a positive serialized whole-turn seed
+        message window at open time. Omit it to preserve full-seed behavior.
+        """
         return cls(
             client,
             session_id,
             turning_mode=turning_mode,
             transport=transport,
+            seed_max_chars=seed_max_chars,
         )
 
     @property
@@ -99,11 +107,17 @@ class LiveChannel:
         Stores the returned ``channel_id`` for subsequent operations.
         Returns the full ``LiveOpenResult`` dict (``channel_id``,
         ``transport``, ``capabilities``, ``continuity``).
+
+        If ``seed_max_chars`` was supplied at construction time, the server
+        may seed a whole-turn suffix. Any truncation is surfaced as degraded
+        continuity. The resolved root is never dropped and must fit; runtime
+        context and canonical image sidecars stay outside the message window.
         """
         result = await self._client.live_open(
             self._session_id,
             turning_mode=self._turning_mode,
             transport=self._transport,
+            seed_max_chars=self._seed_max_chars,
         )
         self._channel_id = result.get("channel_id") or result.get("channelId")
         return result

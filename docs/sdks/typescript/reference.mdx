@@ -153,6 +153,7 @@ The `Session` methods are thin conveniences over canonical runtime calls:
 ```typescript
 const channel = LiveChannel.session(client, session.id, {
   turningMode: "explicit_commit",
+  seedMaxChars: 24_000,
 });
 
 const opened: LiveOpenResult = await channel.open();
@@ -172,6 +173,13 @@ using the transport appropriate for your app.
 
 The direct helper has the same required identity:
 `client.liveSendInputImage(channelId, idempotencyKey, mime, dataBase64)`.
+
+`LiveChannelOptions.seedMaxChars` forwards as `LiveOpenParams.seed_max_chars`.
+It must be positive, bounds serialized seed messages, and requests a
+core-owned whole-turn suffix; omission preserves the complete canonical seed.
+The resolved root must fit. Runtime context and complete image identity,
+tombstone, and accounting sidecars remain outside the window. Any truncation
+reports degraded continuity, and the server rejects zero.
 
 ### Usage
 

@@ -115,6 +115,56 @@ which accommodates the documented 20 MiB decoded-image ceiling plus base64
 and envelope overhead.
 </Note>
 
+### Bounding the initial seed
+
+By default, `live/open` projects the full canonical history into the
+new realtime provider session. Long-lived sessions can request a smaller seed
+with the optional positive `seed_max_chars` parameter:
+
+<CodeGroup>
+```json JSON-RPC
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "live/open",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "seed_max_chars": 24000
+  }
+}
+```
+
+```python Python SDK
+result = await client.live_open(session.id, seed_max_chars=24_000)
+```
+
+```typescript TypeScript SDK
+const result = await client.liveOpen({
+  session_id: session.id,
+  seed_max_chars: 24_000,
+});
+
+const channel = LiveChannel.session(client, session.id, {
+  seedMaxChars: 24_000,
+});
+```
+</CodeGroup>
+
+The core counts the serialized projected seed messages and selects a recent
+whole-turn suffix; it never slices an individual turn just to fill the budget.
+The resolved root prompt is never dropped and must fit the requested window,
+or `live/open` rejects the request. An existing compaction summary may be
+retained as the head before the suffix.
+
+If selection omits any history, `LiveOpenResult.continuity` reports
+`mode: "degraded"`. Omitting `seed_max_chars` preserves the full-seed behavior.
+The value must be positive; the server rejects zero.
+
+Runtime system context and canonical multimodal sidecars are outside the seed
+message window. Image identity, tombstones, and aggregate accounting remain
+complete even when older seed messages are omitted, so retries and future
+image admission continue to use full canonical truth.
+
 ### Configuration defaults
 
 The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime-2"` makes live channels available by default. See the [Configuration guide](/concepts/configuration).
@@ -138,7 +188,7 @@ Use `live/status` to read the current state of a live channel:
 
 | Method | Purpose |
 |--------|---------|
-| `live/open` | Open a live channel on a session; returns `LiveOpenResult` with transport bootstrap and capabilities |
+| `live/open` | Open a live channel on a session; optionally bound its serialized seed messages with positive `seed_max_chars` |
 | `live/status` | Read live channel status |
 | `live/send_input` | Send an audio, text, or model-supported image chunk to a live channel |
 | `live/commit_input` | Commit pending input on a live channel (turn boundary) |

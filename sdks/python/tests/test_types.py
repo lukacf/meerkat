@@ -4996,12 +4996,11 @@ async def test_client_live_close_rejects_missing_or_unknown_generated_status():
 
 
 @pytest.mark.asyncio
-async def test_client_live_open_omits_turning_mode_when_default():
-    """R4-2 (P2): when the caller does not pass ``turning_mode``, the
-    Python SDK must omit the field on the wire — the server's
-    ``LiveOpenParams.turning_mode`` is ``Option<RealtimeTurningMode>``
-    with ``#[serde(skip_serializing_if = "Option::is_none")]`` and treats
-    omitted as ``ProviderManaged`` for back-compat with R3-1-era clients.
+async def test_client_live_open_omits_optional_open_parameters_when_default():
+    """Optional open controls must elide when absent.
+
+    The server treats omitted ``turning_mode`` as ``ProviderManaged`` and
+    omitted ``seed_max_chars`` as the legacy full canonical seed.
     """
     client = MeerkatClient()
 
@@ -5032,6 +5031,67 @@ async def test_client_live_open_omits_turning_mode_when_default():
 
     assert captured == [("live/open", {"session_id": "session-42"})]
     assert "turning_mode" not in captured[0][1]
+    assert "seed_max_chars" not in captured[0][1]
+
+
+@pytest.mark.asyncio
+async def test_client_live_open_passes_seed_max_chars():
+    """The direct helper forwards the snake-case wire budget unchanged."""
+    client = MeerkatClient()
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        return {
+            "channel_id": "live_seeded",
+            "transport": {"transport": "websocket", "url": "ws://x", "token": "t"},
+            "capabilities": {},
+            "continuity": {"mode": "degraded"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.live_open("session-seeded", seed_max_chars=24_000)
+
+    assert captured == [
+        (
+            "live/open",
+            {"session_id": "session-seeded", "seed_max_chars": 24_000},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_live_channel_passes_seed_max_chars_on_open():
+    """The session-bound wrapper carries its camel-free Python option through."""
+    from meerkat import LiveChannel
+
+    client = MeerkatClient()
+    captured: list[tuple[str, object, object, object]] = []
+
+    async def fake_live_open(
+        session_id,
+        turning_mode=None,
+        transport=None,
+        seed_max_chars=None,
+    ):
+        captured.append((session_id, turning_mode, transport, seed_max_chars))
+        return {
+            "channel_id": "live_seeded",
+            "transport": {"transport": "websocket", "url": "ws://x", "token": "t"},
+            "capabilities": {},
+            "continuity": {"mode": "degraded"},
+        }
+
+    client.live_open = fake_live_open  # type: ignore[method-assign]
+    channel = LiveChannel.session(client, "session-seeded", seed_max_chars=12_000)
+
+    result = await channel.open()
+
+    assert captured == [("session-seeded", None, None, 12_000)]
+    assert channel.channel_id == "live_seeded"
+    assert result["continuity"] == {"mode": "degraded"}
 
 
 @pytest.mark.asyncio

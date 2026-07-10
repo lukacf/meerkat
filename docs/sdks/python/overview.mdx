@@ -110,7 +110,12 @@ client = MeerkatClient()
 await client.connect(live_ws=True)
 try:
     session = await client.create_session("Open a live channel")
-    channel = LiveChannel.session(client, session.id, turning_mode="explicit_commit")
+    channel = LiveChannel.session(
+        client,
+        session.id,
+        turning_mode="explicit_commit",
+        seed_max_chars=24_000,
+    )
 
     opened = await channel.open()
     # Connect to opened["transport"]["url"] externally.
@@ -121,7 +126,7 @@ finally:
     await client.close()
 ```
 
-- `await client.live_open(session_id, turning_mode=None)`
+- `await client.live_open(session_id, turning_mode=None, transport=None, seed_max_chars=None)`
 - `await client.live_status(channel_id)`
 - `await client.live_close(channel_id)`
 - `await client.live_send_input_text(channel_id, text)`
@@ -137,6 +142,12 @@ Image keys are required, caller-stable, and session-scoped. The helper returns
 after queue acceptance; wait for `user_content_committed` with the matching key
 before treating the image as durable context. See [Live Channels](/guides/realtime#sending-image-input)
 for replay, conflict, and reconnect limits.
+
+`seed_max_chars` is an optional positive serialized-character budget for a
+core-selected whole-turn seed suffix. Omit it for the full canonical seed. The
+resolved root must fit. Runtime context and complete image identity, tombstone,
+and accounting sidecars remain outside the window; any truncation reports
+degraded continuity. Zero is rejected by the server.
 
 ### Mob APIs
 

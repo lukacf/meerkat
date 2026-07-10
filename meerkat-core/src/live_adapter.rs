@@ -797,6 +797,11 @@ pub struct LiveProjectionSnapshot {
     /// provider receives input.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_content_tombstones: Vec<RealtimeUserContentTombstone>,
+    /// Full canonical decoded-image usage, independent of the selected replay
+    /// seed. A bounded seed may omit old image messages while future image
+    /// admission must still enforce the canonical aggregate ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_user_image_decoded_bytes: Option<usize>,
     /// Canonical transcript revision at projection time. A changed revision
     /// cannot be hot-applied to a provider conversation that already contains
     /// the old causal history.
@@ -1331,6 +1336,7 @@ mod tests {
                 runtime_system_context: vec![],
                 user_content_identities: vec![],
                 user_content_tombstones: vec![],
+                canonical_user_image_decoded_bytes: None,
                 transcript_rewrite_generation: 0,
             },
         };
@@ -1368,6 +1374,7 @@ mod tests {
             }],
             user_content_identities: vec![],
             user_content_tombstones: vec![],
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -1910,6 +1917,7 @@ mod tests {
             runtime_system_context: vec![],
             user_content_identities: vec![],
             user_content_tombstones: vec![],
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         assert_eq!(s1.snapshot_version, 1);

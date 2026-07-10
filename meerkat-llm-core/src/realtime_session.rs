@@ -263,6 +263,15 @@ pub struct RealtimeSessionOpenConfig {
     /// Durable conflict markers for caller keys whose canonical image was
     /// removed by a same-session transcript rewrite.
     pub user_content_tombstones: Vec<RealtimeUserContentTombstone>,
+    /// Full canonical decoded-image usage at projection time.
+    ///
+    /// This is deliberately independent of `seed_messages`: a caller-selected
+    /// seed window may omit old image messages, but the live adapter must still
+    /// enforce future image admission against the complete canonical history.
+    /// `None` is reserved for direct/legacy Rust callers that did not obtain the
+    /// projection from a session service; adapters then derive usage from the
+    /// supplied seed for backward compatibility.
+    pub canonical_user_image_decoded_bytes: Option<usize>,
     /// Canonical transcript revision used to detect same-session history
     /// rewrites that cannot be applied to an already-seeded provider
     /// conversation in place.
@@ -294,6 +303,7 @@ impl RealtimeSessionOpenConfig {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
@@ -356,6 +366,13 @@ impl RealtimeSessionOpenConfig {
         tombstones: Vec<RealtimeUserContentTombstone>,
     ) -> Self {
         self.user_content_tombstones = tombstones;
+        self
+    }
+
+    /// Carry full canonical image usage separately from the selected seed.
+    #[must_use]
+    pub fn with_canonical_user_image_decoded_bytes(mut self, decoded_bytes: usize) -> Self {
+        self.canonical_user_image_decoded_bytes = Some(decoded_bytes);
         self
     }
 

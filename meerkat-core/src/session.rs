@@ -3182,6 +3182,18 @@ impl Session {
         blob_store: &dyn crate::BlobStore,
         max_decoded_bytes: usize,
     ) -> Result<(), crate::image_content::RealtimeUserImageHydrationError> {
+        self.hydrate_realtime_user_images_with_usage(blob_store, max_decoded_bytes)
+            .await
+            .map(|_| ())
+    }
+
+    /// Hydrate realtime user-message images and return the full canonical
+    /// decoded-byte usage for seed-independent future-image admission.
+    pub async fn hydrate_realtime_user_images_with_usage(
+        &mut self,
+        blob_store: &dyn crate::BlobStore,
+        max_decoded_bytes: usize,
+    ) -> Result<usize, crate::image_content::RealtimeUserImageHydrationError> {
         let previous_digest = if self
             .metadata
             .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
@@ -3191,18 +3203,19 @@ impl Session {
             None
         };
         let messages = Arc::make_mut(&mut self.messages);
-        crate::image_content::hydrate_user_images_for_realtime_projection(
-            blob_store,
-            messages,
-            max_decoded_bytes,
-        )
-        .await?;
+        let decoded_total =
+            crate::image_content::hydrate_user_images_for_realtime_projection_with_usage(
+                blob_store,
+                messages,
+                max_decoded_bytes,
+            )
+            .await?;
         if let Some(previous_digest) = previous_digest
             && transcript_messages_digest(self.messages()).ok().as_ref() != Some(&previous_digest)
         {
             self.refresh_transcript_head_after_message_mutation();
         }
-        Ok(())
+        Ok(decoded_total)
     }
 
     /// Explicitly update the timestamp

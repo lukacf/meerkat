@@ -219,14 +219,23 @@ surface, not the old live-adapter/docs-refresh snapshot:
 - Live (audio/video) channels are exposed through the caller-initiated `live/*` surface, not the previous attachment-status family. Capability detection still uses `ModelCapabilities.realtime` to decide whether a model can back a live channel; channel lifecycle is caller-initiated through the `live/*` JSON-RPC methods (and SDK equivalents) below. The previous `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status`, `realtime/open_info`, and `RealtimeAttachmentStatus` enum have been removed.
 ### Live channels (audio/video)
 
-Live is the single subsystem for audio and other realtime modalities. Pick a realtime-capable model (today the only catalog realtime row is `gpt-realtime-2`; older realtime catalog rows are retired) and open a channel explicitly. `live/open` returns a typed `LiveOpenResult` with the negotiated transport bootstrap (e.g. WebSocket URL for `rkat-rpc`'s `--live-ws` listener at `/live/ws`) and a `WireLiveChannelCapabilities` advert describing supported input/output modalities, continuity mode, and tool semantics.
+Live is the single subsystem for audio and other realtime modalities. Pick a realtime-capable model (today the only catalog realtime row is `gpt-realtime-2`; older realtime catalog rows are retired) and open a channel explicitly. `live/open` returns a typed `LiveOpenResult` with the negotiated transport bootstrap (e.g. WebSocket URL for `rkat-rpc`'s `--live-ws` listener at `/live/ws`) and a `WireLiveChannelCapabilities` advert describing supported input/output modalities, continuity mode, and tool semantics. Its optional positive `seed_max_chars` parameter requests a core-owned whole-turn seed suffix; omission preserves the full canonical seed.
 
 | Surface | Open channel | Observe / control |
 |---------|--------------|-------------------|
 | JSON-RPC | `live/open` (returns `LiveOpenResult` with transport bootstrap + capabilities) | `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close` |
-| Python SDK | `client.live_open(session_id)` | `client.live_status / live_refresh / live_send_input_text / live_send_input_audio / live_send_input_image / live_send_input_video_frame / live_commit_input / live_interrupt / live_truncate / live_close` |
-| TypeScript SDK | `client.liveOpen({ session_id: sessionId })` | `client.liveStatus / liveRefresh / liveSendInput / liveSendInputImage / liveSendInputVideoFrame / liveCommitInput / liveInterrupt / liveTruncate / liveClose` |
+| Python SDK | `client.live_open(session_id, seed_max_chars=...)` | `client.live_status / live_refresh / live_send_input_text / live_send_input_audio / live_send_input_image / live_send_input_video_frame / live_commit_input / live_interrupt / live_truncate / live_close` |
+| TypeScript SDK | `client.liveOpen({ session_id: sessionId, seed_max_chars: ... })` or `LiveChannel.session(..., { seedMaxChars: ... })` | `client.liveStatus / liveRefresh / liveSendInput / liveSendInputImage / liveSendInputVideoFrame / liveCommitInput / liveInterrupt / liveTruncate / liveClose` |
 | Rust | `meerkat_live::LiveAdapterHost` + `meerkat_core::live_adapter` adapter trait, exercised through `SessionRuntime` | typed observations and capability reads through the live host |
+
+Seed-window contract: `seed_max_chars` must be positive; zero is rejected by
+server validation. Core counts serialized seed messages and selects complete
+recent turns rather than slicing a turn. The resolved root prompt is never
+dropped and must fit the window; an existing compaction-summary head may be
+retained. Any truncation must return degraded continuity. Runtime system
+context and full canonical image identity, tombstone, and accounting sidecars
+remain outside the message window, so this is not a hard cap on the provider's
+entire instruction payload.
 
 Live image input requires a caller-stable, session-scoped `idempotency_key` on
 both `LiveInputChunkWire::Image` and `RealtimeImageChunk`. The convenience

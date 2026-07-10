@@ -126,6 +126,24 @@ pub struct LiveOpenParams {
     pub turning_mode: Option<RealtimeTurningMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<LiveOpenTransport>,
+    /// Optional serialized-character budget for the history seed messages
+    /// sent to the realtime provider when the channel opens.
+    ///
+    /// Omitted means full-seed compatibility: project the complete canonical
+    /// history. A positive value requests a core-owned, whole-turn suffix
+    /// window. The resolved root prompt must fit and is never dropped; an
+    /// existing compaction-summary head may be retained. If any history is
+    /// omitted, the open result reports degraded continuity rather than
+    /// pretending the bounded replay was complete.
+    ///
+    /// Runtime system context and canonical multimodal identity, tombstone,
+    /// and accounting state remain full sidecars outside this message window.
+    /// `0` is valid at this serde-only wire layer so it can round-trip, but the
+    /// `live/open` server validation rejects it; callers must send a positive
+    /// value when the field is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub seed_max_chars: Option<usize>,
 }
 
 /// Transport requested by `live/open`.
@@ -2108,12 +2126,17 @@ mod tests {
             session_id: "session-1".into(),
             turning_mode: None,
             transport: None,
+            seed_max_chars: None,
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         // R3-1: omitted `turning_mode` elides on the wire (back-compat).
         assert!(
             j.get("turning_mode").is_none(),
             "default `turning_mode` must elide the field on the wire"
+        );
+        assert!(
+            j.get("seed_max_chars").is_none(),
+            "omitted `seed_max_chars` must preserve the legacy full-seed wire shape"
         );
         let back: LiveOpenParams = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
@@ -2127,6 +2150,7 @@ mod tests {
             session_id: "session-1".into(),
             turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
             transport: None,
+            seed_max_chars: None,
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["turning_mode"], "explicit_commit");
@@ -2140,6 +2164,7 @@ mod tests {
             session_id: "session-1".into(),
             turning_mode: Some(RealtimeTurningMode::ProviderManaged),
             transport: None,
+            seed_max_chars: None,
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["turning_mode"], "provider_managed");
@@ -2153,9 +2178,38 @@ mod tests {
             session_id: "session-1".into(),
             turning_mode: None,
             transport: Some(LiveOpenTransport::Webrtc),
+            seed_max_chars: None,
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["transport"], "webrtc");
+        let back: LiveOpenParams = serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn live_open_params_seed_max_chars_round_trip() {
+        let v = LiveOpenParams {
+            session_id: "session-1".into(),
+            turning_mode: None,
+            transport: None,
+            seed_max_chars: Some(24_000),
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["seed_max_chars"], 24_000);
+        let back: LiveOpenParams = serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn live_open_params_zero_seed_budget_round_trips_for_server_validation() {
+        let v = LiveOpenParams {
+            session_id: "session-1".into(),
+            turning_mode: None,
+            transport: None,
+            seed_max_chars: Some(0),
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["seed_max_chars"], 0);
         let back: LiveOpenParams = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
     }

@@ -658,6 +658,30 @@ fn openai_realtime_seed_user_image_decoded_bytes(
     Ok(total)
 }
 
+/// Resolve the full canonical image-history charge independently of the
+/// selected provider replay seed. A seed window may omit old image messages;
+/// that must not lower the aggregate admission baseline for future images.
+fn openai_realtime_canonical_user_image_decoded_bytes(
+    seed_messages: &[Message],
+    canonical_decoded_bytes: Option<usize>,
+    max_decoded_bytes: usize,
+) -> Result<usize, LlmError> {
+    let selected_decoded_bytes =
+        openai_realtime_seed_user_image_decoded_bytes(seed_messages, max_decoded_bytes)?;
+    let canonical_decoded_bytes = canonical_decoded_bytes.unwrap_or(selected_decoded_bytes);
+    if canonical_decoded_bytes < selected_decoded_bytes {
+        return Err(LlmError::InvalidConfig {
+            message: "canonical realtime image usage is smaller than the selected seed".to_string(),
+        });
+    }
+    if canonical_decoded_bytes > max_decoded_bytes {
+        return Err(LlmError::InvalidInputShape {
+            message: "image_input_history_budget_exceeded".to_string(),
+        });
+    }
+    Ok(canonical_decoded_bytes)
+}
+
 fn openai_realtime_history_events(
     seed_messages: &[Message],
     runtime_system_context: &[PendingSystemContextAppend],
@@ -2196,9 +2220,11 @@ impl OpenAiRealtimeSession {
         &mut self,
         seed_messages: &[Message],
         runtime_system_context: &[PendingSystemContextAppend],
+        canonical_user_image_decoded_bytes: Option<usize>,
     ) -> Result<(), LlmError> {
-        let committed_user_image_bytes = openai_realtime_seed_user_image_decoded_bytes(
+        let committed_user_image_bytes = openai_realtime_canonical_user_image_decoded_bytes(
             seed_messages,
+            canonical_user_image_decoded_bytes,
             self.user_image_history_budget_bytes,
         )?;
         let mut seed_events =
@@ -4281,10 +4307,12 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // Hold the take-once runtime lease (or fresh direct-factory fallback)
         // until every canonical seed item has received provider ACK.
         let _open_projection_lease = self.take_or_acquire_open_projection_lease(open_config)?;
-        openai_realtime_seed_user_image_decoded_bytes(
-            &open_config.seed_messages,
-            self.user_image_history_budget_bytes,
-        )?;
+        let canonical_user_image_decoded_bytes =
+            openai_realtime_canonical_user_image_decoded_bytes(
+                &open_config.seed_messages,
+                open_config.canonical_user_image_decoded_bytes,
+                self.user_image_history_budget_bytes,
+            )?;
         let raw = self.raw_factory.open_session(open_config).await?;
         let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
         session.user_image_history_budget_bytes = self.user_image_history_budget_bytes;
@@ -4307,6 +4335,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
             .seed_history_projection(
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
+                Some(canonical_user_image_decoded_bytes),
             )
             .await?;
         Ok(Box::new(session))
@@ -4323,8 +4352,9 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // cannot pin process admission indefinitely. No fresh fallback lease
         // is needed because this path materializes no seed events.
         let _carried_open_projection_lease = open_config.take_open_projection_lease();
-        let committed_user_image_bytes = openai_realtime_seed_user_image_decoded_bytes(
+        let committed_user_image_bytes = openai_realtime_canonical_user_image_decoded_bytes(
             &open_config.seed_messages,
+            open_config.canonical_user_image_decoded_bytes,
             self.user_image_history_budget_bytes,
         )?;
         let target = OpenAiLiveCallTarget::new(target.provider_session_id.clone())?;
@@ -4368,10 +4398,12 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // event/data-URL materialization so the factory surface cannot bypass
         // aggregate memory custody.
         let _open_projection_lease = self.take_or_acquire_open_projection_lease(open_config)?;
-        openai_realtime_seed_user_image_decoded_bytes(
-            &open_config.seed_messages,
-            self.user_image_history_budget_bytes,
-        )?;
+        let canonical_user_image_decoded_bytes =
+            openai_realtime_canonical_user_image_decoded_bytes(
+                &open_config.seed_messages,
+                open_config.canonical_user_image_decoded_bytes,
+                self.user_image_history_budget_bytes,
+            )?;
         let raw = self.raw_factory.open_session(open_config).await?;
         let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
         session.user_image_history_budget_bytes = self.user_image_history_budget_bytes;
@@ -4399,6 +4431,7 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
             .seed_history_projection(
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
+                Some(canonical_user_image_decoded_bytes),
             )
             .await?;
         Ok(Arc::new(OpenAiLiveAdapter::new(session)) as Arc<dyn LiveAdapter>)
@@ -6150,7 +6183,11 @@ async fn execute_openai_live_command_with_budget(
             // system instructions (peer terminal, ops_lifecycle, etc.)
             // are emitted alongside seed history.
             session
-                .seed_history_projection(&snapshot.seed_messages, &snapshot.runtime_system_context)
+                .seed_history_projection(
+                    &snapshot.seed_messages,
+                    &snapshot.runtime_system_context,
+                    snapshot.canonical_user_image_decoded_bytes,
+                )
                 .await?;
             Ok(())
         }
@@ -6739,6 +6776,81 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn windowed_seed_retains_full_canonical_user_image_usage() {
+        use base64::Engine as _;
+
+        let max_decoded_bytes =
+            meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES;
+        assert_eq!(
+            openai_realtime_canonical_user_image_decoded_bytes(&[], Some(16), max_decoded_bytes,)
+                .expect("an empty replay seed must retain the full canonical image charge"),
+            16
+        );
+
+        let selected_seed = vec![Message::User(meerkat_core::UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+                },
+            },
+        ]))];
+        assert_eq!(
+            openai_realtime_canonical_user_image_decoded_bytes(
+                &selected_seed,
+                Some(24),
+                max_decoded_bytes,
+            )
+            .expect("a smaller replay seed must not lower the canonical image charge"),
+            24
+        );
+    }
+
+    #[test]
+    fn canonical_user_image_usage_cannot_be_smaller_than_selected_seed() {
+        use base64::Engine as _;
+
+        let selected_seed = vec![Message::User(meerkat_core::UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+                },
+            },
+        ]))];
+        let error = openai_realtime_canonical_user_image_decoded_bytes(
+            &selected_seed,
+            Some(7),
+            meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+        )
+        .expect_err("the canonical charge must cover every image in the selected seed");
+
+        assert!(matches!(
+            error,
+            LlmError::InvalidConfig { ref message }
+                if message == "canonical realtime image usage is smaller than the selected seed"
+        ));
+    }
+
+    #[test]
+    fn canonical_user_image_usage_cannot_exceed_projection_budget() {
+        let max_decoded_bytes =
+            meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES;
+        let error = openai_realtime_canonical_user_image_decoded_bytes(
+            &[],
+            Some(max_decoded_bytes + 1),
+            max_decoded_bytes,
+        )
+        .expect_err("the full canonical charge must remain within the 40 MiB projection budget");
+
+        assert!(matches!(
+            error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_history_budget_exceeded"
+        ));
+    }
+
     #[tokio::test]
     async fn seed_image_history_over_budget_rejects_before_any_provider_item() {
         use base64::Engine as _;
@@ -6762,7 +6874,7 @@ mod tests {
         ]))];
 
         let error = session
-            .seed_history_projection(&seed, &[])
+            .seed_history_projection(&seed, &[], None)
             .await
             .expect_err("an eight-byte image must not fit a seven-byte replay budget");
         assert!(matches!(
@@ -7117,6 +7229,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         }
     }
@@ -9187,6 +9300,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 4,
         };
         execute_openai_live_command(
@@ -10213,7 +10327,7 @@ mod tests {
             RealtimeTurningMode::ProviderManaged,
         );
         session
-            .seed_history_projection(&seed_messages, &[])
+            .seed_history_projection(&seed_messages, &[], None)
             .await
             .expect("seed history projection");
         assert_eq!(seen.lock().await.len(), 1);
@@ -12358,6 +12472,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         adapter
@@ -12524,6 +12639,7 @@ mod tests {
                 runtime_system_context: runtime_system_context.clone(),
                 user_content_identities: Vec::new(),
                 user_content_tombstones: Vec::new(),
+                canonical_user_image_decoded_bytes: None,
                 transcript_rewrite_generation: 0,
             };
             adapter
@@ -12648,6 +12764,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         adapter
@@ -12766,6 +12883,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         adapter
@@ -12881,6 +12999,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         adapter
@@ -12957,6 +13076,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         adapter
@@ -13042,6 +13162,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         adapter
@@ -14397,6 +14518,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
 
@@ -14531,6 +14653,7 @@ mod tests {
             runtime_system_context: Vec::new(),
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
+            canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         let error = adapter

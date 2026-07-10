@@ -22704,7 +22704,11 @@ async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_secon
         single_edge_events, 0,
         "dense topology materialization must not emit per-edge wire events"
     );
-    let max_wire_elapsed = std::time::Duration::from_secs(180);
+    // GitHub-hosted x86 runners are materially slower than the isolated
+    // BuildBuddy lane (observed at roughly 239s versus 145s). Keep the test
+    // isolated through nextest and allow a portable budget that still catches
+    // a greater-than-2x regression from the isolated baseline.
+    let max_wire_elapsed = std::time::Duration::from_secs(300);
     assert!(
         wire_elapsed < max_wire_elapsed,
         "300x150 topology materialization should stay inside the generated-authority stress budget of {max_wire_elapsed:?} (spawn={spawn_elapsed:?}, wire={wire_elapsed:?})"

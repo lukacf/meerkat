@@ -16285,8 +16285,8 @@ mod tests {
         let service = PersistentSessionService::new(
             CapabilityBuilder,
             4,
-            store,
-            runtime_store,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
             blob_store.clone(),
         );
         let created = service
@@ -16348,7 +16348,24 @@ mod tests {
             .discard_live_session(&created.session_id)
             .await
             .expect("force cold restore path");
-        let retry = service
+        drop(service);
+        let recovery = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store,
+            blob_store.clone(),
+        );
+        let resume_source = recovery
+            .load_authoritative_session(&created.session_id)
+            .await
+            .expect("cold-load rewritten runtime authority")
+            .expect("rewritten runtime authority remains present after restart");
+        recovery
+            .create_session(resume_request(resume_source))
+            .await
+            .expect("cold resume must materialize the rewritten runtime authority");
+        let retry = recovery
             .append_realtime_transcript_event(
                 &created.session_id,
                 image("removed-key", "retry-item", data),
@@ -16365,7 +16382,7 @@ mod tests {
             Err(meerkat_core::BlobStoreError::NotFound(_))
         ));
 
-        let fresh = service
+        let fresh = recovery
             .append_realtime_transcript_event(
                 &created.session_id,
                 image("fresh-key", "fresh-item", data),
@@ -16376,7 +16393,7 @@ mod tests {
             fresh.user_content,
             Some(meerkat_core::RealtimeUserContentApplyOutcome::Committed(_))
         ));
-        let durable = service
+        let durable = recovery
             .export_realtime_refresh_session_snapshot(&created.session_id)
             .await
             .expect("rewritten durable session remains valid");
@@ -16390,8 +16407,13 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
         let blob_store = Arc::new(MemoryBlobStore::new());
-        let service =
-            PersistentSessionService::new(CapabilityBuilder, 4, store, runtime_store, blob_store);
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            blob_store.clone(),
+        );
         let created = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
             .await
@@ -16439,7 +16461,19 @@ mod tests {
             .discard_live_session(&created.session_id)
             .await
             .expect("force cold restore path");
-        let replay = service
+        drop(service);
+        let recovery =
+            PersistentSessionService::new(CapabilityBuilder, 4, store, runtime_store, blob_store);
+        let resume_source = recovery
+            .load_authoritative_session(&created.session_id)
+            .await
+            .expect("cold-load rewritten runtime authority")
+            .expect("rewritten runtime authority remains present after restart");
+        recovery
+            .create_session(resume_request(resume_source))
+            .await
+            .expect("cold resume must materialize the rewritten runtime authority");
+        let replay = recovery
             .append_realtime_transcript_event(&created.session_id, image("ignored-retry-item"))
             .await
             .expect("exact retained retry");

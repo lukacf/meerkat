@@ -9643,16 +9643,19 @@ mod tests {
             .expect("generated publish obligation");
 
         adapter
-            .stage_supervisor_authorize(
+            .stage_supervisor_binding_route_refresh(
                 &session_id,
-                "super-a-renamed".to_string(),
-                supervisor_peer_id,
-                "inproc://super-new".to_string(),
-                test_supervisor_signing_public_key(0xbb),
-                7,
+                GeneratedSupervisorBinding {
+                    name: "super-a-renamed".to_string(),
+                    peer_id: supervisor_peer_id.clone(),
+                    address: "inproc://super-new".to_string(),
+                    signing_public_key: test_supervisor_signing_public_key(0xaa),
+                    epoch: 7,
+                },
+                Some(supervisor_peer_id),
             )
             .await
-            .expect("same-peer same-epoch descriptor rotation");
+            .expect("same-authority same-epoch route refresh");
 
         let stale_authority = crate::protocol_supervisor_trust_publish::publish_authority_for_peer(
             &stale_obligation,

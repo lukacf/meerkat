@@ -307,7 +307,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
-- `PrepareTerminalSupervisorCleanupBindings`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -321,11 +320,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Reset`
 - `StopRuntimeExecutor`(reason: String)
 - `Destroy`(session_id: SessionId)
-- `RecoverSupervisorBinding`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
-- `RecoverSupervisorRevocationPending`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
-- `RecoverSupervisorRotationOperation`(operation_id: String, phase: SupervisorRotationPhase, rejection: Option<SupervisorRotationRejectionKind>, previous_name: String, previous_peer_id: String, previous_address: String, previous_signing_public_key: String, previous_epoch: u64, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64)
-- `RecoverSupervisorRotationTerminalReceipt`(operation_id: String, phase: SupervisorRotationPhase, rejection: Option<SupervisorRotationRejectionKind>, previous_name: String, previous_peer_id: String, previous_address: String, previous_signing_public_key: String, previous_epoch: u64, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64)
-- `RecoverRevokedSupervisorReceipt`(peer_id: String, signing_public_key: String, epoch: u64)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
 - `ContainsSession`(session_id: SessionId)
@@ -353,13 +347,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Recycle`
 - `ServiceTurnCommitted`(run_id: RunId)
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
-- `RefreshSupervisorBindingRoute`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64, sender_peer_id: Option<String>)
-- `SubmitSupervisorRotation`(operation_id: String, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64, preflight_rejection: Option<SupervisorRotationRejectionKind>, sender_peer_id: Option<String>, sender_signing_public_key: Option<String>)
-- `ResumeSupervisorRotation`(operation_id: String)
-- `SupervisorRotationPreviousRevoked`(operation_id: String, peer_id: String, epoch: u64)
-- `SupervisorRotationNextPublished`(operation_id: String, peer_id: String, epoch: u64)
-- `ObserveSupervisorRotation`(operation_id: String, observer_peer_id: Option<String>, observer_signing_public_key: Option<String>, observer_epoch: u64)
-- `ResolveSupervisorCleanupCommandAdmission`(command_kind: SupervisorCleanupCommandKind, supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -373,6 +360,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LoadBoundaryReceipt`
 
 ## Runtime-Internal Inputs
+- `PrepareTerminalSupervisorCleanupBindings`(session_id: SessionId)
 - `BeginUnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `RuntimeLoopStoppedForUnregister`(session_id: SessionId, forced_abort: Bool)
 - `CommsDrainExitedForUnregister`(session_id: SessionId, forced_abort: Bool)
@@ -407,6 +395,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRuntimeCompletionCleanup`(session_id: SessionId, observation_session_id: SessionId, observation_agent_runtime_id: Option<AgentRuntimeId>, observation_fence_token: Option<FenceToken>, observation_runtime_generation: Option<Generation>, observation_runtime_epoch_id: Option<RuntimeEpochId>, outcome: RuntimeCompletionObservedOutcome, archived_by_authority: Bool, live_session: RuntimeCompletionLiveSessionObservation)
 - `ResolveRuntimeCompletionWaitFailure`(session_id: SessionId, failure: RuntimeCompletionWaitFailureObservation)
 - `RecoverRuntimeAuthority`(session_id: SessionId, state: RuntimeLifecycleObservedState, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, silent_intent_overrides: Set<String>)
+- `RecoverSupervisorBinding`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
+- `RecoverSupervisorRevocationPending`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
+- `RecoverSupervisorRotationOperation`(operation_id: String, phase: SupervisorRotationPhase, rejection: Option<SupervisorRotationRejectionKind>, previous_name: String, previous_peer_id: String, previous_address: String, previous_signing_public_key: String, previous_epoch: u64, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64)
+- `RecoverSupervisorRotationTerminalReceipt`(operation_id: String, phase: SupervisorRotationPhase, rejection: Option<SupervisorRotationRejectionKind>, previous_name: String, previous_peer_id: String, previous_address: String, previous_signing_public_key: String, previous_epoch: u64, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64)
+- `RecoverRevokedSupervisorReceipt`(peer_id: String, signing_public_key: String, epoch: u64)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
 - `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
@@ -597,6 +590,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveSupervisorAuthorizeAdmission`(supervisor_name: String, supervisor_peer_id: String, supervisor_address: String, supervisor_signing_public_key: String, supervisor_epoch: u64, sender_peer_id: Option<String>, sender_signing_public_key: Option<String>)
 - `BindSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `AuthorizeSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
+- `RefreshSupervisorBindingRoute`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64, sender_peer_id: Option<String>)
+- `SubmitSupervisorRotation`(operation_id: String, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64, preflight_rejection: Option<SupervisorRotationRejectionKind>, sender_peer_id: Option<String>, sender_signing_public_key: Option<String>)
+- `ResumeSupervisorRotation`(operation_id: String)
+- `SupervisorRotationPreviousRevoked`(operation_id: String, peer_id: String, epoch: u64)
+- `SupervisorRotationNextPublished`(operation_id: String, peer_id: String, epoch: u64)
+- `ObserveSupervisorRotation`(operation_id: String, observer_peer_id: Option<String>, observer_signing_public_key: Option<String>, observer_epoch: u64)
 - `RequestSupervisorTrustPublish`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `RevokeSupervisor`(peer_id: String, epoch: u64)
 - `SupervisorTrustEdgePublished`(peer_id: String, epoch: u64)
@@ -608,6 +607,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AddDirectPeerEndpoint`(endpoint: PeerEndpoint)
 - `RemoveDirectPeerEndpoint`(endpoint: PeerEndpoint)
 - `ResolveSupervisorBridgeCommandAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
+- `ResolveSupervisorCleanupCommandAdmission`(command_kind: SupervisorCleanupCommandKind, supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 - `AuthorizeSupervisorMobPeerOverlay`(supervisor_peer_id: String, supervisor_epoch: u64, recipient_peer_id: String, overlay_epoch: u64, endpoints: Set<PeerEndpoint>, endpoint_count: u64, command_peer_id: String, command_endpoint: PeerEndpoint, command_kind: MobPeerOverlayCommandKind)
 - `ApplyMobPeerOverlay`(epoch: u64, endpoints: Set<PeerEndpoint>)
 
@@ -18248,14 +18248,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `durable_supervisor_cleanup_authority_present`
 - Emits: `LocalEndpointChanged`
 - To: `Retired`
-
-### `PublishLocalEndpointTerminalSupervisorCleanupStopped`
-- From: `Stopped`
-- On: `PublishLocalEndpoint`(endpoint)
-- Guards:
-  - `durable_supervisor_cleanup_authority_present`
-- Emits: `LocalEndpointChanged`
-- To: `Stopped`
 
 ### `PublishLocalEndpointTerminalSupervisorCleanupDestroyed`
 - From: `Destroyed`

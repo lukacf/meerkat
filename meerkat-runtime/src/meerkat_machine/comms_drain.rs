@@ -839,14 +839,12 @@ impl MeerkatMachine {
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> Result<bool, RuntimeDriverError> {
         if !keep_alive {
-            // Explicit disable: stop any running drain for this session. A
-            // failed abort is a typed control fault — the drain would keep
-            // running while the caller believes keep-alive was disabled — so
-            // it propagates instead of being silently discarded.
-            self.execute_meerkat_machine_drain_local_command(MeerkatMachineCommand::Abort {
-                session_id: session_id.clone(),
-            })
-            .await?;
+            // The outer SetPeerIngressContext command already holds the
+            // session mutation gate. Stop the producers through the
+            // gate-assuming helper rather than dispatching Abort, whose public
+            // command path acquires the same non-reentrant gate.
+            self.stop_and_abort_session_comms_producers(session_id, true)
+                .await;
             return Ok(false);
         }
 

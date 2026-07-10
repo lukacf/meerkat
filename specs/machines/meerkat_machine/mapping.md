@@ -5384,9 +5384,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublishLocalEndpointTerminalSupervisorCleanupRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `PublishLocalEndpointTerminalSupervisorCleanupStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `PublishLocalEndpointTerminalSupervisorCleanupDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

@@ -6959,7 +6959,15 @@ async fn archive_session_with_runtime_cleanup(
             }
         }
 
-        let result = service
+        #[cfg(feature = "mob")]
+        let had_cleanup_anchor = state
+            .mob_state
+            .has_bridge_session_scoped_mobs(&session_id.to_string())
+            .await;
+        #[cfg(not(feature = "mob"))]
+        let had_cleanup_anchor = false;
+
+        let mut result = service
             .archive_with_machine_protocol(
                 &session_id,
                 MachineSessionArchiveProtocol::from_machine(state.runtime_adapter.as_ref()),
@@ -6971,6 +6979,14 @@ async fn archive_session_with_runtime_cleanup(
         {
             let _ = result_tx.send(Err(error));
             return;
+        }
+        if not_found && had_cleanup_anchor {
+            // The durable session archive landed on an earlier attempt, but
+            // that caller failed while destroying session-owned mobs. This
+            // exact retry owns the retained cleanup work it just completed,
+            // so report convergence instead of laundering success into a
+            // stale public NotFound response.
+            result = Ok(());
         }
         let _ = result_tx.send(result);
     });

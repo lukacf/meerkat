@@ -22138,7 +22138,10 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition PublishLocalEndpointTerminalSupervisorCleanup {
-            per_phase [Retired, Stopped, Destroyed]
+            // Stopped is intentionally absent: re-registration revives a
+            // stopped session to Idle before any build input is replayed.
+            // Only truly terminal phases need this cleanup-only self-loop.
+            per_phase [Retired, Destroyed]
             on input PublishLocalEndpoint { endpoint }
             guard "durable_supervisor_cleanup_authority_present" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound

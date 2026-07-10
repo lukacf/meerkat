@@ -16851,7 +16851,6 @@ pub enum TransitionId {
     PublishLocalEndpointAttached,
     PublishLocalEndpointRunning,
     PublishLocalEndpointTerminalSupervisorCleanupRetired,
-    PublishLocalEndpointTerminalSupervisorCleanupStopped,
     PublishLocalEndpointTerminalSupervisorCleanupDestroyed,
     ClearLocalEndpointIdle,
     ClearLocalEndpointAttached,

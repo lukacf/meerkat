@@ -236,8 +236,8 @@ impl MeerkatMachine {
                 // Ownership transitions above have succeeded (or been
                 // idempotently rejected); dispatch the mechanical
                 // drain-task lifecycle side-effect. `update_peer_ingress_
-                // context_inner` stages `SpawnDrain` / `Abort` on the DSL
-                // and, on DSL accept, spawns / aborts the drain task.
+                // context_inner` stages `SpawnDrain` when enabling and
+                // applies the already-gated stop/abort path when disabling.
                 // On DSL rejection it returns false without mutating
                 // shell slot state (preserving the bdd460951 invariant
                 // "no shell mutation after DSL rejection"). Its return

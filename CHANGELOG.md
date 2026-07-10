@@ -11,7 +11,7 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures (enforced by the `semver-breaks` release gate
 via cargo-semver-checks against the published baselines).
 
-## [Unreleased]
+## [0.7.27] - 2026-07-10
 
 ### Breaking
 

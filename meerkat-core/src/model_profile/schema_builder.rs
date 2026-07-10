@@ -1,5 +1,7 @@
-//! Build the JSON Schema advertised for a model's `provider_params` from a
-//! [`ModelCapabilities`] row.
+//! Build the JSON Schema advertised for the provider-specific payload inside a
+//! model's canonical `provider_params.provider_tag` from a [`ModelCapabilities`]
+//! row. The outer `ProviderParamsOverride` envelope is owned by the public wire
+//! contract; this builder describes only the selected provider variant's knobs.
 //!
 //! The schema here is the single source of truth for UI-facing param shapes.
 //! It is pure mechanics over the capability vocabulary: the function maps a
@@ -124,8 +126,12 @@ fn anthropic_thinking_schema(mode: ThinkingSupport) -> Option<Value> {
 // ---------------------------------------------------------------------------
 // OpenAI
 //
-// Current hand-written shape (matched for parity):
+// Provider-tag payload shape:
 // - reasoning_effort: string enum  (only on reasoning models)
+// - reasoning_mode: string enum    (GPT-5.6 Responses)
+// - reasoning_context: string enum (GPT-5.6 Responses)
+// - text_verbosity: string enum    (GPT-5.6 Responses)
+// - prompt_cache_options: object   (GPT-5.6 Responses)
 // - seed: integer
 // - frequency_penalty: number
 // - presence_penalty: number
@@ -139,6 +145,81 @@ fn build_openai_schema(caps: &ModelCapabilities) -> Value {
             "reasoning_effort".into(),
             effort_enum_schema("Reasoning effort level.", caps.effort_levels),
         );
+    }
+    if let Some(advanced) = caps.openai_responses_params {
+        if !advanced.reasoning_modes.is_empty() {
+            props.insert(
+                "reasoning_mode".into(),
+                string_enum_schema(
+                    "Responses reasoning execution mode.",
+                    advanced
+                        .reasoning_modes
+                        .iter()
+                        .map(|mode| mode.as_wire_str()),
+                ),
+            );
+        }
+        if !advanced.reasoning_contexts.is_empty() {
+            props.insert(
+                "reasoning_context".into(),
+                string_enum_schema(
+                    "Reasoning items made available to the next sample.",
+                    advanced
+                        .reasoning_contexts
+                        .iter()
+                        .map(|context| context.as_wire_str()),
+                ),
+            );
+        }
+        if !advanced.text_verbosity_levels.is_empty() {
+            props.insert(
+                "text_verbosity".into(),
+                string_enum_schema(
+                    "Default detail level for text output.",
+                    advanced
+                        .text_verbosity_levels
+                        .iter()
+                        .map(|level| level.as_wire_str()),
+                ),
+            );
+        }
+
+        let mut cache_props = serde_json::Map::new();
+        if !advanced.prompt_cache_modes.is_empty() {
+            cache_props.insert(
+                "mode".into(),
+                string_enum_schema(
+                    "Request-wide prompt-cache breakpoint policy.",
+                    advanced
+                        .prompt_cache_modes
+                        .iter()
+                        .map(|mode| mode.as_wire_str()),
+                ),
+            );
+        }
+        if !advanced.prompt_cache_ttls.is_empty() {
+            cache_props.insert(
+                "ttl".into(),
+                string_enum_schema(
+                    "Minimum lifetime for prompt-cache entries.",
+                    advanced
+                        .prompt_cache_ttls
+                        .iter()
+                        .map(|ttl| ttl.as_wire_str()),
+                ),
+            );
+        }
+        if !cache_props.is_empty() {
+            props.insert(
+                "prompt_cache_options".into(),
+                json!({
+                    "description": "GPT-5.6 prompt-cache controls.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": Value::Object(cache_props)
+                }),
+            );
+        }
     }
     if caps.supports_legacy_penalties {
         props.insert(
@@ -269,6 +350,15 @@ fn effort_enum_schema(description: &str, levels: &[EffortLevel]) -> Value {
         "description": description,
         "type": "string",
         "enum": vs
+    })
+}
+
+fn string_enum_schema(description: &str, values: impl Iterator<Item = &'static str>) -> Value {
+    let values: Vec<Value> = values.map(|value| Value::String(value.into())).collect();
+    json!({
+        "description": description,
+        "type": "string",
+        "enum": values
     })
 }
 

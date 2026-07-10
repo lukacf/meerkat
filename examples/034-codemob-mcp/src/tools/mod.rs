@@ -46,13 +46,16 @@ const MODEL_DESCRIPTION: &str = "\
 Available models: \
 claude-opus-4-8 (Anthropic, strongest reasoning), \
 claude-sonnet-4-6 (Anthropic, fast + capable), \
-gpt-5.5 (OpenAI, strongest general + code), \
+gpt-5.6-sol (OpenAI, frontier quality), \
+gpt-5.6-terra (OpenAI, balanced), \
+gpt-5.6-luna (OpenAI, efficient), \
+gpt-5.5 (OpenAI, prior generation), \
 gpt-5.5-pro (OpenAI, deep reasoning — slow, use sparingly), \
 gemini-3.1-pro-preview (Google, strong general), \
 gemini-3.1-flash-lite-preview (Google, fastest). \
-Default: gpt-5.5. \
+Default: gpt-5.5 (broadly available). \
 Guidance: use opus/gpt-5.5-pro for complex reasoning (architecture, judging). \
-Use sonnet/gpt-5.5 for code tasks. \
+Use sonnet/gpt-5.5 for code tasks; use GPT-5.6 only with preview access. \
 Use gemini-3.1-flash-lite-preview for speed-sensitive roles. \
 Mix providers in multi-agent packs for perspective diversity";
 
@@ -143,7 +146,7 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
                         "description": format!(
-                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-8\", \"planner\": \"gpt-5.5\"}}. \
+                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-8\", \"planner\": \"gpt-5.6-sol\"}}. \
                             Role names depend on the pack. {MODEL_DESCRIPTION}"
                         )
                     },
@@ -402,7 +405,9 @@ mod tests {
     fn advertised_model_defaults_are_current() {
         let schema = serde_json::to_string(&tools_list()).expect("tools schema serializes");
 
-        assert!(schema.contains("gpt-5.5"));
+        assert!(schema.contains("gpt-5.6-sol"));
+        assert!(schema.contains("gpt-5.6-terra"));
+        assert!(schema.contains("gpt-5.6-luna"));
         assert!(schema.contains("claude-opus-4-8"));
         assert!(!schema.contains("gpt-5.2"));
         assert!(!schema.contains("gpt-5.4"));

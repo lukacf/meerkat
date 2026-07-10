@@ -241,7 +241,7 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
 - Models: provider:"openai" uses the catalog OpenAI image default; supported image targets and their hosted-tool vs Images API routes are owned by the shared model catalog.
 - Use Meerkat's universal size, quality, format, count, and intent fields for normal requests; the adapter lowers format to OpenAI output_format.
 - provider_params is only for advanced OpenAI-specific overrides. For the current hosted gpt-image-2 route, public callers should normally use {"background":"auto"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}.
-- Hosted gpt-image-2 route only: provider_params may also include {"reasoning_effort":"none"|"low"|"medium"|"high"|"xhigh","web_search":true|false|null|{...}}. Use this for current/fresh image-only requests instead of searching separately first; object web_search values are lowered to the OpenAI hosted web_search tool with type:"web_search".
+- Hosted Responses routes: provider_params may also include {"reasoning_effort":<a level advertised by the backing text model>,"web_search":true|false|null|{...}}. The current gpt-image-2 default is backed by GPT-5.4 and stops at xhigh; GPT-5.6 text-model routes also accept max. Use this for current/fresh image-only requests instead of searching separately first; object web_search values are lowered to the OpenAI hosted web_search tool with type:"web_search".
 - action applies only to the hosted Responses image tool and is usually omitted in favor of the top-level Meerkat intent. Images API requests reject action.
 - Images API requests reject reasoning_effort and web_search.
 - background:"transparent" is model-dependent; gpt-image-2 rejects it."#,
@@ -313,9 +313,14 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
         else {
             return Err(ImageOperationDenialReason::UnsupportedTarget);
         };
-        let provider_call_model = provider_call_model_id
-            .map(ModelId::new)
-            .unwrap_or_else(|| ModelId::new(model.model_id));
+        let provider_call_model_id = provider_call_model_id.unwrap_or(model.model_id);
+        if let Some(effort) = provider_params.reasoning_effort
+            && crate::request_support::supports_reasoning_effort(provider_call_model_id, effort)
+                != Some(true)
+        {
+            return Err(ImageOperationDenialReason::ProjectionUnsupported);
+        }
+        let provider_call_model = ModelId::new(provider_call_model_id);
         let provider_plan = serde_json::to_value(OpenAiResponsesImagePlan {
             tool_name: "image_generation".to_string(),
             model: ModelId::new(tool_model_id),
@@ -569,6 +574,54 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("low")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn profile_rejects_max_effort_for_default_gpt_54_backed_hosted_route()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = generate_request(json!({"reasoning_effort": "max"}))?;
+        let profile = default_image_generation_model(Provider::OpenAI)
+            .expect("OpenAI default image profile must be cataloged");
+
+        let result = OpenAiImageGenerationProfile.resolve_execution_plan(
+            operation_id()?,
+            &profile,
+            &request,
+            capabilities(),
+            NonZeroU32::MIN,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ImageOperationDenialReason::ProjectionUnsupported)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn profile_accepts_max_effort_for_gpt_56_hosted_route() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let request = generate_request(json!({"reasoning_effort": "max"}))?;
+        let profile = openai_image_profile("gpt-5.6-sol");
+
+        let resolution = OpenAiImageGenerationProfile
+            .resolve_execution_plan(
+                operation_id()?,
+                &profile,
+                &request,
+                capabilities(),
+                NonZeroU32::MIN,
+            )
+            .map_err(|err| std::io::Error::other(format!("resolve plan: {err:?}")))?;
+
+        let plan: OpenAiResponsesImagePlan =
+            serde_json::from_value(resolution.execution_plan.provider_plan)?;
+        assert_eq!(
+            plan.provider_params.reasoning_effort,
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(resolution.provider_call_model.as_str(), "gpt-5.6-sol");
         Ok(())
     }
 

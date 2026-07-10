@@ -67,7 +67,7 @@ consult(question: "What about the edge case?", session_id: "<id from previous ca
 **Parameters:**
 - `question` (required) — The question or topic
 - `context` — Background information, code snippets, file contents
-- `model` — LLM model (default: `gpt-5.5`)
+- `model` — LLM model (default: `gpt-5.5`; GPT-5.6 requires preview access)
 - `system_prompt` — Custom persona (default: general technical advisor)
 - `shell` — Enable shell access for running commands
 - `skills` — Inject domain knowledge (e.g. `["meerkat-platform", "rct-methodology"]`)
@@ -129,7 +129,10 @@ Every agent in every pack uses a distinct model by default — different trainin
 | Model | Provider | Strengths | Used as default for |
 |-------|----------|-----------|-------------------|
 | `claude-opus-4-8` | Anthropic | Strongest reasoning | Judge, moderator, synthesizer, orchestrator |
-| `gpt-5.5` | OpenAI | Strongest general + code | Implementer, critic, advisor, security reviewer |
+| `gpt-5.6-sol` | OpenAI | Frontier capability and quality | Preview-enabled override |
+| `gpt-5.6-terra` | OpenAI | Balanced intelligence and cost | Preview-enabled override |
+| `gpt-5.6-luna` | OpenAI | Efficient high-volume work | Preview-enabled override |
+| `gpt-5.5` | OpenAI | Broadly available general + code | Standalone consult, implementer, critic, advisor, security reviewer |
 | `gemini-3.1-pro-preview` | Google | Strong general | General reviewer, purist, guardian |
 | `gemini-3.1-flash-lite-preview` | Google | Fastest | Advocate, skeptic, perf reviewer, contrarian |
 | `claude-sonnet-4-6` | Anthropic | Fast + capable | RCT aggregator, implementer |

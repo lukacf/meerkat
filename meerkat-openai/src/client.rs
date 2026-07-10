@@ -606,6 +606,109 @@ impl OpenAiClient {
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
 
+        if let Some(tag) = openai_tag(request) {
+            if reasoning_enabled
+                && let Some(effort) = tag.reasoning_effort
+                && crate::request_support::supports_reasoning_effort(&request.model, effort)
+                    == Some(false)
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "OpenAI model '{}' does not support reasoning effort '{}'",
+                        request.model,
+                        effort.as_legacy_str()
+                    ),
+                });
+            }
+            if let Some(mode) = tag.reasoning_mode
+                && crate::request_support::supports_reasoning_mode(&request.model, mode)
+                    == Some(false)
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "OpenAI model '{}' does not support reasoning mode '{}'",
+                        request.model,
+                        mode.as_wire_str()
+                    ),
+                });
+            }
+            if let Some(context) = tag.reasoning_context
+                && crate::request_support::supports_reasoning_context(&request.model, context)
+                    == Some(false)
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "OpenAI model '{}' does not support reasoning context '{}'",
+                        request.model,
+                        context.as_wire_str()
+                    ),
+                });
+            }
+            if let Some(verbosity) = tag.text_verbosity
+                && crate::request_support::supports_text_verbosity(&request.model, verbosity)
+                    == Some(false)
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "OpenAI model '{}' does not support text verbosity '{}'",
+                        request.model,
+                        verbosity.as_wire_str()
+                    ),
+                });
+            }
+            if (tag.seed.is_some()
+                || tag.frequency_penalty.is_some()
+                || tag.presence_penalty.is_some())
+                && crate::request_support::supports_legacy_penalties(&request.model) == Some(false)
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "OpenAI model '{}' does not support seed, frequency_penalty, or presence_penalty on the Responses API",
+                        request.model
+                    ),
+                });
+            }
+            if let Some(retention) = tag.prompt_cache_retention
+                && crate::request_support::supports_prompt_cache_retention(
+                    &request.model,
+                    retention,
+                ) == Some(false)
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "OpenAI model '{}' supports only '24h' prompt_cache_retention",
+                        request.model
+                    ),
+                });
+            }
+            if let Some(options) = tag.prompt_cache_options {
+                if let Some(mode) = options.mode
+                    && crate::request_support::supports_prompt_cache_mode(&request.model, mode)
+                        == Some(false)
+                {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!(
+                            "OpenAI model '{}' does not support prompt cache mode '{}'",
+                            request.model,
+                            mode.as_wire_str()
+                        ),
+                    });
+                }
+                if let Some(ttl) = options.ttl
+                    && crate::request_support::supports_prompt_cache_ttl(&request.model, ttl)
+                        == Some(false)
+                {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!(
+                            "OpenAI model '{}' does not support prompt cache TTL '{}'",
+                            request.model,
+                            ttl.as_wire_str()
+                        ),
+                    });
+                }
+            }
+        }
+
         let mut body = serde_json::json!({
             "model": request.model,
             "input": input,
@@ -690,9 +793,28 @@ impl OpenAiClient {
                 );
             }
 
+            if let Some(options) = tag.prompt_cache_options {
+                body["prompt_cache_options"] =
+                    serde_json::to_value(options).map_err(|error| LlmError::InvalidRequest {
+                        message: format!("invalid prompt_cache_options: {error}"),
+                    })?;
+            }
+
             if reasoning_enabled && let Some(effort) = tag.reasoning_effort {
                 let s = effort.as_legacy_str();
                 body["reasoning"]["effort"] = Value::String(s.to_string());
+            }
+            if reasoning_enabled && let Some(mode) = tag.reasoning_mode {
+                body["reasoning"]["mode"] = Value::String(mode.as_wire_str().to_string());
+            }
+            if reasoning_enabled && let Some(context) = tag.reasoning_context {
+                body["reasoning"]["context"] = Value::String(context.as_wire_str().to_string());
+            }
+            if let Some(verbosity) = tag.text_verbosity {
+                if !body["text"].is_object() {
+                    body["text"] = serde_json::json!({});
+                }
+                body["text"]["verbosity"] = Value::String(verbosity.as_wire_str().to_string());
             }
 
             if let Some(seed) = tag.seed {
@@ -720,13 +842,14 @@ impl OpenAiClient {
                 let name = output_schema.name.as_deref().unwrap_or("output");
                 let strict = output_schema.strict;
 
-                body["text"] = serde_json::json!({
-                    "format": {
-                        "type": "json_schema",
-                        "name": name,
-                        "schema": compiled.schema,
-                        "strict": strict
-                    }
+                if !body["text"].is_object() {
+                    body["text"] = serde_json::json!({});
+                }
+                body["text"]["format"] = serde_json::json!({
+                    "type": "json_schema",
+                    "name": name,
+                    "schema": compiled.schema,
+                    "strict": strict
                 });
             }
         }
@@ -2425,6 +2548,14 @@ fn apply_responses_usage(target: &mut Usage, usage: &Value) {
     if let Some(cached_tokens) = cached_tokens {
         target.cache_read_tokens = Some(cached_tokens);
     }
+    let cache_write_tokens = usage
+        .get("input_tokens_details")
+        .or_else(|| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cache_write_tokens"))
+        .and_then(Value::as_u64);
+    if let Some(cache_write_tokens) = cache_write_tokens {
+        target.cache_creation_tokens = Some(cache_write_tokens);
+    }
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2464,6 +2595,11 @@ mod tests {
         http::{HeaderMap, StatusCode},
         response::IntoResponse,
         routing::post,
+    };
+    use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+    use meerkat_core::model_profile::capabilities::{
+        OpenAiPromptCacheMode, OpenAiPromptCacheTtl, OpenAiReasoningContext, OpenAiReasoningMode,
+        OpenAiTextVerbosity,
     };
     use meerkat_core::{
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, MediaType, ProviderImageMetadata,
@@ -3631,6 +3767,152 @@ mod tests {
     }
 
     #[test]
+    fn gpt_56_advanced_responses_params_lower_together() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::Max);
+            tag.reasoning_mode = Some(OpenAiReasoningMode::Pro);
+            tag.reasoning_context = Some(OpenAiReasoningContext::AllTurns);
+            tag.text_verbosity = Some(OpenAiTextVerbosity::High);
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            });
+        });
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["reasoning"]["effort"], "max");
+        assert_eq!(body["reasoning"]["mode"], "pro");
+        assert_eq!(body["reasoning"]["context"], "all_turns");
+        assert_eq!(body["text"]["verbosity"], "high");
+        assert_eq!(
+            body["prompt_cache_options"],
+            serde_json::json!({"mode": "explicit", "ttl": "30m"})
+        );
+    }
+
+    #[test]
+    fn older_catalog_model_rejects_gpt_56_advanced_params() {
+        let client = OpenAiClient::new("test-key".to_string());
+
+        let pro = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| tag.reasoning_mode = Some(OpenAiReasoningMode::Pro));
+        assert!(matches!(
+            client.build_request_body(&pro),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+
+        let context = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.reasoning_context = Some(OpenAiReasoningContext::AllTurns);
+        });
+        assert!(matches!(
+            client.build_request_body(&context),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+
+        let cache = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: None,
+            });
+        });
+        assert!(matches!(
+            client.build_request_body(&cache),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn prompt_cache_retention_and_options_are_independent() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_retention = Some(OpenAiPromptCacheRetention::TwentyFourHours);
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: None,
+            });
+        });
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["prompt_cache_retention"], "24h");
+        assert_eq!(
+            body["prompt_cache_options"],
+            serde_json::json!({"mode": "explicit"})
+        );
+    }
+
+    #[test]
+    fn gpt_56_rejects_in_memory_legacy_cache_retention() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_retention = Some(OpenAiPromptCacheRetention::InMemory);
+        });
+
+        assert!(matches!(
+            client.build_request_body(&request),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_prompt_cache_options_use_api_defaults() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions::default());
+        });
+        let body = client.build_request_body(&request).expect("build request");
+        assert_eq!(body["prompt_cache_options"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn gpt_56_rejects_legacy_responses_sampling_fields() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-luna",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.seed = Some(42);
+            tag.frequency_penalty = Some(0.5);
+            tag.presence_penalty = Some(0.5);
+        });
+
+        assert!(matches!(
+            client.build_request_body(&request),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
     fn openai_continuation_uses_previous_response_id_and_new_turn_only() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
@@ -4163,6 +4445,42 @@ mod tests {
     }
 
     #[test]
+    fn test_gpt_56_request_reasoning_effort_max_override() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-sol",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::Max);
+        });
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn test_max_reasoning_effort_rejected_for_older_catalog_model() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort = Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::Max);
+        });
+
+        let error = client
+            .build_request_body(&request)
+            .expect_err("gpt-5.5 must reject the GPT-5.6-only max effort");
+
+        assert!(matches!(error, LlmError::InvalidRequest { .. }));
+        assert!(error.to_string().contains("gpt-5.5"));
+        assert!(error.to_string().contains("max"));
+    }
+
+    #[test]
     fn test_request_omits_reasoning_payload_for_non_gpt5_model() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
@@ -4569,6 +4887,30 @@ mod tests {
     }
 
     #[test]
+    fn gpt_56_text_verbosity_coexists_with_structured_output() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.6-terra",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_openai_tag_merge(|tag| {
+            tag.text_verbosity = Some(OpenAiTextVerbosity::Low);
+            tag.structured_output = serde_json::from_value::<OutputSchema>(serde_json::json!({
+                "schema": {"type": "object"},
+                "name": "answer",
+                "strict": true
+            }))
+            .ok();
+        });
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["text"]["verbosity"], "low");
+        assert_eq!(body["text"]["format"]["type"], "json_schema");
+        assert_eq!(body["text"]["format"]["name"], "answer");
+    }
+
+    #[test]
     fn test_build_request_body_with_structured_output_defaults() {
         let client = OpenAiClient::new("test-key".to_string());
 
@@ -4902,7 +5244,8 @@ mod tests {
             "input_tokens": 100,
             "output_tokens": 7,
             "input_tokens_details": {
-                "cached_tokens": 64
+                "cached_tokens": 64,
+                "cache_write_tokens": 32
             }
         });
         let mut usage = Usage::default();
@@ -4912,7 +5255,20 @@ mod tests {
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_read_tokens, Some(64));
-        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.cache_creation_tokens, Some(32));
+
+        let fallback = serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "prompt_tokens_details": {
+                "cached_tokens": 8,
+                "cache_write_tokens": 4
+            }
+        });
+        let mut fallback_usage = Usage::default();
+        apply_responses_usage(&mut fallback_usage, &fallback);
+        assert_eq!(fallback_usage.cache_read_tokens, Some(8));
+        assert_eq!(fallback_usage.cache_creation_tokens, Some(4));
     }
 
     #[test]

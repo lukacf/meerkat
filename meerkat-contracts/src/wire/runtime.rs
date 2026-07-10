@@ -559,6 +559,7 @@ pub enum WireReasoningEffort {
     High,
     #[serde(rename = "xhigh")]
     XHigh,
+    Max,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::ReasoningEffort> for WireReasoningEffort {
@@ -570,6 +571,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ReasoningEffort> for WireReaso
             Core::Medium => Self::Medium,
             Core::High => Self::High,
             Core::XHigh => Self::XHigh,
+            Core::Max => Self::Max,
         }
     }
 }
@@ -582,6 +584,7 @@ impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::Reaso
             WireReasoningEffort::Medium => Self::Medium,
             WireReasoningEffort::High => Self::High,
             WireReasoningEffort::XHigh => Self::XHigh,
+            WireReasoningEffort::Max => Self::Max,
         }
     }
 }
@@ -821,6 +824,197 @@ impl From<WireOpenAiPromptCacheRetention>
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+pub enum WireOpenAiReasoningMode {
+    Standard,
+    Pro,
+}
+
+impl From<meerkat_core::model_profile::capabilities::OpenAiReasoningMode>
+    for WireOpenAiReasoningMode
+{
+    fn from(value: meerkat_core::model_profile::capabilities::OpenAiReasoningMode) -> Self {
+        use meerkat_core::model_profile::capabilities::OpenAiReasoningMode as Core;
+        match value {
+            Core::Standard => Self::Standard,
+            Core::Pro => Self::Pro,
+        }
+    }
+}
+
+impl From<WireOpenAiReasoningMode>
+    for meerkat_core::model_profile::capabilities::OpenAiReasoningMode
+{
+    fn from(value: WireOpenAiReasoningMode) -> Self {
+        match value {
+            WireOpenAiReasoningMode::Standard => Self::Standard,
+            WireOpenAiReasoningMode::Pro => Self::Pro,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireOpenAiReasoningContext {
+    Auto,
+    CurrentTurn,
+    AllTurns,
+}
+
+impl From<meerkat_core::model_profile::capabilities::OpenAiReasoningContext>
+    for WireOpenAiReasoningContext
+{
+    fn from(value: meerkat_core::model_profile::capabilities::OpenAiReasoningContext) -> Self {
+        use meerkat_core::model_profile::capabilities::OpenAiReasoningContext as Core;
+        match value {
+            Core::Auto => Self::Auto,
+            Core::CurrentTurn => Self::CurrentTurn,
+            Core::AllTurns => Self::AllTurns,
+        }
+    }
+}
+
+impl From<WireOpenAiReasoningContext>
+    for meerkat_core::model_profile::capabilities::OpenAiReasoningContext
+{
+    fn from(value: WireOpenAiReasoningContext) -> Self {
+        match value {
+            WireOpenAiReasoningContext::Auto => Self::Auto,
+            WireOpenAiReasoningContext::CurrentTurn => Self::CurrentTurn,
+            WireOpenAiReasoningContext::AllTurns => Self::AllTurns,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireOpenAiTextVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<meerkat_core::model_profile::capabilities::OpenAiTextVerbosity>
+    for WireOpenAiTextVerbosity
+{
+    fn from(value: meerkat_core::model_profile::capabilities::OpenAiTextVerbosity) -> Self {
+        use meerkat_core::model_profile::capabilities::OpenAiTextVerbosity as Core;
+        match value {
+            Core::Low => Self::Low,
+            Core::Medium => Self::Medium,
+            Core::High => Self::High,
+        }
+    }
+}
+
+impl From<WireOpenAiTextVerbosity>
+    for meerkat_core::model_profile::capabilities::OpenAiTextVerbosity
+{
+    fn from(value: WireOpenAiTextVerbosity) -> Self {
+        match value {
+            WireOpenAiTextVerbosity::Low => Self::Low,
+            WireOpenAiTextVerbosity::Medium => Self::Medium,
+            WireOpenAiTextVerbosity::High => Self::High,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireOpenAiPromptCacheMode {
+    Implicit,
+    Explicit,
+}
+
+impl From<meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode>
+    for WireOpenAiPromptCacheMode
+{
+    fn from(value: meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode) -> Self {
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode as Core;
+        match value {
+            Core::Implicit => Self::Implicit,
+            Core::Explicit => Self::Explicit,
+        }
+    }
+}
+
+impl From<WireOpenAiPromptCacheMode>
+    for meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode
+{
+    fn from(value: WireOpenAiPromptCacheMode) -> Self {
+        match value {
+            WireOpenAiPromptCacheMode::Implicit => Self::Implicit,
+            WireOpenAiPromptCacheMode::Explicit => Self::Explicit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WireOpenAiPromptCacheTtl {
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+}
+
+impl From<meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl>
+    for WireOpenAiPromptCacheTtl
+{
+    fn from(value: meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl) -> Self {
+        match value {
+            meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl::ThirtyMinutes => {
+                Self::ThirtyMinutes
+            }
+        }
+    }
+}
+
+impl From<WireOpenAiPromptCacheTtl>
+    for meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl
+{
+    fn from(value: WireOpenAiPromptCacheTtl) -> Self {
+        match value {
+            WireOpenAiPromptCacheTtl::ThirtyMinutes => Self::ThirtyMinutes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireOpenAiPromptCacheOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<WireOpenAiPromptCacheMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<WireOpenAiPromptCacheTtl>,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions>
+    for WireOpenAiPromptCacheOptions
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions) -> Self {
+        Self {
+            mode: value.mode.map(Into::into),
+            ttl: value.ttl.map(Into::into),
+        }
+    }
+}
+
+impl From<WireOpenAiPromptCacheOptions>
+    for meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions
+{
+    fn from(value: WireOpenAiPromptCacheOptions) -> Self {
+        Self {
+            mode: value.mode.map(Into::into),
+            ttl: value.ttl.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum WireGeminiThinkingLevel {
     Minimal,
     Low,
@@ -932,6 +1126,12 @@ pub enum WireProviderTag {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<WireReasoningEffort>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_mode: Option<WireOpenAiReasoningMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_context: Option<WireOpenAiReasoningContext>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_verbosity: Option<WireOpenAiTextVerbosity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         seed: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frequency_penalty: Option<f32>,
@@ -969,6 +1169,8 @@ pub enum WireProviderTag {
         prompt_cache_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_cache_retention: Option<WireOpenAiPromptCacheRetention>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_cache_options: Option<WireOpenAiPromptCacheOptions>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supports_temperature_override: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1023,6 +1225,9 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
             },
             Core::OpenAi(t) => Self::OpenAi {
                 reasoning_effort: t.reasoning_effort.map(Into::into),
+                reasoning_mode: t.reasoning_mode.map(Into::into),
+                reasoning_context: t.reasoning_context.map(Into::into),
+                text_verbosity: t.text_verbosity.map(Into::into),
                 seed: t.seed,
                 frequency_penalty: t.frequency_penalty,
                 presence_penalty: t.presence_penalty,
@@ -1034,6 +1239,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
                 store: t.store,
                 prompt_cache_key: t.prompt_cache_key,
                 prompt_cache_retention: t.prompt_cache_retention.map(Into::into),
+                prompt_cache_options: t.prompt_cache_options.map(Into::into),
                 supports_temperature_override: t.supports_temperature_override,
                 supports_reasoning_override: t.supports_reasoning_override,
             },
@@ -1086,6 +1292,9 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
             }),
             WireProviderTag::OpenAi {
                 reasoning_effort,
+                reasoning_mode,
+                reasoning_context,
+                text_verbosity,
                 seed,
                 frequency_penalty,
                 presence_penalty,
@@ -1097,10 +1306,14 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 store,
                 prompt_cache_key,
                 prompt_cache_retention,
+                prompt_cache_options,
                 supports_temperature_override,
                 supports_reasoning_override,
             } => Self::OpenAi(OpenAiProviderTag {
                 reasoning_effort: reasoning_effort.map(Into::into),
+                reasoning_mode: reasoning_mode.map(Into::into),
+                reasoning_context: reasoning_context.map(Into::into),
+                text_verbosity: text_verbosity.map(Into::into),
                 seed,
                 frequency_penalty,
                 presence_penalty,
@@ -1113,6 +1326,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 store,
                 prompt_cache_key,
                 prompt_cache_retention: prompt_cache_retention.map(Into::into),
+                prompt_cache_options: prompt_cache_options.map(Into::into),
                 supports_temperature_override,
                 supports_reasoning_override,
             }),

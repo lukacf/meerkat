@@ -38,16 +38,34 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
 
     | Model | Context | Best for |
     |-------|---------|----------|
-    | `gpt-5.5` | 1.05M | Default OpenAI recommendation |
+    | `gpt-5.6-sol` | 1.05M | Default OpenAI selection; limited-preview frontier capability |
+    | `gpt-5.6-terra` | 1.05M | Balanced intelligence and cost |
+    | `gpt-5.6-luna` | 1.05M | Efficient high-volume workloads |
+    | `gpt-5.5` | 1.05M | Broadly available production recommendation |
     | `gpt-5.5-pro` | 1.05M | Long-running pro-tier reasoning |
     | `gpt-5.4` | 1.05M | Supported GPT-5 fallback |
     | `gpt-5.4-mini` | 128K | Smaller fast-path model with compaction support |
     | `gpt-5.3-codex` | 400K | Coding-focused workflows |
     | `gpt-realtime-2` | 128K | Live audio/text with still-image input |
 
+    The GPT-5.6 tiers are limited-preview API models for selected trusted
+    partners and organizations. Each accepts up to 922K input tokens inside a
+    1.05M context window, emits up to 128K output tokens, accepts text and image
+    input, and has a February 16, 2026 knowledge cutoff. The official `gpt-5.6`
+    alias routes to `gpt-5.6-sol`.
+
+    <Warning>
+    Meerkat deliberately defaults new OpenAI selection to `gpt-5.6-sol`, but
+    the model currently requires preview access for the relevant API
+    organization or Codex workspace. If that account context is not enabled for
+    the preview, explicitly configure `gpt-5.5` until OpenAI broadens access.
+    See OpenAI's
+    [preview availability notice](https://help.openai.com/en/articles/20001325-a-preview-of-gpt-5-6-sol-terra-and-luna).
+    </Warning>
+
     ```toml config.toml (active realm)
     [agent]
-    model = "gpt-5.5"
+    model = "gpt-5.6-sol"
     max_tokens_per_turn = 8192
     ```
   </Tab>
@@ -150,7 +168,10 @@ meerkat = { version = "0.7.27", features = ["all-providers", "jsonl-store"] }
 
 ## Provider parameters
 
-Provider-specific options can be passed via the `--param` CLI flag or `provider_params` in the SDK:
+Use `--param` for common top-level overrides such as `temperature`. Provider-native
+options use the canonical `provider_params.provider_tag` envelope; pass that shape
+with `--params-json` in the CLI or `provider_params` in an SDK. For OpenAI catalog
+models, `params_schema` describes the fields inside the `provider_tag` object.
 
 Provider-native web search is on by default for catalog models that support it.
 Disable it in config with the matching `provider_tools.<provider>` search toggle,
@@ -160,22 +181,40 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
   <Tab title="Anthropic">
     | Parameter | Description |
     |-----------|-------------|
-    | `thinking_budget` | Token budget for extended thinking (integer) |
+    | `thinking_budget_tokens` | Token budget for extended thinking (integer) |
     | `top_k` | Top-k sampling parameter (integer) |
 
     ```bash
-    rkat run --model claude-sonnet-4-6 --param thinking_budget=10000 "Solve this problem"
+    rkat run --model claude-sonnet-4-6 --params-json \
+      '{"provider_tag":{"provider":"anthropic","thinking_budget_tokens":10000}}' \
+      "Solve this problem"
     ```
   </Tab>
   <Tab title="OpenAI">
     | Parameter | Values | Description |
     |-----------|--------|-------------|
-    | `reasoning_effort` | `none`, `low`, `medium`, `high`, `xhigh` | Reasoning effort for GPT-5-era OpenAI models and other compatible OpenAI reasoning surfaces |
-    | `seed` | Integer | Seed for deterministic outputs |
+    | `reasoning_effort` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | GPT-5.6 effort ladder; earlier models expose their cataloged subset |
+    | `reasoning_mode` | `standard`, `pro` | GPT-5.6 Responses execution mode; default is `standard` |
+    | `reasoning_context` | `auto`, `current_turn`, `all_turns` | GPT-5.6 persisted-reasoning context |
+    | `text_verbosity` | `low`, `medium`, `high` | GPT-5.6 default output detail |
+    | `prompt_cache_options` | `mode`: `implicit` or `explicit`; `ttl`: `30m` | GPT-5.6 request-wide cache policy; an empty object uses API defaults |
 
     ```bash
-    rkat run --model gpt-5.5 --param reasoning_effort=high "Prove this theorem"
+    rkat run --model gpt-5.6-terra --params-json \
+      '{"provider_tag":{"provider":"open_ai","reasoning_effort":"max","reasoning_mode":"pro","reasoning_context":"all_turns","text_verbosity":"high","prompt_cache_options":{"mode":"implicit","ttl":"30m"}}}' \
+      "Prove this theorem"
     ```
+
+    <Note>
+    Use `max`, not `ultra`, for the public OpenAI API. `ultra` is a Codex
+    multi-agent orchestration mode rather than a `reasoning.effort` value.
+    GPT-5.6 uses `prompt_cache_options`; the older `prompt_cache_retention`
+    field is deprecated for these models. The two fields remain independent at
+    the API boundary, and the only legacy retention value accepted by GPT-5.6
+    is `24h`. Meerkat does not yet author per-content cache breakpoints,
+    so `mode: "explicit"` currently disables automatic placement without adding
+    a write breakpoint.
+    </Note>
   </Tab>
   <Tab title="Gemini">
     | Parameter | Description |
@@ -184,7 +223,9 @@ or for a single CLI run with `rkat run --no-web-search "..."`.
     | `top_k` | Top-k sampling parameter (integer) |
 
     ```bash
-    rkat run --model gemini-3.5-flash --param thinking_budget=5000 "Analyze this data"
+    rkat run --model gemini-3.5-flash --params-json \
+      '{"provider_tag":{"provider":"gemini","thinking_budget":5000}}' \
+      "Analyze this data"
     ```
   </Tab>
 </Tabs>
@@ -256,7 +297,7 @@ model = "claude-opus-4-8"
 provider = "anthropic"
 
 [[model_fallback.chain]]
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 provider = "openai"
 auth_binding = { realm = "dev", binding = "openai_oauth" }
 

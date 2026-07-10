@@ -70,11 +70,16 @@ npm install @rkat/web
 
 Release artifacts include `rkat`, `rkat-rpc`, `rkat-rest`, and `rkat-mcp`.
 
+> [!IMPORTANT]
+> GPT-5.6 is currently a limited preview. Meerkat's OpenAI/global default is
+> `gpt-5.6-sol`; if the relevant API organization or Codex workspace does not
+> have preview access, explicitly select `gpt-5.5` in config or with `--model`.
+
 **Run a one-off prompt** with any provider:
 
 ```bash
 rkat run "What is the capital of France?"
-rkat run --model gpt-5.5 "Explain async/await"
+rkat run --model gpt-5.6-sol "Explain async/await"
 ```
 
 **Render rich answers in your browser** when a visual artifact is easier to read:
@@ -98,7 +103,7 @@ Same realm means shared sessions, config, backend, credentials, schedules, blobs
 ```bash
 rkat auth login openai
 rkat auth profiles --realm dev
-rkat run --model gpt-5.5 --auth-binding dev:openai_oauth "Summarize this pull request"
+rkat run --model gpt-5.6-sol --auth-binding dev:openai_oauth "Summarize this pull request"
 ```
 
 Realm bindings also work through REST, JSON-RPC, SDKs, and mob member launches, so applications can scope credentials per tenant, session, or team member without hardcoding provider keys. Bindings are provider-checked against the selected model, so an OpenAI binding should be paired with an OpenAI model, an Anthropic binding with an Anthropic model, and so on.
@@ -125,7 +130,7 @@ The agent loops autonomously -- calling tools, reading results, reasoning, calli
 **Generate images** from a runtime-backed session:
 
 ```bash
-rkat run --model gpt-5.5 --allow-tool generate_image \
+rkat run --model gpt-5.6-sol --allow-tool generate_image \
   "Use generate_image with provider \"openai\" to create a square PNG icon for a release dashboard. Return the blob id."
 rkat blob get <blob_id> --output release-dashboard.png
 ```
@@ -297,7 +302,7 @@ The agent returns validated JSON matching your schema, enforced by budget limits
 After defining a realm binding and storing its credentials, pass the binding explicitly:
 
 ```bash
-rkat run --realm prod --model gpt-5.5 --auth-binding prod:openai \
+rkat run --realm prod --model gpt-5.6-sol --auth-binding prod:openai \
   "Summarize the incident queue with the production OpenAI binding."
 ```
 
@@ -364,7 +369,7 @@ Mobs are definition/profile driven. Define the team structure and let the agent 
       "tools": { "shell": true, "builtins": true, "comms": true }
     },
     "writer": {
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "peer_description": "Turns analysis findings into clear remediation plans.",
       "tools": { "builtins": true, "comms": true }
     }

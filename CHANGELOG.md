@@ -107,9 +107,18 @@ via cargo-semver-checks against the published baselines).
   reject malformed required fields, missing result arrays, and non-object
   top-level results as typed `INVALID_RESPONSE` failures instead of
   synthesizing empty/default records.
+- `ReasoningEffort` and `WireReasoningEffort` add the `Max` variant;
+  `OpenAiProviderTag` and `WireProviderTag::OpenAi` add `reasoning_mode`,
+  `reasoning_context`, `text_verbosity`, and `prompt_cache_options`; and
+  `ModelCapabilities` adds `openai_responses_params`. Downstream exhaustive
+  matches and struct literals must handle or initialize the new members.
 
 ### Added
 
+- OpenAI GPT-5.6 Sol, Terra, Luna, and the official `gpt-5.6` Sol alias are
+  cataloged with their 1.05M context / 128K output limits, multimodal and tool
+  capabilities, the `max` reasoning-effort tier, reasoning mode/context, text
+  verbosity, and request-wide prompt-cache options.
 - Image input on the OpenAI Realtime live channel: `gpt-realtime-2` accepts
   still images, and the live surface now carries them end to end — a
   `LiveInputChunk::Image` (wire `kind: "image"`, base64 data) renders as a
@@ -159,6 +168,16 @@ via cargo-semver-checks against the published baselines).
   and deadline bounds, and token authority must resolve within 10 seconds.
   Inline images are not a direct-WebSocket input and must use the 64
   MiB-bounded JSON-RPC `live/send_input` control plane.
+
+### Changed
+
+- `gpt-5.6-sol` is now both the OpenAI provider default and Meerkat's global
+  catalog default. Fresh or unset configuration and newly synthesized OpenAI
+  OAuth bindings select Sol; existing explicit GPT-5.5 agent, provider,
+  binding, and per-session pins remain honored. GPT-5.6 is currently a limited
+  preview, so this default requires access for the relevant API organization or
+  Codex workspace; other users should explicitly configure GPT-5.5 until
+  access broadens.
 
 ### Fixed
 

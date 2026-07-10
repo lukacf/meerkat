@@ -123,6 +123,7 @@ This keeps Rust aligned with the current runtime contract instead of implying ar
 
 - The canonical `SessionDocumentMachine` owns the `session_lifecycle_terminal` fact for ALL profiles; shells realize its verdict, they never decide it.
 - Realization order is fail-closed: durable document commit first, runtime retire second. `RuntimeState::Retired` is the runtime realization of the same verdict, so the resurrection window is unrepresentable.
+- If runtime retirement fails after the document commits `Archived`, the durable terminal remains authoritative: reads, resumes, and turns stay rejected while a repeated archive command follows the generated convergence transition and retires the residual runtime.
 - Archived sessions are excluded from `list()` and rejected for further reads/turns (`SESSION_NOT_FOUND` on persistent services; the ephemeral service serves a final in-memory view).
 - Committed transcript history remains readable via `read_history` on persistent backends.
 

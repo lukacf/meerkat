@@ -18,7 +18,11 @@ path = "tests/integration_shell_jobs.rs"
 
 [features]
 default = ["comms", "mcp", "skills"]
-comms = ["dep:meerkat-comms", "dep:parking_lot"]
+comms = [
+    "dep:meerkat-comms",
+    "meerkat-comms/capability",
+    "dep:parking_lot",
+]
 mcp = ["dep:meerkat-mcp"]
 sqlite = ["dep:rusqlite"]
 skills = []

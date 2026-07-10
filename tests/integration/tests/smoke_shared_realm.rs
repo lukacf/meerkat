@@ -3674,6 +3674,15 @@ fn normalize_semantic_text(text: &str) -> String {
         .join(" ")
 }
 
+fn normalize_semantic_single_token(text: &str) -> Option<String> {
+    let normalized = normalize_semantic_text(text);
+    let token = normalized.trim_matches(|ch: char| ch.is_ascii_punctuation());
+    if token.is_empty() || token.split_whitespace().count() != 1 {
+        return None;
+    }
+    Some(token.to_string())
+}
+
 fn normalized_text_contains_any(text: &str, variants: &[&str]) -> bool {
     variants
         .iter()
@@ -3956,25 +3965,6 @@ async fn live_ws_send_text_chunk(
     let frame = json!({
         "kind": "text",
         "text": text,
-    });
-    writer
-        .send(WsMessage::Text(frame.to_string().into()))
-        .await?;
-    Ok(())
-}
-
-async fn live_ws_send_image_chunk(
-    writer: &mut LiveWsWrite,
-    mime: &str,
-    data_b64: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use futures::SinkExt;
-    use tokio_tungstenite::tungstenite::Message as WsMessage;
-
-    let frame = json!({
-        "kind": "image",
-        "mime": mime,
-        "data": data_b64,
     });
     writer
         .send(WsMessage::Text(frame.to_string().into()))
@@ -4400,12 +4390,14 @@ async fn dump_live_audio_artifacts(
     Ok(())
 }
 
-/// Open a live channel via RPC, connect WebSocket, return (channel_id, writer, reader).
-async fn live_open_and_connect(
+/// Open a live channel via RPC and connect its WebSocket, retaining the typed
+/// `live/open` result so capability-sensitive smoke tests can assert the
+/// negotiated channel contract before sending input.
+async fn live_open_and_connect_with_result(
     pump: &mut RpcEventPump,
     rpc: &mut RpcProcess,
     session_id: &str,
-) -> Result<(String, LiveWsWrite, LiveWsRead), Box<dyn std::error::Error>> {
+) -> Result<(String, LiveWsWrite, LiveWsRead, Value), Box<dyn std::error::Error>> {
     let open_result = pump
         .call(rpc, "live/open", json!({"session_id": session_id}), 30)
         .await?;
@@ -4424,6 +4416,19 @@ async fn live_open_and_connect(
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await?;
     let (ws_write, ws_read) = futures::StreamExt::split(ws_stream);
+    Ok((channel_id, ws_write, ws_read, open_result))
+}
+
+/// Open a live channel via RPC, connect WebSocket, return
+/// `(channel_id, writer, reader)` for callers that do not need capability
+/// inspection.
+async fn live_open_and_connect(
+    pump: &mut RpcEventPump,
+    rpc: &mut RpcProcess,
+    session_id: &str,
+) -> Result<(String, LiveWsWrite, LiveWsRead), Box<dyn std::error::Error>> {
+    let (channel_id, ws_write, ws_read, _open_result) =
+        live_open_and_connect_with_result(pump, rpc, session_id).await?;
     Ok((channel_id, ws_write, ws_read))
 }
 
@@ -4514,16 +4519,122 @@ fn live_audio_silence_compression_preserves_short_pauses_and_caps_long_ones() {
 
 // ===========================================================================
 // Scenario 91: Live adapter realtime IMAGE input (`gpt-realtime-2` vision):
-//              open a live channel, stage a solid-red PNG as an image chunk,
-//              ask for the dominant color by text, and require the answer to
-//              name it. Proves the image reaches the model through the
-//              conversation.item.create input_image lane end to end.
+//              require the negotiated image-input capability, select one of
+//              four deterministic PNG fixtures, stage it and await the
+//              redacted canonical-commit receipt, verify the exact image in
+//              session history, then close/reopen and ask for its dominant
+//              color without resending it. This pins both canonical history
+//              ownership and reconnect projection continuity.
 // ===========================================================================
 
-/// 64x64 solid-red PNG (RGB8), generated deterministically; the model is
-/// asked for the dominant color so the assertion is content-based, not
-/// format-based.
+#[derive(Clone, Copy)]
+struct Scenario91ImageFixture {
+    label: &'static str,
+    png_b64: &'static str,
+}
+
+/// 64x64 solid-color RGB8 PNGs generated deterministically. Selecting from
+/// four fixtures using the new session id keeps the expected label local to the
+/// test while preventing a provider response from passing by always guessing
+/// one hard-coded color (a blind guess succeeds only 25% of the time).
 const SCENARIO_91_RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsKZeS0BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDgsqnc8OJg6Ln3AAAAAElFTkSuQmCC";
+const SCENARIO_91_BLUE_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsGqeExAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA4LMf88OL0EKXAAAAAAElFTkSuQmCC";
+const SCENARIO_91_GREEN_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsJp+ExAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBC4LLjs8OJxKlMxAAAAAElFTkSuQmCC";
+const SCENARIO_91_YELLOW_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAATElEQVR42u3PMQkAAAwDsPo33UnoPQjEQNLmtQgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgILAcyl+HSEp61MQAAAABJRU5ErkJggg==";
+const SCENARIO_91_IMAGE_IDEMPOTENCY_KEY: &str = "scenario-91-primary-image";
+
+const SCENARIO_91_IMAGE_FIXTURES: [Scenario91ImageFixture; 4] = [
+    Scenario91ImageFixture {
+        label: "red",
+        png_b64: SCENARIO_91_RED_PNG_B64,
+    },
+    Scenario91ImageFixture {
+        label: "blue",
+        png_b64: SCENARIO_91_BLUE_PNG_B64,
+    },
+    Scenario91ImageFixture {
+        label: "green",
+        png_b64: SCENARIO_91_GREEN_PNG_B64,
+    },
+    Scenario91ImageFixture {
+        label: "yellow",
+        png_b64: SCENARIO_91_YELLOW_PNG_B64,
+    },
+];
+
+fn scenario_91_image_fixture(selection_key: &str) -> &'static Scenario91ImageFixture {
+    // Stable FNV-1a: randomized session ids exercise all four fixtures across
+    // smoke runs, while a failing run remains exactly reproducible from its
+    // logged session id.
+    let hash = selection_key
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    &SCENARIO_91_IMAGE_FIXTURES[(hash as usize) % SCENARIO_91_IMAGE_FIXTURES.len()]
+}
+
+fn live_user_content_receipt(
+    capture: &LiveObservationCapture,
+    expected_idempotency_key: &str,
+    expected_media_type: &str,
+) -> Option<Value> {
+    capture.frame_log.iter().find_map(|frame| {
+        let value: Value = serde_json::from_str(frame).ok()?;
+        (value["observation"].as_str() == Some("user_content_committed")
+            && value["idempotency_key"].as_str() == Some(expected_idempotency_key)
+            && value["media_type"].as_str() == Some(expected_media_type))
+        .then_some(value)
+    })
+}
+
+fn user_history_image_block<'a>(
+    history: &'a Value,
+    expected_media_type: &str,
+) -> Option<&'a Value> {
+    history["messages"].as_array()?.iter().find_map(|message| {
+        if message["role"].as_str() != Some("user") {
+            return None;
+        }
+        message["content"].as_array()?.iter().find(|block| {
+            block["type"].as_str() == Some("image")
+                && block["media_type"].as_str() == Some(expected_media_type)
+        })
+    })
+}
+
+#[test]
+fn scenario_91_fixture_selection_reaches_all_valid_pngs() {
+    use base64::Engine as _;
+    use std::collections::BTreeSet;
+
+    let labels = (0..64)
+        .map(|index| scenario_91_image_fixture(&format!("session-{index}")))
+        .map(|fixture| fixture.label)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(labels, BTreeSet::from(["blue", "green", "red", "yellow"]));
+
+    for fixture in SCENARIO_91_IMAGE_FIXTURES {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(fixture.png_b64)
+            .expect("scenario 91 fixture must be valid base64");
+        assert!(
+            bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "scenario 91 {} fixture must carry a PNG signature",
+            fixture.label
+        );
+    }
+
+    assert_eq!(
+        normalize_semantic_single_token(" Red. ").as_deref(),
+        Some("red")
+    );
+    assert_eq!(
+        normalize_semantic_single_token("The color is red.").as_deref(),
+        None,
+        "multiword prose must not satisfy the exact one-token color contract"
+    );
+}
 
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
@@ -4602,23 +4713,148 @@ async fn e2e_scenario_91_live_adapter_image_input_dominant_color()
             .ok_or("missing session_id")?
             .to_string();
         eprintln!("[scenario 91] session_id = {session_id}");
+        let fixture = scenario_91_image_fixture(&session_id);
+        eprintln!(
+            "[scenario 91] selected deterministic fixture label = {}",
+            fixture.label
+        );
 
         eprintln!("[scenario 91] live/open + WebSocket connect");
-        let (channel_id, mut ws_write, mut ws_read) =
-            live_open_and_connect(&mut pump, &mut rpc, &session_id).await?;
+        let (channel_id, ws_write, mut ws_read, open_result) =
+            live_open_and_connect_with_result(&mut pump, &mut rpc, &session_id).await?;
         eprintln!("[scenario 91] channel_id = {channel_id}");
+        if open_result["capabilities"]["image_in"].as_bool() != Some(true) {
+            return Err(format!(
+                "scenario 91: live/open did not advertise required image_in capability: {open_result}"
+            )
+            .into());
+        }
 
         let _ready_capture =
             collect_live_observations_until_ready_or_idle(&mut ws_read, 10).await?;
 
-        eprintln!("[scenario 91] stage red PNG image chunk");
-        live_ws_send_image_chunk(&mut ws_write, "image/png", SCENARIO_91_RED_PNG_B64).await?;
+        eprintln!(
+            "[scenario 91] stage {} PNG through the bounded JSON-RPC image control plane and await canonical receipt",
+            fixture.label
+        );
+        let queued = pump
+            .call(
+                &mut rpc,
+                "live/send_input",
+                json!({
+                    "channel_id": channel_id,
+                    "chunk": {
+                        "kind": "image",
+                        "idempotency_key": SCENARIO_91_IMAGE_IDEMPOTENCY_KEY,
+                        "mime": "image/png",
+                        "data": fixture.png_b64,
+                    }
+                }),
+                30,
+            )
+            .await?;
+        assert_eq!(
+            queued["status"], "sent",
+            "scenario 91: live/send_input must acknowledge queue admission"
+        );
+        let receipt_capture = match collect_live_observations_until(&mut ws_read, 30, |capture| {
+            live_user_content_receipt(
+                capture,
+                SCENARIO_91_IMAGE_IDEMPOTENCY_KEY,
+                "image/png",
+            )
+            .is_some()
+        })
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 91 image staging failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        let receipt = live_user_content_receipt(
+            &receipt_capture,
+            SCENARIO_91_IMAGE_IDEMPOTENCY_KEY,
+            "image/png",
+        )
+        .ok_or("scenario 91: missing matching user_content_committed receipt")?;
+        assert_eq!(
+            receipt["idempotency_key"], SCENARIO_91_IMAGE_IDEMPOTENCY_KEY,
+            "scenario 91: durable receipt must echo caller image identity"
+        );
+        assert!(
+            receipt.get("content").is_none() && receipt.get("data").is_none(),
+            "scenario 91: public commit receipt must stay redacted: {receipt}"
+        );
 
-        eprintln!("[scenario 91] ask for the dominant color by text");
+        eprintln!("[scenario 91] close first channel before canonical history read");
+        live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
+        drop(ws_read);
+        sleep(Duration::from_millis(500)).await;
+
+        eprintln!("[scenario 91] verify exact selected image in session/history");
+        let history = pump_session_history(&mut pump, &mut rpc, &session_id, 10).await?;
+        let image_block = user_history_image_block(&history, "image/png").ok_or_else(|| {
+            format!(
+                "scenario 91: canonical history omitted the committed image; history={history}"
+            )
+        })?;
+        let image_source = image_block["source"]
+            .as_str()
+            .ok_or("scenario 91: canonical image block missing source")?
+            .to_string();
+        if image_source != "blob" {
+            return Err(format!(
+                "scenario 91: canonical realtime image must be externalized to durable blob storage, got source `{image_source}`: {image_block}"
+            )
+            .into());
+        }
+        let blob_id = image_block["blob_id"]
+            .as_str()
+            .ok_or("scenario 91: blob-backed canonical image missing blob_id")?
+            .to_string();
+        let payload = pump
+            .call(&mut rpc, "blob/get", json!({"blob_id": blob_id}), 10)
+            .await?;
+        if payload["media_type"].as_str() != Some("image/png") {
+            return Err(format!(
+                "scenario 91: persisted image blob has wrong media type: {payload}"
+            )
+            .into());
+        }
+        let persisted_image_b64 = payload["data"]
+            .as_str()
+            .ok_or("scenario 91: persisted image blob missing data")?
+            .to_string();
+        assert_eq!(
+            persisted_image_b64, fixture.png_b64,
+            "scenario 91: canonical history persisted a different image than the selected {} fixture",
+            fixture.label
+        );
+
+        eprintln!("[scenario 91] reopen same session without resending image");
+        let (reopen_channel_id, mut reopen_write, mut reopen_read, reopen_result) =
+            live_open_and_connect_with_result(&mut pump, &mut rpc, &session_id).await?;
+        if reopen_result["capabilities"]["image_in"].as_bool() != Some(true) {
+            return Err(format!(
+                "scenario 91: reopened channel lost required image_in capability: {reopen_result}"
+            )
+            .into());
+        }
+        collect_live_observations_until_ready_or_idle(&mut reopen_read, 10).await?;
+
+        eprintln!(
+            "[scenario 91] ask reopened provider projection for prior image color (no resend)"
+        );
         let commit_capture = match send_live_text_and_wait_for_turn(
-            &mut ws_write,
-            &mut ws_read,
-            "What is the dominant color of the image I just sent? Answer with exactly one word.",
+            &mut reopen_write,
+            &mut reopen_read,
+            "What is the dominant color of the most recent image in our conversation? Answer with exactly one word.",
             120,
         )
         .await
@@ -4634,24 +4870,30 @@ async fn e2e_scenario_91_live_adapter_image_input_dominant_color()
             }
         };
         let mut capture = commit_capture.clone();
-        capture.merge_from(settle_live_turn_after_input(&mut ws_read, &capture, 120).await?);
+        capture.merge_from(settle_live_turn_after_input(&mut reopen_read, &capture, 120).await?);
 
-        let combined = normalize_semantic_text(&format!(
-            "{} {}",
-            capture.output_text,
-            capture.input_finals.join(" ")
-        ));
-        eprintln!("[scenario 91] combined turn text: {combined}");
-        if !combined.to_lowercase().contains("red") {
+        let answer = normalize_semantic_text(&capture.output_text);
+        let answer_token = normalize_semantic_single_token(&capture.output_text);
+        eprintln!("[scenario 91] reconnect answer: {answer}");
+        if answer_token.as_deref() != Some(fixture.label) {
             return Err(format!(
-                "scenario 91: model did not identify the dominant color of the staged \
-                 image; combined text=`{combined}`: {capture:?}"
+                "scenario 91: reopened provider projection did not identify the selected {} \
+                 image without a resend; answer=`{answer}`: {capture:?}",
+                fixture.label
             )
             .into());
         }
-        eprintln!("[scenario 91] PASS — model saw the image ({scenario_name})");
+        eprintln!(
+            "[scenario 91] PASS — exact image persisted and replayed across reconnect ({scenario_name})"
+        );
 
-        live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
+        live_close_channel(
+            &mut pump,
+            &mut rpc,
+            reopen_write,
+            &reopen_channel_id,
+        )
+        .await?;
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;

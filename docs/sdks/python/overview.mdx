@@ -126,12 +126,17 @@ finally:
 - `await client.live_close(channel_id)`
 - `await client.live_send_input_text(channel_id, text)`
 - `await client.live_send_input_audio(channel_id, data_base64, sample_rate_hz, channels)`
-- `await client.live_send_input_image(channel_id, mime, data_base64)`
+- `await client.live_send_input_image(channel_id, idempotency_key, mime, data_base64)`
 - `await client.live_send_input_video_frame(channel_id, codec, data_base64, timestamp_ms)`
 - `await client.live_commit_input(channel_id, response_modality=None)`
 - `await client.live_interrupt(channel_id)`
 - `await client.live_truncate(channel_id, item_id, content_index, audio_played_ms)`
 - `await client.live_refresh(channel_id)`
+
+Image keys are required, caller-stable, and session-scoped. The helper returns
+after queue acceptance; wait for `user_content_committed` with the matching key
+before treating the image as durable context. See [Live Channels](/guides/realtime#sending-image-input)
+for replay, conflict, and reconnect limits.
 
 ### Mob APIs
 

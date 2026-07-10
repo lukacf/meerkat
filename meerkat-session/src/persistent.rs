@@ -36,7 +36,10 @@ use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::Session;
 use meerkat_core::SessionSystemContextState;
 use meerkat_core::error::AgentError;
-use meerkat_core::image_content::{externalize_deferred_turn_state, externalize_messages_from};
+use meerkat_core::image_content::{
+    MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES, externalize_deferred_turn_state,
+    externalize_messages_from,
+};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
@@ -54,7 +57,8 @@ use meerkat_core::service::{
 };
 use meerkat_core::session_document::{
     LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
-    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
+    SessionArchiveRuntimeObservation, SessionDocumentEffect, SessionDocumentKey,
+    SessionDocumentMachineAuthority, TranscriptEditKind,
 };
 use meerkat_core::session_store::{
     IncrementalSessionStore, SessionHead, SessionHeadCas, TranscriptStrandId,
@@ -1864,6 +1868,48 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     event_projection_faults: EventProjectionFaultRegistry,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedRealtimeUserContentBlob {
+    pending: meerkat_core::PendingRealtimeUserContentBlob,
+    /// Present only when the caller supplied retry-capable inline bytes.
+    inline_data: Option<String>,
+}
+
+fn realtime_user_content_blob_error(
+    context: &'static str,
+    error: impl std::fmt::Display,
+) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(format!("{context}: {error}")))
+}
+
+fn user_content_outcome(
+    user_content: meerkat_core::RealtimeUserContentApplyOutcome,
+) -> meerkat_core::RealtimeTranscriptApplyOutcome {
+    meerkat_core::RealtimeTranscriptApplyOutcome {
+        user_content: Some(user_content),
+        ..meerkat_core::RealtimeTranscriptApplyOutcome::default()
+    }
+}
+
+fn pending_blob_is_definitively_invalid(error: &meerkat_core::ImageBlobIntegrityError) -> bool {
+    match error {
+        meerkat_core::ImageBlobIntegrityError::UnsupportedMediaType { .. }
+        | meerkat_core::ImageBlobIntegrityError::EncodedTooLarge { .. }
+        | meerkat_core::ImageBlobIntegrityError::InvalidBase64 { .. }
+        | meerkat_core::ImageBlobIntegrityError::DecodedTooLarge { .. }
+        | meerkat_core::ImageBlobIntegrityError::SignatureMismatch { .. }
+        | meerkat_core::ImageBlobIntegrityError::MediaTypeMismatch { .. }
+        | meerkat_core::ImageBlobIntegrityError::BlobIdentityMismatch { .. } => true,
+        meerkat_core::ImageBlobIntegrityError::Store(error) => matches!(
+            error,
+            meerkat_core::BlobStoreError::InvalidId(_)
+                | meerkat_core::BlobStoreError::NotFound(_)
+                | meerkat_core::BlobStoreError::ReadLimitExceeded { .. }
+                | meerkat_core::BlobStoreError::Corrupt { .. }
+        ),
+    }
+}
+
 /// Extract session labels from a metadata map.
 ///
 /// Looks for `SESSION_LABELS_KEY` and deserializes the value as
@@ -2046,8 +2092,63 @@ impl<'a> MachineSessionArchiveProtocol<'a> {
         }
     }
 
-    async fn session_registered(&self, id: &SessionId) -> bool {
-        self.runtime_adapter.contains_session(id).await
+    async fn runtime_archive_observation(
+        &self,
+        id: &SessionId,
+        runtime_store: &Arc<dyn RuntimeStore>,
+    ) -> Result<SessionArchiveRuntimeObservation, SessionError> {
+        let retirement_residue_present = self
+            .runtime_adapter
+            .archive_runtime_residue_present(id)
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "machine archive runtime-residue observation failed: {error}"
+                )))
+            })?;
+        if retirement_residue_present {
+            return Ok(SessionArchiveRuntimeObservation::RetirementRequired);
+        }
+
+        let runtime_id = LogicalRuntimeId::for_session(id);
+        let durable_lifecycle =
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "machine archive runtime lifecycle observation failed: {error}"
+                    )))
+                })?;
+        if matches!(
+            durable_lifecycle,
+            Some(RuntimeState::Retired | RuntimeState::Destroyed)
+        ) {
+            return Ok(SessionArchiveRuntimeObservation::QuiescentTerminal);
+        }
+        if durable_lifecycle.is_some() {
+            // Fail closed across an observation race: a non-terminal durable
+            // lifecycle still requires retirement even if the preceding live
+            // observation did not see residue.
+            return Ok(SessionArchiveRuntimeObservation::RetirementRequired);
+        }
+
+        let runtime_snapshot_present = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "machine archive runtime snapshot observation failed: {error}"
+                )))
+            })?
+            .is_some();
+        Ok(if runtime_snapshot_present {
+            // A boundary snapshot can predate the first lifecycle record. It
+            // remains genuine runtime authority and must be registered then
+            // retired instead of being mistaken for a store-only document.
+            SessionArchiveRuntimeObservation::RetirementRequired
+        } else {
+            SessionArchiveRuntimeObservation::Absent
+        })
     }
 
     fn require_shared_runtime_store(
@@ -2127,46 +2228,42 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Whether the session is archived, read as a projection of the canonical
     /// SessionDocumentMachine `session_lifecycle_terminal` fact.
     ///
-    /// The durable document lifecycle terminal is the canonical
-    /// SessionDocumentMachine-owned fact; runtime `Retired` is its runtime
-    /// realization. Reads the runtime `Retired` realization as primary: the
-    /// fail-closed archive realization order (durable document commit first,
-    /// runtime retire second) guarantees `Retired` implies the document is
-    /// Archived, and the only reachable partial state on that path (document
-    /// Archived, runtime live) reads as not-archived here and converges on a
-    /// retried archive.
-    ///
-    /// A document that carries `Archived` with NO runtime lifecycle state at
-    /// all (legacy store-only archives from pre-runtime-companion jsonl
-    /// realms, or a rebuilt runtime companion) reads as archived — terminal,
-    /// non-resumable — never as an untyped error that a realm `list()` would
-    /// propagate.
+    /// The durable document lifecycle terminal is the canonical absorbing
+    /// fact; runtime `Retired` is its realization. Document-first archive can
+    /// legitimately leave `Archived + residual runtime` after a fallible
+    /// retire. That partial state remains terminal/non-resumable while the
+    /// generated re-archive transition converges the runtime residue. Runtime
+    /// state may prove an older row archived, but can never mask an explicit
+    /// durable `Archived` terminal.
     pub async fn session_archived_by_authority(
         &self,
         id: &SessionId,
         session: &Session,
     ) -> Result<bool, SessionError> {
-        match Self::load_runtime_state_for_session(&self.runtime_store, id).await? {
-            Some(RuntimeState::Retired) => Ok(true),
-            Some(_) => Ok(false),
-            None => Ok(session_marks_archived(session)),
+        if session_marks_archived(session) {
+            return Ok(true);
         }
+        Ok(matches!(
+            Self::load_runtime_state_for_session(&self.runtime_store, id).await?,
+            Some(RuntimeState::Retired)
+        ))
     }
 
     /// Metadata-seam sibling of [`Self::session_archived_by_authority`]:
-    /// the same authority precedence (runtime `Retired` realization primary,
-    /// durable typed lifecycle-terminal projection fallback), driven by an
+    /// the same durable-terminal-first authority precedence, driven by an
     /// already-decoded terminal fact instead of a full session document.
     pub async fn session_archived_by_authority_with_terminal(
         &self,
         id: &SessionId,
         lifecycle_terminal: Option<&SessionLifecycleTerminal>,
     ) -> Result<bool, SessionError> {
-        match Self::load_runtime_state_for_session(&self.runtime_store, id).await? {
-            Some(RuntimeState::Retired) => Ok(true),
-            Some(_) => Ok(false),
-            None => Ok(lifecycle_terminal.is_some_and(|terminal| terminal.is_archived())),
+        if lifecycle_terminal.is_some_and(|terminal| terminal.is_archived()) {
+            return Ok(true);
         }
+        Ok(matches!(
+            Self::load_runtime_state_for_session(&self.runtime_store, id).await?,
+            Some(RuntimeState::Retired)
+        ))
     }
 
     fn runtime_id_for_session(id: &SessionId) -> LogicalRuntimeId {
@@ -3735,7 +3832,63 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<Session, SessionError> {
-        match self.live_session_authority(id).await? {
+        self.export_realtime_open_session_snapshot_with_image_budget(
+            id,
+            MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+        )
+        .await
+    }
+
+    async fn export_realtime_open_session_snapshot_with_image_budget(
+        &self,
+        id: &SessionId,
+        max_image_bytes: usize,
+    ) -> Result<Session, SessionError> {
+        // A provider ACK may have reached the durable metadata-only image
+        // anchor immediately before a crash. Resolve that anchor before
+        // constructing provider seed history: deferring recovery until the
+        // next ACK could commit an older image that the newly opened provider
+        // session never saw, splitting canonical and provider ordering.
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let mut session = self.export_realtime_session_authority_snapshot(id).await?;
+        if session.pending_realtime_user_content_blob().is_some() {
+            let outcome = self
+                .reconcile_pending_realtime_user_content_blob(id, &mut session, None)
+                .await?;
+            if outcome.is_some() {
+                return Err(realtime_user_content_blob_error(
+                    "realtime-open pending image recovery returned a request-scoped receipt",
+                    "open recovery must reconcile before provider projection without a caller receipt",
+                ));
+            }
+        }
+        session
+            .hydrate_realtime_user_images(self.blob_store.as_ref(), max_image_bytes)
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to hydrate realtime history images before provider projection: {err}"
+                )))
+            })?;
+        Ok(session)
+    }
+
+    /// Export the authoritative session for an in-place realtime refresh.
+    /// Unlike the open/reconnect path, refresh never replays seed history, so
+    /// blob hydration here would be needless I/O and could reject an otherwise
+    /// valid config-only update because of old media.
+    pub async fn export_realtime_refresh_session_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Session, SessionError> {
+        self.export_realtime_session_authority_snapshot(id).await
+    }
+
+    async fn export_realtime_session_authority_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Session, SessionError> {
+        let session = match self.live_session_authority(id).await? {
             LiveSessionAuthority::DurableAuthoritative { session, reason } => {
                 if self
                     .session_archived_by_authority(id, session.as_ref())
@@ -3763,12 +3916,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     reason = ?reason,
                     "using durable session authority for realtime open snapshot"
                 );
-                Ok(*session)
+                *session
             }
             LiveSessionAuthority::NoLive | LiveSessionAuthority::LiveAuthoritative => {
-                self.export_session_with_labels(id).await
+                self.export_session_with_labels(id).await?
             }
-        }
+        };
+        Ok(session)
     }
 
     pub async fn wait_for_session_mutation_after(
@@ -3896,15 +4050,342 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
         let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let mut current = self.inner.export_session(id).await?;
+        if let Some(user_content) = current.preflight_realtime_user_content_event(&event) {
+            if matches!(
+                user_content,
+                meerkat_core::RealtimeUserContentApplyOutcome::AlreadyCommitted(_)
+            ) {
+                let prepared = self
+                    .prepare_realtime_user_content_blob(&event)
+                    .await?
+                    .ok_or_else(|| {
+                        realtime_user_content_blob_error(
+                            "already-committed realtime user content was not a canonical image",
+                            "missing image ingress",
+                        )
+                    })?;
+                self.ensure_prepared_realtime_user_content_blob(&prepared)
+                    .await?;
+            }
+            return Ok(user_content_outcome(user_content));
+        }
+
+        let prepared = self.prepare_realtime_user_content_blob(&event).await?;
+        if let Some(outcome) = self
+            .reconcile_pending_realtime_user_content_blob(id, &mut current, prepared.as_ref())
+            .await?
+        {
+            return Ok(outcome);
+        }
+
+        // Reconciliation may have committed an older pending anchor. Re-run
+        // admission against that new durable state before any current-request
+        // blob write; the current key may now be an exact replay or conflict.
+        if let Some(user_content) = current.preflight_realtime_user_content_event(&event) {
+            if matches!(
+                user_content,
+                meerkat_core::RealtimeUserContentApplyOutcome::AlreadyCommitted(_)
+            ) {
+                let prepared = prepared.as_ref().ok_or_else(|| {
+                    realtime_user_content_blob_error(
+                        "reconciled realtime user content was not a canonical image",
+                        "missing image ingress",
+                    )
+                })?;
+                self.ensure_prepared_realtime_user_content_blob(prepared)
+                    .await?;
+            }
+            return Ok(user_content_outcome(user_content));
+        }
+
+        let Some(prepared) = prepared else {
+            let outcome = self
+                .inner
+                .append_realtime_transcript_event(id, event)
+                .await?;
+            if let Err(error) = self.persist_full_session(id).await {
+                let _ = self.discard_live_session(id).await;
+                return Err(error);
+            }
+            return Ok(outcome);
+        };
+
+        use meerkat_core::generated::session_document::RealtimeUserContentBlobStageDisposition;
+        let stage = current
+            .stage_pending_realtime_user_content_blob(prepared.pending.clone())
+            .map_err(|error| {
+                realtime_user_content_blob_error(
+                    "failed to authorize realtime user-content blob staging",
+                    error,
+                )
+            })?;
+        if stage != RealtimeUserContentBlobStageDisposition::StageNew {
+            return Err(realtime_user_content_blob_error(
+                "realtime user-content blob staging did not acquire an empty slot",
+                format!("unexpected stage disposition {stage:?}"),
+            ));
+        }
+        // Crash point A: the bounded metadata-only anchor becomes durable
+        // before put. A failed/uncertain persist performs no blob write.
+        self.persist_realtime_transcript_snapshot(id, &current)
+            .await?;
+
+        // Crash point B: put/repair is atomic, directory-synced, and read back
+        // under the decoded-size bound while the durable anchor remains.
+        self.ensure_prepared_realtime_user_content_blob(&prepared)
+            .await?;
+
         let outcome = self
-            .inner
-            .append_realtime_transcript_event(id, event)
+            .commit_pending_realtime_user_content_blob(id, &mut current, &prepared)
+            .await?;
+        // A receipt is still withheld until a final post-commit verification.
+        // If an external actor removed/corrupted the object concurrently, an
+        // inline retry can repair it through the AlreadyCommitted path.
+        self.ensure_prepared_realtime_user_content_blob(&prepared)
+            .await?;
+        Ok(outcome)
+    }
+
+    async fn prepare_realtime_user_content_blob(
+        &self,
+        event: &meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<Option<PreparedRealtimeUserContentBlob>, SessionError> {
+        let meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key,
+            item_id,
+            previous_item_id,
+            content_index,
+            content,
+        } = event
+        else {
+            return Ok(None);
+        };
+        let [meerkat_core::types::ContentBlock::Image { media_type, data }] = content.as_slice()
+        else {
+            return Err(realtime_user_content_blob_error(
+                "realtime user-content blob ingress must contain exactly one image",
+                "invalid content shape",
+            ));
+        };
+        let (verified, inline_data) = match data {
+            meerkat_core::types::ImageData::Inline { data } => (
+                meerkat_core::validate_image_blob_payload(
+                    media_type,
+                    data,
+                    meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+                )
+                .map_err(|error| {
+                    realtime_user_content_blob_error(
+                        "realtime inline image failed bounded integrity validation",
+                        error,
+                    )
+                })?,
+                Some(data.clone()),
+            ),
+            meerkat_core::types::ImageData::Blob { blob_id } => (
+                meerkat_core::verify_stored_image_blob(
+                    self.blob_store.as_ref(),
+                    blob_id,
+                    media_type,
+                    meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+                )
+                .await
+                .map_err(|error| {
+                    realtime_user_content_blob_error(
+                        "realtime blob reference failed bounded integrity validation",
+                        error,
+                    )
+                })?,
+                None,
+            ),
+        };
+        Ok(Some(PreparedRealtimeUserContentBlob {
+            pending: meerkat_core::PendingRealtimeUserContentBlob {
+                idempotency_key: idempotency_key.clone(),
+                item_id: item_id.clone(),
+                previous_item_id: previous_item_id.clone(),
+                content_index: *content_index,
+                blob_id: verified.blob_ref.blob_id,
+                media_type: verified.blob_ref.media_type,
+            },
+            inline_data,
+        }))
+    }
+
+    async fn ensure_prepared_realtime_user_content_blob(
+        &self,
+        prepared: &PreparedRealtimeUserContentBlob,
+    ) -> Result<(), SessionError> {
+        let verified = if let Some(data) = prepared.inline_data.as_deref() {
+            meerkat_core::ensure_stored_image_blob(
+                self.blob_store.as_ref(),
+                &prepared.pending.media_type,
+                data,
+                meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+            )
+            .await
+        } else {
+            meerkat_core::verify_stored_image_blob(
+                self.blob_store.as_ref(),
+                &prepared.pending.blob_id,
+                &prepared.pending.media_type,
+                meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+            )
+            .await
+        }
+        .map_err(|error| {
+            realtime_user_content_blob_error(
+                "realtime user-content blob was not durably verified",
+                error,
+            )
+        })?;
+        if verified.blob_ref.blob_id != prepared.pending.blob_id
+            || verified.blob_ref.media_type != prepared.pending.media_type
+        {
+            return Err(realtime_user_content_blob_error(
+                "realtime user-content blob verification changed staged identity",
+                format!(
+                    "expected {} {}, found {} {}",
+                    prepared.pending.blob_id,
+                    prepared.pending.media_type,
+                    verified.blob_ref.blob_id,
+                    verified.blob_ref.media_type
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn reconcile_pending_realtime_user_content_blob(
+        &self,
+        id: &SessionId,
+        current: &mut Session,
+        request: Option<&PreparedRealtimeUserContentBlob>,
+    ) -> Result<Option<meerkat_core::RealtimeTranscriptApplyOutcome>, SessionError> {
+        let Some(pending) = current.pending_realtime_user_content_blob() else {
+            return Ok(None);
+        };
+        let pending_blob_valid = match meerkat_core::verify_stored_image_blob(
+            self.blob_store.as_ref(),
+            &pending.blob_id,
+            &pending.media_type,
+            meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+        )
+        .await
+        {
+            Ok(_) => true,
+            Err(error) if pending_blob_is_definitively_invalid(&error) => false,
+            Err(error) => {
+                return Err(realtime_user_content_blob_error(
+                    "pending realtime user-content blob verification was inconclusive",
+                    error,
+                ));
+            }
+        };
+        let request_anchor = request.map(|prepared| &prepared.pending);
+        let disposition = current
+            .resolve_pending_realtime_user_content_blob_recovery(request_anchor, pending_blob_valid)
+            .map_err(|error| {
+                realtime_user_content_blob_error(
+                    "failed to resolve pending realtime user-content blob recovery",
+                    error,
+                )
+            })?;
+        use meerkat_core::generated::session_document::RealtimeUserContentBlobRecoveryDisposition;
+        match disposition {
+            RealtimeUserContentBlobRecoveryDisposition::NoPending => {
+                Err(realtime_user_content_blob_error(
+                    "pending realtime user-content blob disappeared during recovery",
+                    "machine observed no pending anchor",
+                ))
+            }
+            RealtimeUserContentBlobRecoveryDisposition::RetryExact => {
+                let request = request.ok_or_else(|| {
+                    realtime_user_content_blob_error(
+                        "exact pending realtime user-content retry lacked caller bytes/reference",
+                        "missing exact request",
+                    )
+                })?;
+                self.ensure_prepared_realtime_user_content_blob(request)
+                    .await?;
+                let outcome = self
+                    .commit_pending_realtime_user_content_blob(id, current, request)
+                    .await?;
+                self.ensure_prepared_realtime_user_content_blob(request)
+                    .await?;
+                Ok(Some(outcome))
+            }
+            RealtimeUserContentBlobRecoveryDisposition::CommitVerifiedBeforeCurrent => {
+                let recovered = PreparedRealtimeUserContentBlob {
+                    pending,
+                    inline_data: None,
+                };
+                self.ensure_prepared_realtime_user_content_blob(&recovered)
+                    .await?;
+                let _ = self
+                    .commit_pending_realtime_user_content_blob(id, current, &recovered)
+                    .await?;
+                self.ensure_prepared_realtime_user_content_blob(&recovered)
+                    .await?;
+                Ok(None)
+            }
+            RealtimeUserContentBlobRecoveryDisposition::ClearInvalidBeforeCurrent => {
+                current
+                    .clear_invalid_pending_realtime_user_content_blob(request_anchor)
+                    .map_err(|error| {
+                        realtime_user_content_blob_error(
+                            "failed to clear invalid pending realtime user-content blob",
+                            error,
+                        )
+                    })?;
+                // Never delete the content-addressed object here: this slot
+                // does not prove exclusive ownership of a realm-shared blob.
+                self.persist_realtime_transcript_snapshot(id, current)
+                    .await?;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn commit_pending_realtime_user_content_blob(
+        &self,
+        id: &SessionId,
+        current: &mut Session,
+        prepared: &PreparedRealtimeUserContentBlob,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        let outcome = current.append_realtime_transcript_event(prepared.pending.canonical_event());
+        let committed_matches = matches!(
+            outcome.user_content.as_ref(),
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::Committed(identity))
+                if prepared.pending.matches_identity(identity)
+        );
+        if !committed_matches || current.pending_realtime_user_content_blob().is_some() {
+            return Err(realtime_user_content_blob_error(
+                "pending realtime user-content blob reducer commit failed closed",
+                format!("unexpected reducer outcome {outcome:?}"),
+            ));
+        }
+        // Crash point C: reducer state may exist in-memory, but no receipt is
+        // returned until the final session authority snapshot is durable.
+        self.persist_realtime_transcript_snapshot(id, current)
+            .await?;
+        Ok(outcome)
+    }
+
+    async fn persist_realtime_transcript_snapshot(
+        &self,
+        id: &SessionId,
+        session: &Session,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .sync_session_from_durable_snapshot(id, session.clone())
             .await?;
         if let Err(error) = self.persist_full_session(id).await {
             let _ = self.discard_live_session(id).await;
             return Err(error);
         }
-        Ok(outcome)
+        Ok(())
     }
 
     /// Create a new persistent session service.
@@ -4272,6 +4753,42 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map_err(|err| SessionError::Store(Box::new(err)))
     }
 
+    /// Read a bounded durable replay page without materializing the remainder
+    /// of the append-only event log.
+    pub async fn event_log_read_page(
+        &self,
+        id: &SessionId,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<Option<Vec<crate::event_store::StoredEvent>>, SessionError> {
+        let Some(event_store) = self.event_store.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(marker) = event_store
+            .projection_halt(id)
+            .await
+            .map_err(|err| SessionError::Store(Box::new(err)))?
+        {
+            return Err(event_projection_halted_error(
+                id,
+                Arc::new(SessionError::Store(Box::new(
+                    DurableEventProjectionHaltMarker {
+                        session_id: marker.session_id,
+                        reason: marker.reason,
+                    },
+                ))),
+            ));
+        }
+        if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
+            return Err(event_projection_halted_error(id, Arc::clone(cause)));
+        }
+        event_store
+            .read_page(id, from_seq, limit)
+            .await
+            .map(Some)
+            .map_err(|err| SessionError::Store(Box::new(err)))
+    }
+
     pub fn blob_store(&self) -> Arc<dyn BlobStore> {
         self.blob_store.clone()
     }
@@ -4503,9 +5020,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// lands FIRST, `protocol.retire_session` commits the runtime `Retire`
     /// transition SECOND. The projection write precedes retire, so `Retired`
     /// implies the document is Archived; the converse partial state
-    /// (document Archived, runtime still live after a retire failure) reads
-    /// as not-archived through the runtime authority and converges on a
-    /// retried archive.
+    /// (document Archived, runtime still live after a retire failure) remains
+    /// terminal to public reads and converges through a retried archive.
     ///
     /// Rebuild trigger: this projection is derived and reconstructable. Deleting
     /// it and replaying machine/event-store state (via `SessionProjector`)
@@ -5820,16 +6336,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // Drive the canonical SessionDocumentMachine archive decision. The
         // machine owns the session-document lifecycle-terminal fact for ALL
         // profiles (LUC-524 R004 fold): this shell extracts only pure
-        // observations — the canonical current archived-ness (the runtime
-        // Retire realization), the durable-snapshot presence, and the
-        // runtime registration — seeds the machine registry, and mirrors the
-        // emitted disposition + realization action vector. It decides nothing.
+        // observations — the canonical durable lifecycle terminal (with an
+        // older Retired runtime accepted only as a compatibility proof), the
+        // durable-snapshot presence, and retirement residue observed from the
+        // runtime machine's live registry plus durable lifecycle — seeds the
+        // machine registry, and mirrors the emitted disposition + realization
+        // action vector. It decides nothing.
         let currently_archived = if let Some(ref session) = archived_snapshot {
             self.session_archived_by_authority(id, session).await?
         } else {
             false
         };
-        let runtime_session_registered = machine_archive.session_registered(id).await;
+        let runtime_observation = machine_archive
+            .runtime_archive_observation(id, &self.runtime_store)
+            .await?;
         let mut authority = SessionDocumentMachineAuthority::new();
         let document_key = SessionDocumentKey::new(id.to_string());
         let seed = if currently_archived {
@@ -5850,7 +6370,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 document_key,
                 true,
                 archived_snapshot.is_some(),
-                runtime_session_registered,
+                runtime_observation,
             )
             .map_err(|err| {
                 SessionError::Agent(AgentError::InternalError(format!(
@@ -5899,8 +6419,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // window (machine retired, projection save failed, durable document
         // stayed Active, standalone reopen resurrected the session) is
         // unrepresentable. The converse partial state (document Archived,
-        // runtime still live after a retire failure) reads as not-archived
-        // through the runtime authority and converges on retry.
+        // runtime still live after a retire failure) remains terminal to
+        // public reads/resume while the generated retry converges the runtime.
         if write_document {
             let Some(session) = archived_snapshot.clone() else {
                 if let Some(ref mut guard) = gate_guard {
@@ -5932,12 +6452,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
         if retire_runtime && let Err(err) = machine_archive.retire_session(id).await {
             // Fail closed: the archive operation fails. The committed
-            // document write (if any) is convergent-by-retry — the runtime
-            // authority still reads the session as live, and a retried
-            // archive re-drives the machine, re-commits the idempotent
-            // document write, and retires the runtime.
-            if let Some(ref mut guard) = gate_guard {
-                **guard = false;
+            // document write (if any) is convergent-by-retry. Durable
+            // Archived remains terminal while the residual runtime is still
+            // registered; a retried archive re-drives the machine and retires
+            // that runtime without reopening the public session. Keep the
+            // checkpointer permanently cancelled: the Archived document is
+            // already canonical, so re-enabling a stale live projection here
+            // would allow a later metadata-only checkpoint to resurrect it.
+            // Release the gate before asking the live task to shut down so a
+            // checkpoint already waiting on the mutex can observe cancellation
+            // and exit instead of deadlocking teardown.
+            drop(gate_guard.take());
+            if let Err(discard_error) = self.inner.discard_live_session(id).await {
+                tracing::warn!(
+                    session_id = %id,
+                    error = %discard_error,
+                    "failed to evict live session after archive document committed but runtime retire failed"
+                );
             }
             return Err(err);
         }
@@ -7207,11 +7738,69 @@ mod tests {
         RunId, SystemContextStateError, lifecycle::run_primitive::RunApplyBoundary,
     };
     use meerkat_runtime::{InMemoryRuntimeStore, RuntimeStore};
-    use meerkat_store::{MemoryBlobStore, MemoryStore, SessionStoreError};
+    use meerkat_store::{FsBlobStore, MemoryBlobStore, MemoryStore, SessionStoreError};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
         Arc::new(MemoryBlobStore::new())
+    }
+
+    struct FailOneBoundedReadBlobStore {
+        inner: FsBlobStore,
+        fail_next_bounded_read: AtomicBool,
+    }
+
+    impl FailOneBoundedReadBlobStore {
+        fn new(root: std::path::PathBuf) -> Self {
+            Self {
+                inner: FsBlobStore::new(root),
+                fail_next_bounded_read: AtomicBool::new(true),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobStore for FailOneBoundedReadBlobStore {
+        async fn put_image(
+            &self,
+            media_type: &str,
+            data: &str,
+        ) -> Result<meerkat_core::BlobRef, meerkat_core::BlobStoreError> {
+            self.inner.put_image(media_type, data).await
+        }
+
+        async fn get(
+            &self,
+            blob_id: &meerkat_core::BlobId,
+        ) -> Result<meerkat_core::BlobPayload, meerkat_core::BlobStoreError> {
+            self.inner.get(blob_id).await
+        }
+
+        async fn get_with_encoded_limit(
+            &self,
+            blob_id: &meerkat_core::BlobId,
+            max_encoded_bytes: usize,
+        ) -> Result<meerkat_core::BlobPayload, meerkat_core::BlobStoreError> {
+            if self.fail_next_bounded_read.swap(false, Ordering::AcqRel) {
+                return Err(meerkat_core::BlobStoreError::ReadFailed(
+                    "synthetic crash after durable put before readback/reducer".to_string(),
+                ));
+            }
+            self.inner
+                .get_with_encoded_limit(blob_id, max_encoded_bytes)
+                .await
+        }
+
+        async fn delete(
+            &self,
+            blob_id: &meerkat_core::BlobId,
+        ) -> Result<(), meerkat_core::BlobStoreError> {
+            self.inner.delete(blob_id).await
+        }
+
+        fn is_persistent(&self) -> bool {
+            true
+        }
     }
 
     #[test]
@@ -7902,7 +8491,10 @@ mod tests {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
         fail_snapshot_commits: AtomicBool,
+        snapshot_commit_count: AtomicUsize,
+        fail_snapshot_commit_ordinal: AtomicUsize,
         fail_snapshot_replaces: AtomicBool,
+        fail_machine_lifecycle_commits: AtomicBool,
         session_snapshot_overrides: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
         replace_snapshot_interlopers: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
         clear_snapshot_interlopers: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
@@ -7916,7 +8508,10 @@ mod tests {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
                 fail_snapshot_commits: AtomicBool::new(false),
+                snapshot_commit_count: AtomicUsize::new(0),
+                fail_snapshot_commit_ordinal: AtomicUsize::new(usize::MAX),
                 fail_snapshot_replaces: AtomicBool::new(false),
+                fail_machine_lifecycle_commits: AtomicBool::new(false),
                 session_snapshot_overrides: Mutex::new(HashMap::new()),
                 replace_snapshot_interlopers: Mutex::new(HashMap::new()),
                 clear_snapshot_interlopers: Mutex::new(HashMap::new()),
@@ -7929,8 +8524,23 @@ mod tests {
             self.fail_snapshot_commits.store(fail, Ordering::Release);
         }
 
+        fn fail_snapshot_commit_in(&self, commits_from_now: usize) {
+            assert!(commits_from_now > 0);
+            let target = self
+                .snapshot_commit_count
+                .load(Ordering::Acquire)
+                .saturating_add(commits_from_now);
+            self.fail_snapshot_commit_ordinal
+                .store(target, Ordering::Release);
+        }
+
         fn set_fail_snapshot_replaces(&self, fail: bool) {
             self.fail_snapshot_replaces.store(fail, Ordering::Release);
+        }
+
+        fn set_fail_machine_lifecycle_commits(&self, fail: bool) {
+            self.fail_machine_lifecycle_commits
+                .store(fail, Ordering::Release);
         }
 
         fn hide_next_session_snapshot_loads(&self, count: usize) {
@@ -8002,9 +8612,22 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
             session_delta: meerkat_runtime::store::SessionDelta,
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            let ordinal = self
+                .snapshot_commit_count
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
             if self.fail_snapshot_commits.load(Ordering::Acquire) {
                 return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
                     "synthetic runtime snapshot commit failure".to_string(),
+                ));
+            }
+            if self
+                .fail_snapshot_commit_ordinal
+                .compare_exchange(ordinal, usize::MAX, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                    format!("synthetic runtime snapshot commit failure at ordinal {ordinal}"),
                 ));
             }
             if let Some(interloper) = self
@@ -8257,6 +8880,11 @@ mod tests {
             commit: meerkat_runtime::store::MachineLifecycleCommit,
             input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            if self.fail_machine_lifecycle_commits.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                    "synthetic machine lifecycle commit failure".to_string(),
+                ));
+            }
             self.inner
                 .commit_machine_lifecycle(runtime_id, commit, input_states)
                 .await
@@ -8889,6 +9517,18 @@ mod tests {
             session: Session,
         ) -> Result<(), meerkat_core::error::AgentError> {
             self.inner.sync_session_from_durable_snapshot(session)
+        }
+
+        fn append_realtime_transcript_event(
+            &mut self,
+            event: meerkat_core::RealtimeTranscriptEvent,
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>
+        {
+            let mut session = match self.inner.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            Ok(session.append_realtime_transcript_event(event))
         }
 
         fn interaction_event_injector(
@@ -9899,6 +10539,25 @@ mod tests {
             ..Default::default()
         });
         req
+    }
+
+    fn realtime_inline_image_event(
+        idempotency_key: &str,
+        item_id: &str,
+        data: &str,
+    ) -> meerkat_core::RealtimeTranscriptEvent {
+        meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: idempotency_key.to_string(),
+            item_id: item_id.to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: data.to_string(),
+                },
+            }],
+        }
     }
 
     fn inline_image_block(label: &str) -> ContentBlock {
@@ -14852,6 +15511,1027 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_realtime_open_snapshot_hydrates_durable_blob_backed_user_image() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service_blob_store: Arc<dyn BlobStore> = blob_store.clone();
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            service_blob_store,
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+        let blob_ref = blob_store
+            .put_image("image/png", image_data)
+            .await
+            .expect("image fixture should persist");
+        let mut durable = service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("initial live session should export");
+        durable.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_ref.blob_id.clone(),
+                },
+            },
+        ])));
+        durable.push(Message::ToolResults {
+            results: vec![ToolResult {
+                tool_use_id: "tool-image".to_string(),
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Blob {
+                        blob_id: blob_ref.blob_id.clone(),
+                    },
+                }],
+                is_error: false,
+            }],
+            created_at: std::time::SystemTime::UNIX_EPOCH.into(),
+        });
+        runtime_store
+            .commit_session_snapshot(
+                &LogicalRuntimeId::for_session(&created.session_id),
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&durable)
+                        .expect("serialize durable image session"),
+                },
+            )
+            .await
+            .expect("commit durable runtime snapshot");
+
+        let realtime_snapshot = service
+            .export_realtime_open_session_snapshot(&created.session_id)
+            .await
+            .expect("realtime provider projection should hydrate durable image bytes");
+        assert!(matches!(
+            realtime_snapshot.messages(),
+            [Message::User(user), Message::ToolResults { results, .. }]
+                if matches!(
+                    user.content.as_slice(),
+                    [ContentBlock::Image {
+                        media_type,
+                        data: ImageData::Inline { data },
+                    }] if media_type == "image/png" && data == image_data
+                )
+                && matches!(
+                    results.as_slice(),
+                    [ToolResult { content, .. }]
+                        if matches!(
+                            content.as_slice(),
+                            [ContentBlock::Image {
+                                data: ImageData::Blob { blob_id },
+                                ..
+                            }] if blob_id == &blob_ref.blob_id
+                        )
+                )
+        ));
+
+        let synced_live = service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("durable authority should synchronize into the live handle");
+        assert!(
+            matches!(
+                synced_live.messages(),
+                [Message::User(user), Message::ToolResults { results, .. }]
+                    if matches!(
+                        user.content.as_slice(),
+                        [ContentBlock::Image {
+                            data: ImageData::Blob { blob_id },
+                            ..
+                        }] if blob_id == &blob_ref.blob_id
+                    )
+                    && matches!(
+                        results.as_slice(),
+                        [ToolResult { content, .. }]
+                            if matches!(
+                                content.as_slice(),
+                                [ContentBlock::Image {
+                                    data: ImageData::Blob { blob_id },
+                                    ..
+                                }] if blob_id == &blob_ref.blob_id
+                            )
+                    )
+            ),
+            "provider hydration must not rewrite canonical durable/live history inline"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_realtime_open_snapshot_fails_closed_when_durable_image_blob_is_missing() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service_blob_store: Arc<dyn BlobStore> = blob_store.clone();
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            service_blob_store,
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let blob_ref = blob_store
+            .put_image("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB")
+            .await
+            .expect("image fixture should persist");
+        let mut durable = service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("initial live session should export");
+        durable.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_ref.blob_id.clone(),
+                },
+            },
+        ])));
+        runtime_store
+            .commit_session_snapshot(
+                &LogicalRuntimeId::for_session(&created.session_id),
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&durable)
+                        .expect("serialize durable image session"),
+                },
+            )
+            .await
+            .expect("commit durable runtime snapshot");
+        blob_store
+            .delete(&blob_ref.blob_id)
+            .await
+            .expect("image fixture should be removable");
+
+        let error = service
+            .export_realtime_open_session_snapshot(&created.session_id)
+            .await
+            .expect_err("missing durable image bytes must fail provider projection closed");
+        match error {
+            SessionError::Agent(AgentError::InternalError(message)) => {
+                assert!(
+                    message.contains(
+                        "failed to hydrate realtime history images before provider projection"
+                    ),
+                    "unexpected hydration error: {message}"
+                );
+                assert!(
+                    message.contains(blob_ref.blob_id.as_str()),
+                    "missing blob identity must survive the error boundary: {message}"
+                );
+            }
+            other => panic!("unexpected realtime image hydration error: {other}"),
+        }
+
+        let synced_live = service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("failed provider hydration must leave canonical history intact");
+        assert!(
+            matches!(
+                synced_live.messages(),
+                [Message::User(user)]
+                    if matches!(
+                        user.content.as_slice(),
+                        [ContentBlock::Image {
+                            data: ImageData::Blob { blob_id },
+                            ..
+                        }] if blob_id == &blob_ref.blob_id
+                    )
+            ),
+            "missing image bytes must not degrade canonical history to a placeholder"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_realtime_user_image_rejects_unmaterialized_causal_predecessor() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service_blob_store: Arc<dyn BlobStore> = blob_store.clone();
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            service_blob_store,
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                meerkat_core::RealtimeTranscriptEvent::AssistantTextDelta {
+                    response_id: "response_before_image".to_string(),
+                    delta_id: "delta_before_image".to_string(),
+                    item_id: "assistant_before_image".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    delta: "before image".to_string(),
+                },
+            )
+            .await
+            .expect("assistant predecessor should stage");
+
+        let image_data = "iVBORw0KGgo=";
+        let image_blob_id = meerkat_core::blob::content_blob_id("image/png", image_data);
+        let image_event = meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "image-request-1".to_string(),
+            item_id: "image_after_assistant".to_string(),
+            previous_item_id: Some("assistant_before_image".to_string()),
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: image_data.to_string(),
+                },
+            }],
+        };
+        let outcome = service
+            .append_realtime_transcript_event(&created.session_id, image_event.clone())
+            .await
+            .expect("image rejection should be a typed reducer outcome");
+        assert!(matches!(
+            outcome.user_content,
+            Some(
+                meerkat_core::RealtimeUserContentApplyOutcome::RejectedUnmaterializedPredecessor { .. }
+            )
+        ));
+        let replay = service
+            .append_realtime_transcript_event(&created.session_id, image_event)
+            .await
+            .expect("duplicate invalid image should remain a typed rejection");
+        assert!(matches!(
+            replay.user_content,
+            Some(
+                meerkat_core::RealtimeUserContentApplyOutcome::RejectedUnmaterializedPredecessor { .. }
+            )
+        ));
+        assert!(matches!(
+            blob_store.get(&image_blob_id).await,
+            Err(meerkat_core::BlobStoreError::NotFound(_))
+        ));
+
+        let staged = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(&runtime_store, &created.session_id)
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("runtime snapshot should exist");
+        let staged_json = serde_json::to_string(&staged).expect("serialize staged session");
+        assert!(
+            !staged_json.contains(image_data),
+            "causally waiting image bytes must never enter durable session metadata"
+        );
+        assert!(!staged_json.contains(image_blob_id.as_str()));
+        assert!(staged.messages().is_empty());
+
+        let completed = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                    response_id: "response_before_image".to_string(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: meerkat_core::Usage::default(),
+                },
+            )
+            .await
+            .expect("predecessor completion should materialize only the accepted predecessor");
+        assert_eq!(completed.materialized_messages.len(), 1);
+
+        let durable = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(&runtime_store, &created.session_id)
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("runtime snapshot should exist");
+        assert_eq!(durable.messages().len(), 1);
+        assert!(matches!(durable.messages()[0], Message::BlockAssistant(_)));
+    }
+
+    #[tokio::test]
+    async fn test_realtime_user_image_replay_and_conflict_preflight_before_blob_write() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store,
+            blob_store.clone(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let image =
+            |item_id: &str, data: &str| meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: "stable-image-key".to_string(),
+                item_id: item_id.to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: data.to_string(),
+                    },
+                }],
+            };
+
+        let canonical_image = "iVBORw0KGgo=";
+        let conflicting_image = "iVBORw0KGgoB";
+        let committed = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                image("canonical-item", canonical_image),
+            )
+            .await
+            .expect("first image commit");
+        assert!(matches!(
+            committed.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+
+        let replay = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                image("retry-item", canonical_image),
+            )
+            .await
+            .expect("exact retry");
+        assert!(matches!(
+            replay.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::AlreadyCommitted(
+                meerkat_core::RealtimeUserContentIdentity { ref item_id, .. }
+            )) if item_id == "canonical-item"
+        ));
+
+        let conflicting_blob = meerkat_core::blob::content_blob_id("image/png", conflicting_image);
+        let conflict = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                image("conflict-item", conflicting_image),
+            )
+            .await
+            .expect("conflict is typed");
+        assert!(matches!(
+            conflict.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::RejectedConflict { .. })
+        ));
+        assert!(matches!(
+            blob_store.get(&conflicting_blob).await,
+            Err(meerkat_core::BlobStoreError::NotFound(_))
+        ));
+
+        let durable = service
+            .export_realtime_refresh_session_snapshot(&created.session_id)
+            .await
+            .expect("durable session remains valid");
+        assert_eq!(durable.messages().len(), 1);
+        assert_eq!(durable.realtime_user_content_identities().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_realtime_raw_blob_reference_is_verified_before_stage_or_receipt() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store.clone(),
+            blob_store,
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let missing_id = meerkat_core::blob::content_blob_id("image/png", "iVBORw0KGgo=");
+        let error = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+                    idempotency_key: "missing-raw-image".to_string(),
+                    item_id: "missing-raw-item".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    content: vec![ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Blob {
+                            blob_id: missing_id,
+                        },
+                    }],
+                },
+            )
+            .await
+            .expect_err("missing raw blob must not receive a commit receipt");
+        assert!(error.to_string().contains("blob not found"));
+        let durable = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(&runtime_store, &created.session_id)
+            .await
+            .expect("runtime snapshot load")
+            .expect("created snapshot");
+        assert!(durable.messages().is_empty());
+        assert!(durable.pending_realtime_user_content_blob().is_none());
+        assert!(durable.realtime_user_content_identities().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_realtime_exact_inline_replay_repairs_missing_committed_blob_before_receipt() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store,
+            blob_store.clone(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let image_data = "iVBORw0KGgo=";
+        let blob_id = meerkat_core::blob::content_blob_id("image/png", image_data);
+        let image = |item_id: &str| meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "repairable-image-key".to_string(),
+            item_id: item_id.to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: image_data.to_string(),
+                },
+            }],
+        };
+        service
+            .append_realtime_transcript_event(&created.session_id, image("canonical-item"))
+            .await
+            .expect("initial image commit");
+        blob_store
+            .delete(&blob_id)
+            .await
+            .expect("simulate lost committed object");
+
+        let replay = service
+            .append_realtime_transcript_event(&created.session_id, image("retry-item"))
+            .await
+            .expect("inline retry must repair before replay receipt");
+        assert!(matches!(
+            replay.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::AlreadyCommitted(_))
+        ));
+        let repaired = blob_store
+            .get(&blob_id)
+            .await
+            .expect("exact replay must restore the object");
+        assert_eq!(repaired.media_type, "image/png");
+        assert_eq!(repaired.data, image_data);
+    }
+
+    #[tokio::test]
+    async fn test_realtime_blob_crash_before_put_leaves_no_object_or_anchor() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let runtime_store_authority: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store_authority.clone(),
+            blob_store.clone(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let data = "iVBORw0KGgo=";
+        let blob_id = meerkat_core::blob::content_blob_id("image/png", data);
+        runtime_store.fail_snapshot_commit_in(1);
+        let error = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                realtime_inline_image_event("crash-before-put", "crash-before-put-item", data),
+            )
+            .await
+            .expect_err("anchor persistence failure must stop before put");
+        assert!(error.to_string().contains("snapshot persistence failed"));
+        assert!(matches!(
+            blob_store.get(&blob_id).await,
+            Err(meerkat_core::BlobStoreError::NotFound(_))
+        ));
+        let durable = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(
+                &runtime_store_authority,
+                &created.session_id,
+            )
+            .await
+            .expect("runtime snapshot load")
+            .expect("initial durable snapshot remains");
+        assert!(durable.pending_realtime_user_content_blob().is_none());
+        assert!(durable.messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_realtime_blob_crash_after_directory_synced_put_recovers_exactly_once() {
+        let temp = tempfile::tempdir().expect("temporary filesystem blob root");
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(FailOneBoundedReadBlobStore::new(temp.path().join("blobs")));
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store.clone(),
+            blob_store.clone(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let data = "iVBORw0KGgo=";
+        let blob_id = meerkat_core::blob::content_blob_id("image/png", data);
+        let event = realtime_inline_image_event("crash-after-put", "crash-after-put-item", data);
+        let error = service
+            .append_realtime_transcript_event(&created.session_id, event.clone())
+            .await
+            .expect_err("synthetic post-put crash must withhold receipt");
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic crash after durable put")
+        );
+
+        let staged = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(&runtime_store, &created.session_id)
+            .await
+            .expect("runtime snapshot load")
+            .expect("staged anchor snapshot");
+        assert_eq!(staged.messages().len(), 0);
+        assert!(staged.pending_realtime_user_content_blob().is_some());
+        assert!(!serde_json::to_string(&staged).unwrap().contains(data));
+        assert_eq!(
+            blob_store
+                .inner
+                .get(&blob_id)
+                .await
+                .expect("fsynced blob")
+                .data,
+            data
+        );
+
+        let recovered = service
+            .append_realtime_transcript_event(&created.session_id, event)
+            .await
+            .expect("exact retry must consume the durable anchor");
+        assert!(matches!(
+            recovered.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+        let durable = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(&runtime_store, &created.session_id)
+            .await
+            .expect("runtime snapshot load")
+            .expect("final snapshot");
+        assert!(durable.pending_realtime_user_content_blob().is_none());
+        assert_eq!(durable.messages().len(), 1);
+        assert_eq!(durable.realtime_user_content_identities().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_realtime_open_reconciles_verified_pending_image_before_provider_seed() {
+        let temp = tempfile::tempdir().expect("temporary filesystem blob root");
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(FailOneBoundedReadBlobStore::new(temp.path().join("blobs")));
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            blob_store.clone(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let first_data = "iVBORw0KGgo=";
+        let first_event =
+            realtime_inline_image_event("pre-crash-image", "pre-crash-item", first_data);
+        service
+            .append_realtime_transcript_event(&created.session_id, first_event)
+            .await
+            .expect_err("synthetic post-put crash must leave a verified pending anchor");
+        let staged = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(&runtime_store, &created.session_id)
+            .await
+            .expect("runtime snapshot load")
+            .expect("staged anchor snapshot");
+        assert!(staged.pending_realtime_user_content_blob().is_some());
+        assert!(staged.messages().is_empty());
+
+        drop(service);
+        let recovery = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            Arc::clone(&runtime_store),
+            blob_store,
+        );
+        recovery
+            .create_session(resume_request(staged))
+            .await
+            .expect("cold resume must restore the pending anchor");
+
+        // This is the provider-history boundary. Recovery must commit and
+        // hydrate the old ACKed image here, before a new provider session is
+        // opened and before any different image ACK can be processed.
+        let projected = recovery
+            .export_realtime_open_session_snapshot(&created.session_id)
+            .await
+            .expect("realtime open must reconcile before projection");
+        assert!(projected.pending_realtime_user_content_blob().is_none());
+        assert_eq!(projected.messages().len(), 1);
+        assert!(matches!(
+            &projected.messages()[0],
+            Message::User(user)
+                if matches!(
+                    user.content.as_slice(),
+                    [ContentBlock::Image {
+                        media_type,
+                        data: ImageData::Inline { data },
+                    }] if media_type == "image/png" && data == first_data
+                )
+        ));
+
+        let second_data = "iVBORw0KGgoA";
+        recovery
+            .append_realtime_transcript_event(
+                &created.session_id,
+                realtime_inline_image_event("post-reopen-image", "post-reopen-item", second_data),
+            )
+            .await
+            .expect("different post-open image may commit only after old image was seeded");
+        let durable = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(&runtime_store, &created.session_id)
+            .await
+            .expect("runtime snapshot load")
+            .expect("recovered durable snapshot");
+        assert!(durable.pending_realtime_user_content_blob().is_none());
+        assert_eq!(durable.messages().len(), 2);
+        assert_eq!(durable.realtime_user_content_identities().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_realtime_blob_final_snapshot_failure_recovers_bounded_pending_anchor() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let runtime_store_authority: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store.clone(),
+            runtime_store_authority.clone(),
+            blob_store.clone(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let data = "iVBORw0KGgo=";
+        let event = realtime_inline_image_event(
+            "crash-before-final-save",
+            "crash-before-final-save-item",
+            data,
+        );
+        runtime_store.fail_snapshot_commit_in(2);
+        let error = service
+            .append_realtime_transcript_event(&created.session_id, event.clone())
+            .await
+            .expect_err("final snapshot failure must withhold receipt");
+        assert!(error.to_string().contains("snapshot persistence failed"));
+
+        let staged = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(
+                &runtime_store_authority,
+                &created.session_id,
+            )
+            .await
+            .expect("runtime snapshot load")
+            .expect("anchor snapshot must remain authority");
+        assert!(staged.pending_realtime_user_content_blob().is_some());
+        assert!(staged.messages().is_empty());
+        let staged_json = serde_json::to_string(&staged).expect("serialize staged snapshot");
+        assert!(!staged_json.contains(data));
+
+        let recovery = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store_authority.clone(),
+            blob_store,
+        );
+        let resumed = recovery
+            .create_session(resume_request(staged))
+            .await
+            .expect("cold resume must restore the bounded anchor");
+        assert_eq!(resumed.session_id, created.session_id);
+        let outcome = recovery
+            .append_realtime_transcript_event(&created.session_id, event)
+            .await
+            .expect("exact inline retry must complete after final-save crash");
+        assert!(matches!(
+            outcome.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+        let durable = PersistentSessionService::<CapabilityBuilder>::
+            load_runtime_session_snapshot_for_session(
+                &runtime_store_authority,
+                &created.session_id,
+            )
+            .await
+            .expect("runtime snapshot load")
+            .expect("recovered final snapshot");
+        assert!(durable.pending_realtime_user_content_blob().is_none());
+        assert_eq!(durable.messages().len(), 1);
+        assert_eq!(durable.realtime_user_content_identities().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_transcript_rewrite_tombstone_survives_cold_restore_and_blocks_blob_write() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store,
+            blob_store.clone(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let image = |key: &str, item_id: &str, data: &str| {
+            meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: key.to_string(),
+                item_id: item_id.to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: data.to_string(),
+                    },
+                }],
+            }
+        };
+        let data = "iVBORw0KGgo=";
+        let blob_id = meerkat_core::blob::content_blob_id("image/png", data);
+        assert!(matches!(
+            service
+                .append_realtime_transcript_event(
+                    &created.session_id,
+                    image("removed-key", "removed-item", data),
+                )
+                .await
+                .expect("commit original image")
+                .user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+        let before = service
+            .export_realtime_refresh_session_snapshot(&created.session_id)
+            .await
+            .expect("read parent");
+        let parent_revision = before.transcript_revision().expect("parent revision");
+        service
+            .rewrite_session_transcript(
+                &created.session_id,
+                SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                    replacement: vec![Message::User(UserMessage::text("image removed"))],
+                    reason: TranscriptRewriteReason::new("remove-image"),
+                    actor: None,
+                    expected_parent_revision: Some(parent_revision),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("rewrite should commit tombstone");
+
+        blob_store
+            .delete(&blob_id)
+            .await
+            .expect("remove old blob to prove retry does not rewrite it");
+        service
+            .discard_live_session(&created.session_id)
+            .await
+            .expect("force cold restore path");
+        let retry = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                image("removed-key", "retry-item", data),
+            )
+            .await
+            .expect("tombstoned retry is a typed rejection");
+        assert!(matches!(
+            retry.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::RejectedConflict { .. })
+        ));
+        assert!(retry.materialized_messages.is_empty());
+        assert!(matches!(
+            blob_store.get(&blob_id).await,
+            Err(meerkat_core::BlobStoreError::NotFound(_))
+        ));
+
+        let fresh = service
+            .append_realtime_transcript_event(
+                &created.session_id,
+                image("fresh-key", "fresh-item", data),
+            )
+            .await
+            .expect("new key should commit after rewrite");
+        assert!(matches!(
+            fresh.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+        let durable = service
+            .export_realtime_refresh_session_snapshot(&created.session_id)
+            .await
+            .expect("rewritten durable session remains valid");
+        assert_eq!(durable.realtime_user_content_identities().len(), 1);
+        assert_eq!(durable.realtime_user_content_tombstones().len(), 1);
+        assert_eq!(durable.messages().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_transcript_rewrite_retaining_image_preserves_exact_replay_after_cold_restore() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service =
+            PersistentSessionService::new(CapabilityBuilder, 4, store, runtime_store, blob_store);
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let data = "iVBORw0KGgo=";
+        let image = |item_id: &str| meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "retained-key".to_string(),
+            item_id: item_id.to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: data.to_string(),
+                },
+            }],
+        };
+        service
+            .append_realtime_transcript_event(&created.session_id, image("canonical-item"))
+            .await
+            .expect("commit original image");
+        let before = service
+            .export_realtime_refresh_session_snapshot(&created.session_id)
+            .await
+            .expect("read parent");
+        let parent_revision = before.transcript_revision().expect("parent revision");
+        service
+            .rewrite_session_transcript(
+                &created.session_id,
+                SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                    replacement: vec![
+                        before.messages()[0].clone(),
+                        Message::User(UserMessage::text("neighbor changed")),
+                    ],
+                    reason: TranscriptRewriteReason::new("retain-image"),
+                    actor: None,
+                    expected_parent_revision: Some(parent_revision),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("rewrite retaining canonical image");
+        service
+            .discard_live_session(&created.session_id)
+            .await
+            .expect("force cold restore path");
+        let replay = service
+            .append_realtime_transcript_event(&created.session_id, image("ignored-retry-item"))
+            .await
+            .expect("exact retained retry");
+        assert!(matches!(
+            replay.user_content,
+            Some(meerkat_core::RealtimeUserContentApplyOutcome::AlreadyCommitted(
+                meerkat_core::RealtimeUserContentIdentity { ref item_id, .. }
+            )) if item_id == "canonical-item"
+        ));
+        assert!(replay.materialized_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_realtime_open_snapshot_rejects_repeated_images_over_cumulative_budget() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(MemoryBlobStore::new());
+        let service_blob_store: Arc<dyn BlobStore> = blob_store.clone();
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            service_blob_store,
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let blob_ref = blob_store
+            .put_image("image/png", "AQID")
+            .await
+            .expect("image fixture should persist");
+        let mut durable = service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("initial live session should export");
+        for _ in 0..3 {
+            durable.push(Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Blob {
+                        blob_id: blob_ref.blob_id.clone(),
+                    },
+                },
+            ])));
+        }
+        runtime_store
+            .commit_session_snapshot(
+                &LogicalRuntimeId::for_session(&created.session_id),
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&durable)
+                        .expect("serialize repeated-image session"),
+                },
+            )
+            .await
+            .expect("commit durable runtime snapshot");
+
+        let error = service
+            .export_realtime_open_session_snapshot_with_image_budget(&created.session_id, 6)
+            .await
+            .expect_err("three repeated three-byte images must exceed a six-byte budget");
+        assert!(
+            matches!(
+                error,
+                SessionError::Agent(AgentError::InternalError(ref message))
+                    if message.contains("exceeds the 6-byte cumulative decoded limit")
+                        && message.contains("attempted 9 bytes")
+            ),
+            "unexpected cumulative image budget error: {error}"
+        );
+
+        let synced_live = service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("failed projection hydration must leave canonical live history intact");
+        assert_eq!(synced_live.messages().len(), 3);
+        assert!(synced_live.messages().iter().all(|message| matches!(
+            message,
+            Message::User(user)
+                if matches!(
+                    user.content.as_slice(),
+                    [ContentBlock::Image {
+                        data: ImageData::Blob { blob_id },
+                        ..
+                    }] if blob_id == &blob_ref.blob_id
+                )
+        )));
+    }
+
+    #[tokio::test]
     async fn test_runtime_turn_synchronizes_stale_live_transcript_authority() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
@@ -15385,6 +17065,124 @@ mod tests {
         );
     }
 
+    /// Once the durable Archived document lands, a fallible runtime-retire
+    /// realization must not re-enable the stale live checkpointer. Otherwise a
+    /// metadata-only checkpoint from the still-live task can replace the
+    /// canonical Archived row with its pre-archive Active snapshot.
+    #[tokio::test]
+    async fn test_runtime_retire_failure_keeps_archived_checkpointer_cancelled() {
+        use meerkat_core::checkpoint::SessionCheckpointer;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let gated_runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = gated_runtime_store.clone();
+        let blob_store = memory_blob_store();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            Arc::clone(&blob_store),
+        );
+        let machine =
+            MeerkatMachine::persistent(Arc::clone(&runtime_store), Arc::clone(&blob_store));
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id;
+        let mut stale_active = store
+            .load(&id)
+            .await
+            .expect("active projection load should succeed")
+            .expect("created session should have an active projection");
+        stale_active.set_metadata(
+            "stale_checkpoint_probe",
+            serde_json::json!({ "would_resurrect": true }),
+        );
+        let gate = service
+            .existing_gate_for_session(&id)
+            .await
+            .expect("live session should own a checkpointer gate");
+
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("seed runtime authority before archive");
+        gated_runtime_store.set_fail_machine_lifecycle_commits(true);
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect_err("injected runtime retire persistence failure must fail archive");
+
+        let archived = store
+            .load(&id)
+            .await
+            .expect("archived projection load should succeed")
+            .expect("document commit must remain durable");
+        assert!(
+            session_marks_archived(&archived),
+            "document-first archive must stay terminal after retire failure"
+        );
+        assert!(
+            *gate.cancelled.lock().await,
+            "retire failure must leave the stale checkpointer cancelled"
+        );
+        assert!(
+            !service
+                .has_live_session(&id)
+                .await
+                .expect("live-session status should succeed"),
+            "terminal document must evict the stale live session even while runtime retry remains"
+        );
+
+        let stale_checkpointer = StoreCheckpointer {
+            store: Arc::clone(&store),
+            incremental: None,
+            blob_store: Arc::clone(&blob_store),
+            event_store: None,
+            projector: None,
+            gate: Arc::clone(&gate),
+            last_saved_revision: std::sync::Mutex::new(None),
+        };
+        stale_checkpointer.checkpoint(&stale_active).await;
+        let after_stale_checkpoint = store
+            .load(&id)
+            .await
+            .expect("post-checkpoint projection load should succeed")
+            .expect("archived document should remain present");
+        assert!(
+            session_marks_archived(&after_stale_checkpoint),
+            "cancelled stale checkpointer must not resurrect the Archived row"
+        );
+
+        gated_runtime_store.set_fail_machine_lifecycle_commits(false);
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect("archive retry should converge runtime retirement");
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime state load should succeed"),
+            Some(RuntimeState::Retired)
+        );
+        assert!(
+            service.existing_gate_for_session(&id).await.is_none(),
+            "successful retry should retire the cancelled checkpointer gate"
+        );
+    }
+
     /// Direct generated-authority coverage for the lifecycle-terminal region:
     /// unseeded drives fail closed, Active archives with the realization
     /// action vector, re-archive is the explicit AlreadyArchived verdict with
@@ -15398,15 +17196,15 @@ mod tests {
             authority: &mut SessionDocumentMachineAuthority,
             key: &SessionDocumentKey,
             runtime_backed: bool,
-            durable_snapshot_present: bool,
-            runtime_session_registered: bool,
+            durable_document_present: bool,
+            runtime_observation: SessionArchiveRuntimeObservation,
         ) -> (SessionArchiveDisposition, bool, bool) {
             let effects = authority
                 .archive_session_document(
                     key.clone(),
                     runtime_backed,
-                    durable_snapshot_present,
-                    runtime_session_registered,
+                    durable_document_present,
+                    runtime_observation,
                 )
                 .expect("seeded archive drive should resolve");
             effects
@@ -15441,7 +17239,7 @@ mod tests {
                     SessionDocumentKey::new("session-archive-verdicts"),
                     true,
                     true,
-                    false,
+                    SessionArchiveRuntimeObservation::RetirementRequired,
                 )
                 .is_err(),
             "archive drive against an unseeded session id must fail closed"
@@ -15451,40 +17249,91 @@ mod tests {
         // same registry is the explicit AlreadyArchived verdict.
         let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
         assert_eq!(
-            verdict(&mut authority, &key, true, true, false),
+            verdict(
+                &mut authority,
+                &key,
+                true,
+                true,
+                SessionArchiveRuntimeObservation::RetirementRequired,
+            ),
             (SessionArchiveDisposition::Archive, true, true)
         );
         assert_eq!(
-            verdict(&mut authority, &key, true, true, false),
+            verdict(
+                &mut authority,
+                &key,
+                true,
+                true,
+                SessionArchiveRuntimeObservation::QuiescentTerminal,
+            ),
             (SessionArchiveDisposition::AlreadyArchived, false, false)
         );
 
         // A recovered-Archived document resolves AlreadyArchived.
         let (mut authority, key) = seeded(SessionDocumentLifecycle::Archived);
         assert_eq!(
-            verdict(&mut authority, &key, true, true, false),
+            verdict(
+                &mut authority,
+                &key,
+                true,
+                true,
+                SessionArchiveRuntimeObservation::Absent,
+            ),
             (SessionArchiveDisposition::AlreadyArchived, false, false)
         );
 
-        // Runtime-backed archive of a session the runtime never saw must not
-        // spuriously register-then-retire it.
+        // A durable session document does not prove runtime presence. A
+        // runtime-backed archive of a session the runtime never saw writes the
+        // document without spuriously registering then retiring a runtime.
         let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
         assert_eq!(
-            verdict(&mut authority, &key, true, false, false),
-            (SessionArchiveDisposition::Archive, false, false)
+            verdict(
+                &mut authority,
+                &key,
+                true,
+                true,
+                SessionArchiveRuntimeObservation::Absent,
+            ),
+            (SessionArchiveDisposition::Archive, true, false)
         );
 
-        // Registered-without-snapshot retires.
+        // Registered-without-document retires.
         let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
         assert_eq!(
-            verdict(&mut authority, &key, true, false, true),
+            verdict(
+                &mut authority,
+                &key,
+                true,
+                false,
+                SessionArchiveRuntimeObservation::RetirementRequired,
+            ),
             (SessionArchiveDisposition::Archive, false, true)
+        );
+
+        // A quiescent runtime terminal is already converged: the document is
+        // still archived, but Retire must not be emitted from Destroyed.
+        let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
+        assert_eq!(
+            verdict(
+                &mut authority,
+                &key,
+                true,
+                true,
+                SessionArchiveRuntimeObservation::QuiescentTerminal,
+            ),
+            (SessionArchiveDisposition::Archive, true, false)
         );
 
         // Store-only archives never retire a runtime.
         let (mut authority, key) = seeded(SessionDocumentLifecycle::Active);
         assert_eq!(
-            verdict(&mut authority, &key, false, true, false),
+            verdict(
+                &mut authority,
+                &key,
+                false,
+                true,
+                SessionArchiveRuntimeObservation::RetirementRequired,
+            ),
             (SessionArchiveDisposition::Archive, true, false)
         );
     }
@@ -18380,6 +20229,22 @@ mod tests {
             .await
             .expect("register the residual runtime session");
 
+        assert!(
+            service
+                .session_archived_by_authority(&id, &session)
+                .await
+                .expect("archived authority read"),
+            "durable Archived must remain terminal while runtime residue exists"
+        );
+        assert!(matches!(
+            service.read(&id).await,
+            Err(SessionError::NotFound { id: ref missing }) if missing == &id
+        ));
+        assert!(matches!(
+            service.create_session(resume_request(session.clone())).await,
+            Err(SessionError::NotFound { id: ref missing }) if missing == &id
+        ));
+
         service
             .archive_with_machine_protocol(
                 &id,
@@ -18398,6 +20263,409 @@ mod tests {
             runtime_state,
             Some(meerkat_runtime::RuntimeState::Retired),
             "the residual runtime must be durably retired by the convergent re-archive"
+        );
+    }
+
+    /// The convergence observation must survive a process boundary. A fresh
+    /// adapter has an empty registration map, but the shared runtime store can
+    /// still contain a non-Retired lifecycle row left by the failed archive.
+    #[tokio::test]
+    async fn test_machine_authorized_archive_completes_durable_retire_after_cold_restart() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("mark seeded session archived");
+        store
+            .save(&session)
+            .await
+            .expect("seed the archived durable record");
+
+        let first_process = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        first_process
+            .register_session(id.clone())
+            .await
+            .expect("seed non-retired durable runtime residue");
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("read seeded durable runtime state"),
+            Some(meerkat_runtime::RuntimeState::Idle)
+        );
+        drop(first_process);
+
+        let restarted = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        assert!(
+            !restarted.contains_session(&id).await,
+            "cold restart must begin without an in-memory registration"
+        );
+        assert!(
+            restarted
+                .archive_runtime_residue_present(&id)
+                .await
+                .expect("observe durable archive residue"),
+            "non-Retired durable lifecycle state must remain visible as archive residue"
+        );
+
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&restarted),
+            )
+            .await
+            .expect("cold-restart re-archive must recover and retire durable runtime residue");
+
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("read converged durable runtime state"),
+            Some(meerkat_runtime::RuntimeState::Retired),
+            "cold-restart retry must durably retire the residual runtime"
+        );
+    }
+
+    /// A runtime boundary snapshot can exist before the first generated
+    /// lifecycle record. That is genuine runtime authority, not merely the
+    /// session document, so archive must recover the runtime and retire it.
+    #[tokio::test]
+    async fn test_machine_authorized_archive_retires_snapshot_only_runtime_authority() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        store
+            .save(&session)
+            .await
+            .expect("seed active durable session document");
+        let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session)
+                        .expect("serialize runtime snapshot"),
+                },
+            )
+            .await
+            .expect("seed runtime snapshot without lifecycle record");
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read absent lifecycle record"),
+            None
+        );
+
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect("snapshot-only runtime authority must be recovered and retired");
+
+        let archived = store
+            .load(&id)
+            .await
+            .expect("load archived document")
+            .expect("archived document remains present");
+        assert!(session_marks_archived(&archived));
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read retired lifecycle"),
+            Some(RuntimeState::Retired)
+        );
+    }
+
+    /// Destroyed is a generated quiescent terminal. First archive must commit
+    /// the Active document to Archived without issuing the illegal Retire that
+    /// the old document-presence proxy forced from Destroyed.
+    #[tokio::test]
+    async fn test_machine_authorized_first_archive_accepts_live_destroyed_runtime() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        store
+            .save(&session)
+            .await
+            .expect("seed active durable session document");
+
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        machine
+            .prepare_bindings(id.clone())
+            .await
+            .expect("seed live bound runtime");
+        let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        meerkat_runtime::RuntimeControlPlane::destroy(&machine, &runtime_id)
+            .await
+            .expect("destroy runtime before first archive");
+
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect("first archive over live Destroyed must not issue Retire");
+
+        let archived = store
+            .load(&id)
+            .await
+            .expect("load archived document")
+            .expect("archived document remains present");
+        assert!(session_marks_archived(&archived));
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read quiescent runtime terminal"),
+            Some(RuntimeState::Destroyed)
+        );
+    }
+
+    /// The same first-archive guarantee must survive a process boundary: the
+    /// typed observation reads the durable Destroyed terminal and never
+    /// restores it merely because the session document exists.
+    #[tokio::test]
+    async fn test_machine_authorized_first_archive_accepts_cold_destroyed_runtime() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        store
+            .save(&session)
+            .await
+            .expect("seed active durable session document");
+
+        let first_process = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        first_process
+            .prepare_bindings(id.clone())
+            .await
+            .expect("seed bound runtime authority");
+        let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        meerkat_runtime::RuntimeControlPlane::destroy(&first_process, &runtime_id)
+            .await
+            .expect("destroy runtime before process boundary");
+        drop(first_process);
+
+        let restarted = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&restarted),
+            )
+            .await
+            .expect("cold first archive over Destroyed must not restore or Retire");
+
+        let archived = store
+            .load(&id)
+            .await
+            .expect("load archived document")
+            .expect("archived document remains present");
+        assert!(session_marks_archived(&archived));
+        assert!(!restarted.contains_session(&id).await);
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read durable Destroyed terminal"),
+            Some(RuntimeState::Destroyed)
+        );
+    }
+
+    /// A live registration may already have reached the absorbing Destroyed
+    /// runtime terminal. Presence in the process registry alone is not
+    /// retirement residue: Retire is illegal from Destroyed, so re-archive
+    /// must resolve as the same quiescent idempotent NotFound as a cold row.
+    #[tokio::test]
+    async fn test_machine_authorized_rearchive_treats_live_destroyed_runtime_as_quiescent() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("mark seeded session archived");
+        store
+            .save(&session)
+            .await
+            .expect("seed the archived durable record");
+
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        machine
+            .prepare_bindings(id.clone())
+            .await
+            .expect("seed bound durable runtime authority");
+        let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        meerkat_runtime::RuntimeControlPlane::destroy(&machine, &runtime_id)
+            .await
+            .expect("destroy the live runtime");
+        assert!(
+            machine.contains_session(&id).await,
+            "destroy keeps the terminal registration available for cleanup"
+        );
+        assert!(
+            !machine
+                .archive_runtime_residue_present(&id)
+                .await
+                .expect("observe live destroyed runtime terminality"),
+            "live Destroyed must be quiescent for archive"
+        );
+
+        let error = service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect_err("quiescent live-destroyed re-archive keeps the NotFound contract");
+        assert!(matches!(error, SessionError::NotFound { .. }));
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("destroyed state must remain readable"),
+            Some(meerkat_runtime::RuntimeState::Destroyed)
+        );
+    }
+
+    /// Destroyed is already a quiescent terminal runtime outcome and has no
+    /// generated Retire transition. A cold re-archive must therefore preserve
+    /// the public idempotent NotFound contract instead of repeatedly restoring
+    /// the destroyed runtime and trying an impossible retire.
+    #[tokio::test]
+    async fn test_machine_authorized_rearchive_treats_cold_destroyed_runtime_as_quiescent() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("mark seeded session archived");
+        store
+            .save(&session)
+            .await
+            .expect("seed the archived durable record");
+
+        let first_process = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        first_process
+            .prepare_bindings(id.clone())
+            .await
+            .expect("seed bound durable runtime authority");
+        let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        meerkat_runtime::RuntimeControlPlane::destroy(&first_process, &runtime_id)
+            .await
+            .expect("destroy runtime before process boundary");
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read destroyed durable runtime state"),
+            Some(meerkat_runtime::RuntimeState::Destroyed)
+        );
+        drop(first_process);
+
+        let restarted = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        assert!(
+            !restarted
+                .archive_runtime_residue_present(&id)
+                .await
+                .expect("observe destroyed runtime terminality"),
+            "cold Destroyed runtime state must be quiescent for archive"
+        );
+
+        let error = service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&restarted),
+            )
+            .await
+            .expect_err("quiescent destroyed re-archive keeps the NotFound contract");
+        assert!(matches!(error, SessionError::NotFound { .. }));
+        assert!(
+            !restarted.contains_session(&id).await,
+            "quiescent re-archive must not restore a destroyed runtime registration"
+        );
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("destroyed state must remain readable"),
+            Some(meerkat_runtime::RuntimeState::Destroyed)
         );
     }
 

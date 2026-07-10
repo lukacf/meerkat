@@ -14,7 +14,8 @@ use crate::{
     CompositionDriverRustBinding, CompositionInvariant, CompositionInvariantKind,
     CompositionSchema, CompositionStateLimits, CompositionTransactionPlan, CompositionWitness,
     CompositionWitnessField, CompositionWitnessInput, CompositionWitnessTransition,
-    CompositionWitnessTransitionOrder, DriverDispatchRoute, DurableMarkerFieldBinding,
+    CompositionWitnessTransitionOrder, DriverDispatchRoute, DriverRefusalClosure,
+    DriverRefusalFieldBinding, DriverRefusalFieldSource, DurableMarkerFieldBinding,
     DurableMarkerProtocol, DurableMarkerRelationProtocol, EffectHandoffProtocol,
     EffectTeardownClass, EntryInput, Expr, FeedbackFieldBinding, FeedbackFieldSource,
     FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance, ProtocolGenerationMode,
@@ -639,6 +640,46 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                     input_variant: RouteVariantId::Input(iv_id("Destroy")),
                 },
             ],
+            refusal_closures: vec![
+                DriverRefusalClosure {
+                    dispatch_route: route_id("binding_request_reaches_meerkat"),
+                    feedback_instance: mi_id("mob"),
+                    feedback_input: iv_id("ResolveRuntimeBindingRefusal"),
+                    field_bindings: vec![
+                        refusal_effect_bind("agent_identity", "agent_identity"),
+                        refusal_effect_bind("agent_runtime_id", "agent_runtime_id"),
+                        refusal_effect_bind("session_id", "session_id"),
+                        refusal_code_bind("refusal_code"),
+                        refusal_message_bind("reason"),
+                    ],
+                },
+                DriverRefusalClosure {
+                    dispatch_route: route_id("work_request_reaches_meerkat"),
+                    feedback_instance: mi_id("mob"),
+                    feedback_input: iv_id("ResolveRuntimeIngressRefusal"),
+                    field_bindings: vec![
+                        refusal_effect_bind("agent_runtime_id", "agent_runtime_id"),
+                        refusal_effect_bind("fence_token", "fence_token"),
+                        refusal_effect_bind("session_id", "session_id"),
+                        refusal_effect_bind("work_id", "work_id"),
+                        refusal_effect_bind("origin", "origin"),
+                        refusal_code_bind("refusal_code"),
+                        refusal_message_bind("reason"),
+                    ],
+                },
+                DriverRefusalClosure {
+                    dispatch_route: route_id("retire_request_reaches_meerkat"),
+                    feedback_instance: mi_id("mob"),
+                    feedback_input: iv_id("ResolveRuntimeRetireRefusal"),
+                    field_bindings: vec![
+                        refusal_effect_bind("agent_identity", "agent_identity"),
+                        refusal_effect_bind("agent_runtime_id", "agent_runtime_id"),
+                        refusal_effect_bind("session_id", "session_id"),
+                        refusal_code_bind("refusal_code"),
+                        refusal_message_bind("reason"),
+                    ],
+                },
+            ],
         }),
         transaction_plans: vec![],
         actor_priorities: vec![],
@@ -890,6 +931,7 @@ pub fn adaptive_mob_bundle_composition() -> CompositionSchema {
                 target_kind: RouteTargetKind::Input,
                 input_variant: RouteVariantId::Input(iv_id("IngestLayerTerminal")),
             }],
+            refusal_closures: vec![],
         }),
         transaction_plans: vec![transaction_plan(
             "adaptive_layer_terminal_feedback",
@@ -1018,6 +1060,27 @@ fn owner_bind(to_field: &str) -> RouteFieldBinding {
     RouteFieldBinding {
         to_field: fld_id(to_field),
         source: RouteBindingSource::OwnerProvided,
+    }
+}
+
+fn refusal_effect_bind(input_field: &str, effect_field: &str) -> DriverRefusalFieldBinding {
+    DriverRefusalFieldBinding {
+        input_field: fld_id(input_field),
+        source: DriverRefusalFieldSource::EffectField(fld_id(effect_field)),
+    }
+}
+
+fn refusal_code_bind(input_field: &str) -> DriverRefusalFieldBinding {
+    DriverRefusalFieldBinding {
+        input_field: fld_id(input_field),
+        source: DriverRefusalFieldSource::ConsumerErrorCode,
+    }
+}
+
+fn refusal_message_bind(input_field: &str) -> DriverRefusalFieldBinding {
+    DriverRefusalFieldBinding {
+        input_field: fld_id(input_field),
+        source: DriverRefusalFieldSource::ConsumerErrorMessage,
     }
 }
 
@@ -2129,8 +2192,8 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
     }
 }
 
-/// Host composition for the `supervisor_trust_publish` and
-/// `supervisor_trust_revoke` handoff protocols — C-F2 step-lock
+/// Host composition for the durable supervisor-binding trust protocols and
+/// the structurally separate one-shot response-route protocol — C-F2 step-lock
 /// formalisation for the trust-edge mutation that runs alongside
 /// `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor`
 /// transitions on `MeerkatMachine`.

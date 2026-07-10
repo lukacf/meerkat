@@ -136,6 +136,7 @@ These fields are set in `meerkat-models/src/capabilities/**` (the types live in 
 - **`view_image` tool visibility** -- hidden via the capability-base `ToolFilter` (`capability_base_filter_for_image_tool_results`) when `image_tool_results` is `false`.
 - **`ContentBlock::Image` in tool results** -- providers that do not support `image_tool_results` will receive image content blocks converted to text descriptions.
 - **`ContentBlock::Image` in user messages** -- providers that do not support `vision` will not receive image content blocks in user messages.
+- **Still images on live channels** -- a realtime model's `vision` capability projects to `LiveOpenResult.capabilities.image_in`; clients must check that channel capability before sending an image chunk.
 - **Provider-native web search** -- injected by default when `supports_web_search` is `true` and the corresponding `provider_tools.*` config is enabled.
 
 Image generation uses provider-owned image profiles rather than `ModelProfile` chat-model flags. OpenAI and Gemini provider crates advertise image targets, supported backend plans, dimensions/aspect ratios, and provider-specific `provider_params`; the runtime exposes one model-facing `generate_image` tool and commits generated outputs as blob-backed assistant image blocks.

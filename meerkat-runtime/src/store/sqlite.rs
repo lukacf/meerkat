@@ -1526,7 +1526,11 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
             store
                 .commit_machine_lifecycle(
                     &runtime_id,
-                    MachineLifecycleCommit::new_with_binding(runtime_state, binding.clone()),
+                    MachineLifecycleCommit::new_with_binding(
+                        runtime_state,
+                        binding.clone(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
                     &[input_state()],
                 )
                 .await

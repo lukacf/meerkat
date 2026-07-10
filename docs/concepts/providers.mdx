@@ -43,7 +43,7 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
     | `gpt-5.4` | 1.05M | Supported GPT-5 fallback |
     | `gpt-5.4-mini` | 128K | Smaller fast-path model with compaction support |
     | `gpt-5.3-codex` | 400K | Coding-focused workflows |
-    | `gpt-realtime-2` | 128K | Live audio sessions |
+    | `gpt-realtime-2` | 128K | Live audio/text with still-image input |
 
     ```toml config.toml (active realm)
     [agent]
@@ -217,6 +217,23 @@ A configured self-hosted alias such as `gemma-4-31b` resolves by exact model ID
 match, so it works without `--provider`.
 
 You can still override this with `--provider` on the CLI or `provider` in API requests.
+
+Session creation resolves model, provider, and credentials as one identity on
+CLI, RPC, REST, and MCP. An explicit model wins. An explicit provider constrains
+all omitted-model choices, and a named `auth_binding` is resolved through the
+effective realm inheritance chain to infer and validate its provider. The
+binding's `default_model` wins when the model is omitted; otherwise Meerkat
+uses a compatible configured global model, the configured per-provider model,
+and finally that provider's catalog default. With no provider or binding hint,
+the configured global model wins, followed by configured provider defaults in
+catalog priority and the global catalog default.
+
+A nonempty `agent.model` is always operator intent, including a still-supported
+model that appeared in an older generated config. Meerkat does not reinterpret
+model IDs through a frozen legacy-default list. Explicit provider/binding
+mismatches, malformed bindings, and binding defaults owned by another provider
+fail before agent construction; inherited bindings retain the realm that owns
+their configuration.
 
 ## Model fallback chain
 

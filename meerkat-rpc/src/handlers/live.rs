@@ -1,10 +1,8 @@
 //! Handlers for `live/*` RPC methods.
 //!
-//! These expose the live adapter MVP surface: open/status/close/send_input.
-//! The transport bootstrap is tagged (currently `websocket` only); see
-//! [`meerkat_core::live_adapter::LiveTransportBootstrap`] for the
-//! reintroduction note covering the planned future `webrtc` variant
-//! (deferred to a follow-up PR with real signaling shape).
+//! These expose the live adapter surface: open/status/close/send_input plus
+//! WebSocket and, when the `live-webrtc` feature is enabled, WebRTC transport
+//! bootstrap and signaling.
 
 use std::sync::Arc;
 #[cfg(feature = "live-webrtc")]
@@ -15,27 +13,67 @@ use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
     LiveChannelParams, LiveCloseResult, LiveCommitInputParams, LiveCommitInputResult,
     LiveInputChunkWire, LiveInterruptResult, LiveOpenParams, LiveOpenResult, LiveOpenTransport,
-    LiveRefreshResult, LiveSendInputParams, LiveSendInputResult, LiveStatusResult,
-    LiveTruncateParams, LiveTruncateResult, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult,
-    RealtimeCapabilities, RealtimeTurningMode, WireLiveAdapterStatus, WireLiveDegradationReason,
+    LiveRefreshResult, LiveSendInputErrorData, LiveSendInputParams, LiveSendInputResult,
+    LiveStatusResult, LiveTruncateParams, LiveTruncateResult, LiveWebrtcAnswerParams,
+    LiveWebrtcAnswerResult, RealtimeCapabilities, RealtimeTurningMode, WireLiveAdapterErrorCode,
+    WireLiveAdapterStatus, WireLiveDegradationReason,
 };
 use meerkat_core::SessionLlmIdentity;
 use meerkat_core::live_adapter::{
-    LiveAdapterCommand, LiveAudioConfig, LiveChannelCapabilities, LiveContinuityMode,
-    LiveProjectionSnapshot, LiveTransportBootstrap,
+    LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode, LiveAudioConfig,
+    LiveChannelCapabilities, LiveContinuityMode, LiveProjectionSnapshot, LiveTransportBootstrap,
 };
 use meerkat_core::types::SessionId;
 #[cfg(feature = "live-webrtc")]
 use meerkat_live::{LIVE_WEBRTC_ANSWER_METHOD, LiveWebrtcState};
 use meerkat_live::{
     LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseObservation, LiveChannelId, LiveWsState,
-    live_input_chunk_from_wire,
+    live_input_chunk_decode_rejection, live_input_chunk_from_wire,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::{LiveOpenPrecheckError, SessionRuntime};
+
+/// Public live channel identifiers are UUID-shaped today. Keep a modest
+/// forward-compatible bound so lookup failures cannot reflect an attacker-
+/// sized identifier into a response buffer.
+const MAX_LIVE_CHANNEL_ID_BYTES: usize = 128;
+
+fn live_send_input_channel_id_rejection(
+    id: Option<RpcId>,
+    channel_id: &str,
+) -> Option<RpcResponse> {
+    let reason = if channel_id.is_empty() {
+        meerkat_contracts::WireLiveConfigRejectionReason::Other {
+            detail: "live_channel_id_empty".to_string(),
+        }
+    } else if channel_id.len() > MAX_LIVE_CHANNEL_ID_BYTES {
+        meerkat_contracts::WireLiveConfigRejectionReason::InputTooLarge {
+            max_bytes: u64::try_from(MAX_LIVE_CHANNEL_ID_BYTES).unwrap_or(u64::MAX),
+            actual_bytes: u64::try_from(channel_id.len()).unwrap_or(u64::MAX),
+        }
+    } else {
+        return None;
+    };
+    let data = LiveSendInputErrorData {
+        error_code: WireLiveAdapterErrorCode::ConfigRejected { reason },
+    };
+    Some(match serde_json::to_value(data) {
+        Ok(data) => RpcResponse::error_with_data(
+            id,
+            error::INVALID_PARAMS,
+            "live channel identity is empty or too large".to_string(),
+            data,
+        ),
+        Err(serialize_error) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("failed to serialize live/send_input error data: {serialize_error}"),
+        ),
+    })
+}
 
 #[cfg(feature = "live-webrtc")]
 fn live_webrtc_now_ms() -> Result<u64, String> {
@@ -167,7 +205,32 @@ fn live_command_rejection_response_from_machine_authority(
         | LiveCommandRejectionReason::AdapterError
         | LiveCommandRejectionReason::InternalHostError => host_error.to_string(),
     };
+    if expected == meerkat_runtime::meerkat_machine::dsl::LiveCommandPublicKind::SendInput
+        && let Some(data) = live_send_input_error_data(host_error)
+    {
+        return match serde_json::to_value(data) {
+            Ok(data) => RpcResponse::error_with_data(id, code, message, data),
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize live/send_input error data: {serialize_error}"),
+            ),
+        };
+    }
     RpcResponse::error(id, code, message)
+}
+
+fn live_send_input_error_data(host_error: &LiveAdapterHostError) -> Option<LiveSendInputErrorData> {
+    let LiveAdapterHostError::AdapterError(LiveAdapterError::ProviderError {
+        code: code @ LiveAdapterErrorCode::ConfigRejected { .. },
+        ..
+    }) = host_error
+    else {
+        return None;
+    };
+    Some(LiveSendInputErrorData {
+        error_code: WireLiveAdapterErrorCode::from(code.clone()),
+    })
 }
 
 async fn live_command_error_response(
@@ -681,6 +744,9 @@ fn build_live_projection_snapshot(
         // the doc-comment claimed the runtime context was folded into seed
         // history — neither was true at the snapshot seam.
         runtime_system_context: open_config.runtime_system_context.clone(),
+        user_content_identities: open_config.user_content_identities.clone(),
+        user_content_tombstones: open_config.user_content_tombstones.clone(),
+        transcript_rewrite_generation: open_config.transcript_rewrite_generation,
     }
 }
 
@@ -1638,10 +1704,11 @@ pub async fn handle_live_close(
 /// queue-acceptance evidence.
 ///
 /// The adapter does not decide whether the refresh is legal — the runtime
-/// builds a snapshot from the same `live_open_config_for_session` helper
-/// `live/open` uses, so the projection stays canonical. Adapters that cannot
-/// apply mutable config live should either no-op or surface a typed error
-/// observation.
+/// builds a config-only snapshot through `live_refresh_config_for_session`.
+/// That helper shares canonical config resolution with live open but
+/// deliberately skips history loading and image hydration; only `live/open`
+/// owns replay. Adapters that cannot apply mutable config live should either
+/// no-op or surface a typed error observation.
 ///
 /// **R7 — honest response shape.** The reply is `status: queued`, not
 /// `refreshed`. `LiveAdapterHost::enqueue_refresh` queues the command on
@@ -1677,7 +1744,7 @@ pub async fn handle_live_refresh(
     };
 
     let open_config = match runtime
-        .live_open_config_for_session(&session_id, RealtimeTurningMode::ProviderManaged)
+        .live_refresh_config_for_session(&session_id, RealtimeTurningMode::ProviderManaged)
         .await
     {
         Ok(config) => config,
@@ -1771,10 +1838,34 @@ pub async fn handle_live_send_input(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    let channel_id = LiveChannelId::new(&parsed.channel_id);
-    let chunk = match live_input_chunk_from_wire(parsed.chunk) {
+    let LiveSendInputParams { channel_id, chunk } = parsed;
+    if let Some(response) = live_send_input_channel_id_rejection(id.clone(), &channel_id) {
+        return response;
+    }
+    let channel_id = LiveChannelId::new(channel_id);
+    let chunk = match live_input_chunk_from_wire(chunk) {
         Ok(chunk) => chunk,
         Err(err) => {
+            if let Some(code) = live_input_chunk_decode_rejection(&err) {
+                let data = LiveSendInputErrorData {
+                    error_code: WireLiveAdapterErrorCode::from(code),
+                };
+                return match serde_json::to_value(data) {
+                    Ok(data) => RpcResponse::error_with_data(
+                        id,
+                        error::INVALID_PARAMS,
+                        err.to_string(),
+                        data,
+                    ),
+                    Err(serialize_error) => RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!(
+                            "failed to serialize live/send_input error data: {serialize_error}"
+                        ),
+                    ),
+                };
+            }
             return RpcResponse::error(id, error::INVALID_PARAMS, err.to_string());
         }
     };
@@ -2106,6 +2197,83 @@ mod tests {
     }
 
     #[test]
+    fn immediate_send_input_config_rejection_keeps_typed_error_data() {
+        let host_error = LiveAdapterHostError::AdapterError(LiveAdapterError::ProviderError {
+            code: LiveAdapterErrorCode::ConfigRejected {
+                reason: meerkat_core::live_adapter::LiveConfigRejectionReason::InputBackpressured {
+                    max_pending_bytes: 1024,
+                },
+            },
+            message: "input queue is full".to_string(),
+        });
+        let data = live_send_input_error_data(&host_error)
+            .expect("scoped adapter rejection must retain typed send_input data");
+        assert!(matches!(
+            data.error_code,
+            WireLiveAdapterErrorCode::ConfigRejected {
+                reason: meerkat_contracts::WireLiveConfigRejectionReason::InputBackpressured {
+                    max_pending_bytes: 1024
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_image_base64_keeps_typed_send_input_error_data() {
+        let wire = LiveInputChunkWire::Image {
+            idempotency_key: "bad-base64-rpc-1".to_string(),
+            mime: "image/png".to_string(),
+            data: "@@@".to_string(),
+        };
+        let decode_error =
+            live_input_chunk_from_wire(wire).expect_err("malformed image must fail decode");
+        let code = live_input_chunk_decode_rejection(&decode_error)
+            .expect("malformed image base64 must be a scoped typed rejection");
+        let data = serde_json::to_value(LiveSendInputErrorData {
+            error_code: WireLiveAdapterErrorCode::from(code),
+        })
+        .expect("typed live/send_input error data should serialize");
+        assert_eq!(data["error_code"]["code"], "config_rejected");
+        assert_eq!(
+            data["error_code"]["reason"]["kind"],
+            "image_input_invalid_base64"
+        );
+        assert!(data["error_code"]["reason"].get("detail").is_none());
+    }
+
+    #[test]
+    fn oversized_send_input_channel_id_is_bounded_and_typed_without_echo() {
+        let oversized = format!("private-channel:{}", "x".repeat(MAX_LIVE_CHANNEL_ID_BYTES));
+        let response = live_send_input_channel_id_rejection(Some(RpcId::Num(7)), &oversized)
+            .expect("oversized public channel id must be rejected");
+        let rpc_error = response.error.as_ref().expect("typed RPC error");
+        assert_eq!(rpc_error.code, error::INVALID_PARAMS);
+        assert!(matches!(
+            rpc_error.data.as_ref(),
+            Some(data)
+                if data["error_code"]["code"] == "config_rejected"
+                    && data["error_code"]["reason"]["kind"] == "input_too_large"
+                    && data["error_code"]["reason"]["max_bytes"]
+                        == MAX_LIVE_CHANNEL_ID_BYTES
+                    && data["error_code"]["reason"]["actual_bytes"] == oversized.len()
+        ));
+        let serialized = serde_json::to_string(&response).expect("serialize rejection");
+        assert!(!serialized.contains(&oversized));
+        assert!(serialized.len() < 1024);
+    }
+
+    #[test]
+    fn bounded_send_input_channel_id_passes_admission() {
+        assert!(
+            live_send_input_channel_id_rejection(
+                Some(RpcId::Num(8)),
+                "01234567-89ab-cdef-0123-456789abcdef",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn snapshot_reads_typed_system_prompt_field_not_seed_messages() {
         // R10 (D209): the snapshot builder MUST surface the typed
         // `RealtimeSessionOpenConfig.system_prompt` field directly — the
@@ -2232,6 +2400,9 @@ mod tests {
             provider_id: meerkat_core::Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         };
         assert_eq!(
             super::continuity_from_snapshot(&empty),
@@ -2740,6 +2911,9 @@ mod tests {
             provider_id: meerkat_core::Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![],
+            user_content_identities: vec![],
+            user_content_tombstones: vec![],
+            transcript_rewrite_generation: 0,
         };
         let acceptance = host
             .enqueue_refresh(&channel_id, snapshot.clone())
@@ -2917,6 +3091,9 @@ mod tests {
                 provider_id: meerkat_core::Provider::OpenAI,
                 audio_config: None,
                 runtime_system_context: vec![],
+                user_content_identities: vec![],
+                user_content_tombstones: vec![],
+                transcript_rewrite_generation: 0,
             };
             snapshot.snapshot_version = host
                 .next_snapshot_version(&channel_id)

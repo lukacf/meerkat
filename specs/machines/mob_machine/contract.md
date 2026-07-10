@@ -90,6 +90,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_kickoff_cancelled`: `Set<AgentIdentity>`
 - `member_kickoff_error`: `Map<AgentIdentity, String>`
 - `member_restore_failures`: `Map<AgentIdentity, String>`
+- `member_restore_failure_codes`: `Map<AgentIdentity, String>`
+- `runtime_retire_refusal_codes`: `Map<AgentRuntimeId, String>`
+- `runtime_retire_refusal_reasons`: `Map<AgentRuntimeId, String>`
+- `runtime_retire_pending_sessions`: `Map<AgentRuntimeId, SessionId>`
+- `remote_runtime_retired_ids`: `Set<AgentRuntimeId>`
+- `remote_supervisor_revoked_ids`: `Set<AgentRuntimeId>`
 - `member_revival_pending`: `Set<AgentIdentity>`
 - `spawn_exec_phase`: `Map<AgentIdentity, SpawnExecPhase>`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
@@ -104,7 +110,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_pending_authority_signing_key`: `Option<PeerSigningKey>`
 - `supervisor_pending_authority_epoch`: `Option<u64>`
 - `supervisor_pending_authority_protocol_version`: `Option<SupervisorProtocolVersion>`
+- `supervisor_pending_authority_operation_id`: `Option<String>`
 - `supervisor_pending_authority_accepted_peer_ids`: `Set<PeerId>`
+- `supervisor_pending_authority_member_target_names`: `Map<PeerId, String>`
+- `supervisor_pending_authority_member_target_addresses`: `Map<PeerId, String>`
 - `pending_recipient_trust`: `Set<PeerId>`
 - `owner_bridge_session_id`: `Option<SessionId>`
 - `owner_bridge_destroy_on_archive`: `Bool`
@@ -278,6 +287,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireAbsent`(agent_identity: AgentIdentity)
 - `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `BindOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
+- `CleanupRetiringMemberWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RestoreRetiringMemberWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
 - `AuthorizeMemberPeerRebind`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
 - `AuthorizeMemberPeerOverlay`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
@@ -285,19 +296,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMemberTrustUnwiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeMemberTrustCleanup`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
+- `AuthorizeRetiringMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
+- `CleanupRetiringExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RestoreRetiringExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `CleanupRetiringExternalPeerObservedAbsent`(key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RestoreRetiringExternalPeerObservedAbsent`(key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `AdmitSupervisorRotation`
 - `ProvisionSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `ClearSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `RecordSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>)
-- `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion)
+- `RecordSupervisorPendingRotation`(current_peer_id: PeerId, current_epoch: u64, current_protocol_version: SupervisorProtocolVersion, operation_id: String, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, pending_protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>, active_peer_ids: Set<PeerId>, member_target_names: Map<PeerId, String>, member_target_addresses: Map<PeerId, String>)
+- `CommitSupervisorRotation`(current_peer_id: PeerId, current_epoch: u64, current_protocol_version: SupervisorProtocolVersion, operation_id: String, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, next_protocol_version: SupervisorProtocolVersion)
 - `ClearSupervisorAuthorityForDestroy`(current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion)
-- `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String>)
 - `RecordPendingRecipientTrust`(peer_id: PeerId)
 - `ResolvePendingRecipientTrust`(peer_id: PeerId)
 - `RollbackPendingRecipientTrust`(peer_id: PeerId)
 - `SessionIngressDetachedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `SessionIngressDetachFailedForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String)
 - `ResolveSubmitWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: WorkOrigin)
+- `ResolveRuntimeBindingRefusal`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String)
+- `ResolveRuntimeIngressRefusal`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId, work_id: WorkId, origin: WorkOrigin, refusal_code: String, reason: String)
+- `ResolveRuntimeRetireRefusal`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String)
+- `RetryRuntimeRetire`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
+- `RecordRemoteMemberRuntimeRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RecordRemoteMemberSupervisorRevoked`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `ResolveCancelAllWorkRejection`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `SubscribeStructuralEvents`(after_cursor: u64, latest_cursor: u64, explicit_after_cursor: Bool, batch_limit: u64, channel_capacity: u64)
 - `AuthorizeMobEventRouterMemberSubscription`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -348,10 +370,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `RetireMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: Option<SessionId>)
-- `AdmitDestroyMemberRetire`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: Option<SessionId>)
+- `AdmitDestroyMemberRetire`(mob_id: MobId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>)
 - `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ObserveMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ObserveMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>)
+- `ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `ObserveDestroyMemberRetirementArchived`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>)
 - `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, session_id: SessionId)
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, session_id: SessionId)
@@ -361,13 +383,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool)
 - `RecoverMemberSessionBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId>)
 - `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RecoverRosterMemberRetirementStarted`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>, retiring_peer_endpoint: Option<MemberPeerEndpoint>)
+- `RecoverRemoteMemberRuntimeRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RecoverRemoteMemberSupervisorRevoked`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
+- `ConvergeRecoveredRosterTopology`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `RecoverMemberKickoff`(member_id: AgentIdentity, phase: KickoffPhase, error: Option<String>)
 - `RecoverRosterWiring`(edge: WiringEdge)
 - `RecoverRosterUnwire`(edge: WiringEdge)
 - `RecoverExternalPeerWiring`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `RecoverExternalPeerUnwire`(key: ExternalPeerKey)
-- `RecoverSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `RecoverSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String>)
 - `RecoverOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
 - `RecoverMemberRestoreFailure`(agent_identity: AgentIdentity, reason: String)
 - `ClassifyMemberLiveMaterialization`(agent_identity: AgentIdentity, observation: MemberLiveMaterializationObservationKind, reason: String)
@@ -404,8 +430,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestPeerRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: WorkOrigin)
 - `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
 - `CancelAllWorkRejected`(agent_runtime_id: AgentRuntimeId, reason: CancelAllWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
-- `RequestRuntimeRetire`(session_id: SessionId)
+- `RequestRuntimeRetire`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId)
 - `RequestRuntimeDestroy`(session_id: SessionId)
+- `RuntimeBindingRefusalClassified`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String)
+- `RuntimeIngressRefusalClassified`(agent_runtime_id: AgentRuntimeId, session_id: SessionId, work_id: WorkId, origin: WorkOrigin, refusal_code: String, reason: String)
+- `RuntimeRetireRefusalClassified`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String)
 - `PendingSpawnOperationOwnerAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
 - `RequestSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `AppendLifecycleJournal`(kind: MobLifecycleJournalKind, agent_identity: Option<AgentIdentity>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, session_id: Option<SessionId>)
@@ -473,7 +502,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberPeerRebindAuthorized`(agent_identity: AgentIdentity, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint)
 - `MemberPeerOverlayAuthorized`(agent_identity: AgentIdentity, peer_id: PeerId, peer_overlay_endpoints: Set<MemberPeerEndpoint>, epoch: u64)
 - `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64)
-- `PersistSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>)
+- `PersistSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String>)
 - `DeleteSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
 - `EmitExternalPeerWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: ExternalPeerEdge)
@@ -600,10 +629,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `bindings_require_known_identity`
 - `identity_runtime_material_matches_runtime_binding`
 - `member_spawn_material_matches_runtime_binding`
+- `pending_session_ingress_detach_has_session_correlation`
+- `remote_runtime_retired_is_still_retiring`
+- `remote_supervisor_revoked_has_retired_runtime_anchor`
 - `spawn_exec_membership_commit_requires_runtime`
 - `external_peer_edges_are_keyed_coherently`
 - `supervisor_authority_tuple_consistent`
 - `supervisor_pending_authority_tuple_consistent`
+- `supervisor_pending_authority_member_targets_aligned`
+- `supervisor_pending_authority_acceptance_has_target`
 - `supervisor_pending_authority_requires_current`
 - `owner_bridge_cleanup_requires_owner`
 - `implicit_delegation_requires_owner`
@@ -3211,20 +3245,187 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `previous_runtime_recovered`
   - `identity_recovered`
+  - `previous_runtime_session_ingress_detach_closed`
+  - `previous_runtime_not_retiring`
+  - `previous_runtime_retirement_closed`
+  - `previous_runtime_retire_refusal_closed`
 - To: `Running`
+
+### `RecoverRosterMemberRetirementStartedReleasing`
+- From: `Running`
+- On: `RecoverRosterMemberRetirementStarted`(agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint)
+- Guards:
+  - `runtime_recovered`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `releasing_present`
+  - `session_matches_releasing`
+  - `binding_matches_releasing`
+  - `retiring_peer_endpoint_consistent`
+- To: `Running`
+
+### `RecoverRosterMemberRetirementStartedReleasingAlreadyApplied`
+- From: `Running`
+- On: `RecoverRosterMemberRetirementStarted`(agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint)
+- Guards:
+  - `runtime_recovered`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `releasing_present`
+  - `session_matches_releasing`
+  - `binding_already_released`
+  - `member_already_retiring`
+  - `retirement_session_already_pending`
+  - `ingress_detach_still_pending`
+  - `retiring_peer_endpoint_consistent`
+- To: `Running`
+
+### `RecoverRosterMemberRetirementStartedPreservingBinding`
+- From: `Running`
+- On: `RecoverRosterMemberRetirementStarted`(agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint)
+- Guards:
+  - `runtime_recovered`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `releasing_absent`
+  - `session_present`
+  - `binding_matches_session`
+  - `retiring_peer_endpoint_consistent`
+- To: `Running`
+
+### `RecoverRosterMemberRetirementStartedPeerOnly`
+- From: `Running`
+- On: `RecoverRosterMemberRetirementStarted`(agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint)
+- Guards:
+  - `runtime_recovered`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `releasing_absent`
+  - `session_absent`
+  - `binding_absent`
+  - `retiring_peer_endpoint_consistent`
+- To: `Running`
+
+### `RecoverRemoteMemberRuntimeRetiredFreshRunning`
+- From: `Running`
+- On: `RecoverRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_not_recorded`
+- To: `Running`
+
+### `RecoverRemoteMemberRuntimeRetiredFreshStopped`
+- From: `Stopped`
+- On: `RecoverRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_not_recorded`
+- To: `Stopped`
+
+### `RecoverRemoteMemberRuntimeRetiredAlreadyRecordedRunning`
+- From: `Running`
+- On: `RecoverRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+- To: `Running`
+
+### `RecoverRemoteMemberRuntimeRetiredAlreadyRecordedStopped`
+- From: `Stopped`
+- On: `RecoverRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+- To: `Stopped`
+
+### `RecoverRemoteMemberSupervisorRevokedFreshRunning`
+- From: `Running`
+- On: `RecoverRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_not_recorded`
+- To: `Running`
+
+### `RecoverRemoteMemberSupervisorRevokedFreshStopped`
+- From: `Stopped`
+- On: `RecoverRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_not_recorded`
+- To: `Stopped`
+
+### `RecoverRemoteMemberSupervisorRevokedAlreadyRecordedRunning`
+- From: `Running`
+- On: `RecoverRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_recorded`
+- To: `Running`
+
+### `RecoverRemoteMemberSupervisorRevokedAlreadyRecordedStopped`
+- From: `Stopped`
+- On: `RecoverRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_recorded`
+- To: `Stopped`
 
 ### `RecoverRosterMemberRetiredRunning`
 - From: `Running`
 - On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
 - Guards:
   - `runtime_recovered`
+  - `identity_binding_matches`
 - To: `Running`
 
 ### `RecoverRosterMemberRetiredAlreadyAbsent`
 - From: `Running`
 - On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
 - Guards:
-  - `runtime_not_recovered`
+  - `identity_absent`
+- To: `Running`
+
+### `RecoverRosterMemberRetiredStaleGeneration`
+- From: `Running`
+- On: `RecoverRosterMemberRetired`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_remapped`
 - To: `Running`
 
 ### `RecoverMemberKickoffPending`
@@ -4251,102 +4452,369 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 
-### `RetireMember`
+### `ResolveRuntimeBindingRefusalRunning`
 - From: `Running`
-- On: `RetireMember`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `ResolveRuntimeBindingRefusal`(agent_identity, agent_runtime_id, session_id, refusal_code, reason)
 - Guards:
   - `identity_binding_matches`
   - `current_binding_matches`
-  - `fence_token_matches`
-  - `session_present`
   - `session_binding_matches`
-- Emits: `RequestRuntimeRetire`, `RequestKickoffQuiesce`
+- Emits: `RuntimeBindingRefusalClassified`
 - To: `Running`
 
-### `RetireMemberPeerOnly`
+### `ResolveRuntimeIngressRefusalRunning`
 - From: `Running`
-- On: `RetireMember`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `ResolveRuntimeIngressRefusal`(agent_runtime_id, fence_token, session_id, work_id, origin, refusal_code, reason)
+- Guards:
+  - `runtime_live`
+  - `fence_token_matches`
+- Emits: `RuntimeIngressRefusalClassified`
+- To: `Running`
+
+### `ResolveRuntimeRetireRefusalRunning`
+- From: `Running`
+- On: `ResolveRuntimeRetireRefusal`(agent_identity, agent_runtime_id, session_id, refusal_code, reason)
 - Guards:
   - `identity_binding_matches`
-  - `current_binding_matches`
-  - `fence_token_matches`
-  - `session_absent`
-  - `session_binding_absent`
-- Emits: `RequestKickoffQuiesce`
+  - `member_retiring`
+- Emits: `RuntimeRetireRefusalClassified`
 - To: `Running`
+
+### `ResolveRuntimeRetireRefusalStopped`
+- From: `Stopped`
+- On: `ResolveRuntimeRetireRefusal`(agent_identity, agent_runtime_id, session_id, refusal_code, reason)
+- Guards:
+  - `identity_binding_matches`
+  - `member_retiring`
+- Emits: `RuntimeRetireRefusalClassified`
+- To: `Stopped`
+
+### `RetryRuntimeRetireRunning`
+- From: `Running`
+- On: `RetryRuntimeRetire`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `retirement_pending`
+- Emits: `RequestRuntimeRetire`
+- To: `Running`
+
+### `RetryRuntimeRetireStopped`
+- From: `Stopped`
+- On: `RetryRuntimeRetire`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `retirement_pending`
+- Emits: `RequestRuntimeRetire`
+- To: `Stopped`
+
+### `RecordRemoteMemberRuntimeRetiredFreshRunning`
+- From: `Running`
+- On: `RecordRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_not_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Running`
+
+### `RecordRemoteMemberRuntimeRetiredFreshStopped`
+- From: `Stopped`
+- On: `RecordRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_not_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Stopped`
+
+### `RecordRemoteMemberRuntimeRetiredAlreadyRecordedRunning`
+- From: `Running`
+- On: `RecordRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Running`
+
+### `RecordRemoteMemberRuntimeRetiredAlreadyRecordedStopped`
+- From: `Stopped`
+- On: `RecordRemoteMemberRuntimeRetired`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Stopped`
+
+### `RecordRemoteMemberSupervisorRevokedFreshRunning`
+- From: `Running`
+- On: `RecordRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_not_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Running`
+
+### `RecordRemoteMemberSupervisorRevokedFreshStopped`
+- From: `Stopped`
+- On: `RecordRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_not_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Stopped`
+
+### `RecordRemoteMemberSupervisorRevokedAlreadyRecordedRunning`
+- From: `Running`
+- On: `RecordRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Running`
+
+### `RecordRemoteMemberSupervisorRevokedAlreadyRecordedStopped`
+- From: `Stopped`
+- On: `RecordRemoteMemberSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `remote_member_session_absent`
+  - `remote_runtime_recorded`
+  - `remote_supervisor_recorded`
+- Emits: `AppendLifecycleJournal`
+- To: `Stopped`
 
 ### `AdmitDestroyMemberRetireLiveRunning`
 - From: `Running`
-- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
   - `current_binding_matches`
   - `fence_token_matches`
+  - `generation_matches`
+  - `member_not_retiring`
+  - `session_ingress_detach_absent`
+  - `retirement_session_absent`
+  - `retire_refusal_absent`
   - `session_present`
   - `session_binding_matches`
-- Emits: `RequestRuntimeRetire`, `RequestKickoffQuiesce`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `AdmitDestroyMemberRetireLiveStopped`
 - From: `Stopped`
-- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
   - `current_binding_matches`
   - `fence_token_matches`
+  - `generation_matches`
+  - `member_not_retiring`
+  - `session_ingress_detach_absent`
+  - `retirement_session_absent`
+  - `retire_refusal_absent`
   - `session_present`
   - `session_binding_matches`
-- Emits: `RequestRuntimeRetire`, `RequestKickoffQuiesce`
+- Emits: `AppendLifecycleJournal`, `RequestRuntimeRetire`, `RequestSessionIngressDetachForMobDestroy`, `RequestKickoffQuiesce`
 - To: `Stopped`
 
 ### `AdmitDestroyMemberRetirePeerOnlyRunning`
 - From: `Running`
-- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
   - `current_binding_matches`
   - `fence_token_matches`
+  - `generation_matches`
+  - `member_not_retiring`
+  - `session_ingress_detach_absent`
+  - `retirement_session_absent`
+  - `retire_refusal_absent`
   - `session_absent`
   - `session_binding_absent`
-- Emits: `RequestKickoffQuiesce`
+- Emits: `AppendLifecycleJournal`, `RequestKickoffQuiesce`
 - To: `Running`
 
 ### `AdmitDestroyMemberRetirePeerOnlyStopped`
 - From: `Stopped`
-- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
   - `current_binding_matches`
   - `fence_token_matches`
+  - `generation_matches`
+  - `member_not_retiring`
+  - `session_ingress_detach_absent`
+  - `retirement_session_absent`
+  - `retire_refusal_absent`
   - `session_absent`
   - `session_binding_absent`
-- Emits: `RequestKickoffQuiesce`
+- Emits: `AppendLifecycleJournal`, `RequestKickoffQuiesce`
 - To: `Stopped`
 
-### `AdmitDestroyMemberRetireAlreadyRetiringRunning`
+### `AdmitDestroyMemberRetireAlreadyRetiringSessionRunning`
 - From: `Running`
-- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
   - `member_retiring`
-  - `session_matches_binding_or_absent`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `session_present`
+  - `session_binding_matches`
+  - `retirement_session_matches`
+- Emits: `RequestSessionIngressDetachForMobDestroy`, `RequestKickoffQuiesce`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringSessionStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `session_present`
+  - `session_binding_matches`
+  - `retirement_session_matches`
+- Emits: `RequestSessionIngressDetachForMobDestroy`, `RequestKickoffQuiesce`
+- To: `Stopped`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `session_present`
+  - `session_binding_released`
+  - `retirement_session_matches`
+- Emits: `RequestSessionIngressDetachForMobDestroy`, `RequestKickoffQuiesce`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `session_present`
+  - `session_binding_released`
+  - `retirement_session_matches`
+- Emits: `RequestSessionIngressDetachForMobDestroy`, `RequestKickoffQuiesce`
+- To: `Stopped`
+
+### `AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `member_retiring`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `session_absent`
+  - `session_binding_absent`
+  - `session_ingress_detach_absent`
+  - `retirement_session_absent`
+  - `retire_refusal_absent`
 - Emits: `RequestKickoffQuiesce`
 - To: `Running`
 
-### `AdmitDestroyMemberRetireAlreadyRetiringStopped`
+### `AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyStopped`
 - From: `Stopped`
-- On: `AdmitDestroyMemberRetire`(agent_identity, agent_runtime_id, fence_token, session_id)
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
   - `destroy_admitted`
   - `identity_binding_matches`
   - `member_retiring`
-  - `session_matches_binding_or_absent`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `session_absent`
+  - `session_binding_absent`
+  - `session_ingress_detach_absent`
+  - `retirement_session_absent`
+  - `retire_refusal_absent`
 - Emits: `RequestKickoffQuiesce`
+- To: `Stopped`
+
+### `AdmitDestroyMemberRetireAlreadyArchivedRunning`
+- From: `Running`
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `runtime_not_live`
+  - `member_not_retiring`
+  - `session_binding_cleared`
+  - `retry_observes_cleared_session`
+  - `session_ingress_detach_closed`
+  - `runtime_retirement_closed`
+  - `runtime_retire_refusal_closed`
+- To: `Running`
+
+### `AdmitDestroyMemberRetireAlreadyArchivedStopped`
+- From: `Stopped`
+- On: `AdmitDestroyMemberRetire`(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `runtime_not_live`
+  - `member_not_retiring`
+  - `session_binding_cleared`
+  - `retry_observes_cleared_session`
+  - `session_ingress_detach_closed`
+  - `runtime_retirement_closed`
+  - `runtime_retire_refusal_closed`
 - To: `Stopped`
 
 ### `ObserveRuntimeRetired`
@@ -4358,92 +4826,199 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
+### `ObserveRuntimeRetiredStopped`
+- From: `Stopped`
+- On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token)
+- Guards:
+  - `current_binding_matches`
+  - `fence_token_matches`
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Stopped`
+
+### `ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedRunning`
+- From: `Running`
+- On: `ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `remote_runtime_retired`
+  - `remote_supervisor_revoked`
+  - `remote_member_session_absent`
+  - `remote_retirement_session_absent`
+  - `kickoff_quiesced`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`
+- To: `Running`
+
+### `ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedStopped`
+- From: `Stopped`
+- On: `ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `remote_runtime_retired`
+  - `remote_supervisor_revoked`
+  - `remote_member_session_absent`
+  - `remote_retirement_session_absent`
+  - `kickoff_quiesced`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`
+- To: `Stopped`
+
 ### `ObserveMemberRetirementArchivedLive`
 - From: `Running`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
   - `kickoff_quiesced`
-- Emits: `EmitMemberLifecycleNotice`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `ObserveMemberRetirementArchivedLiveStopped`
 - From: `Stopped`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `runtime_live`
   - `fence_token_matches`
+  - `generation_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
   - `kickoff_quiesced`
-- Emits: `EmitMemberLifecycleNotice`
+- Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`
 - To: `Stopped`
 
 ### `ObserveMemberRetirementArchivedRetired`
 - From: `Running`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
+  - `generation_matches`
+  - `retirement_session_matches`
+  - `session_present`
   - `kickoff_quiesced`
+- Emits: `AppendLifecycleJournal`
 - To: `Running`
 
 ### `ObserveMemberRetirementArchivedRetiredStopped`
 - From: `Stopped`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `identity_binding_matches`
   - `runtime_not_live`
   - `member_retiring`
+  - `generation_matches`
+  - `retirement_session_matches`
+  - `session_present`
   - `kickoff_quiesced`
+- Emits: `AppendLifecycleJournal`
 - To: `Stopped`
 
 ### `ObserveMemberRetirementArchivedStaleRuntime`
 - From: `Running`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `identity_remapped`
   - `runtime_not_live`
   - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
+- Emits: `AppendLifecycleJournal`
 - To: `Running`
 
 ### `ObserveMemberRetirementArchivedStaleRuntimeStopped`
 - From: `Stopped`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `identity_remapped`
   - `runtime_not_live`
   - `member_retiring`
+  - `retirement_session_matches`
+  - `session_present`
+- Emits: `AppendLifecycleJournal`
 - To: `Stopped`
 
 ### `ObserveMemberRetirementArchivedAlreadyCleared`
 - From: `Running`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
   - `runtime_not_live`
   - `member_not_retiring`
+- Emits: `AppendLifecycleJournal`
 - To: `Running`
 
 ### `ObserveMemberRetirementArchivedAlreadyClearedStopped`
 - From: `Stopped`
-- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token)
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
   - `runtime_not_live`
   - `member_not_retiring`
+- Emits: `AppendLifecycleJournal`
+- To: `Stopped`
+
+### `ObserveMemberRetirementArchivedStaleRuntimeAlreadyCleared`
+- From: `Running`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_ingress_detach_closed`
+  - `identity_remapped`
+  - `runtime_not_live`
+  - `member_not_retiring`
+- Emits: `AppendLifecycleJournal`
+- To: `Running`
+
+### `ObserveMemberRetirementArchivedStaleRuntimeAlreadyClearedStopped`
+- From: `Stopped`
+- On: `ObserveMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_ingress_detach_closed`
+  - `identity_remapped`
+  - `runtime_not_live`
+  - `member_not_retiring`
+- Emits: `AppendLifecycleJournal`
 - To: `Stopped`
 
 ### `ObserveDestroyMemberRetirementArchivedLiveRunning`
 - From: `Running`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
   - `generation_matches`
   - `session_binding_matches`
+  - `session_present`
   - `runtime_live`
   - `fence_token_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
   - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
 - To: `Running`
@@ -4452,12 +5027,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
   - `generation_matches`
   - `session_binding_matches`
+  - `session_present`
   - `runtime_live`
   - `fence_token_matches`
+  - `member_retiring`
+  - `retirement_session_matches`
   - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `EmitMemberLifecycleNotice`, `MemberSessionBindingChanged`
 - To: `Stopped`
@@ -4466,12 +5045,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
   - `generation_matches`
   - `session_binding_matches`
+  - `session_present`
   - `runtime_not_live`
   - `member_retiring`
+  - `retirement_session_matches`
   - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
 - To: `Running`
@@ -4480,25 +5062,72 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
 - Guards:
+  - `session_ingress_detach_closed`
   - `destroy_admitted`
   - `identity_binding_matches`
   - `generation_matches`
   - `session_binding_matches`
+  - `session_present`
   - `runtime_not_live`
   - `member_retiring`
+  - `retirement_session_matches`
   - `kickoff_quiesced`
 - Emits: `AppendLifecycleJournal`, `MemberSessionBindingChanged`
+- To: `Stopped`
+
+### `ObserveDestroyMemberRetirementArchivedAlreadyClearedRunning`
+- From: `Running`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `runtime_not_live`
+  - `member_not_retiring`
+  - `session_binding_cleared`
+  - `retry_observes_cleared_session`
+- Emits: `AppendLifecycleJournal`
+- To: `Running`
+
+### `ObserveDestroyMemberRetirementArchivedAlreadyClearedStopped`
+- From: `Stopped`
+- On: `ObserveDestroyMemberRetirementArchived`(agent_identity, agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `destroy_admitted`
+  - `session_ingress_detach_closed`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `runtime_not_live`
+  - `member_not_retiring`
+  - `session_binding_cleared`
+  - `retry_observes_cleared_session`
+- Emits: `AppendLifecycleJournal`
 - To: `Stopped`
 
 ### `ResetMember`
 - From: `Running`, `Stopped`
 - On: `ResetMember`(agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable, session_id)
+- Guards:
+  - `identity_binding_present`
+  - `previous_runtime_session_ingress_detach_closed`
+  - `previous_runtime_not_retiring`
+  - `previous_runtime_retirement_closed`
+  - `previous_runtime_retire_refusal_closed`
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `RespawnMember`
 - From: `Running`
 - On: `RespawnMember`(agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable, session_id)
+- Guards:
+  - `identity_binding_present`
+  - `previous_runtime_session_ingress_detach_closed`
+  - `previous_runtime_not_retiring`
+  - `previous_runtime_retirement_closed`
+  - `previous_runtime_retire_refusal_closed`
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
@@ -4597,6 +5226,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`, `Completed`, `Destroyed`
 - On: `ObserveRuntimeDestroyed`(agent_runtime_id, fence_token)
 - Guards:
+  - `session_ingress_detaches_closed`
   - `current_binding_matches`
   - `fence_token_matches`
 - Emits: `EmitMemberLifecycleNotice`
@@ -4788,6 +5418,65 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `edge_not_recovered`
 - To: `Running`
 
+### `ConvergeRecoveredRosterTopologyPruneRunning`
+- From: `Running`
+- On: `ConvergeRecoveredRosterTopology`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_recovered`
+  - `edge_matches_members`
+  - `edge_has_absent_endpoint`
+- To: `Running`
+
+### `ConvergeRecoveredRosterTopologyPruneStopped`
+- From: `Stopped`
+- On: `ConvergeRecoveredRosterTopology`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_recovered`
+  - `edge_matches_members`
+  - `edge_has_absent_endpoint`
+- To: `Stopped`
+
+### `ConvergeRecoveredRosterTopologyPruneCompleted`
+- From: `Completed`
+- On: `ConvergeRecoveredRosterTopology`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_recovered`
+  - `edge_matches_members`
+  - `edge_has_absent_endpoint`
+- To: `Completed`
+
+### `ConvergeRecoveredRosterTopologyRetainRunning`
+- From: `Running`
+- On: `ConvergeRecoveredRosterTopology`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_recovered`
+  - `edge_matches_members`
+  - `edge_endpoints_present`
+- To: `Running`
+
+### `ConvergeRecoveredRosterTopologyRetainStopped`
+- From: `Stopped`
+- On: `ConvergeRecoveredRosterTopology`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_recovered`
+  - `edge_matches_members`
+  - `edge_endpoints_present`
+- To: `Stopped`
+
+### `ConvergeRecoveredRosterTopologyRetainCompleted`
+- From: `Completed`
+- On: `ConvergeRecoveredRosterTopology`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_recovered`
+  - `edge_matches_members`
+  - `edge_endpoints_present`
+- To: `Completed`
+
+### `ConvergeRecoveredRosterTopologyDestroyed`
+- From: `Destroyed`
+- On: `ConvergeRecoveredRosterTopology`(edge, a_identity, b_identity)
+- To: `Destroyed`
+
 ### `UnwireMembersRunning`
 - From: `Running`
 - On: `UnwireMembers`(edge)
@@ -4802,6 +5491,88 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `edge_already_absent`
 - To: `Running`
+
+### `CleanupRetiringMemberWiringRunning`
+- From: `Running`
+- On: `CleanupRetiringMemberWiring`(edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_currently_wired`
+  - `edge_matches_members`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- Emits: `WiringGraphChanged`
+- To: `Running`
+
+### `CleanupRetiringMemberWiringStopped`
+- From: `Stopped`
+- On: `CleanupRetiringMemberWiring`(edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_currently_wired`
+  - `edge_matches_members`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- Emits: `WiringGraphChanged`
+- To: `Stopped`
+
+### `CleanupRetiringMemberWiringAlreadyAbsentRunning`
+- From: `Running`
+- On: `CleanupRetiringMemberWiring`(edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_absent`
+  - `edge_matches_members`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- To: `Running`
+
+### `CleanupRetiringMemberWiringAlreadyAbsentStopped`
+- From: `Stopped`
+- On: `CleanupRetiringMemberWiring`(edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_absent`
+  - `edge_matches_members`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- To: `Stopped`
+
+### `RestoreRetiringMemberWiringRunning`
+- From: `Running`
+- On: `RestoreRetiringMemberWiring`(edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_absent`
+  - `edge_matches_members`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- Emits: `WiringGraphChanged`
+- To: `Running`
+
+### `RestoreRetiringMemberWiringStopped`
+- From: `Stopped`
+- On: `RestoreRetiringMemberWiring`(edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_absent`
+  - `edge_matches_members`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- Emits: `WiringGraphChanged`
+- To: `Stopped`
 
 ### `WireExternalPeerRunning`
 - From: `Running`
@@ -4830,6 +5601,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RegisterMemberPeer`(agent_identity, peer_endpoint)
 - Guards:
   - `identity_present`
+  - `retiring_endpoint_not_replaced`
 - Emits: `MemberPeerRegistered`
 - To: `Running`
 
@@ -4883,6 +5655,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `MemberTrustUnwiringRequested`
 - To: `Running`
 
+### `AuthorizeMemberTrustUnwiringStopped`
+- From: `Stopped`
+- On: `AuthorizeMemberTrustUnwiring`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_currently_wired`
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Stopped`
+
 ### `AuthorizeMemberTrustCleanupRunning`
 - From: `Running`
 - On: `AuthorizeMemberTrustCleanup`(edge, a_identity, b_identity)
@@ -4893,6 +5676,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `MemberTrustUnwiringRequested`
 - To: `Running`
 
+### `AuthorizeMemberTrustCleanupStopped`
+- From: `Stopped`
+- On: `AuthorizeMemberTrustCleanup`(edge, a_identity, b_identity)
+- Guards:
+  - `edge_matches_members`
+  - `a_member_peer_registered`
+  - `b_member_peer_registered`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Stopped`
+
 ### `AuthorizeMemberTrustCleanupObservedRunning`
 - From: `Running`
 - On: `AuthorizeMemberTrustCleanupObserved`(edge, a_identity, a_peer_id, b_identity, b_peer_id)
@@ -4902,6 +5695,44 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `cleanup_has_restore_failure`
 - Emits: `MemberTrustUnwiringRequested`
 - To: `Running`
+
+### `AuthorizeMemberTrustCleanupObservedStopped`
+- From: `Stopped`
+- On: `AuthorizeMemberTrustCleanupObserved`(edge, a_identity, a_peer_id, b_identity, b_peer_id)
+- Guards:
+  - `edge_matches_members`
+  - `edge_currently_wired`
+  - `cleanup_has_restore_failure`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Stopped`
+
+### `AuthorizeRetiringMemberTrustCleanupObservedRunning`
+- From: `Running`
+- On: `AuthorizeRetiringMemberTrustCleanupObserved`(edge, a_identity, a_peer_id, b_identity, b_peer_id, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_matches_members`
+  - `edge_currently_wired`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Running`
+
+### `AuthorizeRetiringMemberTrustCleanupObservedStopped`
+- From: `Stopped`
+- On: `AuthorizeRetiringMemberTrustCleanupObserved`(edge, a_identity, a_peer_id, b_identity, b_peer_id, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `edge_matches_members`
+  - `edge_currently_wired`
+  - `retiring_identity_is_endpoint`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Stopped`
 
 ### `AuthorizeExternalPeerReciprocalTrustRunning`
 - From: `Running`
@@ -4966,6 +5797,154 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_peer_edge_already_absent`
 - To: `Running`
 
+### `CleanupRetiringExternalPeerRunning`
+- From: `Running`
+- On: `CleanupRetiringExternalPeer`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_currently_wired`
+  - `external_peer_edge_currently_wired`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `local_member_peer_registered`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustUnwiringRequested`
+- To: `Running`
+
+### `CleanupRetiringExternalPeerStopped`
+- From: `Stopped`
+- On: `CleanupRetiringExternalPeer`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_currently_wired`
+  - `external_peer_edge_currently_wired`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `local_member_peer_registered`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustUnwiringRequested`
+- To: `Stopped`
+
+### `RestoreRetiringExternalPeerRunning`
+- From: `Running`
+- On: `RestoreRetiringExternalPeer`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_absent`
+  - `external_peer_edge_absent`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `local_member_peer_registered`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustWiringRequested`
+- To: `Running`
+
+### `RestoreRetiringExternalPeerStopped`
+- From: `Stopped`
+- On: `RestoreRetiringExternalPeer`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_absent`
+  - `external_peer_edge_absent`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `local_member_peer_registered`
+- Emits: `WiringGraphChanged`, `ExternalPeerTrustWiringRequested`
+- To: `Stopped`
+
+### `CleanupRetiringExternalPeerObservedAbsentRunning`
+- From: `Running`
+- On: `CleanupRetiringExternalPeerObservedAbsent`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_currently_wired`
+  - `external_peer_edge_currently_wired`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `retiring_peer_endpoint_retained`
+  - `retiring_peer_id_retained`
+- Emits: `WiringGraphChanged`
+- To: `Running`
+
+### `CleanupRetiringExternalPeerObservedAbsentStopped`
+- From: `Stopped`
+- On: `CleanupRetiringExternalPeerObservedAbsent`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_currently_wired`
+  - `external_peer_edge_currently_wired`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `retiring_peer_endpoint_retained`
+  - `retiring_peer_id_retained`
+- Emits: `WiringGraphChanged`
+- To: `Stopped`
+
+### `RestoreRetiringExternalPeerObservedAbsentRunning`
+- From: `Running`
+- On: `RestoreRetiringExternalPeerObservedAbsent`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_absent`
+  - `external_peer_edge_absent`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `retiring_peer_endpoint_retained`
+  - `retiring_peer_id_retained`
+- Emits: `WiringGraphChanged`
+- To: `Running`
+
+### `RestoreRetiringExternalPeerObservedAbsentStopped`
+- From: `Stopped`
+- On: `RestoreRetiringExternalPeerObservedAbsent`(key, edge, agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `external_peer_key_matches_edge`
+  - `external_peer_key_matches_member`
+  - `external_peer_key_absent`
+  - `external_peer_edge_absent`
+  - `identity_binding_matches`
+  - `generation_matches`
+  - `fence_token_matches`
+  - `member_retiring`
+  - `retiring_peer_endpoint_retained`
+  - `retiring_peer_id_retained`
+- Emits: `WiringGraphChanged`
+- To: `Stopped`
+
+### `AdmitSupervisorRotationRunning`
+- From: `Running`
+- On: `AdmitSupervisorRotation`()
+- Guards:
+  - `destroy_not_admitted`
+  - `no_member_retiring`
+- To: `Running`
+
+### `AdmitSupervisorRotationStopped`
+- From: `Stopped`
+- On: `AdmitSupervisorRotation`()
+- Guards:
+  - `destroy_not_admitted`
+  - `no_member_retiring`
+- To: `Stopped`
+
 ### `ProvisionSupervisorAuthorityRunning`
 - From: `Running`
 - On: `ProvisionSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version)
@@ -5004,84 +5983,79 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RecoverSupervisorAuthorityRunning`
 - From: `Running`
-- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids, pending_member_target_names, pending_member_target_addresses)
 - Guards:
   - `supervisor_authority_absent`
   - `pending_shape_consistent`
+  - `pending_member_targets_aligned`
 - To: `Running`
 
 ### `RecoverSupervisorAuthorityStopped`
 - From: `Stopped`
-- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids, pending_member_target_names, pending_member_target_addresses)
 - Guards:
   - `supervisor_authority_absent`
   - `pending_shape_consistent`
+  - `pending_member_targets_aligned`
 - To: `Stopped`
 
 ### `RecoverSupervisorAuthorityCompleted`
 - From: `Completed`
-- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids, pending_member_target_names, pending_member_target_addresses)
 - Guards:
   - `supervisor_authority_absent`
   - `pending_shape_consistent`
+  - `pending_member_targets_aligned`
 - To: `Completed`
 
 ### `RecoverSupervisorAuthorityDestroyed`
 - From: `Destroyed`
-- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- On: `RecoverSupervisorAuthority`(peer_id, signing_key, epoch, protocol_version, pending_operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids, pending_member_target_names, pending_member_target_addresses)
 - Guards:
   - `supervisor_authority_absent`
   - `pending_shape_consistent`
+  - `pending_member_targets_aligned`
 - To: `Destroyed`
-
-### `ClearSupervisorPendingRotationRunning`
-- From: `Running`
-- On: `ClearSupervisorPendingRotation`(current_peer_id, current_epoch, protocol_version)
-- Guards:
-  - `current_supervisor_matches`
-- Emits: `PersistSupervisorAuthority`
-- To: `Running`
-
-### `ClearSupervisorPendingRotationStopped`
-- From: `Stopped`
-- On: `ClearSupervisorPendingRotation`(current_peer_id, current_epoch, protocol_version)
-- Guards:
-  - `current_supervisor_matches`
-- Emits: `PersistSupervisorAuthority`
-- To: `Stopped`
-
-### `ClearSupervisorPendingRotationCompleted`
-- From: `Completed`
-- On: `ClearSupervisorPendingRotation`(current_peer_id, current_epoch, protocol_version)
-- Guards:
-  - `current_supervisor_matches`
-- Emits: `PersistSupervisorAuthority`
-- To: `Completed`
 
 ### `RecordSupervisorPendingRotationRunning`
 - From: `Running`
-- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, pending_peer_id, pending_signing_key, pending_epoch, protocol_version, accepted_peer_ids)
+- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, current_protocol_version, operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, accepted_peer_ids, active_peer_ids, member_target_names, member_target_addresses)
 - Guards:
   - `current_supervisor_matches`
   - `pending_authority_changes_peer`
+  - `pending_epoch_is_successor`
+  - `operation_id_not_empty`
+  - `member_targets_aligned`
+  - `accepted_peers_have_targets`
+  - `pending_slot_empty_legacy_reconciled_or_exact_retry`
 - Emits: `PersistSupervisorAuthority`
 - To: `Running`
 
 ### `RecordSupervisorPendingRotationStopped`
 - From: `Stopped`
-- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, pending_peer_id, pending_signing_key, pending_epoch, protocol_version, accepted_peer_ids)
+- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, current_protocol_version, operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, accepted_peer_ids, active_peer_ids, member_target_names, member_target_addresses)
 - Guards:
   - `current_supervisor_matches`
   - `pending_authority_changes_peer`
+  - `pending_epoch_is_successor`
+  - `operation_id_not_empty`
+  - `member_targets_aligned`
+  - `accepted_peers_have_targets`
+  - `pending_slot_empty_legacy_reconciled_or_exact_retry`
 - Emits: `PersistSupervisorAuthority`
 - To: `Stopped`
 
 ### `RecordSupervisorPendingRotationCompleted`
 - From: `Completed`
-- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, pending_peer_id, pending_signing_key, pending_epoch, protocol_version, accepted_peer_ids)
+- On: `RecordSupervisorPendingRotation`(current_peer_id, current_epoch, current_protocol_version, operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, accepted_peer_ids, active_peer_ids, member_target_names, member_target_addresses)
 - Guards:
   - `current_supervisor_matches`
   - `pending_authority_changes_peer`
+  - `pending_epoch_is_successor`
+  - `operation_id_not_empty`
+  - `member_targets_aligned`
+  - `accepted_peers_have_targets`
+  - `pending_slot_empty_legacy_reconciled_or_exact_retry`
 - Emits: `PersistSupervisorAuthority`
 - To: `Completed`
 
@@ -5147,31 +6121,37 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitSupervisorRotationRunning`
 - From: `Running`
-- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, next_peer_id, next_signing_key, next_epoch, protocol_version)
+- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, current_protocol_version, operation_id, next_peer_id, next_signing_key, next_epoch, next_protocol_version)
 - Guards:
   - `current_supervisor_matches`
   - `next_epoch_is_successor`
   - `next_authority_changes_peer`
+  - `pending_operation_matches`
+  - `pending_authority_matches_next`
 - Emits: `PersistSupervisorAuthority`
 - To: `Running`
 
 ### `CommitSupervisorRotationStopped`
 - From: `Stopped`
-- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, next_peer_id, next_signing_key, next_epoch, protocol_version)
+- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, current_protocol_version, operation_id, next_peer_id, next_signing_key, next_epoch, next_protocol_version)
 - Guards:
   - `current_supervisor_matches`
   - `next_epoch_is_successor`
   - `next_authority_changes_peer`
+  - `pending_operation_matches`
+  - `pending_authority_matches_next`
 - Emits: `PersistSupervisorAuthority`
 - To: `Stopped`
 
 ### `CommitSupervisorRotationCompleted`
 - From: `Completed`
-- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, next_peer_id, next_signing_key, next_epoch, protocol_version)
+- On: `CommitSupervisorRotation`(current_peer_id, current_epoch, current_protocol_version, operation_id, next_peer_id, next_signing_key, next_epoch, next_protocol_version)
 - Guards:
   - `current_supervisor_matches`
   - `next_epoch_is_successor`
   - `next_authority_changes_peer`
+  - `pending_operation_matches`
+  - `pending_authority_matches_next`
 - Emits: `PersistSupervisorAuthority`
 - To: `Completed`
 
@@ -5185,10 +6165,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreSupervisorAuthorityAfterDestroyRollback`
 - From: `Destroyed`
-- On: `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id, signing_key, epoch, protocol_version, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids)
+- On: `RestoreSupervisorAuthorityAfterDestroyRollback`(peer_id, signing_key, epoch, protocol_version, pending_operation_id, pending_peer_id, pending_signing_key, pending_epoch, pending_protocol_version, pending_accepted_peer_ids, pending_member_target_names, pending_member_target_addresses)
 - Guards:
   - `supervisor_authority_absent`
   - `pending_shape_consistent`
+  - `pending_member_targets_aligned`
 - Emits: `PersistSupervisorAuthority`
 - To: `Destroyed`
 

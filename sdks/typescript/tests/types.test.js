@@ -2501,36 +2501,48 @@ describe("Parity wrappers", () => {
   it("adds wrappers for schedule APIs", async () => {
     const client = new MeerkatClient();
     const calls = [];
+    const schedule = {
+      schedule_id: "sch-1",
+      phase: "active",
+      revision: 1,
+      trigger: { type: "once", due_at_utc: "2026-07-11T09:00:00Z" },
+      target: { target_kind: "host_runnable", runnable: "test" },
+      misfire_policy: { type: "skip" },
+      overlap_policy: "skip_if_running",
+      missing_target_policy: "mark_misfired",
+      next_occurrence_ordinal: 1,
+      planning_horizon_days: 30,
+      planning_horizon_occurrences: 64,
+      created_at_utc: "2026-07-10T09:00:00Z",
+      updated_at_utc: "2026-07-10T09:00:00Z",
+    };
+    const occurrence = {
+      occurrence_id: "occ-1",
+      schedule_id: "sch-1",
+      schedule_revision: 1,
+      occurrence_ordinal: 0,
+      phase: "pending",
+      due_at_utc: "2026-07-11T09:00:00Z",
+      trigger_snapshot: schedule.trigger,
+      target_snapshot: schedule.target,
+      misfire_policy: { type: "skip" },
+      overlap_policy: "skip_if_running",
+      missing_target_policy: "mark_misfired",
+      attempt_count: 0,
+      created_at_utc: "2026-07-10T09:00:00Z",
+    };
     client.request = async (method, params) => {
       calls.push({ method, params });
       if (method === "schedule/list") {
-        return {
-          schedules: [
-            {
-              schedule_id: "sch-1",
-              phase: "active",
-              revision: 1,
-              trigger: {},
-              target: {},
-              labels: {},
-            },
-          ],
-        };
+        return { schedules: [schedule] };
       }
       if (method === "schedule/occurrences") {
-        return { occurrences: [] };
+        return { occurrences: [occurrence] };
       }
       if (method === "schedule/tools") {
         return { tools: [{ name: "schedule.create" }] };
       }
-      return {
-        schedule_id: "sch-1",
-        phase: "active",
-        revision: 1,
-        trigger: {},
-        target: {},
-        labels: {},
-      };
+      return schedule;
     };
 
     const created = await client.createSchedule({ trigger: {}, target: {} });
@@ -2545,10 +2557,11 @@ describe("Parity wrappers", () => {
     await client.callScheduleTool({ name: "schedule.create", arguments: { a: 1 } });
 
     assert.equal(created.scheduleId, "sch-1");
+    assert.deepEqual(created.supersededAckIds, []);
     assert.equal(fetched.scheduleId, "sch-1");
     assert.equal(listed[0].scheduleId, "sch-1");
     assert.equal(updated.scheduleId, "sch-1");
-    assert.equal(occurrences.occurrences.length, 0);
+    assert.equal(occurrences.occurrences[0].occurrenceId, "occ-1");
     assert.equal(tools.tools.length, 1);
     assert.deepEqual(calls.map((c) => c.method), [
       "schedule/create",
@@ -2564,6 +2577,64 @@ describe("Parity wrappers", () => {
     ]);
     assert.deepEqual(calls[2].params, { labels: { env: "prod" }, limit: 5, offset: 2 });
     assert.deepEqual(calls[7].params, { schedule_id: "sch-1", include_terminal: false });
+  });
+
+  it("rejects missing or malformed schedule result arrays and required facts", async () => {
+    const validSchedule = {
+      schedule_id: "sch-1",
+      phase: "active",
+      revision: 1,
+      trigger: { type: "once", due_at_utc: "2026-07-11T09:00:00Z" },
+      target: { target_kind: "host_runnable", runnable: "test" },
+      misfire_policy: { type: "skip" },
+      overlap_policy: "skip_if_running",
+      missing_target_policy: "mark_misfired",
+      next_occurrence_ordinal: 0,
+      planning_horizon_days: 1,
+      planning_horizon_occurrences: 1,
+      created_at_utc: "2026-07-10T09:00:00Z",
+      updated_at_utc: "2026-07-10T09:00:00Z",
+    };
+    const cases = [
+      ["schedule/get", null],
+      ["schedule/get", { schedule_id: "sch-1" }],
+      ["schedule/list", []],
+      ["schedule/list", {}],
+      ["schedule/list", { schedules: {} }],
+      ["schedule/list", { schedules: [{ schedule_id: "sch-1" }] }],
+      ["schedule/list", { schedules: [{ ...validSchedule, superseded_ack_ids: null }] }],
+      ["schedule/list", { schedules: [{ ...validSchedule, labels: null }] }],
+      ["schedule/occurrences", "not-an-object"],
+      ["schedule/occurrences", {}],
+      ["schedule/occurrences", { occurrences: {} }],
+      ["schedule/occurrences", { occurrences: [{ occurrence_id: "occ-1" }] }],
+      ["schedule/tools", 1],
+      ["schedule/tools", {}],
+      ["schedule/tools", { tools: {} }],
+      ["schedule/tools", { tools: ["not-an-object"] }],
+    ];
+
+    for (const [method, response] of cases) {
+      const client = new MeerkatClient();
+      client.request = async (requestMethod) => {
+        assert.equal(requestMethod, method);
+        return response;
+      };
+
+      const call =
+        method === "schedule/get"
+          ? () => client.getSchedule("sch-1")
+          : method === "schedule/list"
+            ? () => client.listSchedules()
+            : method === "schedule/occurrences"
+              ? () => client.listScheduleOccurrences("sch-1")
+              : () => client.listScheduleTools();
+
+      await assert.rejects(
+        call,
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
   });
 
   it("adds wrappers for WorkGraph read-only APIs", async () => {
@@ -4259,6 +4330,37 @@ describe("Mob ready wait wrappers", () => {
 });
 
 describe("Live wrappers", () => {
+  it("liveSendInputImage forwards the required idempotency key", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { status: "sent" };
+    };
+
+    await client.liveSendInputImage(
+      "live_channel_image",
+      "image-turn-1",
+      "image/png",
+      "iVBORw0KGgo=",
+    );
+
+    assert.deepEqual(calls, [
+      {
+        method: "live/send_input",
+        params: {
+          channel_id: "live_channel_image",
+          chunk: {
+            kind: "image",
+            idempotency_key: "image-turn-1",
+            mime: "image/png",
+            data: "iVBORw0KGgo=",
+          },
+        },
+      },
+    ]);
+  });
+
   it("returns generated live/close result only when required fields are present", async () => {
     const client = new MeerkatClient();
     const calls = [];

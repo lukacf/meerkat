@@ -1078,47 +1078,284 @@ fn provider_tool_defaults_for(
     }
 }
 
-/// Resolve the session-create default model from one catalog/config-owned seam.
+/// Typed create-session model hints supplied by a public surface.
 ///
-/// This is the single default-model policy that every surface (CLI, REST, RPC)
-/// must consult when `create-session` carries no explicit model, so they all
-/// resolve `None` to the *same* default instead of each hand-coding a ladder or
-/// literal. Resolution order:
+/// `None` means omitted by the caller. In particular, this type does not carry
+/// fabricated provenance for values that were read from config.
+#[derive(Debug, Clone, Default)]
+pub struct CreateSessionModelResolutionRequest {
+    pub model: Option<String>,
+    pub provider: Option<Provider>,
+    pub auth_binding: Option<AuthBindingRef>,
+}
+
+/// Canonical lowering of create-session model hints into one concrete LLM
+/// identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSessionModelResolution {
+    pub model: String,
+    pub provider: Provider,
+    /// Owner-stamped configured binding when the request named one.
+    pub auth_binding: Option<AuthBindingRef>,
+}
+
+/// Fail-closed errors from create-session model resolution.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateSessionModelResolutionError {
+    #[error("invalid effective model registry: {0}")]
+    Config(#[from] meerkat_core::ConfigError),
+    #[error("invalid auth binding: {0}")]
+    AuthBinding(#[from] meerkat_core::ConnectionTargetError),
+    #[error(
+        "auth binding realm '{realm}' binding '{binding}' selects provider {binding_provider:?}, but the request selected provider {explicit_provider:?}"
+    )]
+    AuthBindingProviderMismatch {
+        realm: RealmId,
+        binding: meerkat_core::BindingId,
+        binding_provider: Provider,
+        explicit_provider: Provider,
+    },
+    #[error("{0}")]
+    ProviderModelMismatch(String),
+    #[error("invalid configured model/provider identity: {0}")]
+    ConfiguredProviderModelMismatch(String),
+    #[error("cannot infer provider from model '{model}'; specify a provider or auth binding")]
+    UnknownProvider { model: String },
+    #[error("cannot infer provider from configured create-session model '{model}'")]
+    ConfiguredUnknownProvider { model: String },
+    #[error("provider {provider:?} has no configured or catalog default model")]
+    MissingProviderDefault { provider: Provider },
+    #[error(
+        "auth binding realm '{realm}' binding '{binding}' selects provider {provider:?}, which has no configured or catalog default model"
+    )]
+    BindingMissingProviderDefault {
+        realm: RealmId,
+        binding: meerkat_core::BindingId,
+        provider: Provider,
+    },
+    #[error("explicit model must not be empty")]
+    EmptyExplicitModel,
+    #[error("auth binding realm '{realm}' binding '{binding}' has an empty default_model")]
+    EmptyBindingDefaultModel {
+        realm: RealmId,
+        binding: meerkat_core::BindingId,
+    },
+}
+
+impl CreateSessionModelResolutionError {
+    /// Whether this failure comes from server-owned effective configuration
+    /// rather than caller-supplied create-session hints.
+    ///
+    /// Public surfaces use this typed classification to keep malformed host
+    /// configuration on their internal/configuration error channel instead of
+    /// blaming the request as invalid parameters. Keep the match exhaustive so
+    /// every future resolver error makes an explicit fault-ownership decision.
+    #[must_use]
+    pub const fn is_configuration_fault(&self) -> bool {
+        match self {
+            Self::Config(_)
+            | Self::ConfiguredProviderModelMismatch(_)
+            | Self::ConfiguredUnknownProvider { .. }
+            | Self::EmptyBindingDefaultModel { .. }
+            | Self::BindingMissingProviderDefault { .. } => true,
+            Self::AuthBinding(source) => Self::auth_binding_is_configuration_fault(source),
+            Self::AuthBindingProviderMismatch { .. }
+            | Self::ProviderModelMismatch(_)
+            | Self::UnknownProvider { .. }
+            | Self::MissingProviderDefault { .. }
+            | Self::EmptyExplicitModel => false,
+        }
+    }
+
+    const fn auth_binding_is_configuration_fault(
+        source: &meerkat_core::ConnectionTargetError,
+    ) -> bool {
+        match source {
+            meerkat_core::ConnectionTargetError::MissingRealm
+            | meerkat_core::ConnectionTargetError::UnknownRealm(_)
+            | meerkat_core::ConnectionTargetError::InvalidRealmId { .. }
+            | meerkat_core::ConnectionTargetError::InvalidBindingId { .. }
+            | meerkat_core::ConnectionTargetError::BindingInvalid {
+                source: meerkat_core::ProviderBindingError::UnknownBinding(_),
+                ..
+            } => false,
+            meerkat_core::ConnectionTargetError::MissingDefaultBinding { .. }
+            | meerkat_core::ConnectionTargetError::RealmConfigInvalid { .. }
+            | meerkat_core::ConnectionTargetError::BindingInvalid {
+                source:
+                    meerkat_core::ProviderBindingError::UnknownBackend(_)
+                    | meerkat_core::ProviderBindingError::UnknownAuth(_)
+                    | meerkat_core::ProviderBindingError::ProviderMismatch { .. }
+                    | meerkat_core::ProviderBindingError::UnknownProviderName(_)
+                    | meerkat_core::ProviderBindingError::InvalidRealmId { .. },
+                ..
+            }
+            | meerkat_core::ConnectionTargetError::ProviderMismatch { .. }
+            | meerkat_core::ConnectionTargetError::RealmChain(_) => true,
+        }
+    }
+}
+
+fn configured_model_for_provider(config: &Config, provider: Provider) -> Option<String> {
+    let configured = match provider {
+        Provider::Anthropic => Some(&config.models.anthropic),
+        Provider::OpenAI => Some(&config.models.openai),
+        Provider::Gemini => Some(&config.models.gemini),
+        Provider::SelfHosted | Provider::Other => None,
+    }?;
+    (!configured.is_empty()).then(|| configured.clone())
+}
+
+fn resolve_provider_constrained_create_model(
+    config: &Config,
+    registry: &ModelRegistry,
+    provider: Provider,
+) -> Result<String, CreateSessionModelResolutionError> {
+    if !config.agent.model.is_empty() {
+        match registry.entry(&config.agent.model) {
+            Some(entry) if entry.provider == provider => return Ok(config.agent.model.clone()),
+            // A registered model owned by another provider cannot satisfy the
+            // constraint. Continue to the provider-specific default.
+            Some(_) => {}
+            // An uncatalogued global model remains valid operator intent when
+            // a provider or binding supplies its typed owner.
+            None => return Ok(config.agent.model.clone()),
+        }
+    }
+    if let Some(model) = configured_model_for_provider(config, provider) {
+        return Ok(model);
+    }
+    registry
+        .default_model(provider)
+        .map(str::to_string)
+        .ok_or(CreateSessionModelResolutionError::MissingProviderDefault { provider })
+}
+
+/// Resolve create-session model/provider/binding precedence once for every
+/// surface.
 ///
-/// 1. The configured global agent default (`config.agent.model`) when set and
-///    not a frozen legacy built-in default — this is the operator's explicit
-///    "default model" knob and outranks the per-provider entries.
-/// 2. The configured per-provider default (`config.models.{provider}`) walked
-///    in the catalog-owned [`provider_priority`] order — the first non-empty
-///    entry wins. Core's [`ModelDefaults::default`] leaves these empty
-///    (core embeds no provider data); they are operator overrides.
-/// 3. The catalog-owned [`global_default_model`] as the terminal fallback —
-///    the common path when neither knob is set.
+/// Precedence is explicit model; a named auth binding's model default; then
+/// configured global, per-provider, and catalog defaults constrained by the
+/// explicit provider or binding provider. A named auth binding is resolved
+/// through the effective realm config before model selection, which both
+/// infers its provider and validates inherited owner/profile facts. Known
+/// provider/model mismatches fail closed.
+pub fn resolve_create_session_model(
+    config: &Config,
+    request: CreateSessionModelResolutionRequest,
+) -> Result<CreateSessionModelResolution, CreateSessionModelResolutionError> {
+    let registry = config.model_registry(meerkat_models::canonical())?;
+    let model_was_explicit = request.model.is_some();
+    if request.model.as_ref().is_some_and(String::is_empty) {
+        return Err(CreateSessionModelResolutionError::EmptyExplicitModel);
+    }
+
+    let resolved_binding = request
+        .auth_binding
+        .as_ref()
+        .map(|binding| meerkat_core::resolve_explicit_auth_binding_target(config, binding))
+        .transpose()?;
+    let binding_provider = resolved_binding
+        .as_ref()
+        .map(|target| target.backend.provider);
+    if let (Some(explicit_provider), Some(binding_provider), Some(binding)) = (
+        request.provider,
+        binding_provider,
+        resolved_binding.as_ref(),
+    ) && explicit_provider != binding_provider
+    {
+        return Err(
+            CreateSessionModelResolutionError::AuthBindingProviderMismatch {
+                realm: binding.auth_binding.realm.clone(),
+                binding: binding.auth_binding.binding.clone(),
+                binding_provider,
+                explicit_provider,
+            },
+        );
+    }
+
+    let constrained_provider = request.provider.or(binding_provider);
+    let (model, provider_hint) = if let Some(model) = request.model {
+        (model, constrained_provider)
+    } else if let Some(target) = resolved_binding.as_ref()
+        && let Some(model) = target.binding.default_model.clone()
+    {
+        if model.is_empty() {
+            return Err(
+                CreateSessionModelResolutionError::EmptyBindingDefaultModel {
+                    realm: target.auth_binding.realm.clone(),
+                    binding: target.auth_binding.binding.clone(),
+                },
+            );
+        }
+        (model, Some(target.backend.provider))
+    } else if let Some(provider) = constrained_provider {
+        let model = resolve_provider_constrained_create_model(config, &registry, provider)
+            .map_err(|error| match (error, resolved_binding.as_ref()) {
+                (
+                    CreateSessionModelResolutionError::MissingProviderDefault { provider },
+                    Some(target),
+                ) => CreateSessionModelResolutionError::BindingMissingProviderDefault {
+                    realm: target.auth_binding.realm.clone(),
+                    binding: target.auth_binding.binding.clone(),
+                    provider,
+                },
+                (error, _) => error,
+            })?;
+        (model, Some(provider))
+    } else if !config.agent.model.is_empty() {
+        (config.agent.model.clone(), None)
+    } else if let Some((provider, model)) =
+        meerkat_models::provider_priority()
+            .iter()
+            .find_map(|provider| {
+                configured_model_for_provider(config, *provider).map(|m| (*provider, m))
+            })
+    {
+        (model, Some(provider))
+    } else {
+        (meerkat_models::global_default_model().to_string(), None)
+    };
+
+    let provider = provider_hint
+        .or_else(|| registry.entry(&model).map(|entry| entry.provider))
+        .ok_or_else(|| {
+            if model_was_explicit {
+                CreateSessionModelResolutionError::UnknownProvider {
+                    model: model.clone(),
+                }
+            } else {
+                CreateSessionModelResolutionError::ConfiguredUnknownProvider {
+                    model: model.clone(),
+                }
+            }
+        })?;
+    if let Some(reason) = registry.provider_override_mismatch_reason(provider, &model) {
+        return Err(if model_was_explicit {
+            CreateSessionModelResolutionError::ProviderModelMismatch(reason)
+        } else {
+            CreateSessionModelResolutionError::ConfiguredProviderModelMismatch(reason)
+        });
+    }
+
+    Ok(CreateSessionModelResolution {
+        model,
+        provider,
+        auth_binding: resolved_binding.map(|target| target.auth_binding),
+    })
+}
+
+/// Resolve the no-hint create-session default model.
 ///
-/// [`provider_priority`]: meerkat_models::provider_priority
-/// [`global_default_model`]: meerkat_models::global_default_model
-/// [`ModelDefaults::default`]: meerkat_core::config::ModelDefaults
+/// A nonempty `config.agent.model` is explicit operator intent, including a
+/// still-supported model that happened to be a historical template default.
+/// The default template is now empty, so no frozen string list is consulted.
 #[must_use]
 pub fn resolve_create_session_default_model(config: &Config) -> String {
     if !config.agent.model.is_empty() {
-        if legacy_agent_model_defaults().contains(&config.agent.model.as_str()) {
-            return resolve_provider_catalog_default_model(config);
-        }
         return config.agent.model.clone();
     }
     resolve_provider_catalog_default_model(config)
-}
-
-/// FROZEN historical snapshot of prior built-in create-session defaults.
-///
-/// This is intentionally not a mirror of the live model catalog. It detects
-/// stale defaults that users may still carry in persisted `config.agent.model`
-/// and heals them through the shared catalog/provider ladder. Entries are prior
-/// shipped defaults, not catalog membership claims: a listed model may still be
-/// a supported catalog row.
-#[must_use]
-fn legacy_agent_model_defaults() -> &'static [&'static str] {
-    &["claude-opus-4-7"]
 }
 
 /// Tiers 2–3 of [`resolve_create_session_default_model`]: the configured
@@ -1126,10 +1363,9 @@ fn legacy_agent_model_defaults() -> &'static [&'static str] {
 /// catalog [`global_default_model`] terminal fallback — *without* consulting
 /// `config.agent.model`.
 ///
-/// This is the seam for code that already decided to bypass the global knob,
-/// including the legacy-default heal owned by
-/// [`resolve_create_session_default_model`]. Create-session callers should use
-/// [`resolve_create_session_default_model`].
+/// This is the seam for code that already decided to bypass the global knob.
+/// Create-session callers should use [`resolve_create_session_model`] so model,
+/// provider, and auth-binding precedence remain coupled.
 ///
 /// [`provider_priority`]: meerkat_models::provider_priority
 /// [`global_default_model`]: meerkat_models::global_default_model
@@ -4021,16 +4257,13 @@ impl AgentFactory {
                                             ),
                                         ));
                                     }
-                                    let resolved_model = if build_config.resume_override_mask.model
-                                    {
-                                        build_config.model.clone()
-                                    } else {
-                                        target
-                                            .binding
-                                            .default_model
-                                            .clone()
-                                            .unwrap_or_else(|| build_config.model.clone())
-                                    };
+                                    // `build_config.model` is already the
+                                    // canonical surface resolution. Binding
+                                    // selection owns credentials only; it must
+                                    // not silently replace that final model
+                                    // merely because the original caller
+                                    // omitted an explicit model hint.
+                                    let resolved_model = build_config.model.clone();
                                     resolved = Some((
                                         connection,
                                         resolved_auth_binding,
@@ -4060,6 +4293,17 @@ impl AgentFactory {
                                     }),
                                 ))
                             })?;
+                        if resolved_model.is_empty() {
+                            return Err(BuildAgentError::Config(format!(
+                                "auth binding realm '{}' binding '{}' has an empty default_model",
+                                resolved_auth_binding.realm, resolved_auth_binding.binding,
+                            )));
+                        }
+                        if let Some(reason) =
+                            registry.provider_override_mismatch_reason(provider, &resolved_model)
+                        {
+                            return Err(BuildAgentError::Config(reason));
+                        }
                         build_config.model = resolved_model;
 
                         // Publish immediately after resolve. Provider resolution can refresh and
@@ -5888,9 +6132,9 @@ mod tests {
     };
     use meerkat_core::types::ToolCallView;
     use meerkat_core::{
-        BackendProfileConfig, BindingId, BlobId, BlobPayload, BlobRef, BlobStoreError,
-        CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, SelfHostedApiStyle,
-        SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
+        AuthProfileConfig, BackendProfileConfig, BindingId, BindingOrigin, BlobId, BlobPayload,
+        BlobRef, BlobStoreError, CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection,
+        SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
     };
     use std::collections::HashMap;
     use tokio::sync::Mutex;
@@ -6260,57 +6504,426 @@ mod tests {
     }
 
     #[test]
-    fn create_session_default_model_heals_legacy_builtin_default() {
+    fn create_session_default_model_preserves_supported_historical_pin() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
-        // A legacy builtin default heals through the canonical ladder. Priority
-        // is owned by the catalog seam (`meerkat_models::provider_priority()`),
-        // so even with a customized OpenAI model the heal resolves to the
-        // configured Anthropic override.
         config.models.anthropic = "custom-anthropic".to_string();
         config.models.openai = "gpt-5.5-custom".to_string();
 
         assert_eq!(
             resolve_create_session_default_model(&config),
-            "custom-anthropic"
+            "claude-opus-4-7"
+        );
+        let resolved =
+            resolve_create_session_model(&config, CreateSessionModelResolutionRequest::default())
+                .expect("supported operator pin resolves");
+        assert_eq!(resolved.model, "claude-opus-4-7");
+        assert_eq!(resolved.provider, Provider::Anthropic);
+    }
+
+    #[test]
+    fn create_session_model_provider_mismatch_uses_provider_default() {
+        let mut config = Config::default();
+        config.agent.model = "gpt-5.5".to_string();
+        config.models.anthropic = "claude-sonnet-4-6".to_string();
+
+        let resolved = resolve_create_session_model(
+            &config,
+            CreateSessionModelResolutionRequest {
+                provider: Some(Provider::Anthropic),
+                ..Default::default()
+            },
+        )
+        .expect("provider constraint selects its configured default");
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
+        assert_eq!(resolved.provider, Provider::Anthropic);
+    }
+
+    fn create_model_configured_auth_binding(
+        provider: Provider,
+        default_model: Option<&str>,
+    ) -> (Config, AuthBindingRef) {
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "backend".to_string(),
+            BackendProfileConfig {
+                provider: provider.as_str().to_string(),
+                backend_kind: "test_backend".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "auth".to_string(),
+            AuthProfileConfig {
+                provider: provider.as_str().to_string(),
+                auth_method: "test_auth".to_string(),
+                source: CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "primary".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "backend".to_string(),
+                auth_profile: "auth".to_string(),
+                default_model: default_model.map(str::to_string),
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+        (
+            config,
+            AuthBindingRef {
+                realm: RealmId::parse("dev").expect("realm"),
+                binding: BindingId::parse("primary").expect("binding"),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            },
+        )
+    }
+
+    #[test]
+    fn create_session_model_binding_default_wins_when_model_omitted() {
+        let (mut config, auth_binding) = create_model_configured_auth_binding(
+            Provider::Gemini,
+            Some("gemini-3.1-flash-lite-preview"),
+        );
+        config.agent.model = "claude-opus-4-7".to_string();
+
+        let resolved = resolve_create_session_model(
+            &config,
+            CreateSessionModelResolutionRequest {
+                auth_binding: Some(auth_binding),
+                ..Default::default()
+            },
+        )
+        .expect("binding default resolves");
+        assert_eq!(resolved.model, "gemini-3.1-flash-lite-preview");
+        assert_eq!(resolved.provider, Provider::Gemini);
+        assert!(resolved.auth_binding.is_some());
+    }
+
+    #[test]
+    fn create_session_model_explicit_model_wins_over_binding_default() {
+        let (config, auth_binding) = create_model_configured_auth_binding(
+            Provider::Gemini,
+            Some("gemini-3.1-flash-lite-preview"),
+        );
+
+        let resolved = resolve_create_session_model(
+            &config,
+            CreateSessionModelResolutionRequest {
+                model: Some("gemini-3.5-flash".to_string()),
+                auth_binding: Some(auth_binding),
+                ..Default::default()
+            },
+        )
+        .expect("explicit same-provider model wins");
+        assert_eq!(resolved.model, "gemini-3.5-flash");
+        assert_eq!(resolved.provider, Provider::Gemini);
+    }
+
+    #[test]
+    fn create_session_model_binding_provider_without_default_constrains_ladder() {
+        let (mut config, auth_binding) =
+            create_model_configured_auth_binding(Provider::Gemini, None);
+        config.agent.model = "claude-opus-4-7".to_string();
+        config.models.gemini = "gemini-3.1-pro-preview".to_string();
+
+        let resolved = resolve_create_session_model(
+            &config,
+            CreateSessionModelResolutionRequest {
+                auth_binding: Some(auth_binding),
+                ..Default::default()
+            },
+        )
+        .expect("binding provider constrains defaults");
+        assert_eq!(resolved.model, "gemini-3.1-pro-preview");
+        assert_eq!(resolved.provider, Provider::Gemini);
+    }
+
+    #[test]
+    fn create_session_model_malformed_or_mismatched_binding_fails_closed() {
+        let (mut malformed, auth_binding) =
+            create_model_configured_auth_binding(Provider::Gemini, None);
+        malformed
+            .realm
+            .get_mut("dev")
+            .expect("realm")
+            .auth
+            .get_mut("auth")
+            .expect("auth")
+            .provider = "openai".to_string();
+        let malformed_error = resolve_create_session_model(
+            &malformed,
+            CreateSessionModelResolutionRequest {
+                auth_binding: Some(auth_binding),
+                ..Default::default()
+            },
+        )
+        .expect_err("backend/auth mismatch must fail");
+        assert!(matches!(
+            &malformed_error,
+            CreateSessionModelResolutionError::AuthBinding(_)
+        ));
+        assert!(
+            malformed_error.is_configuration_fault(),
+            "malformed server-owned binding config is an internal fault"
+        );
+
+        let (config, auth_binding) = create_model_configured_auth_binding(Provider::Gemini, None);
+        let mismatch_error = resolve_create_session_model(
+            &config,
+            CreateSessionModelResolutionRequest {
+                provider: Some(Provider::OpenAI),
+                auth_binding: Some(auth_binding),
+                ..Default::default()
+            },
+        )
+        .expect_err("explicit provider mismatch must fail");
+        assert!(matches!(
+            &mismatch_error,
+            CreateSessionModelResolutionError::AuthBindingProviderMismatch { .. }
+        ));
+        assert!(
+            !mismatch_error.is_configuration_fault(),
+            "an explicit provider that conflicts with a valid named binding is caller-owned"
         );
     }
 
     #[test]
-    fn create_session_default_model_heals_legacy_default_to_global_without_overrides() {
-        let mut config = Config::default();
-        config.agent.model = "claude-opus-4-7".to_string();
+    fn create_session_model_empty_binding_default_is_configuration_fault() {
+        let (config, auth_binding) =
+            create_model_configured_auth_binding(Provider::Gemini, Some(""));
 
-        assert_eq!(
-            resolve_create_session_default_model(&config),
-            meerkat_models::global_default_model()
-        );
+        let error = resolve_create_session_model(
+            &config,
+            CreateSessionModelResolutionRequest {
+                auth_binding: Some(auth_binding),
+                ..Default::default()
+            },
+        )
+        .expect_err("empty configured binding default must fail");
+
+        assert!(matches!(
+            &error,
+            CreateSessionModelResolutionError::EmptyBindingDefaultModel { .. }
+        ));
+        assert!(error.is_configuration_fault());
     }
 
     #[test]
-    fn create_session_default_model_heals_legacy_default_by_provider_priority() {
-        let mut config = Config::default();
-        config.agent.model = "claude-opus-4-7".to_string();
-        config.models.openai = "custom-openai".to_string();
-        config.models.gemini = "custom-gemini".to_string();
+    fn create_session_model_missing_default_distinguishes_binding_from_explicit_provider() {
+        let (binding_config, auth_binding) =
+            create_model_configured_auth_binding(Provider::SelfHosted, None);
+        let binding_error = resolve_create_session_model(
+            &binding_config,
+            CreateSessionModelResolutionRequest {
+                auth_binding: Some(auth_binding),
+                ..Default::default()
+            },
+        )
+        .expect_err("a self-hosted binding without any model default must fail");
+        assert!(matches!(
+            &binding_error,
+            CreateSessionModelResolutionError::BindingMissingProviderDefault { .. }
+        ));
+        assert!(binding_error.is_configuration_fault());
 
-        // Anthropic unset: the next provider in catalog priority order wins.
-        assert_eq!(
-            resolve_create_session_default_model(&config),
-            "custom-openai"
+        let provider_error = resolve_create_session_model(
+            &Config::default(),
+            CreateSessionModelResolutionRequest {
+                provider: Some(Provider::SelfHosted),
+                ..Default::default()
+            },
+        )
+        .expect_err("an explicit self-hosted provider requires a model");
+        assert!(matches!(
+            &provider_error,
+            CreateSessionModelResolutionError::MissingProviderDefault { .. }
+        ));
+        assert!(!provider_error.is_configuration_fault());
+    }
+
+    #[test]
+    fn create_session_model_unknown_owner_distinguishes_config_from_request() {
+        let model = "uncatalogued-without-provider";
+        let mut configured = Config::default();
+        configured.agent.model = model.to_string();
+
+        let configured_error = resolve_create_session_model(
+            &configured,
+            CreateSessionModelResolutionRequest::default(),
+        )
+        .expect_err("uncatalogued configured model without an owner must fail");
+        assert!(matches!(
+            &configured_error,
+            CreateSessionModelResolutionError::ConfiguredUnknownProvider { .. }
+        ));
+        assert!(configured_error.is_configuration_fault());
+
+        let request_error = resolve_create_session_model(
+            &Config::default(),
+            CreateSessionModelResolutionRequest {
+                model: Some(model.to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("uncatalogued explicit model without an owner must fail");
+        assert!(matches!(
+            &request_error,
+            CreateSessionModelResolutionError::UnknownProvider { .. }
+        ));
+        assert!(!request_error.is_configuration_fault());
+    }
+
+    #[test]
+    fn create_session_model_error_ownership_distinguishes_config_from_request() {
+        fn assert_fault(error: CreateSessionModelResolutionError, expected: bool) {
+            assert_eq!(
+                error.is_configuration_fault(),
+                expected,
+                "unexpected fault ownership for {error}"
+            );
+        }
+
+        let realm = RealmId::parse("dev").expect("realm");
+        let binding = BindingId::parse("primary").expect("binding");
+
+        assert_fault(
+            CreateSessionModelResolutionError::Config(meerkat_core::ConfigError::Validation(
+                "broken model registry".to_string(),
+            )),
+            true,
+        );
+        assert_fault(
+            CreateSessionModelResolutionError::ConfiguredProviderModelMismatch(
+                "configured mismatch".to_string(),
+            ),
+            true,
+        );
+        assert_fault(
+            CreateSessionModelResolutionError::ConfiguredUnknownProvider {
+                model: "configured-unknown".to_string(),
+            },
+            true,
+        );
+        assert_fault(
+            CreateSessionModelResolutionError::EmptyBindingDefaultModel {
+                realm: realm.clone(),
+                binding: binding.clone(),
+            },
+            true,
+        );
+        assert_fault(
+            CreateSessionModelResolutionError::BindingMissingProviderDefault {
+                realm: realm.clone(),
+                binding: binding.clone(),
+                provider: Provider::SelfHosted,
+            },
+            true,
         );
 
-        config.models.openai.clear();
-        assert_eq!(
-            resolve_create_session_default_model(&config),
-            "custom-gemini"
-        );
+        for source in [
+            meerkat_core::ConnectionTargetError::MissingRealm,
+            meerkat_core::ConnectionTargetError::UnknownRealm("missing".to_string()),
+            meerkat_core::ConnectionTargetError::InvalidRealmId {
+                realm: "bad realm".to_string(),
+                source: meerkat_core::IdentityError::InvalidChar(' '),
+            },
+            meerkat_core::ConnectionTargetError::InvalidBindingId {
+                binding: "bad binding".to_string(),
+                source: meerkat_core::IdentityError::InvalidChar(' '),
+            },
+            meerkat_core::ConnectionTargetError::BindingInvalid {
+                realm: "dev".to_string(),
+                binding: "missing".to_string(),
+                source: meerkat_core::ProviderBindingError::UnknownBinding("missing".to_string()),
+            },
+        ] {
+            assert_fault(
+                CreateSessionModelResolutionError::AuthBinding(source),
+                false,
+            );
+        }
 
-        config.models.gemini.clear();
-        assert_eq!(
-            resolve_create_session_default_model(&config),
-            meerkat_models::global_default_model()
-        );
+        for source in [
+            meerkat_core::ConnectionTargetError::MissingDefaultBinding {
+                realm: "dev".to_string(),
+            },
+            meerkat_core::ConnectionTargetError::RealmConfigInvalid {
+                realm: "dev".to_string(),
+                source: meerkat_core::ProviderBindingError::UnknownBackend("missing".to_string()),
+            },
+            meerkat_core::ConnectionTargetError::BindingInvalid {
+                realm: "dev".to_string(),
+                binding: "primary".to_string(),
+                source: meerkat_core::ProviderBindingError::UnknownAuth("missing".to_string()),
+            },
+            meerkat_core::ConnectionTargetError::BindingInvalid {
+                realm: "dev".to_string(),
+                binding: "primary".to_string(),
+                source: meerkat_core::ProviderBindingError::ProviderMismatch {
+                    binding: "primary".to_string(),
+                    backend: Provider::OpenAI,
+                    auth: Provider::Anthropic,
+                },
+            },
+            meerkat_core::ConnectionTargetError::BindingInvalid {
+                realm: "dev".to_string(),
+                binding: "primary".to_string(),
+                source: meerkat_core::ProviderBindingError::UnknownProviderName(
+                    "mystery".to_string(),
+                ),
+            },
+            meerkat_core::ConnectionTargetError::BindingInvalid {
+                realm: "dev".to_string(),
+                binding: "primary".to_string(),
+                source: meerkat_core::ProviderBindingError::InvalidRealmId {
+                    realm: "bad realm".to_string(),
+                    source: meerkat_core::IdentityError::InvalidChar(' '),
+                },
+            },
+            meerkat_core::ConnectionTargetError::ProviderMismatch {
+                realm: "dev".to_string(),
+                binding: "primary".to_string(),
+                expected: Provider::Gemini,
+                backend: Provider::OpenAI,
+                auth: Provider::Anthropic,
+            },
+            meerkat_core::ConnectionTargetError::RealmChain(
+                meerkat_core::connection::RealmChainError::Cycle {
+                    chain: vec!["dev".to_string(), "dev".to_string()],
+                },
+            ),
+        ] {
+            assert_fault(CreateSessionModelResolutionError::AuthBinding(source), true);
+        }
+
+        for error in [
+            CreateSessionModelResolutionError::AuthBindingProviderMismatch {
+                realm,
+                binding,
+                binding_provider: Provider::Gemini,
+                explicit_provider: Provider::OpenAI,
+            },
+            CreateSessionModelResolutionError::ProviderModelMismatch(
+                "request mismatch".to_string(),
+            ),
+            CreateSessionModelResolutionError::UnknownProvider {
+                model: "request-unknown".to_string(),
+            },
+            CreateSessionModelResolutionError::MissingProviderDefault {
+                provider: Provider::SelfHosted,
+            },
+            CreateSessionModelResolutionError::EmptyExplicitModel,
+        ] {
+            assert_fault(error, false);
+        }
     }
 
     #[test]
@@ -6325,6 +6938,16 @@ mod tests {
         assert_eq!(
             resolve_create_session_default_model(&config),
             meerkat_models::global_default_model()
+        );
+        let resolved =
+            resolve_create_session_model(&config, CreateSessionModelResolutionRequest::default())
+                .expect("no-hint ladder resolves");
+        assert_eq!(resolved.model, meerkat_models::global_default_model());
+        assert_eq!(
+            resolved.provider,
+            meerkat_models::canonical()
+                .infer_provider(meerkat_models::global_default_model())
+                .expect("global default has a catalog owner")
         );
     }
 
@@ -6795,10 +7418,9 @@ mod tests {
             async fn attach_external_session(
                 &self,
                 _target: &RealtimeExternalSessionTarget,
-                identity: &SessionLlmIdentity,
-                _turning_mode: RealtimeTurningMode,
+                open_config: &RealtimeSessionOpenConfig,
             ) -> Result<Box<dyn RealtimeSession>, LlmError> {
-                self.record(identity, "attach_external_session");
+                self.record(&open_config.llm_identity, "attach_external_session");
                 Err(LlmError::ConnectionReset)
             }
 
@@ -6922,8 +7544,7 @@ mod tests {
             let attached = wrapper
                 .attach_external_session(
                     &RealtimeExternalSessionTarget::new("call_1").expect("target"),
-                    &identity,
-                    RealtimeTurningMode::ProviderManaged,
+                    &open_config(identity.clone()),
                 )
                 .await;
             assert!(matches!(attached, Err(LlmError::ConnectionReset)));
@@ -7692,6 +8313,88 @@ mod tests {
             }),
             Some(("global".to_string(), "openai_oauth".to_string())),
             "inherited binding is owner-stamped at global, not the consuming head"
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn omitted_model_surface_resolution_survives_implicit_binding_default_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        config.agent.model.clear();
+        config.models.openai = "gpt-5.4".to_string();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-test-openai".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "implicit-openai".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "openai_key".to_string(),
+                default_model: Some("gpt-5.5".to_string()),
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        config.realm.insert("global".to_string(), section);
+
+        let resolution = resolve_create_session_model(
+            &config,
+            CreateSessionModelResolutionRequest {
+                model: None,
+                provider: Some(Provider::OpenAI),
+                auth_binding: None,
+            },
+        )
+        .expect("surface model resolution");
+        assert_ne!(
+            resolution.model, "gpt-5.5",
+            "fixture must distinguish surface default from binding default"
+        );
+        let mut build = AgentBuildConfig::new(resolution.model.clone());
+        build.provider = Some(resolution.provider);
+        build.auth_binding = resolution.auth_binding.clone();
+        assert!(
+            !build.resume_override_mask.model,
+            "omitted caller model remains omitted provenance"
+        );
+
+        let agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("implicit credential binding should build");
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("metadata written");
+        assert_eq!(metadata.model, resolution.model);
+        assert_eq!(metadata.provider, resolution.provider);
+        assert_eq!(
+            metadata
+                .auth_binding
+                .as_ref()
+                .map(|binding| binding.binding.as_str()),
+            Some("implicit-openai")
         );
     }
 

@@ -29,12 +29,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRealtimeItemObserved`(role: RealtimeTranscriptRoleKind, response_discarded: Bool)
 - `ResolveRealtimeItemSkipped`
 - `ResolveRealtimeUserTranscriptFinal`(text_present: Bool, segment_empty: Bool, segment_matches: Bool)
+- `ResolveRealtimeUserContentFinal`(content_present: Bool, segment_empty: Bool, segment_matches: Bool)
+- `ResolveRealtimeUserContentIdentity`(identity_fields_valid: Bool, key_tombstoned: Bool, predecessor_materialized: Bool, existing_identity_present: Bool, existing_payload_matches: Bool, target_item_id_available: Bool, reducer_commit_proof_required: Bool, reducer_commit_proof_present: Bool)
+- `ResolveRealtimeUserContentBlobStage`(pending_present: Bool, pending_matches_request: Bool)
+- `ResolveRealtimeUserContentBlobRecovery`(pending_present: Bool, request_matches_pending: Bool, pending_blob_valid: Bool)
+- `ResolveRealtimeUserContentBlobFinalize`(pending_present: Bool, pending_matches_committed: Bool)
 - `ResolveRealtimeAssistantDelta`(response_id_valid: Bool, response_discarded: Bool, delta_id_present: Bool, delta_id_seen: Bool, item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind, response_completed: Bool, text_after_write_present: Bool)
 - `ResolveRealtimeAssistantTextReplacement`(response_id_valid: Bool, response_discarded: Bool, item_materialized: Bool, item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind, response_completed: Bool, text_after_replace_present: Bool)
 - `ResolveRealtimeAssistantTurnCompleted`(response_id_valid: Bool, response_discarded: Bool, stop_reason: RealtimeTranscriptStopReasonKind)
 - `ResolveRealtimeAssistantTurnInterrupted`(response_id_valid: Bool)
 - `ResolveRealtimeMaterializeCandidate`(item_materialized: Bool, predecessor_materialized: Bool, item_skipped: Bool, item_ready: Bool, item_text_present: Bool, role: RealtimeTranscriptRoleKind, response_id_present: Bool, completion_present: Bool, completion_usage_consumed: Bool)
-- `RestoreRealtimeTranscriptState`(item_count: u64, first_seen_count: u64, first_seen_unique_count: u64, every_item_has_order_entry: Bool, every_order_entry_has_item: Bool, all_identity_fields_valid: Bool, all_delta_ids_valid: Bool, all_completion_response_ids_valid: Bool, all_discarded_response_ids_valid: Bool, all_materialized_items_were_ready_or_skipped: Bool, all_assistant_items_have_response_unless_skipped: Bool, all_ready_assistant_items_have_completion_or_are_skipped: Bool, all_materialized_assistant_completions_consumed: Bool, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: Bool, all_discarded_assistant_items_are_skipped_or_materialized: Bool)
+- `RestoreRealtimeTranscriptState`(item_count: u64, first_seen_count: u64, first_seen_unique_count: u64, every_item_has_order_entry: Bool, every_order_entry_has_item: Bool, all_materialized_predecessor_references_exist: Bool, no_self_predecessor_references: Bool, causal_graph_acyclic: Bool, all_materialized_items_have_materialized_ancestry: Bool, all_identity_fields_valid: Bool, all_user_content_identity_keys_match: Bool, all_user_content_identity_fields_valid: Bool, all_user_content_identity_item_ids_unique: Bool, all_user_content_identities_reference_materialized_user_items: Bool, all_user_content_tombstones_valid: Bool, user_content_identities_and_tombstones_disjoint: Bool, pending_user_content_blob_fields_valid: Bool, pending_user_content_blob_uncommitted: Bool, all_delta_ids_valid: Bool, all_completion_response_ids_valid: Bool, all_discarded_response_ids_valid: Bool, all_materialized_items_were_ready_or_skipped: Bool, all_assistant_items_have_response_unless_skipped: Bool, all_ready_assistant_items_have_completion_or_are_skipped: Bool, all_materialized_assistant_completions_consumed: Bool, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: Bool, all_discarded_assistant_items_are_skipped_or_materialized: Bool)
 - `AuthorizeSessionMetadataPersist`(schema_version: u64, model_present: Bool)
 - `AuthorizeSessionBuildStatePersist`(mob_tool_authority_context_present: Bool, mob_tool_authority_context_generated: Bool)
 - `RestoreSessionBuildState`
@@ -48,7 +53,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
-- `ArchiveSessionDocument`(session_id: SessionId, runtime_backed: Bool, durable_snapshot_present: Bool, runtime_session_registered: Bool)
+- `ArchiveSessionDocument`(session_id: SessionId, runtime_backed: Bool, durable_document_present: Bool, runtime_observation: SessionArchiveRuntimeObservation)
 
 ## Signals
 
@@ -66,6 +71,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SystemContextPersistAppendAdmissionResolved`(admission: SystemContextPersistAppendAdmission)
 - `RealtimeTranscriptEventResolved`(observe_item: Bool, observe_skipped: Bool, write_user_segment: Bool, append_assistant_segment: Bool, replace_assistant_segment: Bool, promote_lane: Bool, mark_item_ready: Bool, record_delta_id: Bool, remove_completion: Bool, record_completion: Bool, discard_response: Bool, discard_response_by_lane: Bool, mark_response_ready: Bool, materialize_ready_items: Bool)
 - `RealtimeMaterializeCandidateResolved`(decision: RealtimeTranscriptMaterializeDecision, consume_usage: Bool)
+- `RealtimeUserContentIdentityResolved`(disposition: RealtimeUserContentIdentityDisposition)
+- `RealtimeUserContentBlobStageResolved`(disposition: RealtimeUserContentBlobStageDisposition)
+- `RealtimeUserContentBlobRecoveryResolved`(disposition: RealtimeUserContentBlobRecoveryDisposition)
+- `RealtimeUserContentBlobFinalizeResolved`(disposition: RealtimeUserContentBlobFinalizeDisposition)
 - `RealtimeTranscriptSnapshotRestoreAuthorized`
 - `SessionMetadataPersistAuthorized`
 - `SessionBuildStatePersistAuthorized`
@@ -105,7 +114,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `resume_overrides_admissible`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_provider_recompute_from_model`(model_override_present: Bool, provider_override_present: Bool) -> `Bool`
 - `store_projection_can_recover_authority`(has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool) -> `Bool`
-- `archive_should_retire_runtime`(runtime_backed: Bool, durable_snapshot_present: Bool, runtime_session_registered: Bool) -> `Bool`
+- `archive_should_retire_runtime`(runtime_backed: Bool, runtime_observation: SessionArchiveRuntimeObservation) -> `Bool`
 
 ## Invariants
 
@@ -372,6 +381,150 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RealtimeTranscriptEventResolved`
 - To: `Ready`
 
+### `ResolveRealtimeUserContentIdentityInvalid`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentIdentity`(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentIdentityResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentIdentityUnmaterializedPredecessor`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentIdentity`(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentIdentityResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentIdentityConflict`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentIdentity`(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentIdentityResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentIdentityReplay`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentIdentity`(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentIdentityResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentIdentityCommitNew`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentIdentity`(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentIdentityResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobStageNew`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobStage`(pending_present, pending_matches_request)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobStageResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobStageReuseExact`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobStage`(pending_present, pending_matches_request)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobStageResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobStageRejectOccupied`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobStage`(pending_present, pending_matches_request)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobStageResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobRecoveryNone`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobRecovery`(pending_present, request_matches_pending, pending_blob_valid)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobRecoveryResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobRecoveryExact`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobRecovery`(pending_present, request_matches_pending, pending_blob_valid)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobRecoveryResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobRecoveryCommitVerified`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobRecovery`(pending_present, request_matches_pending, pending_blob_valid)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobRecoveryResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobRecoveryClearInvalid`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobRecovery`(pending_present, request_matches_pending, pending_blob_valid)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobRecoveryResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobFinalizeNone`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobFinalize`(pending_present, pending_matches_committed)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobFinalizeResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobFinalizeClearCommitted`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobFinalize`(pending_present, pending_matches_committed)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobFinalizeResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentBlobFinalizeRejectMismatch`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentBlobFinalize`(pending_present, pending_matches_committed)
+- Guards:
+  - ``
+- Emits: `RealtimeUserContentBlobFinalizeResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentFinalEmpty`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentFinal`(content_present, segment_empty, segment_matches)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentFinalStore`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentFinal`(content_present, segment_empty, segment_matches)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
+### `ResolveRealtimeUserContentFinalReplayOrConflict`
+- From: `Ready`
+- On: `ResolveRealtimeUserContentFinal`(content_present, segment_empty, segment_matches)
+- Guards:
+  - ``
+- Emits: `RealtimeTranscriptEventResolved`
+- To: `Ready`
+
 ### `ResolveRealtimeAssistantDeltaInvalidOrDuplicate`
 - From: `Ready`
 - On: `ResolveRealtimeAssistantDelta`(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present)
@@ -550,7 +703,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeRestoreRealtimeTranscriptState`
 - From: `Ready`
-- On: `RestoreRealtimeTranscriptState`(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_identity_fields_valid, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized)
+- On: `RestoreRealtimeTranscriptState`(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_materialized_predecessor_references_exist, no_self_predecessor_references, causal_graph_acyclic, all_materialized_items_have_materialized_ancestry, all_identity_fields_valid, all_user_content_identity_keys_match, all_user_content_identity_fields_valid, all_user_content_identity_item_ids_unique, all_user_content_identities_reference_materialized_user_items, all_user_content_tombstones_valid, user_content_identities_and_tombstones_disjoint, pending_user_content_blob_fields_valid, pending_user_content_blob_uncommitted, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized)
 - Guards:
   - ``
 - Emits: `RealtimeTranscriptSnapshotRestoreAuthorized`
@@ -762,7 +915,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ArchiveSessionDocumentActive`
 - From: `Ready`
-- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
+- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_document_present, runtime_observation)
 - Guards:
   - ``
 - Emits: `SessionArchiveResolved`
@@ -770,7 +923,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ArchiveSessionDocumentAlreadyArchived`
 - From: `Ready`
-- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
+- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_document_present, runtime_observation)
 - Guards:
   - ``
   - `runtime_quiescent`
@@ -779,7 +932,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ArchiveSessionDocumentCompleteRetire`
 - From: `Ready`
-- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_snapshot_present, runtime_session_registered)
+- On: `ArchiveSessionDocument`(session_id, runtime_backed, durable_document_present, runtime_observation)
 - Guards:
   - ``
   - `runtime_residue`

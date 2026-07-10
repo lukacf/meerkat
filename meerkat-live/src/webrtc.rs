@@ -4,6 +4,16 @@
 //! media stack: SDP, ICE/DTLS/SRTP, RTP, Opus, and resampling. Surfaces only
 //! compose this state and expose signaling; live channel semantics stay in
 //! `LiveAdapterHost`.
+//!
+//! Data-channel observations and RTP audio are independently transported.
+//! Because rust-webrtc's callback reader is limited to 65,535-byte messages,
+//! image input for a WebRTC channel goes through JSON-RPC `live/send_input`,
+//! not the data channel. An image envelope delivered whole within that ceiling
+//! receives the scoped `image_input_transport_unsupported` observation; a
+//! larger envelope can fail in the browser/SCTP transport before Meerkat can
+//! classify it and therefore cannot be promised a server-side rejection. A
+//! client must then wait for the redacted `user_content_committed` data-channel
+//! observation before starting RTP audio that depends on the image.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,7 +23,9 @@ use std::time::Duration;
 use axum::Router;
 use bytes::Bytes;
 use meerkat_contracts::{LiveInputChunkWire, WireLiveAdapterObservation};
-use meerkat_core::live_adapter::{LiveAdapterObservation, LiveInputChunk};
+use meerkat_core::live_adapter::{
+    LiveAdapterErrorCode, LiveAdapterObservation, LiveConfigRejectionReason, LiveInputChunk,
+};
 use opus::{Application, Channels, Decoder, Encoder};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
@@ -37,9 +49,9 @@ use crate::host::{
 };
 use crate::transport::{
     LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString, LiveWsState,
-    live_ws_router,
+    live_ws_router, should_publish_observation,
 };
-use crate::wire_input::live_input_chunk_from_wire;
+use crate::wire_input::{live_input_chunk_decode_rejection, live_input_chunk_from_wire};
 
 /// Canonical JSON-RPC signaling method for browser-offer WebRTC.
 pub const LIVE_WEBRTC_ANSWER_METHOD: &str = "live/webrtc/answer";
@@ -58,6 +70,17 @@ const WEBRTC_AUDIO_PACKET_MS: u64 = 20;
 const WEBRTC_AUDIO_PACKET_DURATION: Duration = Duration::from_millis(WEBRTC_AUDIO_PACKET_MS);
 const WEBRTC_AUDIO_QUEUE_CAPACITY: usize = 1_800;
 const LOCAL_BARGE_IN_RMS_THRESHOLD: f32 = 0.035;
+
+fn webrtc_data_channel_image_rejection() -> LiveAdapterObservation {
+    LiveAdapterObservation::CommandRejected {
+        code: LiveAdapterErrorCode::ConfigRejected {
+            reason: LiveConfigRejectionReason::ImageInputTransportUnsupported {
+                transport: "webrtc_data_channel_use_live_send_input_rpc".to_string(),
+            },
+        },
+        message: "WebRTC data-channel image frames are unsupported; send the image with JSON-RPC live/send_input and wait for user_content_committed before dependent RTP audio".to_string(),
+    }
+}
 
 struct OutgoingAudioPacket {
     generation: u64,
@@ -474,11 +497,10 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
         };
 
         // D329: capture the close machinery + peer handles into the message
-        // handler so an invalid input frame on the WebRTC data channel
-        // terminalizes the channel identically to the WS path
-        // (`transport.rs`), instead of `tracing::warn`-and-keep-alive. Both
-        // transports now route malformed frames through
-        // `reject_invalid_live_frame` for uniform generated close feedback.
+        // handler so malformed JSON/base64 terminalizes the channel identically
+        // to the WS path. Bounded image size/MIME failures and the explicitly
+        // unsupported data-channel image route are scoped command rejections,
+        // leaving the peer usable for RPC image ingress plus RTP audio.
         let close_feedback_for_messages = Arc::clone(&observation_context.close_feedback);
         let peer_registry_for_messages = Arc::clone(&observation_context.peer_registry);
         let peer_for_messages = Arc::clone(&observation_context.peer);
@@ -499,19 +521,41 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
                         // (`crate::wire_input`) that the RPC `live/send_input`
                         // path also routes through, so the WebRTC data channel
                         // runs identical wire validation. A payload that fails
-                        // wire validation (malformed envelope OR malformed
-                        // base64) is rejected here exactly as on the RPC path.
-                        //
-                        // D329: any invalid frame — failed wire parse or failed
-                        // wire->core conversion — terminalizes the channel
-                        // (uniform with the WS path) rather than only logging
-                        // and keeping the peer alive.
+                        // wire validation is rejected here exactly as on the
+                        // RPC path. Malformed envelopes/base64 are terminal;
+                        // resource-policy failures remain typed and scoped.
                         let chunk = match serde_json::from_slice::<LiveInputChunkWire>(
                             &message.data,
                         ) {
+                            Ok(LiveInputChunkWire::Image { .. }) => {
+                                // rust-webrtc's callback API reads into a fixed
+                                // 65,535-byte buffer. This typed rejection is
+                                // therefore guaranteed only for an envelope
+                                // delivered whole and decoded here; larger
+                                // messages may fail below this callback. Images
+                                // use the JSON-RPC `live/send_input` control
+                                // plane, while the data channel remains the
+                                // redacted receipt lane and RTP ordering barrier.
+                                let observation = webrtc_data_channel_image_rejection();
+                                let _ = forward_observation_json(&data_channel, &observation).await;
+                                return;
+                            }
                             Ok(wire) => match live_input_chunk_from_wire(wire) {
                                 Ok(chunk) => Some(chunk),
                                 Err(err) => {
+                                    if let Some(code) = live_input_chunk_decode_rejection(&err) {
+                                        let observation =
+                                            LiveAdapterObservation::CommandRejected {
+                                                code,
+                                                message: err.to_string(),
+                                            };
+                                        let _ = forward_observation_json(
+                                            &data_channel,
+                                            &observation,
+                                        )
+                                        .await;
+                                        return;
+                                    }
                                     tracing::warn!(
                                         channel = %channel_id,
                                         error = %err,
@@ -532,6 +576,18 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
                         match chunk {
                             Some(chunk) => {
                                 if let Err(err) = host.send_input(&channel_id, chunk).await {
+                                    if let Some(observation) =
+                                        crate::transport::scoped_command_rejection_from_host_error(
+                                            &err,
+                                        )
+                                    {
+                                        let _ = forward_observation_json(
+                                            &data_channel,
+                                            &observation,
+                                        )
+                                        .await;
+                                        return;
+                                    }
                                     tracing::warn!(
                                         channel = %channel_id,
                                         error = %err,
@@ -664,6 +720,18 @@ fn install_incoming_audio_handler(
                     channels: MONO_CHANNELS,
                 };
                 if let Err(err) = host.send_input(&channel_id, chunk).await {
+                    if crate::transport::scoped_command_rejection_from_host_error(&err).is_some() {
+                        // RTP has no request/response lane on which to return a
+                        // scoped rejection. Drop this packet and keep the peer
+                        // alive: input backpressure/config rejection describes
+                        // the packet, not a terminal channel failure.
+                        tracing::debug!(
+                            channel = %channel_id,
+                            error = %err,
+                            "dropping WebRTC RTP input after scoped adapter rejection"
+                        );
+                        continue;
+                    }
                     tracing::warn!(
                         channel = %channel_id,
                         error = %err,
@@ -738,7 +806,7 @@ async fn pump_observations_to_data_channel(
         };
 
         let close_observation = observation_requires_generated_close(&observation);
-        let publish_observation = !matches!(&observation, &LiveAdapterObservation::Error { .. });
+        let publish_observation = should_publish_observation(&observation);
         if close_observation {
             if !close_channel_with_generated_feedback(
                 host.as_ref(),
@@ -769,6 +837,11 @@ async fn pump_observations_to_data_channel(
             }
         };
 
+        // Forward only after `apply_observation` has completed. In
+        // particular, an image's internal byte-bearing transcript event is
+        // filtered and its following `user_content_committed` receipt becomes
+        // visible only after canonical persistence. WebRTC clients must wait
+        // for that receipt before sending RTP audio that relies on the image.
         if publish_observation
             && let Err(err) = forward_observation_json(&data_channel, &observation).await
         {
@@ -844,6 +917,12 @@ async fn pump_observations_to_data_channel(
         }
 
         match outcome {
+            ObservationOutcome::UserContentCommitted { observation } => {
+                if let Err(err) = forward_observation_json(&data_channel, &observation).await {
+                    tracing::warn!(channel = %channel_id, error = %err, "failed to send durable WebRTC user-content receipt");
+                    break;
+                }
+            }
             ObservationOutcome::Terminal { code } => {
                 tracing::info!(
                     channel = %channel_id,
@@ -1368,6 +1447,82 @@ mod tests {
     use meerkat_core::types::{SessionId, StopReason, Usage};
     use tokio::sync::mpsc;
 
+    #[test]
+    fn webrtc_filters_raw_adapter_receipt_until_host_commit_outcome() {
+        use meerkat_core::types::{ContentBlock, ImageData};
+
+        let internal = LiveAdapterObservation::RealtimeTranscript {
+            event: meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: "image-request-1".into(),
+                item_id: "item_image".into(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/jpeg".into(),
+                    data: ImageData::Inline {
+                        data: "private-image-data".into(),
+                    },
+                }],
+            },
+        };
+        let receipt = LiveAdapterObservation::UserContentCommitted {
+            idempotency_key: "image-request-1".into(),
+            item_id: "item_image".into(),
+            previous_item_id: None,
+            content_index: 0,
+            media_type: "image/jpeg".into(),
+        };
+
+        assert!(!should_publish_observation(&internal));
+        assert!(!should_publish_observation(&receipt));
+
+        assert!(matches!(
+            webrtc_data_channel_image_rejection(),
+            LiveAdapterObservation::CommandRejected {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::ImageInputTransportUnsupported {
+                        transport,
+                    },
+                },
+                message,
+            } if transport == "webrtc_data_channel_use_live_send_input_rpc"
+                && message.contains("JSON-RPC live/send_input")
+                && message.contains("user_content_committed")
+        ));
+    }
+
+    #[test]
+    fn webrtc_scoped_backpressure_is_nonterminal_for_data_and_rtp_ingress() {
+        let reason = LiveConfigRejectionReason::InputBackpressured {
+            max_pending_bytes: 64 * 1024 * 1024,
+        };
+        let error = LiveAdapterHostError::AdapterError(LiveAdapterError::ProviderError {
+            code: LiveAdapterErrorCode::ConfigRejected {
+                reason: reason.clone(),
+            },
+            message: reason.to_string(),
+        });
+
+        assert!(matches!(
+            crate::transport::scoped_command_rejection_from_host_error(&error),
+            Some(LiveAdapterObservation::CommandRejected {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::InputBackpressured {
+                        max_pending_bytes,
+                    },
+                },
+                ..
+            }) if max_pending_bytes == 64 * 1024 * 1024
+        ));
+        assert!(
+            crate::transport::scoped_command_rejection_from_host_error(
+                &LiveAdapterHostError::AdapterError(LiveAdapterError::Closed)
+            )
+            .is_none(),
+            "closed adapters remain terminal"
+        );
+    }
+
     struct FailingLiveProjectionSink;
 
     #[async_trait]
@@ -1478,8 +1633,8 @@ mod tests {
             &self,
             _session_id: &SessionId,
             _event: &meerkat_core::RealtimeTranscriptEvent,
-        ) -> Result<(), LiveProjectionError> {
-            Ok(())
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, LiveProjectionError> {
+            Ok(meerkat_core::RealtimeTranscriptApplyOutcome::default())
         }
     }
 
@@ -1943,6 +2098,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webrtc_peer_rejects_small_image_and_keeps_same_data_channel_usable() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
+            .await
+            .unwrap();
+        let (adapter, mut command_rx, _observation_tx) = RecordingAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
+
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(Arc::clone(&host));
+        let browser_peer = new_browser_peer().await;
+        let (data_tx, mut data_rx) = mpsc::channel::<String>(4);
+        let data_channel = browser_peer
+            .create_data_channel("meerkat.live", None)
+            .await
+            .unwrap();
+        data_channel.on_message(Box::new(move |message: DataChannelMessage| {
+            let data_tx = data_tx.clone();
+            Box::pin(async move {
+                if message.is_string
+                    && let Ok(text) = String::from_utf8(message.data.to_vec())
+                {
+                    let _ = data_tx.send(text).await;
+                }
+            })
+        }));
+        let (open_tx, mut open_rx) = mpsc::channel::<()>(1);
+        data_channel.on_open(Box::new(move || {
+            let open_tx = open_tx.clone();
+            Box::pin(async move {
+                let _ = open_tx.send(()).await;
+            })
+        }));
+
+        connect_browser_peer(&browser_peer, &state, &channel_id).await;
+        tokio::time::timeout(Duration::from_secs(5), open_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let image_envelope = r#"{"kind":"image","idempotency_key":"image-request-1","mime":"image/png","data":"iVBORw0KGgo="}"#.to_owned();
+        assert!(
+            image_envelope.len() < 65_535,
+            "fixture must remain within the effective data-channel ceiling"
+        );
+        data_channel.send_text(image_envelope).await.unwrap();
+
+        let rejection_json = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let rejection: serde_json::Value = serde_json::from_str(&rejection_json).unwrap();
+        assert_eq!(rejection["observation"], "command_rejected");
+        assert_eq!(rejection["code"]["code"], "config_rejected");
+        assert_eq!(
+            rejection["code"]["reason"]["kind"],
+            "image_input_transport_unsupported"
+        );
+        assert_eq!(
+            rejection["code"]["reason"]["transport"],
+            "webrtc_data_channel_use_live_send_input_rpc"
+        );
+        assert!(matches!(
+            command_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(state.peer_count().await, 1);
+
+        data_channel
+            .send_text(r#"{"kind":"text","text":"still-open"}"#.to_owned())
+            .await
+            .unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), command_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Text { text },
+            } => assert_eq!(text, "still-open"),
+            other => panic!("expected text input on the surviving data channel, got {other:?}"),
+        }
+        assert_eq!(state.peer_count().await, 1);
+
+        state.close_peer(&channel_id).await;
+        browser_peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn webrtc_data_channel_scoped_backpressure_keeps_peer_usable() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
+            .await
+            .unwrap();
+        let (adapter, mut command_rx, _observation_tx) = RejectFirstInputAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
+
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(Arc::clone(&host));
+        let browser_peer = new_browser_peer().await;
+        let (data_tx, mut data_rx) = mpsc::channel::<String>(4);
+        let data_channel = browser_peer
+            .create_data_channel("meerkat.live", None)
+            .await
+            .unwrap();
+        data_channel.on_message(Box::new(move |message: DataChannelMessage| {
+            let data_tx = data_tx.clone();
+            Box::pin(async move {
+                if message.is_string
+                    && let Ok(text) = String::from_utf8(message.data.to_vec())
+                {
+                    let _ = data_tx.send(text).await;
+                }
+            })
+        }));
+        let (open_tx, mut open_rx) = mpsc::channel::<()>(1);
+        data_channel.on_open(Box::new(move || {
+            let open_tx = open_tx.clone();
+            Box::pin(async move {
+                let _ = open_tx.send(()).await;
+            })
+        }));
+
+        connect_browser_peer(&browser_peer, &state, &channel_id).await;
+        tokio::time::timeout(Duration::from_secs(5), open_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        data_channel
+            .send_text(r#"{"kind":"text","text":"backpressure-me"}"#.to_owned())
+            .await
+            .unwrap();
+        let rejection_json = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let rejection: serde_json::Value = serde_json::from_str(&rejection_json).unwrap();
+        assert_eq!(rejection["observation"], "command_rejected");
+        assert_eq!(rejection["code"]["code"], "config_rejected");
+        assert_eq!(rejection["code"]["reason"]["kind"], "input_backpressured");
+        assert_eq!(state.peer_count().await, 1);
+
+        data_channel
+            .send_text(r#"{"kind":"text","text":"accepted-after-retry"}"#.to_owned())
+            .await
+            .unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), command_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Text { text },
+            } => assert_eq!(text, "accepted-after-retry"),
+            other => panic!("expected text input after scoped retry, got {other:?}"),
+        }
+        assert_eq!(state.peer_count().await, 1);
+
+        state.close_peer(&channel_id).await;
+        browser_peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn webrtc_peer_deregisters_when_observation_stream_closes() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let channel_id = host
@@ -2066,6 +2397,71 @@ mod tests {
     #[async_trait]
     impl LiveAdapter for RecordingAdapter {
         async fn send_command(&self, command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+            self.command_tx
+                .send(command)
+                .await
+                .map_err(|_| LiveAdapterError::Closed)
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+            Ok(self.observation_rx.lock().await.recv().await)
+        }
+
+        fn status(&self) -> LiveAdapterStatus {
+            LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    struct RejectFirstInputAdapter {
+        command_tx: mpsc::Sender<LiveAdapterCommand>,
+        observation_rx: Mutex<mpsc::Receiver<LiveAdapterObservation>>,
+        rejected: std::sync::atomic::AtomicBool,
+    }
+
+    impl RejectFirstInputAdapter {
+        fn new() -> (
+            Arc<Self>,
+            mpsc::Receiver<LiveAdapterCommand>,
+            mpsc::Sender<LiveAdapterObservation>,
+        ) {
+            let (command_tx, command_rx) = mpsc::channel(16);
+            let (observation_tx, observation_rx) = mpsc::channel(16);
+            (
+                Arc::new(Self {
+                    command_tx,
+                    observation_rx: Mutex::new(observation_rx),
+                    rejected: std::sync::atomic::AtomicBool::new(false),
+                }),
+                command_rx,
+                observation_tx,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LiveAdapter for RejectFirstInputAdapter {
+        async fn send_command(&self, command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+            if matches!(&command, LiveAdapterCommand::SendInput { .. })
+                && !self
+                    .rejected
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let reason = LiveConfigRejectionReason::InputBackpressured {
+                    max_pending_bytes: 64 * 1024 * 1024,
+                };
+                return Err(LiveAdapterError::ProviderError {
+                    code: LiveAdapterErrorCode::ConfigRejected {
+                        reason: reason.clone(),
+                    },
+                    message: reason.to_string(),
+                });
+            }
             self.command_tx
                 .send(command)
                 .await

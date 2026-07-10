@@ -138,13 +138,16 @@ pub struct RealtimeVideoChunk {
 
 /// An opaque still-image chunk for vision-capable realtime models.
 ///
-/// `mime_type` is the IANA type of the encoded bytes (`image/png`,
-/// `image/jpeg`, `image/webp`, …); `data` is the base64-encoded image —
-/// the provider seam renders it into the provider-native form (OpenAI
-/// Realtime: an `input_image` content part carrying a data URL).
+/// `mime_type` is the IANA type of the encoded bytes; supported formats are
+/// provider-specific. The current OpenAI Realtime adapter accepts only
+/// `image/png` and `image/jpeg`. `data` is the base64-encoded image; the
+/// provider seam renders it into the provider-native form (for OpenAI
+/// Realtime, an `input_image` content part carrying a data URL).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeImageChunk {
+    /// Caller-stable, session-scoped idempotency identity.
+    pub idempotency_key: String,
     pub mime_type: String,
     pub data: String,
 }

@@ -30,6 +30,10 @@ _Generated from the Rust composition catalog. Do not edit by hand._
     - `work_request_reaches_meerkat` → `meerkat::Ingest` (Input)
     - `retire_request_reaches_meerkat` → `meerkat::Retire` (Input)
     - `destroy_request_reaches_meerkat` → `meerkat::Destroy` (Input)
+  - consumer-refusal closures:
+    - `binding_request_reaches_meerkat` refusal → `mob::ResolveRuntimeBindingRefusal`
+    - `work_request_reaches_meerkat` refusal → `mob::ResolveRuntimeIngressRefusal`
+    - `retire_request_reaches_meerkat` refusal → `mob::ResolveRuntimeRetireRefusal`
 
 ## Transaction Plans
 - `(none)`

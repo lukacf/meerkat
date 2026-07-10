@@ -10,7 +10,7 @@ use serde_json::value::RawValue;
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
-use crate::protocol::{RpcId, RpcResponse};
+use crate::protocol::{RpcId, RpcResponse, bounded_collection_limit};
 use crate::session_runtime::SessionRuntime;
 
 fn map_workgraph_error(id: Option<RpcId>, error: WorkGraphError) -> RpcResponse {
@@ -136,7 +136,7 @@ pub async fn handle_list(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let filter: WorkItemFilter = match params {
+    let mut filter: WorkItemFilter = match params {
         Some(raw) => match serde_json::from_str(raw.get()) {
             Ok(filter) => filter,
             Err(error) => {
@@ -148,6 +148,10 @@ pub async fn handle_list(
             }
         },
         None => WorkItemFilter::default(),
+    };
+    filter.limit = match bounded_collection_limit(filter.limit) {
+        Ok(limit) => Some(limit),
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
     };
     let service = match workgraph_service_or_error(&id, &runtime) {
         Ok(service) => service,
@@ -162,16 +166,12 @@ pub async fn handle_list(
 /// Serialize a typed work-item list into the contracts `WorkItemsResult`
 /// wire payload, failing closed on serialization (K17).
 fn work_items_response<T: serde::Serialize>(id: Option<RpcId>, items: &[T]) -> RpcResponse {
-    let items: Result<Vec<serde_json::Value>, serde_json::Error> =
-        items.iter().map(serde_json::to_value).collect();
-    match items {
-        Ok(items) => RpcResponse::success(id, meerkat_contracts::WorkItemsResult { items }),
-        Err(err) => RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            format!("failed to serialize workgraph items: {err}"),
-        ),
+    #[derive(serde::Serialize)]
+    struct WorkItemsResultRef<'a, T> {
+        items: &'a [T],
     }
+
+    RpcResponse::success(id, WorkItemsResultRef { items })
 }
 
 pub async fn handle_ready(
@@ -179,7 +179,7 @@ pub async fn handle_ready(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let filter: ReadyWorkFilter = match params {
+    let mut filter: ReadyWorkFilter = match params {
         Some(raw) => match serde_json::from_str(raw.get()) {
             Ok(filter) => filter,
             Err(error) => {
@@ -191,6 +191,10 @@ pub async fn handle_ready(
             }
         },
         None => ReadyWorkFilter::default(),
+    };
+    filter.limit = match bounded_collection_limit(filter.limit) {
+        Ok(limit) => Some(limit),
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
     };
     let service = match workgraph_service_or_error(&id, &runtime) {
         Ok(service) => service,
@@ -207,7 +211,7 @@ pub async fn handle_snapshot(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let filter: WorkGraphSnapshotFilter = match params {
+    let mut filter: WorkGraphSnapshotFilter = match params {
         Some(raw) => match serde_json::from_str(raw.get()) {
             Ok(filter) => filter,
             Err(error) => {
@@ -219,6 +223,10 @@ pub async fn handle_snapshot(
             }
         },
         None => WorkGraphSnapshotFilter::default(),
+    };
+    filter.limit = match bounded_collection_limit(filter.limit) {
+        Ok(limit) => Some(limit),
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
     };
     let service = match workgraph_service_or_error(&id, &runtime) {
         Ok(service) => service,
@@ -235,7 +243,7 @@ pub async fn handle_events(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let filter: WorkGraphEventFilter = match params {
+    let mut filter: WorkGraphEventFilter = match params {
         Some(raw) => match serde_json::from_str(raw.get()) {
             Ok(filter) => filter,
             Err(error) => {
@@ -248,24 +256,21 @@ pub async fn handle_events(
         },
         None => WorkGraphEventFilter::default(),
     };
+    filter.limit = match bounded_collection_limit(filter.limit) {
+        Ok(limit) => Some(limit),
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    };
     let service = match workgraph_service_or_error(&id, &runtime) {
         Ok(service) => service,
         Err(response) => return response,
     };
     match service.events(filter).await {
         Ok(events) => {
-            let events: Result<Vec<serde_json::Value>, serde_json::Error> =
-                events.iter().map(serde_json::to_value).collect();
-            match events {
-                Ok(events) => {
-                    RpcResponse::success(id, meerkat_contracts::WorkEventsResult { events })
-                }
-                Err(err) => RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("failed to serialize workgraph events: {err}"),
-                ),
+            #[derive(serde::Serialize)]
+            struct WorkEventsResultRef<'a, T> {
+                events: &'a [T],
             }
+            RpcResponse::success(id, WorkEventsResultRef { events: &events })
         }
         Err(error) => map_workgraph_error(id, error),
     }

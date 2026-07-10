@@ -3671,7 +3671,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         91 => Some(&Spec {
             id: Some(91),
             lane: Lane::Smoke,
-            title: "Live adapter realtime image input (gpt-realtime-2 vision)",
+            title: "Live image canonical persistence and reconnect continuity",
             timeout_secs: 600,
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo"],

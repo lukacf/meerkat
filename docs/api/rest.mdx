@@ -126,6 +126,12 @@ This overview follows the generated OpenAPI artifact at
 | `PATCH` | `/config` | Merge-patch config (RFC 7396) |
 | `POST` | `/requests/{request_id}/cancel` | Cancel an uncommitted in-flight request |
 
+<Note>
+Schedule endpoints return the same flattened public `Schedule` contract as
+JSON-RPC. Planning, labels, and created/updated timestamps are top-level;
+there is no nested `config` and persisted `machine_state` is not public.
+</Note>
+
 WorkGraph goal and attention mutation routes require trusted in-process
 host/session authority and are not part of the public REST catalog.
 
@@ -1161,11 +1167,44 @@ List discoverable peers for a session. Requires the `comms` feature.
 ```json Response
 {
   "peers": [
-    {"name": "reviewer", "address": "127.0.0.1:4201"},
-    {"name": "coordinator", "address": "inproc"}
+    {
+      "peer_id": "550e8400-e29b-41d4-a716-446655440001",
+      "name": "reviewer",
+      "address": {
+        "transport": "tcp",
+        "endpoint": "127.0.0.1:4201"
+      },
+      "source": "trusted",
+      "sendable_kinds": ["peer_message", "peer_request", "peer_response"],
+      "capabilities": {
+        "version": 1,
+        "extensions": {"review": true}
+      },
+      "meta": {
+        "description": "Reviews pull requests",
+        "labels": {"role": "reviewer"}
+      }
+    },
+    {
+      "peer_id": "550e8400-e29b-41d4-a716-446655440002",
+      "name": "coordinator",
+      "address": {
+        "transport": "inproc",
+        "endpoint": "coordinator"
+      },
+      "source": "inproc",
+      "sendable_kinds": ["peer_message", "peer_request", "peer_response"],
+      "capabilities": {"version": 1, "extensions": {}},
+      "meta": {}
+    }
   ]
 }
 ```
+
+`peer_id` is the canonical routing value accepted by `POST /comms/send`;
+`name` is display-only and need not be unique. `address` is a typed
+`{transport, endpoint}` object, while `source`, `sendable_kinds`,
+`capabilities`, and `meta` describe discovery provenance and supported use.
 
 ## Error responses
 

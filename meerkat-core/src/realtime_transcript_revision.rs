@@ -27,20 +27,25 @@
 //! registry, hands them to the machine, and mirrors the machine's resolved
 //! action vector / verdict back onto the registry.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+
+use sha2::{Digest, Sha256};
 
 use crate::generated::session_document::{
     RealtimeTranscriptLaneKind, RealtimeTranscriptMaterializeDecision, RealtimeTranscriptRoleKind,
-    RealtimeTranscriptStopReasonKind, SessionDocumentEffect, SessionDocumentError,
+    RealtimeTranscriptStopReasonKind, RealtimeUserContentBlobFinalizeDisposition,
+    RealtimeUserContentBlobRecoveryDisposition, RealtimeUserContentBlobStageDisposition,
+    RealtimeUserContentIdentityDisposition, SessionDocumentEffect, SessionDocumentError,
     SessionDocumentMachineAuthority,
 };
 use crate::realtime_transcript::{
-    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
-    RealtimeTranscriptRole, TranscriptLane,
+    PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
+    RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole, RealtimeUserContentApplyOutcome,
+    RealtimeUserContentIdentity, RealtimeUserContentTombstone, TranscriptLane,
 };
 use crate::types::{
-    AssistantBlock, BlockAssistantMessage, ContentInput, Message, StopReason, TranscriptSource,
-    Usage, UserMessage,
+    AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, StopReason,
+    TranscriptSource, Usage, UserMessage,
 };
 
 /// Error surfaced when the canonical SessionDocument authority rejects a
@@ -191,6 +196,117 @@ fn resolve_materialize_candidate(
         })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RealtimeUserContentIdentityFacts {
+    identity_fields_valid: bool,
+    key_tombstoned: bool,
+    predecessor_materialized: bool,
+    existing_identity_present: bool,
+    existing_payload_matches: bool,
+    target_item_id_available: bool,
+    reducer_commit_proof_required: bool,
+    reducer_commit_proof_present: bool,
+}
+
+fn resolve_realtime_user_content_identity(
+    facts: RealtimeUserContentIdentityFacts,
+) -> Result<RealtimeUserContentIdentityDisposition, RealtimeTranscriptShellError> {
+    let RealtimeUserContentIdentityFacts {
+        identity_fields_valid,
+        key_tombstoned,
+        predecessor_materialized,
+        existing_identity_present,
+        existing_payload_matches,
+        target_item_id_available,
+        reducer_commit_proof_required,
+        reducer_commit_proof_present,
+    } = facts;
+    let mut authority = document_authority();
+    let effects = authority.resolve_realtime_user_content_identity(
+        identity_fields_valid,
+        key_tombstoned,
+        predecessor_materialized,
+        existing_identity_present,
+        existing_payload_matches,
+        target_item_id_available,
+        reducer_commit_proof_required,
+        reducer_commit_proof_present,
+    )?;
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            SessionDocumentEffect::RealtimeUserContentIdentityResolved { disposition } => {
+                Some(disposition)
+            }
+            _ => None,
+        })
+        .ok_or(RealtimeTranscriptShellError {
+            op: "user_content_identity_resolved",
+        })
+}
+
+fn resolve_realtime_user_content_blob_stage(
+    pending_present: bool,
+    pending_matches_request: bool,
+) -> Result<RealtimeUserContentBlobStageDisposition, RealtimeTranscriptShellError> {
+    let mut authority = document_authority();
+    authority
+        .resolve_realtime_user_content_blob_stage(pending_present, pending_matches_request)?
+        .into_iter()
+        .find_map(|effect| match effect {
+            SessionDocumentEffect::RealtimeUserContentBlobStageResolved { disposition } => {
+                Some(disposition)
+            }
+            _ => None,
+        })
+        .ok_or(RealtimeTranscriptShellError {
+            op: "user_content_blob_stage_resolved",
+        })
+}
+
+fn resolve_realtime_user_content_blob_recovery(
+    pending_present: bool,
+    request_matches_pending: bool,
+    pending_blob_valid: bool,
+) -> Result<RealtimeUserContentBlobRecoveryDisposition, RealtimeTranscriptShellError> {
+    let mut authority = document_authority();
+    authority
+        .resolve_realtime_user_content_blob_recovery(
+            pending_present,
+            request_matches_pending,
+            pending_blob_valid,
+        )?
+        .into_iter()
+        .find_map(|effect| match effect {
+            SessionDocumentEffect::RealtimeUserContentBlobRecoveryResolved { disposition } => {
+                Some(disposition)
+            }
+            _ => None,
+        })
+        .ok_or(RealtimeTranscriptShellError {
+            op: "user_content_blob_recovery_resolved",
+        })
+}
+
+fn resolve_realtime_user_content_blob_finalize(
+    pending_present: bool,
+    pending_matches_committed: bool,
+) -> Result<RealtimeUserContentBlobFinalizeDisposition, RealtimeTranscriptShellError> {
+    let mut authority = document_authority();
+    authority
+        .resolve_realtime_user_content_blob_finalize(pending_present, pending_matches_committed)?
+        .into_iter()
+        .find_map(|effect| match effect {
+            SessionDocumentEffect::RealtimeUserContentBlobFinalizeResolved { disposition } => {
+                Some(disposition)
+            }
+            _ => None,
+        })
+        .ok_or(RealtimeTranscriptShellError {
+            op: "user_content_blob_finalize_resolved",
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Per-session registry storage (MECHANISM).
 // ---------------------------------------------------------------------------
@@ -208,6 +324,17 @@ pub struct SessionRealtimeTranscriptState {
     assistant_completions: BTreeMap<String, RealtimeAssistantCompletion>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     discarded_assistant_response_ids: BTreeSet<String>,
+    /// Session-scoped idempotency bindings for committed non-text user input.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    user_content_identities: BTreeMap<String, RealtimeUserContentIdentity>,
+    /// Durable conflict markers for keys whose canonical image was removed by
+    /// a same-session transcript rewrite.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    user_content_tombstones: BTreeSet<RealtimeUserContentTombstone>,
+    /// Bounded metadata-only recovery anchor for an image blob whose reducer
+    /// commit and durable object are not yet known to be jointly committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_user_content_blob: Option<PendingRealtimeUserContentBlob>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -220,6 +347,16 @@ struct RealtimeTranscriptItemState {
     response_id: Option<String>,
     #[serde(default)]
     content_segments: BTreeMap<u32, String>,
+    /// Typed non-text user content staged until canonical materialization.
+    /// Cleared as soon as the user message materializes so inline image bytes
+    /// never remain duplicated in durable transcript metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    user_content_segments: BTreeMap<u32, Vec<ContentBlock>>,
+    /// Stable replay identities retained after typed blocks move into the
+    /// canonical message. This preserves idempotency without retaining a
+    /// second copy of media bytes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    user_content_segment_fingerprints: BTreeMap<u32, String>,
     #[serde(default)]
     skipped: bool,
     #[serde(default)]
@@ -241,6 +378,8 @@ impl RealtimeTranscriptItemState {
             previous_item_id,
             response_id,
             content_segments: BTreeMap::new(),
+            user_content_segments: BTreeMap::new(),
+            user_content_segment_fingerprints: BTreeMap::new(),
             skipped: false,
             ready: false,
             materialized: false,
@@ -254,6 +393,8 @@ impl RealtimeTranscriptItemState {
             previous_item_id,
             response_id: None,
             content_segments: BTreeMap::new(),
+            user_content_segments: BTreeMap::new(),
+            user_content_segment_fingerprints: BTreeMap::new(),
             skipped: true,
             ready: true,
             materialized: false,
@@ -263,6 +404,34 @@ impl RealtimeTranscriptItemState {
 
     fn text(&self) -> String {
         self.content_segments.values().cloned().collect()
+    }
+
+    fn materializable_content_present(&self) -> bool {
+        !self.text().is_empty()
+            || self
+                .user_content_segments
+                .values()
+                .any(|blocks| !blocks.is_empty())
+    }
+
+    fn user_content_blocks(&self) -> Vec<ContentBlock> {
+        let indices = self
+            .content_segments
+            .keys()
+            .chain(self.user_content_segments.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut blocks = Vec::new();
+        for index in indices {
+            if let Some(content) = self.user_content_segments.get(&index) {
+                blocks.extend(content.clone());
+            } else if let Some(text) = self.content_segments.get(&index)
+                && !text.is_empty()
+            {
+                blocks.push(ContentBlock::Text { text: text.clone() });
+            }
+        }
+        blocks
     }
 }
 
@@ -287,12 +456,13 @@ pub struct RealtimeTranscriptApplyCommit {
 pub fn restore_realtime_transcript_state(
     state: SessionRealtimeTranscriptState,
 ) -> Result<SessionRealtimeTranscriptState, RealtimeTranscriptShellError> {
-    let first_seen_unique_count = state
+    let first_seen_ids = state
         .first_seen_order
         .iter()
         .cloned()
-        .collect::<BTreeSet<_>>()
-        .len();
+        .collect::<BTreeSet<_>>();
+    let first_seen_unique_count = first_seen_ids.len();
+    let causal = realtime_transcript_causal_graph_observations(&state);
     let mut authority = document_authority();
     authority.restore_realtime_transcript_state(
         usize_to_u64(state.items.len()),
@@ -301,12 +471,24 @@ pub fn restore_realtime_transcript_state(
         state
             .items
             .keys()
-            .all(|item_id| state.first_seen_order.iter().any(|seen| seen == item_id)),
+            .all(|item_id| first_seen_ids.contains(item_id)),
         state
             .first_seen_order
             .iter()
             .all(|item_id| state.items.contains_key(item_id)),
+        causal.all_materialized_predecessor_references_exist,
+        causal.no_self_predecessor_references,
+        causal.acyclic,
+        causal.all_materialized_items_have_materialized_ancestry,
         realtime_transcript_state_identity_fields_valid(&state),
+        realtime_user_content_identity_keys_match(&state),
+        realtime_user_content_identity_fields_valid(&state),
+        realtime_user_content_identity_item_ids_unique(&state),
+        realtime_user_content_identities_reference_materialized_user_items(&state),
+        realtime_user_content_tombstones_valid(&state),
+        realtime_user_content_identities_and_tombstones_disjoint(&state),
+        realtime_pending_user_content_blob_fields_valid(&state),
+        realtime_pending_user_content_blob_is_uncommitted(&state),
         realtime_transcript_delta_ids_valid(&state),
         realtime_transcript_completion_ids_valid(&state),
         realtime_transcript_discarded_ids_valid(&state),
@@ -320,6 +502,93 @@ pub fn restore_realtime_transcript_state(
         realtime_transcript_discarded_assistant_items_are_skipped_or_materialized(&state),
     )?;
     Ok(state)
+}
+
+#[must_use]
+pub fn pending_realtime_user_content_blob(
+    state: &SessionRealtimeTranscriptState,
+) -> Option<PendingRealtimeUserContentBlob> {
+    state.pending_user_content_blob.clone()
+}
+
+pub fn stage_pending_realtime_user_content_blob(
+    state: &mut SessionRealtimeTranscriptState,
+    pending: PendingRealtimeUserContentBlob,
+) -> Result<RealtimeUserContentBlobStageDisposition, RealtimeTranscriptShellError> {
+    if !realtime_pending_user_content_blob_value_fields_valid(&pending)
+        || !realtime_pending_user_content_blob_value_is_uncommitted(state, &pending)
+    {
+        return Err(RealtimeTranscriptShellError {
+            op: "user_content_blob_stage_invalid",
+        });
+    }
+    let disposition = resolve_realtime_user_content_blob_stage(
+        state.pending_user_content_blob.is_some(),
+        state.pending_user_content_blob.as_ref() == Some(&pending),
+    )?;
+    match disposition {
+        RealtimeUserContentBlobStageDisposition::StageNew => {
+            state.pending_user_content_blob = Some(pending);
+        }
+        RealtimeUserContentBlobStageDisposition::ReuseExact
+        | RealtimeUserContentBlobStageDisposition::RejectOccupied => {}
+    }
+    Ok(disposition)
+}
+
+pub fn resolve_pending_realtime_user_content_blob_recovery(
+    state: &SessionRealtimeTranscriptState,
+    request: Option<&PendingRealtimeUserContentBlob>,
+    pending_blob_valid: bool,
+) -> Result<RealtimeUserContentBlobRecoveryDisposition, RealtimeTranscriptShellError> {
+    resolve_realtime_user_content_blob_recovery(
+        state.pending_user_content_blob.is_some(),
+        state
+            .pending_user_content_blob
+            .as_ref()
+            .is_some_and(|pending| request == Some(pending)),
+        pending_blob_valid,
+    )
+}
+
+pub fn clear_invalid_pending_realtime_user_content_blob(
+    state: &mut SessionRealtimeTranscriptState,
+    request: Option<&PendingRealtimeUserContentBlob>,
+) -> Result<(), RealtimeTranscriptShellError> {
+    match resolve_pending_realtime_user_content_blob_recovery(state, request, false)? {
+        RealtimeUserContentBlobRecoveryDisposition::ClearInvalidBeforeCurrent => {
+            state.pending_user_content_blob = None;
+            Ok(())
+        }
+        _ => Err(RealtimeTranscriptShellError {
+            op: "user_content_blob_clear_not_authorized",
+        }),
+    }
+}
+
+fn finalize_pending_realtime_user_content_blob(
+    state: &mut SessionRealtimeTranscriptState,
+    identity: &RealtimeUserContentIdentity,
+) -> Result<(), RealtimeTranscriptShellError> {
+    let disposition = resolve_realtime_user_content_blob_finalize(
+        state.pending_user_content_blob.is_some(),
+        state
+            .pending_user_content_blob
+            .as_ref()
+            .is_some_and(|pending| pending.matches_identity(identity)),
+    )?;
+    match disposition {
+        RealtimeUserContentBlobFinalizeDisposition::ClearCommitted => {
+            state.pending_user_content_blob = None;
+            Ok(())
+        }
+        RealtimeUserContentBlobFinalizeDisposition::NoPending => Ok(()),
+        RealtimeUserContentBlobFinalizeDisposition::RejectMismatch => {
+            Err(RealtimeTranscriptShellError {
+                op: "user_content_blob_finalize_mismatch",
+            })
+        }
+    }
 }
 
 pub fn apply_realtime_transcript_event(
@@ -371,6 +640,20 @@ pub fn apply_realtime_transcript_event(
             content_index,
             text,
         } => apply_user_transcript_final(state, item_id, previous_item_id, content_index, text)?,
+        RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key,
+            item_id,
+            previous_item_id,
+            content_index,
+            content,
+        } => apply_user_content_final(
+            state,
+            idempotency_key,
+            item_id,
+            previous_item_id,
+            content_index,
+            content,
+        )?,
         RealtimeTranscriptEvent::AssistantTextDelta {
             response_id,
             delta_id,
@@ -504,6 +787,459 @@ fn apply_user_transcript_final(
         }
     }
     finish_realtime_event(state, decision)
+}
+
+fn apply_user_content_final(
+    state: &mut SessionRealtimeTranscriptState,
+    idempotency_key: String,
+    item_id: String,
+    previous_item_id: Option<String>,
+    content_index: u32,
+    content: Vec<ContentBlock>,
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
+    let identity_image = match content.as_slice() {
+        [ContentBlock::Image { media_type, data }] => {
+            let blob_id = match data {
+                crate::types::ImageData::Inline { data } => {
+                    crate::blob::content_blob_id(media_type, data)
+                }
+                crate::types::ImageData::Blob { blob_id } => blob_id.clone(),
+            };
+            Some((
+                crate::image_generation::MediaType::canonical_str(media_type),
+                blob_id,
+                data.clone(),
+            ))
+        }
+        _ => None,
+    };
+    let (media_type, blob_id) = identity_image
+        .as_ref()
+        .map(|(media_type, blob_id, _)| (media_type.clone(), blob_id.clone()))
+        .unwrap_or_else(|| (String::new(), crate::blob::BlobId::new("")));
+    let content = identity_image
+        .as_ref()
+        .map(|(media_type, _, data)| {
+            vec![ContentBlock::Image {
+                media_type: media_type.clone(),
+                data: data.clone(),
+            }]
+        })
+        .unwrap_or(content);
+    let existing_identity = state.user_content_identities.get(&idempotency_key).cloned();
+    let reducer_blob_backed = identity_image
+        .as_ref()
+        .is_some_and(|(_, _, data)| matches!(data, crate::types::ImageData::Blob { .. }));
+    let pending_matches_candidate =
+        state
+            .pending_user_content_blob
+            .as_ref()
+            .is_some_and(|pending| {
+                pending
+                    == &PendingRealtimeUserContentBlob {
+                        idempotency_key: idempotency_key.clone(),
+                        item_id: item_id.clone(),
+                        previous_item_id: previous_item_id.clone(),
+                        content_index,
+                        blob_id: blob_id.clone(),
+                        media_type: media_type.clone(),
+                    }
+            });
+    let identity_fields_valid = identity_image.is_some()
+        && crate::live_adapter::live_image_idempotency_key_is_valid(&idempotency_key)
+        && !item_id.trim().is_empty()
+        && previous_item_id
+            .as_ref()
+            .is_none_or(|previous| !previous.trim().is_empty())
+        && canonical_supported_image_media_type(&media_type)
+        && blob_id.is_canonical_sha256();
+    let predecessor_materialized =
+        realtime_predecessor_materialized(state, previous_item_id.as_deref());
+    let existing_payload_matches = existing_identity.as_ref().is_some_and(|identity| {
+        identity.blob_id == blob_id
+            && identity.media_type == media_type
+            && identity.content_index == content_index
+    });
+    let disposition = resolve_realtime_user_content_identity(RealtimeUserContentIdentityFacts {
+        identity_fields_valid,
+        key_tombstoned: realtime_user_content_key_tombstoned(state, &idempotency_key),
+        predecessor_materialized,
+        existing_identity_present: existing_identity.is_some(),
+        existing_payload_matches,
+        target_item_id_available: !state.items.contains_key(&item_id),
+        reducer_commit_proof_required: true,
+        reducer_commit_proof_present: reducer_blob_backed && pending_matches_candidate,
+    })?;
+
+    match disposition {
+        RealtimeUserContentIdentityDisposition::RejectInvalidIdentity => {
+            return Ok(RealtimeTranscriptApplyCommit {
+                outcome: RealtimeTranscriptApplyOutcome {
+                    user_content: Some(RealtimeUserContentApplyOutcome::RejectedInvalidIdentity {
+                        idempotency_key,
+                    }),
+                    ..RealtimeTranscriptApplyOutcome::default()
+                },
+                ..RealtimeTranscriptApplyCommit::default()
+            });
+        }
+        RealtimeUserContentIdentityDisposition::RejectUnmaterializedPredecessor => {
+            return Ok(RealtimeTranscriptApplyCommit {
+                outcome: RealtimeTranscriptApplyOutcome {
+                    user_content: Some(
+                        RealtimeUserContentApplyOutcome::RejectedUnmaterializedPredecessor {
+                            idempotency_key,
+                            previous_item_id,
+                        },
+                    ),
+                    ..RealtimeTranscriptApplyOutcome::default()
+                },
+                ..RealtimeTranscriptApplyCommit::default()
+            });
+        }
+        RealtimeUserContentIdentityDisposition::RejectConflict => {
+            return Ok(RealtimeTranscriptApplyCommit {
+                outcome: RealtimeTranscriptApplyOutcome {
+                    user_content: Some(RealtimeUserContentApplyOutcome::RejectedConflict {
+                        idempotency_key,
+                    }),
+                    ..RealtimeTranscriptApplyOutcome::default()
+                },
+                ..RealtimeTranscriptApplyCommit::default()
+            });
+        }
+        RealtimeUserContentIdentityDisposition::AlreadyCommitted => {
+            let identity = existing_identity.ok_or(RealtimeTranscriptShellError {
+                op: "user_content_identity_replay_missing",
+            })?;
+            finalize_pending_realtime_user_content_blob(state, &identity)?;
+            return Ok(RealtimeTranscriptApplyCommit {
+                outcome: RealtimeTranscriptApplyOutcome {
+                    user_content: Some(RealtimeUserContentApplyOutcome::AlreadyCommitted(identity)),
+                    ..RealtimeTranscriptApplyOutcome::default()
+                },
+                ..RealtimeTranscriptApplyCommit::default()
+            });
+        }
+        RealtimeUserContentIdentityDisposition::CommitNew => {}
+    }
+
+    let fingerprint = user_content_fingerprint(&content)?;
+    let existing_fingerprint = state
+        .items
+        .get(&item_id)
+        .and_then(|item| item.user_content_segment_fingerprints.get(&content_index));
+    let segment_empty = existing_fingerprint.is_none();
+    let segment_matches = existing_fingerprint.is_some_and(|existing| existing == &fingerprint);
+    let content_present = !content.is_empty();
+    let decision = resolve_realtime_event(|authority| {
+        authority.resolve_realtime_user_content_final(
+            content_present,
+            segment_empty,
+            segment_matches,
+        )
+    })?;
+
+    if let Some(item) = if decision.observe_item {
+        observe_realtime_item(
+            state,
+            item_id.clone(),
+            previous_item_id.clone(),
+            RealtimeTranscriptRole::User,
+            None,
+        )
+    } else {
+        None
+    } {
+        if decision.write_user_segment {
+            item.user_content_segments.insert(content_index, content);
+            item.user_content_segment_fingerprints
+                .insert(content_index, fingerprint);
+        } else if content_present && !segment_empty && !segment_matches {
+            tracing::warn!(
+                content_index,
+                "ignoring conflicting realtime user content segment replay"
+            );
+        }
+        if decision.mark_item_ready {
+            item.ready = true;
+        }
+    }
+    let mut commit = finish_realtime_event(state, decision)?;
+    let materialized = state
+        .items
+        .get(&item_id)
+        .is_some_and(|item| item.role == RealtimeTranscriptRole::User && item.materialized);
+    if !materialized {
+        return Err(RealtimeTranscriptShellError {
+            op: "user_content_commit_not_materialized",
+        });
+    }
+    let identity = RealtimeUserContentIdentity {
+        idempotency_key: idempotency_key.clone(),
+        item_id,
+        previous_item_id,
+        content_index,
+        blob_id,
+        media_type,
+    };
+    state
+        .user_content_identities
+        .insert(idempotency_key, identity.clone());
+    finalize_pending_realtime_user_content_blob(state, &identity)?;
+    commit.outcome.user_content = Some(RealtimeUserContentApplyOutcome::Committed(identity));
+    Ok(commit)
+}
+
+/// Return the durable user-content idempotency registry in deterministic key
+/// order for provider-session reconstruction.
+#[must_use]
+pub fn realtime_user_content_identities(
+    state: &SessionRealtimeTranscriptState,
+) -> Vec<RealtimeUserContentIdentity> {
+    state.user_content_identities.values().cloned().collect()
+}
+
+/// Return durable removed-key markers in deterministic order for provider
+/// open/reconnect/refresh admission.
+#[must_use]
+pub fn realtime_user_content_tombstones(
+    state: &SessionRealtimeTranscriptState,
+) -> Vec<RealtimeUserContentTombstone> {
+    state.user_content_tombstones.iter().cloned().collect()
+}
+
+/// Reconcile realtime transcript metadata after a canonical same-session
+/// history rewrite.
+///
+/// The rewritten messages are the sole authority for whether an old committed
+/// image still exists. Matching is an ordered, deterministic multiset over
+/// canonical `(media_type, blob_id)` identities, so one image occurrence can
+/// retain at most one caller key. Retained bindings are rebased into a fresh
+/// materialized user-item projection; removed bindings become durable
+/// tombstones. All response/delta/causal staging from the pre-rewrite history
+/// is discarded.
+pub fn reconcile_realtime_transcript_state_after_rewrite(
+    mut state: SessionRealtimeTranscriptState,
+    canonical_messages: &[Message],
+) -> Result<SessionRealtimeTranscriptState, RealtimeTranscriptShellError> {
+    if state.pending_user_content_blob.is_some() {
+        return Err(RealtimeTranscriptShellError {
+            op: "history_rewrite_pending_user_content_blob",
+        });
+    }
+    let mut canonical_images = canonical_user_image_multiset(canonical_messages);
+    let previous_identities = std::mem::take(&mut state.user_content_identities);
+    let mut retained_identities = BTreeMap::new();
+    let mut rebuilt_items = BTreeMap::new();
+    let mut rebuilt_order = Vec::new();
+
+    for (key, mut identity) in previous_identities {
+        let image_key = (identity.media_type.clone(), identity.blob_id.clone());
+        let already_tombstoned = realtime_user_content_key_tombstoned(&state, &key);
+        let retained = !already_tombstoned
+            && canonical_images
+                .get_mut(&image_key)
+                .is_some_and(|remaining| {
+                    if *remaining == 0 {
+                        false
+                    } else {
+                        *remaining -= 1;
+                        true
+                    }
+                });
+        if !retained {
+            state
+                .user_content_tombstones
+                .insert(RealtimeUserContentTombstone {
+                    idempotency_key: key,
+                });
+            continue;
+        }
+
+        // A rewrite creates a new causal projection. Provider-native
+        // predecessor ids from the old projection are not authoritative in
+        // the rewritten history, so retained canonical images become roots.
+        identity.previous_item_id = None;
+        let expected_content = vec![ContentBlock::Image {
+            media_type: identity.media_type.clone(),
+            data: crate::types::ImageData::Blob {
+                blob_id: identity.blob_id.clone(),
+            },
+        }];
+        let fingerprint = user_content_fingerprint(&expected_content)?;
+        let mut item = RealtimeTranscriptItemState::new(RealtimeTranscriptRole::User, None, None);
+        item.user_content_segment_fingerprints
+            .insert(identity.content_index, fingerprint);
+        item.ready = true;
+        item.materialized = true;
+        rebuilt_order.push(identity.item_id.clone());
+        rebuilt_items.insert(identity.item_id.clone(), item);
+        retained_identities.insert(key, identity);
+    }
+
+    state.items = rebuilt_items;
+    state.first_seen_order = rebuilt_order;
+    state.seen_delta_ids.clear();
+    state.assistant_completions.clear();
+    state.discarded_assistant_response_ids.clear();
+    state.user_content_identities = retained_identities;
+    restore_realtime_transcript_state(state)
+}
+
+fn canonical_user_image_multiset(
+    messages: &[Message],
+) -> BTreeMap<(String, crate::blob::BlobId), usize> {
+    let mut images = BTreeMap::new();
+    for message in messages {
+        let Message::User(user) = message else {
+            continue;
+        };
+        for block in &user.content {
+            let ContentBlock::Image { media_type, data } = block else {
+                continue;
+            };
+            let media_type = crate::image_generation::MediaType::canonical_str(media_type);
+            let blob_id = match data {
+                crate::types::ImageData::Inline { data } => {
+                    crate::blob::content_blob_id(&media_type, data)
+                }
+                crate::types::ImageData::Blob { blob_id } => blob_id.clone(),
+            };
+            *images.entry((media_type, blob_id)).or_insert(0) += 1;
+        }
+    }
+    images
+}
+
+fn realtime_user_content_key_tombstoned(
+    state: &SessionRealtimeTranscriptState,
+    idempotency_key: &str,
+) -> bool {
+    state
+        .user_content_tombstones
+        .iter()
+        .any(|tombstone| tombstone.idempotency_key == idempotency_key)
+}
+
+/// Resolve expected replay/rejection outcomes without mutating transcript
+/// state. Persistent services use this before writing a new blob so conflict,
+/// malformed identity, and unmaterialized-predecessor attempts cannot create
+/// orphan storage. `None` means the event is a valid new commit and must flow
+/// through the normal externalize + reducer path.
+pub fn preflight_realtime_user_content_event(
+    state: &SessionRealtimeTranscriptState,
+    event: &RealtimeTranscriptEvent,
+) -> Result<Option<RealtimeUserContentApplyOutcome>, RealtimeTranscriptShellError> {
+    let RealtimeTranscriptEvent::UserContentFinal {
+        idempotency_key,
+        item_id,
+        previous_item_id,
+        content_index,
+        content,
+    } = event
+    else {
+        return Ok(None);
+    };
+    let identity_image = match content.as_slice() {
+        [ContentBlock::Image { media_type, data }] => {
+            let blob_id = match data {
+                crate::types::ImageData::Inline { data } => {
+                    crate::blob::content_blob_id(media_type, data)
+                }
+                crate::types::ImageData::Blob { blob_id } => blob_id.clone(),
+            };
+            Some((
+                crate::image_generation::MediaType::canonical_str(media_type),
+                blob_id,
+            ))
+        }
+        _ => None,
+    };
+    let (media_type, blob_id) = identity_image
+        .clone()
+        .unwrap_or_else(|| (String::new(), crate::blob::BlobId::new("")));
+    let existing_identity = state.user_content_identities.get(idempotency_key).cloned();
+    let identity_fields_valid = identity_image.is_some()
+        && crate::live_adapter::live_image_idempotency_key_is_valid(idempotency_key)
+        && !item_id.trim().is_empty()
+        && previous_item_id
+            .as_ref()
+            .is_none_or(|previous| !previous.trim().is_empty())
+        && canonical_supported_image_media_type(&media_type)
+        && blob_id.is_canonical_sha256();
+    let existing_payload_matches = existing_identity.as_ref().is_some_and(|identity| {
+        identity.blob_id == blob_id
+            && identity.media_type == media_type
+            && identity.content_index == *content_index
+    });
+    let disposition = resolve_realtime_user_content_identity(RealtimeUserContentIdentityFacts {
+        identity_fields_valid,
+        key_tombstoned: realtime_user_content_key_tombstoned(state, idempotency_key),
+        predecessor_materialized: realtime_predecessor_materialized(
+            state,
+            previous_item_id.as_deref(),
+        ),
+        existing_identity_present: existing_identity.is_some(),
+        existing_payload_matches,
+        target_item_id_available: !state.items.contains_key(item_id),
+        reducer_commit_proof_required: false,
+        reducer_commit_proof_present: false,
+    })?;
+    Ok(match disposition {
+        RealtimeUserContentIdentityDisposition::CommitNew => None,
+        RealtimeUserContentIdentityDisposition::AlreadyCommitted => {
+            Some(RealtimeUserContentApplyOutcome::AlreadyCommitted(
+                existing_identity.ok_or(RealtimeTranscriptShellError {
+                    op: "user_content_preflight_replay_missing",
+                })?,
+            ))
+        }
+        RealtimeUserContentIdentityDisposition::RejectInvalidIdentity => {
+            Some(RealtimeUserContentApplyOutcome::RejectedInvalidIdentity {
+                idempotency_key: idempotency_key.clone(),
+            })
+        }
+        RealtimeUserContentIdentityDisposition::RejectUnmaterializedPredecessor => Some(
+            RealtimeUserContentApplyOutcome::RejectedUnmaterializedPredecessor {
+                idempotency_key: idempotency_key.clone(),
+                previous_item_id: previous_item_id.clone(),
+            },
+        ),
+        RealtimeUserContentIdentityDisposition::RejectConflict => {
+            Some(RealtimeUserContentApplyOutcome::RejectedConflict {
+                idempotency_key: idempotency_key.clone(),
+            })
+        }
+    })
+}
+
+fn user_content_fingerprint(
+    content: &[ContentBlock],
+) -> Result<String, RealtimeTranscriptShellError> {
+    let canonical = content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Image {
+                media_type,
+                data: crate::types::ImageData::Inline { data },
+            } => ContentBlock::Image {
+                media_type: crate::image_generation::MediaType::canonical_str(media_type),
+                data: crate::types::ImageData::Blob {
+                    blob_id: crate::blob::content_blob_id(media_type, data),
+                },
+            },
+            ContentBlock::Image { media_type, data } => ContentBlock::Image {
+                media_type: crate::image_generation::MediaType::canonical_str(media_type),
+                data: data.clone(),
+            },
+            other => other.clone(),
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&canonical).map_err(|_| RealtimeTranscriptShellError {
+        op: "user_content_fingerprint",
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -812,8 +1548,12 @@ fn materialize_realtime_transcript_ready_items(
                 .response_id
                 .as_ref()
                 .and_then(|response_id| state.assistant_completions.get(response_id));
-            let decision =
-                resolve_materialize_candidate(state, item, !text.is_empty(), completion)?;
+            let decision = resolve_materialize_candidate(
+                state,
+                item,
+                item.materializable_content_present(),
+                completion,
+            )?;
             match decision.decision {
                 RealtimeTranscriptMaterializeDecision::Wait => {}
                 RealtimeTranscriptMaterializeDecision::MarkSkipped => {
@@ -822,7 +1562,7 @@ fn materialize_realtime_transcript_ready_items(
                 RealtimeTranscriptMaterializeDecision::MaterializeUser => {
                     batch.push(ResolvedMaterialization::User {
                         item_id: item_id.clone(),
-                        text,
+                        content: item.user_content_blocks(),
                     });
                 }
                 RealtimeTranscriptMaterializeDecision::MaterializeAssistant => {
@@ -860,7 +1600,7 @@ fn materialize_realtime_transcript_ready_items(
 
         for resolved in batch {
             match resolved {
-                ResolvedMaterialization::User { item_id, text } => {
+                ResolvedMaterialization::User { item_id, content } => {
                     flush_pending_assistant_blocks(
                         &mut messages,
                         &mut committed_usage,
@@ -871,10 +1611,10 @@ fn materialize_realtime_transcript_ready_items(
                     pending_response_id = None;
                     if let Some(item) = state.items.get_mut(&item_id) {
                         item.materialized = true;
+                        item.user_content_segments.clear();
                     }
-                    messages.push(Message::User(UserMessage::with_blocks(
-                        ContentInput::Text(text.clone()).into_blocks(),
-                    )));
+                    let text = ContentInput::Blocks(content.clone()).text_content();
+                    messages.push(Message::User(UserMessage::with_blocks(content)));
                     materialized
                         .push(RealtimeTranscriptMaterializedMessage::User { item_id, text });
                 }
@@ -950,6 +1690,7 @@ fn materialize_realtime_transcript_ready_items(
     Ok(RealtimeTranscriptApplyCommit {
         outcome: RealtimeTranscriptApplyOutcome {
             materialized_messages: materialized,
+            ..RealtimeTranscriptApplyOutcome::default()
         },
         messages,
         usage: committed_usage,
@@ -959,7 +1700,7 @@ fn materialize_realtime_transcript_ready_items(
 enum ResolvedMaterialization {
     User {
         item_id: String,
-        text: String,
+        content: Vec<ContentBlock>,
     },
     Assistant {
         item_id: String,
@@ -1118,10 +1859,9 @@ fn realtime_transcript_order(state: &SessionRealtimeTranscriptState) -> Vec<Stri
             let Some(item) = state.items.get(item_id) else {
                 continue;
             };
-            if item
-                .previous_item_id
-                .as_ref()
-                .is_some_and(|prev| state.items.contains_key(prev) && !emitted.contains(prev))
+            if let Some(previous_item_id) = item.previous_item_id.as_ref()
+                && (!state.items.contains_key(previous_item_id)
+                    || !emitted.contains(previous_item_id))
             {
                 continue;
             }
@@ -1130,11 +1870,6 @@ fn realtime_transcript_order(state: &SessionRealtimeTranscriptState) -> Vec<Stri
             progressed = true;
         }
         if !progressed {
-            for item_id in &state.first_seen_order {
-                if emitted.insert(item_id.clone()) {
-                    out.push(item_id.clone());
-                }
-            }
             break;
         }
         if emitted.len() >= state.items.len() {
@@ -1219,6 +1954,207 @@ fn realtime_transcript_state_identity_fields_valid(state: &SessionRealtimeTransc
                 .as_ref()
                 .is_none_or(|response| !response.trim().is_empty())
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RealtimeTranscriptCausalGraphObservations {
+    all_materialized_predecessor_references_exist: bool,
+    no_self_predecessor_references: bool,
+    acyclic: bool,
+    all_materialized_items_have_materialized_ancestry: bool,
+}
+
+/// Compute every causal-graph restore observation in one bounded Kahn walk.
+/// Each node and predecessor edge is visited a constant number of times; a
+/// long valid transcript cannot trigger an independent ancestry walk per item.
+fn realtime_transcript_causal_graph_observations(
+    state: &SessionRealtimeTranscriptState,
+) -> RealtimeTranscriptCausalGraphObservations {
+    let mut indegree = HashMap::with_capacity(state.items.len());
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for item_id in state.items.keys() {
+        indegree.insert(item_id.as_str(), 0_u8);
+    }
+
+    let mut all_materialized_predecessor_references_exist = true;
+    let mut no_self_predecessor_references = true;
+    let mut all_materialized_items_have_materialized_ancestry = true;
+    for (item_id, item) in &state.items {
+        let Some(previous_item_id) = item.previous_item_id.as_deref() else {
+            continue;
+        };
+        if previous_item_id == item_id {
+            no_self_predecessor_references = false;
+        }
+        let Some(previous) = state.items.get(previous_item_id) else {
+            if item.materialized {
+                all_materialized_predecessor_references_exist = false;
+                all_materialized_items_have_materialized_ancestry = false;
+            }
+            continue;
+        };
+        if let Some(degree) = indegree.get_mut(item_id.as_str()) {
+            *degree = 1;
+        }
+        children
+            .entry(previous_item_id)
+            .or_default()
+            .push(item_id.as_str());
+        // Immediate predecessor materialization is sufficient for the
+        // transitive property because every materialized predecessor is
+        // subject to the same observation.
+        if item.materialized && !previous.materialized {
+            all_materialized_items_have_materialized_ancestry = false;
+        }
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(item_id, degree)| (*degree == 0).then_some(*item_id))
+        .collect::<VecDeque<_>>();
+    let mut visited = 0_usize;
+    while let Some(item_id) = ready.pop_front() {
+        visited = visited.saturating_add(1);
+        if let Some(item_children) = children.get(item_id) {
+            for child in item_children {
+                if let Some(degree) = indegree.get_mut(child) {
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        ready.push_back(child);
+                    }
+                }
+            }
+        }
+    }
+
+    RealtimeTranscriptCausalGraphObservations {
+        all_materialized_predecessor_references_exist,
+        no_self_predecessor_references,
+        acyclic: visited == state.items.len(),
+        all_materialized_items_have_materialized_ancestry,
+    }
+}
+
+fn realtime_user_content_identity_keys_match(state: &SessionRealtimeTranscriptState) -> bool {
+    state
+        .user_content_identities
+        .iter()
+        .all(|(key, identity)| key == &identity.idempotency_key)
+}
+
+fn realtime_user_content_identity_fields_valid(state: &SessionRealtimeTranscriptState) -> bool {
+    state.user_content_identities.values().all(|identity| {
+        crate::live_adapter::live_image_idempotency_key_is_valid(&identity.idempotency_key)
+            && !identity.item_id.trim().is_empty()
+            && identity
+                .previous_item_id
+                .as_ref()
+                .is_none_or(|previous| !previous.trim().is_empty())
+            && identity.blob_id.is_canonical_sha256()
+            && canonical_supported_image_media_type(&identity.media_type)
+    })
+}
+
+fn realtime_user_content_identity_item_ids_unique(state: &SessionRealtimeTranscriptState) -> bool {
+    let item_ids = state
+        .user_content_identities
+        .values()
+        .map(|identity| identity.item_id.as_str())
+        .collect::<BTreeSet<_>>();
+    item_ids.len() == state.user_content_identities.len()
+}
+
+fn realtime_user_content_identities_reference_materialized_user_items(
+    state: &SessionRealtimeTranscriptState,
+) -> bool {
+    state.user_content_identities.values().all(|identity| {
+        state.items.get(&identity.item_id).is_some_and(|item| {
+            let expected_content = vec![ContentBlock::Image {
+                media_type: identity.media_type.clone(),
+                data: crate::types::ImageData::Blob {
+                    blob_id: identity.blob_id.clone(),
+                },
+            }];
+            let fingerprint_matches =
+                user_content_fingerprint(&expected_content).is_ok_and(|expected| {
+                    item.user_content_segment_fingerprints
+                        .get(&identity.content_index)
+                        == Some(&expected)
+                });
+            item.role == RealtimeTranscriptRole::User
+                && item.materialized
+                && item.previous_item_id == identity.previous_item_id
+                && realtime_predecessor_materialized(state, identity.previous_item_id.as_deref())
+                && fingerprint_matches
+        })
+    })
+}
+
+fn realtime_user_content_tombstones_valid(state: &SessionRealtimeTranscriptState) -> bool {
+    state.user_content_tombstones.iter().all(|tombstone| {
+        crate::live_adapter::live_image_idempotency_key_is_valid(&tombstone.idempotency_key)
+    })
+}
+
+fn realtime_user_content_identities_and_tombstones_disjoint(
+    state: &SessionRealtimeTranscriptState,
+) -> bool {
+    state.user_content_tombstones.iter().all(|tombstone| {
+        !state
+            .user_content_identities
+            .contains_key(&tombstone.idempotency_key)
+    })
+}
+
+fn canonical_supported_image_media_type(media_type: &str) -> bool {
+    matches!(media_type, "image/png" | "image/jpeg")
+        && crate::image_generation::MediaType::canonical_str(media_type) == media_type
+}
+
+fn realtime_pending_user_content_blob_value_fields_valid(
+    pending: &PendingRealtimeUserContentBlob,
+) -> bool {
+    crate::live_adapter::live_image_idempotency_key_is_valid(&pending.idempotency_key)
+        && !pending.item_id.trim().is_empty()
+        && pending
+            .previous_item_id
+            .as_ref()
+            .is_none_or(|previous| !previous.trim().is_empty())
+        && pending.blob_id.is_canonical_sha256()
+        && canonical_supported_image_media_type(&pending.media_type)
+}
+
+fn realtime_pending_user_content_blob_fields_valid(state: &SessionRealtimeTranscriptState) -> bool {
+    state
+        .pending_user_content_blob
+        .as_ref()
+        .is_none_or(realtime_pending_user_content_blob_value_fields_valid)
+}
+
+fn realtime_pending_user_content_blob_is_uncommitted(
+    state: &SessionRealtimeTranscriptState,
+) -> bool {
+    state
+        .pending_user_content_blob
+        .as_ref()
+        .is_none_or(|pending| {
+            realtime_pending_user_content_blob_value_is_uncommitted(state, pending)
+        })
+}
+
+fn realtime_pending_user_content_blob_value_is_uncommitted(
+    state: &SessionRealtimeTranscriptState,
+    pending: &PendingRealtimeUserContentBlob,
+) -> bool {
+    !state
+        .user_content_identities
+        .contains_key(&pending.idempotency_key)
+        && !state
+            .user_content_tombstones
+            .iter()
+            .any(|tombstone| tombstone.idempotency_key == pending.idempotency_key)
+        && !state.items.contains_key(&pending.item_id)
+        && realtime_predecessor_materialized(state, pending.previous_item_id.as_deref())
 }
 
 fn realtime_transcript_delta_ids_valid(state: &SessionRealtimeTranscriptState) -> bool {

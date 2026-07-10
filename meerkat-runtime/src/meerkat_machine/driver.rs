@@ -753,6 +753,23 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) async fn persist_current_machine_lifecycle_with_supervisor_authority(
+        &mut self,
+        context: &str,
+        supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(()),
+            DriverEntry::Persistent(d) => {
+                d.persist_current_machine_lifecycle_with_supervisor_authority(
+                    context,
+                    supervisor_authority,
+                )
+                .await
+            }
+        }
+    }
+
     pub(crate) fn control_projection_handle(
         &self,
     ) -> Arc<std::sync::RwLock<crate::driver::ephemeral::RuntimeControlProjection>> {
@@ -2421,6 +2438,7 @@ pub(crate) async fn machine_recover_persistent_driver(
             binding
                 .runtime_epoch_id()
                 .map(crate::meerkat_machine::dsl::RuntimeEpochId::from),
+            snapshot.supervisor_authority().clone(),
         )?;
     }
 

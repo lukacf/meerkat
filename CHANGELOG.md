@@ -13,6 +13,101 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_contracts::RealtimeInputKind` gained the exhaustive `Image`
+  variant and `meerkat_contracts::RealtimeInputChunk` gained the exhaustive
+  `ImageChunk(RealtimeImageChunk)` variant. Downstream Rust matches over
+  either enum must handle image input; generated SDK unions now include the
+  corresponding `"image"` and `"image_chunk"` cases.
+- Live image construction now requires a caller-stable `idempotency_key` on
+  `meerkat_core::LiveInputChunk::Image`,
+  `meerkat_contracts::LiveInputChunkWire::Image`, and
+  `meerkat_contracts::RealtimeImageChunk`. Rust struct/variant literals must
+  provide it. Python signatures are now
+  `live_send_input_image(channel_id, idempotency_key, mime, data_base64)` and
+  `LiveChannel.send_input_image(idempotency_key, mime, data_base64)`;
+  TypeScript signatures are now
+  `liveSendInputImage(channelId, idempotencyKey, mime, dataBase64)` and
+  `LiveChannel.sendInputImage(idempotencyKey, mime, dataBase64)`.
+- `meerkat_core::RealtimeTranscriptEvent` gained the exhaustive
+  `UserContentFinal` variant. Provider/session integrations that match the
+  internal event stream must handle canonical non-text user content. The
+  public wire transcript union deliberately omits this byte-bearing command.
+- `meerkat_core::RealtimeTranscriptApplyOutcome` gained the public
+  `user_content` field, so downstream struct literals must initialize it.
+  `meerkat_live::LiveProjectionSink::append_realtime_transcript` now returns
+  `Result<RealtimeTranscriptApplyOutcome, LiveProjectionError>` instead of
+  `Result<(), LiveProjectionError>` so the host can synthesize the redacted
+  receipt only after durable reducer application.
+- `meerkat_core::BlobStoreError` gained the exhaustive `InvalidId`,
+  `ReadLimitExceeded { blob_id, max_encoded_bytes, actual_encoded_bytes }`,
+  and `Corrupt { blob_id, detail }` variants. Downstream matches must handle
+  canonical-ID, bounded-read, and integrity rejection. The new
+  `BlobStore::get_with_encoded_limit` method has a default implementation, so
+  external stores remain source-compatible but should override it to reject
+  before materializing an oversized payload.
+- `RealtimeSessionFactory::attach_external_session` now takes
+  `(&RealtimeExternalSessionTarget, &RealtimeSessionOpenConfig)` instead of
+  separate identity and turning-mode arguments. `RealtimeSessionOpenConfig`
+  struct literals must also initialize `user_content_identities`,
+  `user_content_tombstones`, and `transcript_rewrite_generation`.
+- `meerkat_core::LiveProjectionSnapshot` struct literals must initialize the
+  new `user_content_identities`, `user_content_tombstones`, and
+  `transcript_rewrite_generation` fields used by exact-retry and live rewrite
+  guards.
+- `WireLiveAdapterObservation::RealtimeTranscript.event` now uses the
+  public-safe `WireRealtimeTranscriptEvent` Rust type instead of the internal
+  `RealtimeTranscriptEvent`. Its serialized/schema shape preserves the public
+  transcript variants, while internal byte-bearing user content is no longer
+  representable on the public observation type.
+- Generated SessionDocument public alphabets gained the realtime user-content
+  identity lane: core `SessionDocumentInput` and `SessionDocumentEffect`, and
+  kernel `Input`, `InputKind`, `Effect`, `EffectKind`, and `TransitionId`, all
+  have new exhaustive variants. `RestoreRealtimeTranscriptState` input
+  construction and `SessionDocumentMachineAuthority::restore_realtime_transcript_state`
+  also require the four new user-content identity invariant booleans.
+- Mob retirement now has an explicit durable start boundary. The exhaustive
+  `MobEventKind` gained `MemberRetirementStarted`; generated
+  `MobLifecycleJournalKind` gained the releasing, binding-preserving, and
+  peer-only start variants; `RecoverRosterMemberRetirementStarted` now carries
+  `generation`; and `ObserveMemberRetirementArchived` now carries `generation`
+  plus `session_id`. The obsolete unjournaled `RetireMember` signal was removed;
+  callers must use the canonical journaled `Retire` input.
+- Generated MobMachine public alphabets gained typed runtime-consumer refusal
+  closure: `ResolveRuntimeBindingRefusal`, `ResolveRuntimeIngressRefusal`, and
+  `ResolveRuntimeRetireRefusal` inputs plus their corresponding classified
+  effects. Downstream exhaustive matches over generated MobMachine input,
+  effect, transition, or kernel kinds must handle these variants.
+- `meerkat_rpc::TransportError` gained the exhaustive `FrameTooLarge`,
+  `FrameAdmissionBackpressured`, `FrameProgressTimeout`, and `WriteTimeout`
+  variants. JSONL framing, incremental process memory, minimum read progress,
+  and outbound write lifetime are now explicitly bounded.
+- `meerkat_rpc::RpcNotification::params` now uses `Box<serde_json::value::RawValue>`
+  instead of `serde_json::Value`, and `RpcResponse` / `RpcNotification` now
+  carry private process-admission ownership. Downstream Rust code must use
+  `RpcResponse::{success,error,error_with_data}` and `RpcNotification::new`
+  instead of struct literals; `RpcNotification::new` now returns
+  `Result<RpcNotification, RpcOutboundAdmissionError>` so admission failure is
+  explicit and cannot fabricate an unmetered fallback. Notification consumers can call
+  `RpcNotification::params_value()` when an owned `Value` is required. This
+  clean break prevents queued notifications and responses from retaining
+  unmetered expanded JSON trees.
+- The generated RPC/SDK `Schedule` response contract now matches the canonical
+  flattened wire object: `ScheduleConfig` fields such as
+  `planning_horizon_days`, `created_at_utc`, and `labels` live at the top
+  level instead of under `config`. Public REST/RPC responses no longer expose
+  private persisted `machine_state`. In Rust,
+  `meerkat_contracts::ScheduleListResult.schedules` is now
+  `Vec<meerkat_contracts::wire::Schedule>`,
+  `ScheduleOccurrencesResult.occurrences` is now
+  `Vec<meerkat_contracts::wire::Occurrence>`, and the REST
+  `ScheduleListResponse` / `ScheduleOccurrencesResponse` types are aliases to
+  those canonical wire results. Python and TypeScript schedule wrappers now
+  reject malformed required fields, missing result arrays, and non-object
+  top-level results as typed `INVALID_RESPONSE` failures instead of
+  synthesizing empty/default records.
+
 ### Added
 
 - Image input on the OpenAI Realtime live channel: `gpt-realtime-2` accepts
@@ -25,11 +120,96 @@ via cargo-semver-checks against the published baselines).
   projection's new `RealtimeInputKind::Image` follow the bound model's
   catalog `vision` fact, so clients feature-detect instead of
   try-and-catch; non-vision realtime bindings keep the documented scoped
-  `image_input_not_implemented` rejection (channel survives), and non-image
-  MIME types reject typed before any provider send. New wire vocabulary:
-  `RealtimeImageChunk` + `RealtimeInputChunk::ImageChunk`. Covered by a new
-  live smoke scenario (91): stage a red PNG over the live WebSocket, ask
-  for the dominant color, require the model to name it.
+  `image_input_not_implemented` rejection (channel survives). OpenAI image
+  input accepts PNG and JPEG up to Meerkat's 20 MiB decoded safety
+  ceiling, verifies that bytes match the declared MIME type, byte-budgets
+  the adapter queue, and redacts image data from diagnostics. Image submissions
+  require a non-empty session-scoped idempotency key of at most 128 bytes.
+  Exact same-key/content retries do not resend provider input and reproduce the
+  existing durable receipt; changed content fails closed as
+  `image_input_idempotency_conflict`, and an image behind staged text/audio is
+  rejected as `image_input_requires_commit`. Accepted images materialize in
+  canonical history, persist through the blob store, and are hydrated for
+  reconnect replay under a 40 MiB aggregate decoded-image ceiling (repeated
+  blob references count per occurrence); hydration also re-verifies the
+  content-addressed identity before sending bytes back to the provider.
+  Clients receive a byte-free
+  `user_content_committed` ordering receipt carrying the idempotency key after
+  persistence. `live/send_input` success remains queue acceptance; later
+  scoped failures arrive as `command_rejected`, and only the receipt is the
+  durable-success barrier. New wire vocabulary:
+  `RealtimeImageChunk` + `RealtimeInputChunk::ImageChunk`.
+  Smoke scenario 91 now verifies the selected image in canonical history,
+  reopens the channel, and identifies it without resending it.
+- The non-exhaustive `meerkat_live::LiveInputChunkDecodeError` gained
+  `ImageEncodedTooLarge`, `ImageDecodedTooLarge`, and `ImageMimeTooLong`
+  variants so callers can distinguish bounded image-ingress failures.
+- Added `meerkat_core::image_content::RealtimeUserImageHydrationError` with
+  typed blob-store, cumulative-budget, invalid-base64, and content-address
+  mismatch failures. Realtime reconnect rejects a blob response whose returned
+  identity or hydrated content does not match the durable image reference.
+- Live image overload and transport routing are explicit scoped rejections:
+  `image_input_backpressured` bounds queued/pending bytes, while WebRTC data
+  channels return `image_input_transport_unsupported` and direct callers to
+  JSON-RPC `live/send_input` for the image control plane.
+- Direct live WebSocket ingress now has a 2 MiB aggregate/per-frame ceiling
+  for text and negotiated raw PCM audio. Each of the 32 advertised upgraded
+  connections reserves one full raw codec message before upgrade; listener
+  sockets and partial HTTP headers have separate process-wide count, size,
+  and deadline bounds, and token authority must resolve within 10 seconds.
+  Inline images are not a direct-WebSocket input and must use the 64
+  MiB-bounded JSON-RPC `live/send_input` control plane.
+
+### Fixed
+
+- Direct `RealtimeSession` image submissions now acquire the same process-wide
+  conservative image-memory admission used by `OpenAiLiveAdapter`. The permit
+  is acquired before base64 decode/provider send and remains attached through
+  provider ACK and canonical-event completion; adapter-originated submissions
+  transfer their existing permit without double charging.
+- `live/open` now reserves the full cold image-hydration and provider-seed
+  amplification window process-wide. Concurrent tiny opens fail fast under
+  admission instead of multiplying decoded images and provider projections in
+  memory.
+- Realtime cold-open now reconciles any durable pending image anchor before
+  constructing provider seed history. A verified post-ACK/post-put anchor is
+  committed and hydrated into the reopened provider session; an invalid
+  anchor is cleared, and inconclusive verification fails the open closed.
+  Recovery can no longer defer the old anchor until a different new image ACK
+  and thereby claim canonical content that the reconstructed provider never
+  saw.
+- Member retirement is now crash-safe across routed-runtime refusal, archive
+  failure, and final-event append failure. A durable generation-bound start
+  event retains the roster and exact pending session, cold replay restores the
+  Retiring authority (including stopped-era and duplicate replay), and
+  `MemberRetired` publishes only after routed retirement and critical cleanup.
+- Routed Mob runtime refusals now close through generated, effect-specific
+  feedback instead of collapsing binding, ingress, and retirement failures into
+  one restore terminal. Binding refusal degrades only the owning member,
+  ingress refusal rejects only the addressed work item, and retirement refusal
+  remains retryable without discarding unrelated queued effects.
+- Re-archiving an Archived session after a process restart now observes durable
+  runtime lifecycle residue instead of relying only on the empty in-memory
+  registry. Non-terminal residue converges to Retired, while terminal Destroyed
+  state is correctly treated as quiescent rather than retried through an
+  impossible Retire transition.
+- The embedded `mob-communication` declaration and body are now owned by
+  `meerkat-comms`, alongside the capability and tools whose operating policy
+  they describe. The facade's `skills` feature mechanically links that owner
+  even when the `comms` tool surface is disabled, preserving durable builtin
+  `SkillKey` resolution across binaries without making the facade a semantic
+  skill author.
+- Create-session model resolution is now one typed facade policy shared by CLI,
+  RPC, REST, and MCP. Explicit model/provider intent, inherited auth-binding
+  defaults, configured global/per-provider defaults, and catalog fallback use
+  one precedence ladder; malformed or provider-mismatched bindings fail closed
+  and retain owner-stamped realm provenance. Nonempty `agent.model` values are
+  preserved verbatim, including supported `claude-opus-4-7` pins, instead of
+  being reinterpreted through a frozen legacy-default list. Malformed
+  server-owned registry, binding, or default configuration is reported as a
+  REST configuration error and an RPC/MCP internal error; caller-owned
+  model/provider mistakes and unknown named realms or bindings remain request
+  or invalid-params errors.
 
 ## [0.7.26] - 2026-07-09
 

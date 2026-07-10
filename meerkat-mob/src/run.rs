@@ -390,6 +390,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::WireMembers { .. }
             | mob_dsl::MobMachineInput::WireMembersWithTrust { .. }
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
+            | mob_dsl::MobMachineInput::CleanupRetiringMemberWiring { .. }
+            | mob_dsl::MobMachineInput::RestoreRetiringMemberWiring { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberPeerRebind { .. }
@@ -398,10 +400,15 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanupObserved { .. }
+            | mob_dsl::MobMachineInput::AuthorizeRetiringMemberTrustCleanupObserved { .. }
             | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::CleanupRetiringExternalPeer { .. }
+            | mob_dsl::MobMachineInput::RestoreRetiringExternalPeer { .. }
+            | mob_dsl::MobMachineInput::CleanupRetiringExternalPeerObservedAbsent { .. }
+            | mob_dsl::MobMachineInput::RestoreRetiringExternalPeerObservedAbsent { .. }
+            | mob_dsl::MobMachineInput::AdmitSupervisorRotation
             | mob_dsl::MobMachineInput::ProvisionSupervisorAuthority { .. }
-            | mob_dsl::MobMachineInput::ClearSupervisorPendingRotation { .. }
             | mob_dsl::MobMachineInput::RecordSupervisorPendingRotation { .. }
             | mob_dsl::MobMachineInput::CommitSupervisorRotation { .. }
             | mob_dsl::MobMachineInput::ClearSupervisorAuthorityForDestroy { .. }
@@ -411,6 +418,12 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::RollbackPendingRecipientTrust { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
+            | mob_dsl::MobMachineInput::ResolveRuntimeBindingRefusal { .. }
+            | mob_dsl::MobMachineInput::ResolveRuntimeIngressRefusal { .. }
+            | mob_dsl::MobMachineInput::ResolveRuntimeRetireRefusal { .. }
+            | mob_dsl::MobMachineInput::RetryRuntimeRetire { .. }
+            | mob_dsl::MobMachineInput::RecordRemoteMemberRuntimeRetired { .. }
+            | mob_dsl::MobMachineInput::RecordRemoteMemberSupervisorRevoked { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
             | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }
@@ -1579,6 +1592,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::WireMembers { .. }
             | mob_dsl::MobMachineInput::WireMembersWithTrust { .. }
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
+            | mob_dsl::MobMachineInput::CleanupRetiringMemberWiring { .. }
+            | mob_dsl::MobMachineInput::RestoreRetiringMemberWiring { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberPeerRebind { .. }
@@ -1587,10 +1602,15 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanupObserved { .. }
+            | mob_dsl::MobMachineInput::AuthorizeRetiringMemberTrustCleanupObserved { .. }
             | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::CleanupRetiringExternalPeer { .. }
+            | mob_dsl::MobMachineInput::RestoreRetiringExternalPeer { .. }
+            | mob_dsl::MobMachineInput::CleanupRetiringExternalPeerObservedAbsent { .. }
+            | mob_dsl::MobMachineInput::RestoreRetiringExternalPeerObservedAbsent { .. }
+            | mob_dsl::MobMachineInput::AdmitSupervisorRotation
             | mob_dsl::MobMachineInput::ProvisionSupervisorAuthority { .. }
-            | mob_dsl::MobMachineInput::ClearSupervisorPendingRotation { .. }
             | mob_dsl::MobMachineInput::RecordSupervisorPendingRotation { .. }
             | mob_dsl::MobMachineInput::CommitSupervisorRotation { .. }
             | mob_dsl::MobMachineInput::ClearSupervisorAuthorityForDestroy { .. }
@@ -1600,6 +1620,12 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RollbackPendingRecipientTrust { .. }
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::ResolveSubmitWorkRejection { .. }
+            | mob_dsl::MobMachineInput::ResolveRuntimeBindingRefusal { .. }
+            | mob_dsl::MobMachineInput::ResolveRuntimeIngressRefusal { .. }
+            | mob_dsl::MobMachineInput::ResolveRuntimeRetireRefusal { .. }
+            | mob_dsl::MobMachineInput::RetryRuntimeRetire { .. }
+            | mob_dsl::MobMachineInput::RecordRemoteMemberRuntimeRetired { .. }
+            | mob_dsl::MobMachineInput::RecordRemoteMemberSupervisorRevoked { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
             | mob_dsl::MobMachineInput::ResolveCancelAllWorkRejection { .. }

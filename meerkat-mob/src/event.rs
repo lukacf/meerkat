@@ -296,6 +296,52 @@ pub enum MobEventKind {
     /// the difference is intentional and regression-pinned by
     /// `member_spawned_public_wire_shape_excludes_bridge_member_ref`.
     MemberSpawned(MemberSpawnedEvent),
+    /// Retirement was admitted but has not completed its routed runtime and
+    /// critical archival work yet.
+    ///
+    /// This durable retry anchor deliberately does not remove the member from
+    /// the roster projection. Replay restores the MobMachine `Retiring` marker
+    /// and exact session correlation; only a later [`Self::MemberRetired`]
+    /// event closes membership.
+    MemberRetirementStarted {
+        /// Stable member identity.
+        agent_identity: AgentIdentity,
+        /// Composite runtime identity for this generation.
+        agent_runtime_id: AgentRuntimeId,
+        /// Generation whose retirement is in flight.
+        generation: Generation,
+        /// Profile name of the retiring member.
+        role: ProfileName,
+        /// Session binding released by the retirement, when applicable.
+        releasing: Option<SessionId>,
+        /// Session targeted by the routed runtime-retire request.
+        session_id: Option<SessionId>,
+        /// Exact comms endpoint for the retiring runtime, retained until the
+        /// terminal `MemberRetired` event. Cold cleanup uses this descriptor
+        /// to remove reciprocal trust without reviving or re-identifying the
+        /// retired runtime. Older journals may omit it.
+        #[serde(skip, default)]
+        retiring_peer_endpoint: Option<TrustedPeerDescriptor>,
+    },
+    /// A peer-only member runtime has acknowledged retirement, while
+    /// supervisor revocation and terminal member archival are still pending.
+    /// This exact runtime-scoped checkpoint makes the sequence crash-safe: a
+    /// retry revokes directly instead of re-authorizing or re-retiring it.
+    RemoteMemberRuntimeRetired {
+        agent_identity: AgentIdentity,
+        agent_runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        generation: Generation,
+    },
+    /// A peer-only member's exact supervisor binding has acknowledged
+    /// revocation. Once durable, cleanup retries never contact the remote
+    /// runtime again; they finish local trust removal and terminal archival.
+    RemoteMemberSupervisorRevoked {
+        agent_identity: AgentIdentity,
+        agent_runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        generation: Generation,
+    },
     /// A member was retired.
     ///
     /// Identity-native replacement for `MeerkatRetired`.
@@ -657,6 +703,34 @@ impl MobEventKind {
             _ => None,
         }
     }
+
+    pub(crate) fn retiring_peer_endpoint(&self) -> Option<&TrustedPeerDescriptor> {
+        match self {
+            Self::MemberRetirementStarted {
+                retiring_peer_endpoint,
+                ..
+            } => retiring_peer_endpoint.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_retiring_peer_endpoint(
+        &mut self,
+        endpoint: TrustedPeerDescriptor,
+    ) -> Result<(), serde_json::Error> {
+        match self {
+            Self::MemberRetirementStarted {
+                retiring_peer_endpoint,
+                ..
+            } => {
+                *retiring_peer_endpoint = Some(endpoint);
+                Ok(())
+            }
+            _ => Err(stored_mob_event_format_error(
+                "stored retiring_peer_endpoint belongs only to MemberRetirementStarted",
+            )),
+        }
+    }
 }
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
@@ -680,6 +754,14 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert(
             "bridge_session_id".to_string(),
             serde_json::to_value(bridge_session_id)?,
+        );
+    }
+    if let Some(retiring_peer_endpoint) = event.kind.retiring_peer_endpoint()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "retiring_peer_endpoint".to_string(),
+            serde_json::to_value(retiring_peer_endpoint)?,
         );
     }
     serde_json::to_vec(&serde_json::json!({
@@ -731,6 +813,18 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         })
         .map(serde_json::from_value)
         .transpose()?;
+    let retiring_peer_endpoint = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_retirement_started") {
+                kind.remove("retiring_peer_endpoint")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -741,6 +835,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(recovered) = event.kind.member_session_binding_recovered_mut()
     {
         recovered.bridge_session_id = Some(bridge_session_id);
+    }
+    if let Some(retiring_peer_endpoint) = retiring_peer_endpoint {
+        event
+            .kind
+            .set_retiring_peer_endpoint(retiring_peer_endpoint)?;
     }
     Ok(event)
 }
@@ -1418,6 +1517,88 @@ mod tests {
             result.is_err(),
             "member_spawned without runtime_mode must be rejected"
         );
+    }
+
+    #[test]
+    fn test_member_retirement_started_roundtrip() {
+        let session_id = SessionId::from_uuid(Uuid::nil());
+        let pubkey = [7; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let event = MobEventKind::MemberRetirementStarted {
+            agent_identity: AgentIdentity::from("researcher"),
+            agent_runtime_id: AgentRuntimeId::new(
+                AgentIdentity::from("researcher"),
+                Generation::new(2),
+            ),
+            generation: Generation::new(2),
+            role: ProfileName::from("worker"),
+            releasing: Some(session_id.clone()),
+            session_id: Some(session_id),
+            retiring_peer_endpoint: Some(
+                TrustedPeerDescriptor::unsigned_with_pubkey(
+                    "researcher",
+                    peer_id.to_string(),
+                    pubkey,
+                    "inproc://researcher",
+                )
+                .expect("retiring peer endpoint"),
+            ),
+        };
+        let public_value = serde_json::to_value(&event).expect("serialize retirement-start event");
+        let public_json = serde_json::to_string(&public_value).expect("render retirement-start");
+        assert!(
+            !public_json.contains("retiring_peer_endpoint")
+                && !public_json.contains(&peer_id.to_string()),
+            "public retirement event must not expose the durable peer endpoint: {public_json}"
+        );
+        let decoded: MobEventKind =
+            serde_json::from_value(public_value).expect("public retirement-start event");
+        assert!(matches!(
+            decoded,
+            MobEventKind::MemberRetirementStarted {
+                retiring_peer_endpoint: None,
+                ..
+            }
+        ));
+
+        let stored = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: event,
+        };
+        let encoded = encode_stored_mob_event(&stored).expect("encode stored retirement-start");
+        let decoded =
+            decode_stored_mob_event(&encoded).expect("decode stored retirement-start endpoint");
+        assert!(matches!(
+            decoded.kind,
+            MobEventKind::MemberRetirementStarted {
+                retiring_peer_endpoint: Some(endpoint),
+                ..
+            } if endpoint.peer_id == peer_id
+        ));
+    }
+
+    #[test]
+    fn test_remote_member_runtime_retired_roundtrip() {
+        let agent_identity = AgentIdentity::from("remote-worker");
+        roundtrip(&MobEventKind::RemoteMemberRuntimeRetired {
+            agent_runtime_id: AgentRuntimeId::new(agent_identity.clone(), Generation::new(3)),
+            agent_identity,
+            fence_token: FenceToken::new(8),
+            generation: Generation::new(3),
+        });
+    }
+
+    #[test]
+    fn test_remote_member_supervisor_revoked_roundtrip() {
+        let agent_identity = AgentIdentity::from("remote-worker");
+        roundtrip(&MobEventKind::RemoteMemberSupervisorRevoked {
+            agent_runtime_id: AgentRuntimeId::new(agent_identity.clone(), Generation::new(3)),
+            agent_identity,
+            fence_token: FenceToken::new(8),
+            generation: Generation::new(3),
+        });
     }
 
     #[test]

@@ -7065,12 +7065,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -7100,7 +7100,8 @@
           "supported_protocol_versions": {
             "default": [
               2,
-              3
+              3,
+              4
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -7170,12 +7171,12 @@
     "properties": {
       "current_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
-        "default": 3,
+        "default": 4,
         "description": "Protocol version implemented by the responding member runtime."
       },
       "default_protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion",
-        "default": 3,
+        "default": 4,
         "description": "Protocol version new supervisors should use for fresh authority records."
       },
       "deliver_member_input": {
@@ -7205,7 +7206,8 @@
       "supported_protocol_versions": {
         "default": [
           2,
-          3
+          3,
+          4
         ],
         "description": "Protocol versions accepted by the responding member runtime.",
         "items": {
@@ -7571,6 +7573,10 @@
       },
       "SourceUuid": {
         "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
         "type": "string"
       }
     },
@@ -7983,6 +7989,38 @@
           "command",
           "supervisor",
           "epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Request to observe a previously submitted supervisor rotation.\n\nThe observer identity and epoch are explicit proof inputs that the member\nvalidates against the authenticated request sender and its current or\npending authority state.",
+        "properties": {
+          "command": {
+            "const": "observe_supervisor_rotation",
+            "type": "string"
+          },
+          "observer": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "observer_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          }
+        },
+        "required": [
+          "command",
+          "operation_id",
+          "observer",
+          "observer_epoch",
           "protocol_version"
         ],
         "type": "object"
@@ -9359,12 +9397,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -9394,7 +9432,8 @@
           "supported_protocol_versions": {
             "default": [
               2,
-              3
+              3,
+              4
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -9568,6 +9607,73 @@
         ],
         "type": "string"
       },
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
       "BridgeProtocolVersion": {
         "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
         "format": "uint32",
@@ -9633,6 +9739,148 @@
             "type": "string"
           }
         ]
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationPendingPhase": {
+        "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+        "enum": [
+          "previous_revoke_pending",
+          "next_publish_pending"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionReceipt": {
+        "additionalProperties": false,
+        "description": "Durable receipt for a terminally rejected supervisor rotation.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeSupervisorRotationRejectionCause"
+          },
+          "operation": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "reason": {
+            "description": "Operator-facing diagnostic only; callers must not parse it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationState": {
+        "description": "Durable state of a known supervisor-rotation operation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "phase": {
+                "$ref": "#/$defs/BridgeSupervisorRotationPendingPhase"
+              },
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "operation",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationRejectionReceipt"
+              },
+              "status": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -9811,6 +10059,53 @@
         "type": "object"
       },
       {
+        "description": "Observation of a previously submitted supervisor-rotation operation.\nSubmission is one-way and never produces this reply directly.",
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "const": "found",
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/BridgeSupervisorRotationState"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "operation_id": {
+                "$ref": "#/$defs/SupervisorRotationOperationId"
+              },
+              "outcome": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "operation_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "properties": {
+          "result": {
+            "const": "supervisor_rotation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object"
+      },
+      {
         "additionalProperties": false,
         "properties": {
           "cause": {
@@ -9856,6 +10151,124 @@
     ],
     "title": "BridgeRetireResponse",
     "type": "object"
+  },
+  "BridgeSupervisorDelivery": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Closed one-way supervisor delivery envelope.\n\nThis marker is deliberately distinct from [`BridgeCommand`]. A member may\ndecode a peer-message body as this type to admit supervisor-owned one-way\ncontrol traffic without interpreting arbitrary user message JSON as a\nrequest/reply bridge command. Supervisor rotation submission is the only\nadmitted one-way delivery.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "One-way submission of a durable supervisor-rotation operation.\n\nAuthentication comes from the signed peer-message envelope. The payload\ntherefore carries only the stable operation identity and requested target;\nit does not smuggle a second sender claim into the command body.",
+        "properties": {
+          "delivery": {
+            "const": "submit_supervisor_rotation",
+            "type": "string"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "delivery",
+          "operation_id",
+          "target",
+          "target_epoch",
+          "protocol_version"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "BridgeSupervisorDelivery"
   },
   "BridgeSupervisorPayload": {
     "$defs": {
@@ -9957,6 +10370,1057 @@
     "title": "BridgeSupervisorPayload",
     "type": "object"
   },
+  "BridgeSupervisorRotationObservation": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationPendingPhase": {
+        "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+        "enum": [
+          "previous_revoke_pending",
+          "next_publish_pending"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionReceipt": {
+        "additionalProperties": false,
+        "description": "Durable receipt for a terminally rejected supervisor rotation.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeSupervisorRotationRejectionCause"
+          },
+          "operation": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "reason": {
+            "description": "Operator-facing diagnostic only; callers must not parse it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationState": {
+        "description": "Durable state of a known supervisor-rotation operation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "phase": {
+                "$ref": "#/$defs/BridgeSupervisorRotationPendingPhase"
+              },
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "operation",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationRejectionReceipt"
+              },
+              "status": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Observation result for a supervisor-rotation operation.\n\n`NotFound` is an observation outcome, never a durable rejected state: an\nobserver may race the one-way submission before the member has committed\nit and can safely retry the observation.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "const": "found",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/BridgeSupervisorRotationState"
+          }
+        },
+        "required": [
+          "outcome",
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "outcome": {
+            "const": "not_found",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "operation_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "BridgeSupervisorRotationObservation"
+  },
+  "BridgeSupervisorRotationObserve": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request to observe a previously submitted supervisor rotation.\n\nThe observer identity and epoch are explicit proof inputs that the member\nvalidates against the authenticated request sender and its current or\npending authority state.",
+    "properties": {
+      "observer": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      },
+      "observer_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "operation_id": {
+        "$ref": "#/$defs/SupervisorRotationOperationId"
+      },
+      "protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion"
+      }
+    },
+    "required": [
+      "operation_id",
+      "observer",
+      "observer_epoch",
+      "protocol_version"
+    ],
+    "title": "BridgeSupervisorRotationObserve",
+    "type": "object"
+  },
+  "BridgeSupervisorRotationOperationReceipt": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+    "properties": {
+      "operation_id": {
+        "$ref": "#/$defs/SupervisorRotationOperationId"
+      },
+      "target": {
+        "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+      }
+    },
+    "required": [
+      "operation_id",
+      "target"
+    ],
+    "title": "BridgeSupervisorRotationOperationReceipt",
+    "type": "object"
+  },
+  "BridgeSupervisorRotationPendingPhase": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+    "enum": [
+      "previous_revoke_pending",
+      "next_publish_pending"
+    ],
+    "title": "BridgeSupervisorRotationPendingPhase",
+    "type": "string"
+  },
+  "BridgeSupervisorRotationRejectionCause": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+    "enum": [
+      "operation_conflict",
+      "invalid_target",
+      "stale_target_epoch",
+      "sender_mismatch",
+      "unsupported_protocol_version",
+      "internal"
+    ],
+    "title": "BridgeSupervisorRotationRejectionCause",
+    "type": "string"
+  },
+  "BridgeSupervisorRotationRejectionReceipt": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Durable receipt for a terminally rejected supervisor rotation.",
+    "properties": {
+      "cause": {
+        "$ref": "#/$defs/BridgeSupervisorRotationRejectionCause"
+      },
+      "operation": {
+        "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+      },
+      "reason": {
+        "description": "Operator-facing diagnostic only; callers must not parse it.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "operation",
+      "cause",
+      "reason"
+    ],
+    "title": "BridgeSupervisorRotationRejectionReceipt",
+    "type": "object"
+  },
+  "BridgeSupervisorRotationState": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationPendingPhase": {
+        "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+        "enum": [
+          "previous_revoke_pending",
+          "next_publish_pending"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionReceipt": {
+        "additionalProperties": false,
+        "description": "Durable receipt for a terminally rejected supervisor rotation.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeSupervisorRotationRejectionCause"
+          },
+          "operation": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "reason": {
+            "description": "Operator-facing diagnostic only; callers must not parse it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Durable state of a known supervisor-rotation operation.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "phase": {
+            "$ref": "#/$defs/BridgeSupervisorRotationPendingPhase"
+          },
+          "status": {
+            "const": "pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "operation",
+          "phase"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "status": {
+            "const": "completed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "$ref": "#/$defs/BridgeSupervisorRotationRejectionReceipt"
+          },
+          "status": {
+            "const": "rejected",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "receipt"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "BridgeSupervisorRotationState"
+  },
+  "BridgeSupervisorRotationSubmit": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      },
+      "BridgeProtocolVersion": {
+        "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One-way submission of a durable supervisor-rotation operation.\n\nAuthentication comes from the signed peer-message envelope. The payload\ntherefore carries only the stable operation identity and requested target;\nit does not smuggle a second sender claim into the command body.",
+    "properties": {
+      "operation_id": {
+        "$ref": "#/$defs/SupervisorRotationOperationId"
+      },
+      "protocol_version": {
+        "$ref": "#/$defs/BridgeProtocolVersion"
+      },
+      "target": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      },
+      "target_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "operation_id",
+      "target",
+      "target_epoch",
+      "protocol_version"
+    ],
+    "title": "BridgeSupervisorRotationSubmit",
+    "type": "object"
+  },
+  "BridgeSupervisorRotationTargetReceipt": {
+    "$defs": {
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Exact target identity committed to a supervisor-rotation operation.",
+    "properties": {
+      "target": {
+        "$ref": "#/$defs/BridgePeerSpec"
+      },
+      "target_epoch": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "target",
+      "target_epoch"
+    ],
+    "title": "BridgeSupervisorRotationTargetReceipt",
+    "type": "object"
+  },
   "CallbackToolDefinition": {
     "$defs": {
       "ToolName": {
@@ -10055,12 +11519,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -10090,7 +11554,8 @@
           "supported_protocol_versions": {
             "default": [
               2,
-              3
+              3,
+              4
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -10518,6 +11983,38 @@
               "command",
               "supervisor",
               "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Request to observe a previously submitted supervisor rotation.\n\nThe observer identity and epoch are explicit proof inputs that the member\nvalidates against the authenticated request sender and its current or\npending authority state.",
+            "properties": {
+              "command": {
+                "const": "observe_supervisor_rotation",
+                "type": "string"
+              },
+              "observer": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "observer_epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/SupervisorRotationOperationId"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              }
+            },
+            "required": [
+              "command",
+              "operation_id",
+              "observer",
+              "observer_epoch",
               "protocol_version"
             ],
             "type": "object"
@@ -11014,6 +12511,53 @@
             "type": "object"
           },
           {
+            "description": "Observation of a previously submitted supervisor-rotation operation.\nSubmission is one-way and never produces this reply directly.",
+            "oneOf": [
+              {
+                "properties": {
+                  "outcome": {
+                    "const": "found",
+                    "type": "string"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/BridgeSupervisorRotationState"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "state"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "operation_id": {
+                    "$ref": "#/$defs/SupervisorRotationOperationId"
+                  },
+                  "outcome": {
+                    "const": "not_found",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "operation_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "result": {
+                "const": "supervisor_rotation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "type": "object"
+          },
+          {
             "additionalProperties": false,
             "properties": {
               "cause": {
@@ -11035,6 +12579,144 @@
             "type": "object"
           }
         ]
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationPendingPhase": {
+        "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+        "enum": [
+          "previous_revoke_pending",
+          "next_publish_pending"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionReceipt": {
+        "additionalProperties": false,
+        "description": "Durable receipt for a terminally rejected supervisor rotation.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeSupervisorRotationRejectionCause"
+          },
+          "operation": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "reason": {
+            "description": "Operator-facing diagnostic only; callers must not parse it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationState": {
+        "description": "Durable state of a known supervisor-rotation operation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "phase": {
+                "$ref": "#/$defs/BridgeSupervisorRotationPendingPhase"
+              },
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "operation",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationRejectionReceipt"
+              },
+              "status": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
       },
       "CommsChecksumTokenParams": {
         "additionalProperties": false,
@@ -11463,6 +13145,10 @@
       },
       "SourceUuid": {
         "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
         "type": "string"
       }
     },
@@ -12278,6 +13964,38 @@
               "protocol_version"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Request to observe a previously submitted supervisor rotation.\n\nThe observer identity and epoch are explicit proof inputs that the member\nvalidates against the authenticated request sender and its current or\npending authority state.",
+            "properties": {
+              "command": {
+                "const": "observe_supervisor_rotation",
+                "type": "string"
+              },
+              "observer": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "observer_epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/SupervisorRotationOperationId"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              }
+            },
+            "required": [
+              "command",
+              "operation_id",
+              "observer",
+              "observer_epoch",
+              "protocol_version"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -12631,6 +14349,10 @@
       "SourceUuid": {
         "description": "Canonical source identifier.",
         "type": "string"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -12653,12 +14375,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -12688,7 +14410,8 @@
           "supported_protocol_versions": {
             "default": [
               2,
-              3
+              3,
+              4
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -12861,6 +14584,73 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "BridgePeerSpec": {
+        "additionalProperties": false,
+        "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "default": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "description": "Ed25519 signing public key bytes — required so the receiver can\nverify envelope signatures after trust registration. Serialized\nas a 32-element array; the JSON form is an array of numbers, not\na base64/hex string, to keep the wire deliberately boring.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
       },
       "BridgeProtocolVersion": {
         "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
@@ -13104,6 +14894,53 @@
             "type": "object"
           },
           {
+            "description": "Observation of a previously submitted supervisor-rotation operation.\nSubmission is one-way and never produces this reply directly.",
+            "oneOf": [
+              {
+                "properties": {
+                  "outcome": {
+                    "const": "found",
+                    "type": "string"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/BridgeSupervisorRotationState"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "state"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "operation_id": {
+                    "$ref": "#/$defs/SupervisorRotationOperationId"
+                  },
+                  "outcome": {
+                    "const": "not_found",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "operation_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "result": {
+                "const": "supervisor_rotation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "type": "object"
+          },
+          {
             "additionalProperties": false,
             "properties": {
               "cause": {
@@ -13125,6 +14962,144 @@
             "type": "object"
           }
         ]
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationPendingPhase": {
+        "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+        "enum": [
+          "previous_revoke_pending",
+          "next_publish_pending"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionReceipt": {
+        "additionalProperties": false,
+        "description": "Durable receipt for a terminally rejected supervisor rotation.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeSupervisorRotationRejectionCause"
+          },
+          "operation": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "reason": {
+            "description": "Operator-facing diagnostic only; callers must not parse it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationState": {
+        "description": "Durable state of a known supervisor-rotation operation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "phase": {
+                "$ref": "#/$defs/BridgeSupervisorRotationPendingPhase"
+              },
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "operation",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationRejectionReceipt"
+              },
+              "status": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
       },
       "CommsChecksumTokenResult": {
         "additionalProperties": false,
@@ -13152,6 +15127,10 @@
         "enum": [
           "checksum_token"
         ],
+        "type": "string"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
         "type": "string"
       }
     },
@@ -22246,6 +24225,10 @@
           "data": {
             "type": "string"
           },
+          "idempotency_key": {
+            "description": "Required caller-stable, session-scoped idempotency identity.",
+            "type": "string"
+          },
           "kind": {
             "const": "image",
             "type": "string"
@@ -22256,6 +24239,7 @@
         },
         "required": [
           "kind",
+          "idempotency_key",
           "mime",
           "data"
         ],
@@ -22399,7 +24383,7 @@
             "type": "boolean"
           },
           "image_in": {
-            "description": "Adapter accepts image input via `live/send_input` (e.g. future\n`gpt-realtime-2` image support). Today: `false` for OpenAI realtime.",
+            "description": "Adapter accepts image input via `live/send_input`. OpenAI advertises\nthis for vision-capable realtime bindings such as `gpt-realtime-2`.",
             "type": "boolean"
           },
           "provider_native_resume": {
@@ -22659,6 +24643,595 @@
     ],
     "title": "LiveRefreshStatus"
   },
+  "LiveSendInputErrorData": {
+    "$defs": {
+      "WireLiveAdapterErrorCode": {
+        "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterErrorCode`].\n\nInternally-tagged on `code` (snake_case). SDK consumers route on `code`\nto distinguish payload-less variants from typed payload variants\n(`config_rejected { reason }`, `other { raw }`). FIX-SDK-OBS: makes the\nR5-9 `CommandRejected` observation's typed code visible at the SDK\nboundary instead of a free-form blob.\n\nR5-2 (P2 dogma): `config_rejected.reason` is now a typed\n[`WireLiveConfigRejectionReason`] mirror so SDK consumers route on the\nvariant rather than parsing English from the previous free-form\n`String`.",
+        "oneOf": [
+          {
+            "properties": {
+              "code": {
+                "const": "connection_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "const": "connection_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "const": "config_rejected",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/WireLiveConfigRejectionReason"
+              }
+            },
+            "required": [
+              "code",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "const": "provider_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "const": "authentication_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "const": "internal_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "const": "other",
+                "type": "string"
+              },
+              "raw": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "raw"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveAdapterErrorCode`] enum is `#[non_exhaustive]`. When\na future error code lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing to `InternalError` — a \"plausible lie\" that\nwould attribute every future-variant failure to an internal-server\nbug and mask real provider/transport classification. SDK consumers\nroute on the `code: \"unknown\"` discriminator and treat it as an\nunrecognized error class — never as `InternalError`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "code": {
+                "const": "unknown",
+                "type": "string"
+              },
+              "debug": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireLiveConfigRejectionReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "auth_binding_changed": {
+                "type": "boolean"
+              },
+              "from_model": {
+                "type": "string"
+              },
+              "from_provider": {
+                "$ref": "#/$defs/WireProvider"
+              },
+              "kind": {
+                "const": "channel_identity_swap",
+                "type": "string"
+              },
+              "to_model": {
+                "type": "string"
+              },
+              "to_provider": {
+                "$ref": "#/$defs/WireProvider"
+              }
+            },
+            "required": [
+              "kind",
+              "from_model",
+              "from_provider",
+              "to_model",
+              "to_provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "non_realtime_resolution",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_not_implemented",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_unsupported_mime",
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mime_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_content_mismatch",
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mime_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The image payload's `data` field is not valid base64. This remains a\nscoped input rejection so clients can retry without reopening a live\nchannel.",
+            "properties": {
+              "kind": {
+                "const": "image_input_invalid_base64",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "image_input_too_large",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "image_input_idempotency_key_invalid",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_idempotency_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_history_budget_exceeded",
+                "type": "string"
+              },
+              "max_decoded_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_decoded_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_requires_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "input_too_large",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "input_backpressured",
+                "type": "string"
+              },
+              "max_pending_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_pending_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_backpressured",
+                "type": "string"
+              },
+              "max_pending_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_pending_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_transport_unsupported",
+                "type": "string"
+              },
+              "transport": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "transport"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "video_frame_input_not_implemented",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "unsupported_input_chunk_variant",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_model": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "refresh_model_swap",
+                "type": "string"
+              },
+              "to_model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "from_model",
+              "to_model"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_provider": {
+                "$ref": "#/$defs/WireProvider"
+              },
+              "kind": {
+                "const": "refresh_provider_swap",
+                "type": "string"
+              },
+              "to_provider": {
+                "$ref": "#/$defs/WireProvider"
+              }
+            },
+            "required": [
+              "kind",
+              "from_provider",
+              "to_provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "refresh_audio_config_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The refreshed canonical transcript changed an item identity or\ntombstone that the already-created provider session cannot retract.\nThe live channel must close and reopen instead of pretending the\nprovider's immutable context was rewritten in place.",
+            "properties": {
+              "kind": {
+                "const": "refresh_transcript_rewrite_requires_reopen",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R6-4 (P2): typed mirror of\n[`LiveConfigRejectionReason::AudioInputFormatMismatch`]. The\nbound provider session has a fixed input audio format (OpenAI\nRealtime: PCM 24 kHz mono); a `live/send_input` chunk that\ndeclares a divergent `sample_rate_hz` / `channels` is rejected\nat the adapter boundary BEFORE bytes hit the provider buffer.\nSDK consumers route on this typed discriminator to surface a\nprecise format-mismatch error rather than parsing English from\n`Other.detail`.",
+            "properties": {
+              "actual_channels": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "actual_sample_rate_hz": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_channels": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_sample_rate_hz": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "audio_input_format_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "expected_sample_rate_hz",
+              "expected_channels",
+              "actual_sample_rate_hz",
+              "actual_channels"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "other",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R6-5 (P3 dogma): explicit fail-loud variant for unknown core\nvariants.\n\nThe core [`LiveConfigRejectionReason`] enum is `#[non_exhaustive]`.\nWhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Other { detail:\n\"unknown_live_config_rejection_reason\" }` — a \"typed route becomes\ndetail string\" antipattern that forces SDK consumers to parse\nEnglish from `detail` to recover the missing route. SDK consumers\nroute on the `kind: \"unknown\"` discriminator and treat it as an\nunrecognized rejection reason — never as `Other`. The `debug`\npayload carries the `{:?}` projection of the source variant so\nserver logs name the real shape that needs to be promoted.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireProvider": {
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\n`WireProvider` pins each provider's canonical wire name with an explicit\n`#[serde(rename)]` (`\"openai\"`, `\"anthropic\"`, `\"gemini\"`, …). The core\n`Provider` enum now agrees (its `OpenAI` variant carries an explicit\n`#[serde(rename = \"openai\")]` so `rename_all = \"snake_case\"` can no longer\nmangle it into `\"open_a_i\"`); `WireProvider` exists as the dedicated wire\nmirror so SDK consumers get a stable, explicitly-named contract plus the\nfail-loud `Unknown` sentinel below, per the wire-mirror dogma used\nthroughout this module.",
+        "oneOf": [
+          {
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "self_hosted",
+              "other"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Fail-loud sentinel for future core variants. When a new\n`Provider` variant is added, add an explicit arm in the `From`\nimpl rather than letting it fall through to `Unknown`.\n\nUnlike other wire-mirror `Unknown` variants, this is a unit\nvariant because `WireProvider` serializes as a flat string value\n(not an internally-tagged object). The debug payload from the\nsource variant is captured in the `WireConversionError::Provider`\nerror on the reverse path (and logged server-side in the forward\n`From<Provider>` impl via `debug_assert!`).",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed JSON-RPC error data for scoped `live/send_input` rejections.\n\nThe channel remains usable; callers route on the structured adapter error\ncode instead of parsing the human-readable JSON-RPC error message.",
+    "properties": {
+      "error_code": {
+        "$ref": "#/$defs/WireLiveAdapterErrorCode"
+      }
+    },
+    "required": [
+      "error_code"
+    ],
+    "title": "LiveSendInputErrorData",
+    "type": "object"
+  },
   "LiveSendInputParams": {
     "$defs": {
       "LiveInputChunkWire": {
@@ -22714,6 +25287,10 @@
               "data": {
                 "type": "string"
               },
+              "idempotency_key": {
+                "description": "Required caller-stable, session-scoped idempotency identity.",
+                "type": "string"
+              },
               "kind": {
                 "const": "image",
                 "type": "string"
@@ -22724,6 +25301,7 @@
             },
             "required": [
               "kind",
+              "idempotency_key",
               "mime",
               "data"
             ],
@@ -30946,6 +33524,29 @@
     "title": "RealtimeCapabilities",
     "type": "object"
   },
+  "RealtimeImageChunk": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "An opaque still-image chunk for vision-capable realtime models.\n\n`mime_type` is the IANA type of the encoded bytes; supported formats are\nprovider-specific. The current OpenAI Realtime adapter accepts only\n`image/png` and `image/jpeg`. `data` is the base64-encoded image; the\nprovider seam renders it into the provider-native form (for OpenAI\nRealtime, an `input_image` content part carrying a data URL).",
+    "properties": {
+      "data": {
+        "type": "string"
+      },
+      "idempotency_key": {
+        "description": "Caller-stable, session-scoped idempotency identity.",
+        "type": "string"
+      },
+      "mime_type": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "idempotency_key",
+      "mime_type",
+      "data"
+    ],
+    "title": "RealtimeImageChunk",
+    "type": "object"
+  },
   "RealtimeInputChunk": {
     "$defs": {
       "RealtimeAudioChunk": {
@@ -30978,9 +33579,13 @@
         "type": "object"
       },
       "RealtimeImageChunk": {
-        "description": "An opaque still-image chunk for vision-capable realtime models.\n\n`mime_type` is the IANA type of the encoded bytes (`image/png`,\n`image/jpeg`, `image/webp`, …); `data` is the base64-encoded image —\nthe provider seam renders it into the provider-native form (OpenAI\nRealtime: an `input_image` content part carrying a data URL).",
+        "description": "An opaque still-image chunk for vision-capable realtime models.\n\n`mime_type` is the IANA type of the encoded bytes; supported formats are\nprovider-specific. The current OpenAI Realtime adapter accepts only\n`image/png` and `image/jpeg`. `data` is the base64-encoded image; the\nprovider seam renders it into the provider-native form (for OpenAI\nRealtime, an `input_image` content part carrying a data URL).",
         "properties": {
           "data": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Caller-stable, session-scoped idempotency identity.",
             "type": "string"
           },
           "mime_type": {
@@ -30988,6 +33593,7 @@
           }
         },
         "required": [
+          "idempotency_key",
           "mime_type",
           "data"
         ],
@@ -31124,6 +33730,360 @@
     ],
     "title": "RealtimeTextChunk",
     "type": "object"
+  },
+  "RealtimeTranscriptEvent": {
+    "$defs": {
+      "RealtimeTranscriptRole": {
+        "description": "Provider-neutral role for a realtime transcript item.",
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "type": "string"
+      },
+      "StopReason": {
+        "description": "Why the model stopped generating",
+        "oneOf": [
+          {
+            "const": "end_turn",
+            "description": "Model finished naturally",
+            "type": "string"
+          },
+          {
+            "const": "tool_use",
+            "description": "Model wants to call tools",
+            "type": "string"
+          },
+          {
+            "const": "max_tokens",
+            "description": "Hit max output tokens",
+            "type": "string"
+          },
+          {
+            "const": "stop_sequence",
+            "description": "Hit a stop sequence",
+            "type": "string"
+          },
+          {
+            "const": "content_filter",
+            "description": "Blocked by content filter",
+            "type": "string"
+          },
+          {
+            "const": "cancelled",
+            "description": "Request was cancelled",
+            "type": "string"
+          }
+        ]
+      },
+      "Usage": {
+        "description": "Token usage statistics",
+        "properties": {
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public-wire mirror of [`RealtimeTranscriptEvent`].\n\nThe core event stream also contains\n[`RealtimeTranscriptEvent::UserContentFinal`], an internal canonical-state\ncommand that may carry inline image bytes. That variant is deliberately\nabsent here, making private user content unrepresentable on\n[`WireLiveAdapterObservation`] by construction rather than relying on each\ntransport to remember an output filter.\n\nThe schema retains the historical `RealtimeTranscriptEvent` name so SDK\nconsumers keep the existing generated type name while the Rust public wire\nsurface gains a distinct, safe type.",
+    "oneOf": [
+      {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "previous_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "$ref": "#/$defs/RealtimeTranscriptRole"
+          },
+          "type": {
+            "const": "item_observed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "item_id",
+          "role"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "previous_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "item_skipped",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "previous_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "user_transcript_final",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "item_id",
+          "content_index",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delta": {
+            "type": "string"
+          },
+          "delta_id": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "previous_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "assistant_text_delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "response_id",
+          "delta_id",
+          "item_id",
+          "content_index",
+          "delta"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delta": {
+            "type": "string"
+          },
+          "delta_id": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "previous_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "assistant_transcript_delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "response_id",
+          "delta_id",
+          "item_id",
+          "content_index",
+          "delta"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "response_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "assistant_transcript_truncated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "response_id",
+          "item_id",
+          "content_index",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "response_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "assistant_transcript_final_text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "response_id",
+          "item_id",
+          "content_index",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "response_id": {
+            "type": "string"
+          },
+          "stop_reason": {
+            "$ref": "#/$defs/StopReason"
+          },
+          "type": {
+            "const": "assistant_turn_completed",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/$defs/Usage"
+          }
+        },
+        "required": [
+          "type",
+          "response_id",
+          "stop_reason",
+          "usage"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "response_id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "assistant_turn_interrupted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "response_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "RealtimeTranscriptEvent"
   },
   "RealtimeTurningMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -32961,60 +35921,6 @@
         ],
         "type": "string"
       },
-      "ScheduleConfig": {
-        "properties": {
-          "created_at_utc": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "deleted_at_utc": {
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "labels": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "planning_horizon_days": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "planning_horizon_occurrences": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "updated_at_utc": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "planning_horizon_days",
-          "planning_horizon_occurrences",
-          "created_at_utc",
-          "updated_at_utc"
-        ],
-        "type": "object"
-      },
       "ScheduleId": {
         "description": "Opaque identifier for a persisted schedule.",
         "type": "string"
@@ -33602,15 +36508,42 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical public projection returned by every `schedule/*` RPC method.\n\nThe durable schedule domain object has a custom persistence serializer\nwhich includes generated machine authority state. That persistence shape\nmust not double as the public contract. This projection deliberately keeps\nthe existing flattened schedule configuration while excluding the private\nmachine state, and it is the single source for both production responses\nand generated SDK schemas.",
     "properties": {
-      "config": {
-        "$ref": "#/$defs/ScheduleConfig"
+      "created_at_utc": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "deleted_at_utc": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "labels": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
       },
       "misfire_policy": {
         "$ref": "#/$defs/MisfirePolicy"
       },
       "missing_target_policy": {
         "$ref": "#/$defs/MissingTargetPolicy"
+      },
+      "name": {
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "next_occurrence_ordinal": {
         "format": "uint64",
@@ -33629,6 +36562,16 @@
           "string",
           "null"
         ]
+      },
+      "planning_horizon_days": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "planning_horizon_occurrences": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
       },
       "revision": {
         "format": "uint64",
@@ -33650,6 +36593,10 @@
       },
       "trigger": {
         "$ref": "#/$defs/TriggerSpec"
+      },
+      "updated_at_utc": {
+        "format": "date-time",
+        "type": "string"
       }
     },
     "required": [
@@ -33662,8 +36609,10 @@
       "overlap_policy",
       "missing_target_policy",
       "next_occurrence_ordinal",
-      "superseded_ack_ids",
-      "config"
+      "planning_horizon_days",
+      "planning_horizon_occurrences",
+      "created_at_utc",
+      "updated_at_utc"
     ],
     "title": "Schedule",
     "type": "object"
@@ -35095,72 +38044,7 @@
         "type": "string"
       },
       "Schedule": {
-        "properties": {
-          "config": {
-            "$ref": "#/$defs/ScheduleConfig"
-          },
-          "misfire_policy": {
-            "$ref": "#/$defs/MisfirePolicy"
-          },
-          "missing_target_policy": {
-            "$ref": "#/$defs/MissingTargetPolicy"
-          },
-          "next_occurrence_ordinal": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "overlap_policy": {
-            "$ref": "#/$defs/OverlapPolicy"
-          },
-          "phase": {
-            "$ref": "#/$defs/SchedulePhase"
-          },
-          "planning_cursor_utc": {
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "schedule_id": {
-            "$ref": "#/$defs/ScheduleId"
-          },
-          "superseded_ack_ids": {
-            "items": {
-              "$ref": "#/$defs/OccurrenceId"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "target": {
-            "$ref": "#/$defs/TargetBinding"
-          },
-          "trigger": {
-            "$ref": "#/$defs/TriggerSpec"
-          }
-        },
-        "required": [
-          "schedule_id",
-          "phase",
-          "revision",
-          "trigger",
-          "target",
-          "misfire_policy",
-          "overlap_policy",
-          "missing_target_policy",
-          "next_occurrence_ordinal",
-          "superseded_ack_ids",
-          "config"
-        ],
-        "type": "object"
-      },
-      "ScheduleConfig": {
+        "description": "Canonical public projection returned by every `schedule/*` RPC method.\n\nThe durable schedule domain object has a custom persistence serializer\nwhich includes generated machine authority state. That persistence shape\nmust not double as the public contract. This projection deliberately keeps\nthe existing flattened schedule configuration while excluding the private\nmachine state, and it is the single source for both production responses\nand generated SDK schemas.",
         "properties": {
           "created_at_utc": {
             "format": "date-time",
@@ -35185,7 +38069,31 @@
             },
             "type": "object"
           },
+          "misfire_policy": {
+            "$ref": "#/$defs/MisfirePolicy"
+          },
+          "missing_target_policy": {
+            "$ref": "#/$defs/MissingTargetPolicy"
+          },
           "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_occurrence_ordinal": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overlap_policy": {
+            "$ref": "#/$defs/OverlapPolicy"
+          },
+          "phase": {
+            "$ref": "#/$defs/SchedulePhase"
+          },
+          "planning_cursor_utc": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -35201,12 +38109,42 @@
             "minimum": 0,
             "type": "integer"
           },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schedule_id": {
+            "$ref": "#/$defs/ScheduleId"
+          },
+          "superseded_ack_ids": {
+            "items": {
+              "$ref": "#/$defs/OccurrenceId"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "target": {
+            "$ref": "#/$defs/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/$defs/TriggerSpec"
+          },
           "updated_at_utc": {
             "format": "date-time",
             "type": "string"
           }
         },
         "required": [
+          "schedule_id",
+          "phase",
+          "revision",
+          "trigger",
+          "target",
+          "misfire_policy",
+          "overlap_policy",
+          "missing_target_policy",
+          "next_occurrence_ordinal",
           "planning_horizon_days",
           "planning_horizon_occurrences",
           "created_at_utc",
@@ -39296,6 +42234,12 @@
     ],
     "title": "SupervisorRotationIncompleteDataWire",
     "type": "object"
+  },
+  "SupervisorRotationOperationId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+    "title": "SupervisorRotationOperationId",
+    "type": "string"
   },
   "SupervisorRotationReportWire": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -46343,6 +49287,217 @@
           {
             "properties": {
               "kind": {
+                "const": "image_input_unsupported_mime",
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mime_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_content_mismatch",
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mime_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The image payload's `data` field is not valid base64. This remains a\nscoped input rejection so clients can retry without reopening a live\nchannel.",
+            "properties": {
+              "kind": {
+                "const": "image_input_invalid_base64",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "image_input_too_large",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "image_input_idempotency_key_invalid",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_idempotency_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_history_budget_exceeded",
+                "type": "string"
+              },
+              "max_decoded_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_decoded_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_requires_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "input_too_large",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "input_backpressured",
+                "type": "string"
+              },
+              "max_pending_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_pending_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_backpressured",
+                "type": "string"
+              },
+              "max_pending_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_pending_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_transport_unsupported",
+                "type": "string"
+              },
+              "transport": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "transport"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
                 "const": "video_frame_input_not_implemented",
                 "type": "string"
               }
@@ -46417,6 +49572,19 @@
             "required": [
               "kind",
               "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The refreshed canonical transcript changed an item identity or\ntombstone that the already-created provider session cannot retract.\nThe live channel must close and reopen instead of pretending the\nprovider's immutable context was rewritten in place.",
+            "properties": {
+              "kind": {
+                "const": "refresh_transcript_rewrite_requires_reopen",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           },
@@ -46633,10 +49801,9 @@
   "WireLiveAdapterObservation": {
     "$defs": {
       "RealtimeTranscriptEvent": {
-        "description": "A typed, identity-bearing realtime transcript event consumed by the session.",
+        "description": "Public-wire mirror of [`RealtimeTranscriptEvent`].\n\nThe core event stream also contains\n[`RealtimeTranscriptEvent::UserContentFinal`], an internal canonical-state\ncommand that may carry inline image bytes. That variant is deliberately\nabsent here, making private user content unrepresentable on\n[`WireLiveAdapterObservation`] by construction rather than relying on each\ntransport to remember an output filter.\n\nThe schema retains the historical `RealtimeTranscriptEvent` name so SDK\nconsumers keep the existing generated type name while the Rust public wire\nsurface gains a distinct, safe type.",
         "oneOf": [
           {
-            "description": "Observe a provider item and its causal predecessor without committing\ncontent yet.",
             "properties": {
               "item_id": {
                 "type": "string"
@@ -46669,7 +49836,6 @@
             "type": "object"
           },
           {
-            "description": "Observe a provider item that participates in provider causal ordering\nbut must not materialize transcript content.",
             "properties": {
               "item_id": {
                 "type": "string"
@@ -46692,7 +49858,6 @@
             "type": "object"
           },
           {
-            "description": "Provider finalized the transcript for a user input item.",
             "properties": {
               "content_index": {
                 "format": "uint32",
@@ -46725,7 +49890,6 @@
             "type": "object"
           },
           {
-            "description": "Provider emitted an assistant **display-text** delta for an output\nitem — authored text the model writes (e.g. OpenAI realtime\n`response.output_text.delta`).\n\nMaterializes as [`crate::types::AssistantBlock::Text`].",
             "properties": {
               "content_index": {
                 "format": "uint32",
@@ -46766,7 +49930,6 @@
             "type": "object"
           },
           {
-            "description": "Provider emitted an assistant **spoken-transcript** delta for an\noutput item — text derived from audio output (e.g. OpenAI realtime\n`response.output_audio_transcript.delta`).\n\nIdentity shape mirrors [`Self::AssistantTextDelta`] so generated\nidempotent ordering / staging authority owns dedup uniformly across\nlanes. Materializes as [`crate::types::AssistantBlock::Transcript`]\nwith `source: TranscriptSource::Spoken` (T9/T10).",
             "properties": {
               "content_index": {
                 "format": "uint32",
@@ -46807,7 +49970,6 @@
             "type": "object"
           },
           {
-            "description": "Provider reported the assistant output item was truncated to the heard\ntranscript prefix.",
             "properties": {
               "content_index": {
                 "format": "uint32",
@@ -46838,7 +50000,6 @@
             "type": "object"
           },
           {
-            "description": "R5-7: provider supplied authoritative final transcript text for an\nassistant output item, overriding any incomplete delta accumulation.\n\nNecessary for two cases:\n  1. Final-only providers that emit a single `AssistantTranscriptFinal`\n     observation without prior deltas.\n  2. Recovery from delta loss (R5-1: lossy media lane back-pressure\n     may drop transcript deltas; the final's text is the authoritative\n     reconciliation).\n\nThe materializer locates the staged item by\n`(response_id, item_id, content_index)`, replaces its accumulated\ncontent with `text`, and (if no item is staged yet) creates one on\nthe spoken lane. Flush still happens via `AssistantTurnCompleted`;\nthis variant only updates the staged content.",
             "properties": {
               "content_index": {
                 "format": "uint32",
@@ -46869,7 +50030,6 @@
             "type": "object"
           },
           {
-            "description": "Provider turn reached a terminal boundary. The session decides which\nstaged assistant items, if any, are now canonical.",
             "properties": {
               "response_id": {
                 "type": "string"
@@ -46894,7 +50054,6 @@
             "type": "object"
           },
           {
-            "description": "Provider turn was interrupted before terminal materialization.",
             "properties": {
               "response_id": {
                 "type": "string"
@@ -47267,6 +50426,217 @@
           {
             "properties": {
               "kind": {
+                "const": "image_input_unsupported_mime",
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mime_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_content_mismatch",
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mime_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The image payload's `data` field is not valid base64. This remains a\nscoped input rejection so clients can retry without reopening a live\nchannel.",
+            "properties": {
+              "kind": {
+                "const": "image_input_invalid_base64",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "image_input_too_large",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "image_input_idempotency_key_invalid",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_idempotency_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_history_budget_exceeded",
+                "type": "string"
+              },
+              "max_decoded_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_decoded_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_requires_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "actual_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "input_too_large",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_bytes",
+              "actual_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "input_backpressured",
+                "type": "string"
+              },
+              "max_pending_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_pending_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_backpressured",
+                "type": "string"
+              },
+              "max_pending_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_pending_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "image_input_transport_unsupported",
+                "type": "string"
+              },
+              "transport": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "transport"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
                 "const": "video_frame_input_not_implemented",
                 "type": "string"
               }
@@ -47341,6 +50711,19 @@
             "required": [
               "kind",
               "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The refreshed canonical transcript changed an item identity or\ntombstone that the already-created provider session cannot retract.\nThe live channel must close and reopen instead of pretending the\nprovider's immutable context was rewritten in place.",
+            "properties": {
+              "kind": {
+                "const": "refresh_transcript_rewrite_requires_reopen",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           },
@@ -47567,7 +50950,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterObservation`].\n\nFIX-SDK-OBS: closes the R5-4 verifier gap. The core enum is the canonical\nshape adapters emit, but it is not registered for schema emission and is\ntherefore invisible at the SDK boundary — browser/Python clients receive\nobservations as untyped JSON and cannot type-narrow on\n`assistant_audio_chunk` (to read the new `item_id` / `response_id` /\n`content_index` fields driving `live/truncate`) or on `command_rejected`\n(a typed channel-survives error introduced in R5-9). The wire mirror\nmakes every variant visible to schema codegen and produces a discriminated\nTypeScript union / typed Python `TypedDict` union.\n\nSerde shape mirrors the core enum exactly: internally-tagged on\n`observation` (snake_case). Round-trip with the core type is byte-\nidentical (see `wire_live_adapter_observation_byte_compatible_with_core`).\n\nField types reference other wire mirrors where they exist\n([`WireStopReason`], [`WireUsage`], [`WireLiveAdapterStatus`],\n[`WireLiveAdapterErrorCode`]) and the canonical\n[`RealtimeTranscriptEvent`] (which already derives `JsonSchema` and is\nauto-promoted by the SDK codegen `Realtime*` allowlist rule).\n\nAudio data is base64-encoded on the wire (matches the core\n[`LiveAdapterObservation::AssistantAudioChunk`] base64 mode); the wire\nmirror carries `data` as a `String` so the schema emits `String` instead\nof an opaque `Vec<u8>` JSON-array shape.",
+    "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterObservation`].\n\nFIX-SDK-OBS: closes the R5-4 verifier gap. The core enum is the canonical\nshape adapters emit, but it is not registered for schema emission and is\ntherefore invisible at the SDK boundary — browser/Python clients receive\nobservations as untyped JSON and cannot type-narrow on\n`assistant_audio_chunk` (to read the new `item_id` / `response_id` /\n`content_index` fields driving `live/truncate`) or on `command_rejected`\n(a typed channel-survives error introduced in R5-9). The wire mirror\nmakes every variant visible to schema codegen and produces a discriminated\nTypeScript union / typed Python `TypedDict` union.\n\nSerde shape mirrors the public subset of the core enum: internally-tagged\non `observation` (snake_case). Round-trip with public core variants is\nbyte-identical (see `wire_live_adapter_observation_byte_compatible_with_core`).\n\nField types reference other wire mirrors where they exist\n([`WireStopReason`], [`WireUsage`], [`WireLiveAdapterStatus`],\n[`WireLiveAdapterErrorCode`]) and the public-safe\n[`WireRealtimeTranscriptEvent`].\n\nAudio data is base64-encoded on the wire (matches the core\n[`LiveAdapterObservation::AssistantAudioChunk`] base64 mode); the wire\nmirror carries `data` as a `String` so the schema emits `String` instead\nof an opaque `Vec<u8>` JSON-array shape.",
     "oneOf": [
       {
         "properties": {
@@ -47857,7 +51240,7 @@
         "type": "object"
       },
       {
-        "description": "Pass-through of a structured `RealtimeTranscriptEvent` from the\nprovider. The core type already derives `JsonSchema` and the SDK\ncodegen auto-promotes `Realtime*` schemas, so the typed shape lands\nin generated SDK types without an additional wire mirror.",
+        "description": "Public-safe projection of a structured [`RealtimeTranscriptEvent`]\nfrom the provider. Internal byte-bearing user-content events cannot be\nrepresented by [`WireRealtimeTranscriptEvent`].",
         "properties": {
           "event": {
             "$ref": "#/$defs/RealtimeTranscriptEvent"
@@ -47870,6 +51253,43 @@
         "required": [
           "observation",
           "event"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Public, redacted ordering receipt for committed user content.\n\nThe byte-bearing canonical transcript event is internal and filtered\nby live transports. WebRTC clients must wait for this observation\nbefore relying on an image as context for independently transported\nRTP audio.",
+        "properties": {
+          "content_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "observation": {
+            "const": "user_content_committed",
+            "type": "string"
+          },
+          "previous_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "observation",
+          "idempotency_key",
+          "item_id",
+          "content_index",
+          "media_type"
         ],
         "type": "object"
       },
@@ -48209,7 +51629,7 @@
         "type": "boolean"
       },
       "image_in": {
-        "description": "Adapter accepts image input via `live/send_input` (e.g. future\n`gpt-realtime-2` image support). Today: `false` for OpenAI realtime.",
+        "description": "Adapter accepts image input via `live/send_input`. OpenAI advertises\nthis for vision-capable realtime bindings such as `gpt-realtime-2`.",
         "type": "boolean"
       },
       "provider_native_resume": {

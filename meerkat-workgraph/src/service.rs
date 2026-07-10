@@ -26,6 +26,21 @@ use crate::{WorkGraphError, validate_workgraph_attention_projection_current};
 
 const BEST_EFFORT_REFRESH_ATTEMPTS: usize = 3;
 const MAX_REVIEWER_QUORUM_THRESHOLD: u16 = 64;
+const DEFAULT_COLLECTION_LIMIT: usize = 100;
+const MAX_COLLECTION_LIMIT: usize = 1000;
+const MAX_ATOMIC_SNAPSHOT_EDGES: usize = 1000;
+const MAX_ATOMIC_SNAPSHOT_ATTENTION: usize = 1000;
+const MAX_ATOMIC_READY_ITEMS: usize = 1000;
+
+fn bounded_collection_limit(limit: Option<usize>) -> Result<usize, WorkGraphError> {
+    let limit = limit.unwrap_or(DEFAULT_COLLECTION_LIMIT);
+    if limit > MAX_COLLECTION_LIMIT {
+        return Err(WorkGraphError::InvalidInput(format!(
+            "limit {limit} exceeds the WorkGraph maximum of {MAX_COLLECTION_LIMIT}"
+        )));
+    }
+    Ok(limit)
+}
 
 #[derive(Clone)]
 pub struct WorkGraphService {
@@ -193,8 +208,17 @@ impl WorkGraphService {
         }
         let status_filter = filter.status.take();
         let now = self.store.get_store_time_utc().await?;
+        let candidates = self
+            .store
+            .list_attention_bounded(filter, MAX_COLLECTION_LIMIT.saturating_add(1))
+            .await?;
+        if candidates.len() > MAX_COLLECTION_LIMIT {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "attention list exceeds the atomic {MAX_COLLECTION_LIMIT}-row limit; narrow the scope"
+            )));
+        }
         let mut attention = Vec::new();
-        for binding in self.store.list_attention(filter).await? {
+        for binding in candidates {
             let matches = match status_filter.as_ref() {
                 Some(status) => attention_status_matches_at(&binding, status, now)?,
                 None => true,
@@ -642,11 +666,12 @@ impl WorkGraphService {
 
     pub async fn list(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         self.store
-            .list_items(self.normalize_item_filter(filter))
+            .list_items(self.normalize_item_filter(filter)?)
             .await
     }
 
     pub async fn ready(&self, filter: ReadyWorkFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
+        let output_limit = bounded_collection_limit(filter.limit)?;
         let now = self.store.get_store_time_utc().await?;
         let (realm_id, namespace) = self.scope(filter.realm_id.clone(), filter.namespace.clone());
         let all_items = self
@@ -655,9 +680,15 @@ impl WorkGraphService {
                 realm_id: Some(realm_id.clone()),
                 namespace: Some(namespace.clone()),
                 include_terminal: true,
+                limit: Some(MAX_ATOMIC_READY_ITEMS.saturating_add(1)),
                 ..WorkItemFilter::default()
             })
             .await?;
+        if all_items.len() > MAX_ATOMIC_READY_ITEMS {
+            return Err(WorkGraphError::InvalidInput(format!(
+                "ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-item limit; narrow the scope"
+            )));
+        }
         let labels = filter.labels.clone();
         let mut ready = WorkGraphMachine::ready_items(
             all_items
@@ -666,9 +697,7 @@ impl WorkGraphService {
                 .collect(),
             now,
         );
-        if let Some(limit) = filter.limit {
-            ready.truncate(limit);
-        }
+        ready.truncate(output_limit);
         Ok(ready)
     }
 
@@ -677,14 +706,14 @@ impl WorkGraphService {
         filter: WorkGraphSnapshotFilter,
     ) -> Result<WorkGraphSnapshot, WorkGraphError> {
         let captured_at = self.store.get_store_time_utc().await?;
-        let filter = self.normalize_snapshot_filter(filter);
+        let filter = self.normalize_snapshot_filter(filter)?;
         let realm_id = filter
             .realm_id
             .clone()
             .unwrap_or_else(|| self.default_realm_id.to_string());
         let event_high_water_mark = self
             .store
-            .list_events(WorkGraphEventFilter {
+            .latest_event_seq(WorkGraphEventFilter {
                 realm_id: Some(realm_id.clone()),
                 namespace: if filter.all_namespaces {
                     None
@@ -693,12 +722,9 @@ impl WorkGraphService {
                 },
                 all_namespaces: filter.all_namespaces,
                 after_seq: None,
-                limit: None,
+                limit: Some(1),
             })
-            .await?
-            .into_iter()
-            .filter_map(|event| event.seq)
-            .max();
+            .await?;
         let items = self
             .store
             .list_items(WorkItemFilter {
@@ -723,28 +749,46 @@ impl WorkGraphService {
         let namespaces = self.snapshot_namespaces(&realm_id, &filter, &items).await?;
         let mut edges = Vec::new();
         let mut attention = Vec::new();
+        let mut scanned_edges = 0usize;
+        let mut scanned_attention = 0usize;
         for namespace in &namespaces {
-            edges.extend(
-                self.store
-                    .list_edges(&realm_id, namespace)
-                    .await?
-                    .into_iter()
-                    .filter(|edge| {
-                        included_item_refs.contains(&(edge.namespace.clone(), edge.from_id.clone()))
-                            && included_item_refs
-                                .contains(&(edge.namespace.clone(), edge.to_id.clone()))
-                    }),
-            );
-            for binding in self
+            let remaining_edges = MAX_ATOMIC_SNAPSHOT_EDGES.saturating_sub(scanned_edges);
+            let edge_candidates = self
                 .store
-                .list_attention(AttentionListRequest {
-                    realm_id: Some(realm_id.clone()),
-                    namespace: Some(namespace.clone()),
-                    target: None,
-                    status: None,
-                })
-                .await?
-            {
+                .list_edges_bounded(&realm_id, namespace, remaining_edges.saturating_add(1))
+                .await?;
+            if edge_candidates.len() > remaining_edges {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "snapshot exceeds the atomic {MAX_ATOMIC_SNAPSHOT_EDGES}-edge scan limit; narrow the namespace/item scope"
+                )));
+            }
+            scanned_edges = scanned_edges.saturating_add(edge_candidates.len());
+            edges.extend(edge_candidates.into_iter().filter(|edge| {
+                included_item_refs.contains(&(edge.namespace.clone(), edge.from_id.clone()))
+                    && included_item_refs.contains(&(edge.namespace.clone(), edge.to_id.clone()))
+            }));
+
+            let remaining_attention =
+                MAX_ATOMIC_SNAPSHOT_ATTENTION.saturating_sub(scanned_attention);
+            let attention_candidates = self
+                .store
+                .list_attention_bounded(
+                    AttentionListRequest {
+                        realm_id: Some(realm_id.clone()),
+                        namespace: Some(namespace.clone()),
+                        target: None,
+                        status: None,
+                    },
+                    remaining_attention.saturating_add(1),
+                )
+                .await?;
+            if attention_candidates.len() > remaining_attention {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "snapshot exceeds the atomic {MAX_ATOMIC_SNAPSHOT_ATTENTION}-attention scan limit; narrow the namespace/item scope"
+                )));
+            }
+            scanned_attention = scanned_attention.saturating_add(attention_candidates.len());
+            for binding in attention_candidates {
                 if included_item_refs.contains(&(
                     binding.work_ref.namespace.clone(),
                     binding.work_ref.item_id.clone(),
@@ -1060,32 +1104,37 @@ impl WorkGraphService {
         )
     }
 
-    fn normalize_item_filter(&self, mut filter: WorkItemFilter) -> WorkItemFilter {
+    fn normalize_item_filter(
+        &self,
+        mut filter: WorkItemFilter,
+    ) -> Result<WorkItemFilter, WorkGraphError> {
         if filter.realm_id.is_none() {
             filter.realm_id = Some(self.default_realm_id.to_string());
         }
         if !filter.all_namespaces && filter.namespace.is_none() {
             filter.namespace = Some(self.default_namespace.clone());
         }
-        filter
+        filter.limit = Some(bounded_collection_limit(filter.limit)?);
+        Ok(filter)
     }
 
     fn normalize_snapshot_filter(
         &self,
         mut filter: WorkGraphSnapshotFilter,
-    ) -> WorkGraphSnapshotFilter {
+    ) -> Result<WorkGraphSnapshotFilter, WorkGraphError> {
         if filter.realm_id.is_none() {
             filter.realm_id = Some(self.default_realm_id.to_string());
         }
         if !filter.all_namespaces && filter.namespace.is_none() {
             filter.namespace = Some(self.default_namespace.clone());
         }
-        filter
+        filter.limit = Some(bounded_collection_limit(filter.limit)?);
+        Ok(filter)
     }
 
     async fn snapshot_namespaces(
         &self,
-        realm_id: &str,
+        _realm_id: &str,
         filter: &WorkGraphSnapshotFilter,
         items: &[WorkItem],
     ) -> Result<BTreeSet<WorkNamespace>, WorkGraphError> {
@@ -1096,25 +1145,10 @@ impl WorkGraphService {
                 .unwrap_or_else(|| self.default_namespace.clone())]));
         }
 
-        let mut namespaces = items
+        let namespaces = items
             .iter()
             .map(|item| item.namespace.clone())
             .collect::<BTreeSet<_>>();
-        if namespaces.is_empty() {
-            namespaces.extend(
-                self.store
-                    .list_events(WorkGraphEventFilter {
-                        realm_id: Some(realm_id.to_string()),
-                        namespace: None,
-                        all_namespaces: true,
-                        after_seq: None,
-                        limit: None,
-                    })
-                    .await?
-                    .into_iter()
-                    .map(|event| event.namespace),
-            );
-        }
         Ok(namespaces)
     }
 
@@ -1126,16 +1160,25 @@ impl WorkGraphService {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<WorkItemId>, WorkGraphError> {
         let mut ready_ids = Vec::new();
+        let mut scanned_items = 0usize;
         for namespace in namespaces {
+            let remaining = MAX_ATOMIC_READY_ITEMS.saturating_sub(scanned_items);
             let all_items = self
                 .store
                 .list_items(WorkItemFilter {
                     realm_id: Some(realm_id.to_string()),
                     namespace: Some(namespace.clone()),
                     include_terminal: true,
+                    limit: Some(remaining.saturating_add(1)),
                     ..WorkItemFilter::default()
                 })
                 .await?;
+            if all_items.len() > remaining {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "snapshot ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-item limit; narrow the scope"
+                )));
+            }
+            scanned_items = scanned_items.saturating_add(all_items.len());
             let ready_items = WorkGraphMachine::ready_items(
                 all_items
                     .into_iter()
@@ -2616,5 +2659,34 @@ mod tests {
                 if msg == "reviewer_quorum requires reviewer_confirmation evidence, got host_confirmation"),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn collection_limit_defaults_and_rejects_oversized_requests() {
+        assert_eq!(
+            super::bounded_collection_limit(None).expect("default limit"),
+            super::DEFAULT_COLLECTION_LIMIT
+        );
+        assert!(matches!(
+            super::bounded_collection_limit(Some(super::MAX_COLLECTION_LIMIT + 1)),
+            Err(crate::WorkGraphError::InvalidInput(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_applies_owner_default_before_cloning_results() {
+        let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
+        for index in 0..=super::DEFAULT_COLLECTION_LIMIT {
+            service
+                .create(create_req(&format!("bounded-{index}")))
+                .await
+                .expect("create bounded test item");
+        }
+
+        let listed = service
+            .list(WorkItemFilter::default())
+            .await
+            .expect("bounded list");
+        assert_eq!(listed.len(), super::DEFAULT_COLLECTION_LIMIT);
     }
 }

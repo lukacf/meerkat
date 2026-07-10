@@ -5,7 +5,7 @@ use serde_json::value::RawValue;
 use std::sync::Arc;
 
 use crate::handlers::runtime::to_wire_accept_result;
-use crate::protocol::{RpcId, RpcResponse};
+use crate::protocol::{RpcId, RpcResponse, bounded_collection_limit};
 use crate::session_runtime::SessionRuntime;
 use meerkat_contracts::{
     EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,
@@ -161,9 +161,13 @@ pub async fn handle_events_list_since(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let params: EventsListSinceParams = match parse_params(params) {
+    let mut params: EventsListSinceParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
+    };
+    params.limit = match bounded_collection_limit(params.limit) {
+        Ok(limit) => Some(limit),
+        Err(message) => return RpcResponse::error(id, crate::error::INVALID_PARAMS, message),
     };
 
     match runtime.event_list_since(params).await {

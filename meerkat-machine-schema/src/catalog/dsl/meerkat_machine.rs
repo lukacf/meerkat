@@ -2204,6 +2204,7 @@ pub enum MobPeerOverlayCommandKind {
 pub enum SupervisorBridgeCommandAdmissionResultKind {
     #[default]
     Accept,
+    ResumePendingRevoke,
     Reject,
 }
 
@@ -2214,6 +2215,19 @@ pub enum SupervisorBridgeCommandRejectionKind {
     NotBound,
     StaleSupervisor,
     SenderMismatch,
+    CommandNotAllowed,
+}
+
+/// Closed supervisor cleanup command class. These commands have a narrower
+/// phase policy than ordinary bridge traffic because the supervisor must be
+/// able to finish teardown after the member runtime stops accepting work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorCleanupCommandKind {
+    #[default]
+    Retire,
+    Observe,
+    Destroy,
+    Revoke,
 }
 
 /// Generated admission result for `BindMember`, before bootstrap transport
@@ -2232,6 +2246,7 @@ pub enum SupervisorBindRejectionKind {
     #[default]
     AlreadyBound,
     SenderMismatch,
+    RevocationPending,
 }
 
 /// Generated material-admission verdict for `BindMember`. Owns the
@@ -2275,6 +2290,46 @@ pub enum SupervisorAuthorizeAdmissionResultKind {
     Reject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationPhase {
+    #[default]
+    PreviousRevokePending,
+    NextPublishPending,
+    Completed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationSubmissionResultKind {
+    #[default]
+    New,
+    ExistingPending,
+    ExistingTerminal,
+    Rejected,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationObservationStatusKind {
+    #[default]
+    NotFound,
+    PreviousRevokePending,
+    NextPublishPending,
+    Completed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationRejectionKind {
+    #[default]
+    OperationConflict,
+    NotBound,
+    SenderMismatch,
+    TargetEpochNotAdvanced,
+    InvalidTarget,
+    UnsupportedProtocolVersion,
+}
+
 /// Generated public rejection class for `AuthorizeSupervisor` admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SupervisorAuthorizeRejectionKind {
@@ -2282,6 +2337,7 @@ pub enum SupervisorAuthorizeRejectionKind {
     NotBound,
     StaleSupervisor,
     SenderMismatch,
+    RotationNotAllowed,
 }
 
 // Track-B (R5): declarative peer endpoint descriptor for the runtime
@@ -2925,6 +2981,41 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_revoke_pending_address: Option<String>,
             supervisor_revoke_pending_signing_public_key: Option<String>,
             supervisor_revoke_pending_epoch: Option<u64>,
+            // Durable receipt for the last completed supervisor revoke. This
+            // is not a live binding or trust edge: it exists solely so an
+            // exact duplicate RevokeSupervisor can receive a machine-authorized
+            // one-shot response after the original private edge is gone.
+            supervisor_revoked_peer_id: Option<String>,
+            supervisor_revoked_signing_public_key: Option<String>,
+            supervisor_revoked_epoch: Option<u64>,
+            supervisor_rotation_operation_id: Option<String>,
+            supervisor_rotation_phase: Option<Enum<SupervisorRotationPhase>>,
+            supervisor_rotation_rejection: Option<Enum<SupervisorRotationRejectionKind>>,
+            supervisor_rotation_previous_name: Option<String>,
+            supervisor_rotation_previous_peer_id: Option<String>,
+            supervisor_rotation_previous_address: Option<String>,
+            supervisor_rotation_previous_signing_public_key: Option<String>,
+            supervisor_rotation_previous_epoch: Option<u64>,
+            supervisor_rotation_next_name: Option<String>,
+            supervisor_rotation_next_peer_id: Option<String>,
+            supervisor_rotation_next_address: Option<String>,
+            supervisor_rotation_next_signing_public_key: Option<String>,
+            supervisor_rotation_next_epoch: Option<u64>,
+            // Terminal rotation receipts are retained by stable operation id
+            // across later rotations. Only the single active operation uses
+            // the scalar phase/descriptor fields above.
+            supervisor_rotation_terminal_phases: Map<String, Enum<SupervisorRotationPhase>>,
+            supervisor_rotation_terminal_rejections: Map<String, Enum<SupervisorRotationRejectionKind>>,
+            supervisor_rotation_terminal_previous_names: Map<String, String>,
+            supervisor_rotation_terminal_previous_peer_ids: Map<String, String>,
+            supervisor_rotation_terminal_previous_addresses: Map<String, String>,
+            supervisor_rotation_terminal_previous_signing_public_keys: Map<String, String>,
+            supervisor_rotation_terminal_previous_epochs: Map<String, u64>,
+            supervisor_rotation_terminal_next_names: Map<String, String>,
+            supervisor_rotation_terminal_next_peer_ids: Map<String, String>,
+            supervisor_rotation_terminal_next_addresses: Map<String, String>,
+            supervisor_rotation_terminal_next_signing_public_keys: Map<String, String>,
+            supervisor_rotation_terminal_next_epochs: Map<String, u64>,
 
             // --- Track-B (R5): peer-projection state ---
             //
@@ -3222,6 +3313,34 @@ macro_rules! meerkat_catalog_machine_dsl {
             supervisor_revoke_pending_address = None,
             supervisor_revoke_pending_signing_public_key = None,
             supervisor_revoke_pending_epoch = None,
+            supervisor_revoked_peer_id = None,
+            supervisor_revoked_signing_public_key = None,
+            supervisor_revoked_epoch = None,
+            supervisor_rotation_operation_id = None,
+            supervisor_rotation_phase = None,
+            supervisor_rotation_rejection = None,
+            supervisor_rotation_previous_name = None,
+            supervisor_rotation_previous_peer_id = None,
+            supervisor_rotation_previous_address = None,
+            supervisor_rotation_previous_signing_public_key = None,
+            supervisor_rotation_previous_epoch = None,
+            supervisor_rotation_next_name = None,
+            supervisor_rotation_next_peer_id = None,
+            supervisor_rotation_next_address = None,
+            supervisor_rotation_next_signing_public_key = None,
+            supervisor_rotation_next_epoch = None,
+            supervisor_rotation_terminal_phases = EmptyMap,
+            supervisor_rotation_terminal_rejections = EmptyMap,
+            supervisor_rotation_terminal_previous_names = EmptyMap,
+            supervisor_rotation_terminal_previous_peer_ids = EmptyMap,
+            supervisor_rotation_terminal_previous_addresses = EmptyMap,
+            supervisor_rotation_terminal_previous_signing_public_keys = EmptyMap,
+            supervisor_rotation_terminal_previous_epochs = EmptyMap,
+            supervisor_rotation_terminal_next_names = EmptyMap,
+            supervisor_rotation_terminal_next_peer_ids = EmptyMap,
+            supervisor_rotation_terminal_next_addresses = EmptyMap,
+            supervisor_rotation_terminal_next_signing_public_keys = EmptyMap,
+            supervisor_rotation_terminal_next_epochs = EmptyMap,
             // Track-B (R5): peer-projection state initialised empty.
             local_endpoint = None,
             direct_peer_endpoints = EmptySet,
@@ -3245,6 +3364,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         input MeerkatMachineInput {
             // Direct inputs
             RegisterSession { session_id: SessionId },
+            PrepareTerminalSupervisorCleanupBindings { session_id: SessionId },
             // Two-phase unregister (D1): BeginUnregisterSession opens the
             // drain window and emits one drain-request effect per in-process
             // producer class; the three feedback inputs close the
@@ -3429,6 +3549,55 @@ macro_rules! meerkat_catalog_machine_dsl {
                 current_run_id: Option<RunId>,
                 pre_run_phase: Option<Enum<PreRunPhase>>,
                 silent_intent_overrides: Set<String>,
+            },
+            RecoverSupervisorBinding {
+                name: String,
+                peer_id: String,
+                address: String,
+                signing_public_key: String,
+                epoch: u64,
+            },
+            RecoverSupervisorRevocationPending {
+                name: String,
+                peer_id: String,
+                address: String,
+                signing_public_key: String,
+                epoch: u64,
+            },
+            RecoverSupervisorRotationOperation {
+                operation_id: String,
+                phase: Enum<SupervisorRotationPhase>,
+                rejection: Option<Enum<SupervisorRotationRejectionKind>>,
+                previous_name: String,
+                previous_peer_id: String,
+                previous_address: String,
+                previous_signing_public_key: String,
+                previous_epoch: u64,
+                next_name: String,
+                next_peer_id: String,
+                next_address: String,
+                next_signing_public_key: String,
+                next_epoch: u64,
+            },
+            RecoverSupervisorRotationTerminalReceipt {
+                operation_id: String,
+                phase: Enum<SupervisorRotationPhase>,
+                rejection: Option<Enum<SupervisorRotationRejectionKind>>,
+                previous_name: String,
+                previous_peer_id: String,
+                previous_address: String,
+                previous_signing_public_key: String,
+                previous_epoch: u64,
+                next_name: String,
+                next_peer_id: String,
+                next_address: String,
+                next_signing_public_key: String,
+                next_epoch: u64,
+            },
+            RecoverRevokedSupervisorReceipt {
+                peer_id: String,
+                signing_public_key: String,
+                epoch: u64,
             },
             // Absorbed inputs
             EnsureSessionWithExecutor { session_id: SessionId },
@@ -4097,9 +4266,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // admission against canonical supervisor binding truth before
             // the shell emits wire replies or mutates trust. `BindSupervisor`
             // establishes the initial binding from the `Unbound` state.
-            // `AuthorizeSupervisor` rotates an already `Bound` binding after
-            // generated admission has accepted the current supervisor as the
-            // sender. `RevokeSupervisor` tears the binding down and returns
+            // `AuthorizeSupervisor` advances metadata/version for the same
+            // already-bound authority after generated admission has accepted
+            // the current supervisor as the sender. Identity rotation is
+            // owned by `SubmitSupervisorRotation`. `RevokeSupervisor` tears
+            // the binding down and returns
             // to `Unbound`; the `epoch` and `peer_id` arguments must match
             // the current binding so a stale revoke cannot clear a rotated
             // binding.
@@ -4131,9 +4302,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 has_active_inputs: bool,
             },
             ResolveSupervisorAuthorizeAdmission {
+                supervisor_name: String,
                 supervisor_peer_id: String,
+                supervisor_address: String,
+                supervisor_signing_public_key: String,
                 supervisor_epoch: u64,
                 sender_peer_id: Option<String>,
+                sender_signing_public_key: Option<String>,
             },
             BindSupervisor {
                 name: String,
@@ -4148,6 +4323,34 @@ macro_rules! meerkat_catalog_machine_dsl {
                 address: String,
                 signing_public_key: String,
                 epoch: u64,
+            },
+            RefreshSupervisorBindingRoute {
+                name: String,
+                peer_id: String,
+                address: String,
+                signing_public_key: String,
+                epoch: u64,
+                sender_peer_id: Option<String>,
+            },
+            SubmitSupervisorRotation {
+                operation_id: String,
+                next_name: String,
+                next_peer_id: String,
+                next_address: String,
+                next_signing_public_key: String,
+                next_epoch: u64,
+                preflight_rejection: Option<Enum<SupervisorRotationRejectionKind>>,
+                sender_peer_id: Option<String>,
+                sender_signing_public_key: Option<String>,
+            },
+            ResumeSupervisorRotation { operation_id: String },
+            SupervisorRotationPreviousRevoked { operation_id: String, peer_id: String, epoch: u64 },
+            SupervisorRotationNextPublished { operation_id: String, peer_id: String, epoch: u64 },
+            ObserveSupervisorRotation {
+                operation_id: String,
+                observer_peer_id: Option<String>,
+                observer_signing_public_key: Option<String>,
+                observer_epoch: u64,
             },
             RequestSupervisorTrustPublish {
                 name: String,
@@ -4209,6 +4412,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 endpoint: PeerEndpoint,
             },
             ResolveSupervisorBridgeCommandAdmission {
+                supervisor_peer_id: String,
+                supervisor_epoch: u64,
+                sender_peer_id: Option<String>,
+            },
+            // Cleanup-only admission. The command kind and lifecycle phase
+            // jointly decide whether an authenticated supervisor may continue
+            // teardown after the member runtime stops accepting ordinary work.
+            ResolveSupervisorCleanupCommandAdmission {
+                command_kind: Enum<SupervisorCleanupCommandKind>,
                 supervisor_peer_id: String,
                 supervisor_epoch: u64,
                 sender_peer_id: Option<String>,
@@ -4856,6 +5068,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_signing_public_key: Option<String>,
                 previous_epoch: Option<u64>,
             },
+            SupervisorRotationSubmissionResolved {
+                operation_id: String,
+                result: Enum<SupervisorRotationSubmissionResultKind>,
+                rejection: Option<Enum<SupervisorRotationRejectionKind>>,
+                previous_name: Option<String>,
+                previous_peer_id: Option<String>,
+                previous_address: Option<String>,
+                previous_signing_public_key: Option<String>,
+                previous_epoch: Option<u64>,
+            },
+            SupervisorRotationObservationResolved {
+                operation_id: String,
+                status: Enum<SupervisorRotationObservationStatusKind>,
+                rejection: Option<Enum<SupervisorRotationRejectionKind>>,
+                previous_name: Option<String>,
+                previous_peer_id: Option<String>,
+                previous_address: Option<String>,
+                previous_signing_public_key: Option<String>,
+                previous_epoch: Option<u64>,
+                next_name: Option<String>,
+                next_peer_id: Option<String>,
+                next_address: Option<String>,
+                next_signing_public_key: Option<String>,
+                next_epoch: Option<u64>,
+            },
             SupervisorBridgeCommandAdmissionResolved {
                 result: Enum<SupervisorBridgeCommandAdmissionResultKind>,
                 rejection: Option<Enum<SupervisorBridgeCommandRejectionKind>>,
@@ -5039,6 +5276,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SupervisorBindMaterialAdmissionResolved => local seam SurfaceResultAlignment,
         disposition TranscriptEditAdmissionResolved => local seam SurfaceResultAlignment,
         disposition SupervisorAuthorizeAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition SupervisorRotationSubmissionResolved => local seam SurfaceResultAlignment,
+        disposition SupervisorRotationObservationResolved => local seam SurfaceResultAlignment,
         disposition SessionLlmReconfigurePlanResolved => local seam SurfaceResultAlignment,
         disposition PeerProjectionChanged => external seam OwnerRealizationOnly,
         disposition CommsTrustReconcileRequested => external handoff comms_trust_reconcile seam OwnerRealizationOnly,
@@ -5578,6 +5817,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_revoke_pending_epoch != None)
         }
 
+        invariant supervisor_revoked_receipt_consistency {
+            (self.supervisor_revoked_peer_id == None
+                && self.supervisor_revoked_signing_public_key == None
+                && self.supervisor_revoked_epoch == None)
+            || (self.supervisor_revoked_peer_id != None
+                && self.supervisor_revoked_signing_public_key != None
+                && self.supervisor_revoked_epoch != None)
+        }
+
+        invariant supervisor_live_binding_excludes_revoked_receipt {
+            self.supervisor_binding_kind != SupervisorBindingKind::Bound
+            || self.supervisor_revoked_peer_id == None
+        }
+
+        invariant supervisor_authority_is_closed {
+            (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                && self.supervisor_revoke_pending_peer_id == None
+                && self.supervisor_revoked_peer_id == None)
+            || (self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+                && self.supervisor_revoke_pending_peer_id != None
+                && self.supervisor_revoked_peer_id == None)
+            || (self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+                && self.supervisor_revoke_pending_peer_id == None)
+        }
+
         invariant supervisor_publish_pending_consistency {
             (self.supervisor_publish_pending_name == None
                 && self.supervisor_publish_pending_peer_id == None
@@ -5589,6 +5853,103 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_publish_pending_address != None
                 && self.supervisor_publish_pending_signing_public_key != None
                 && self.supervisor_publish_pending_epoch != None)
+        }
+
+        invariant supervisor_rotation_receipt_consistency {
+            (self.supervisor_rotation_operation_id == None
+                && self.supervisor_rotation_phase == None
+                && self.supervisor_rotation_rejection == None
+                && self.supervisor_rotation_previous_name == None
+                && self.supervisor_rotation_previous_peer_id == None
+                && self.supervisor_rotation_previous_address == None
+                && self.supervisor_rotation_previous_signing_public_key == None
+                && self.supervisor_rotation_previous_epoch == None
+                && self.supervisor_rotation_next_name == None
+                && self.supervisor_rotation_next_peer_id == None
+                && self.supervisor_rotation_next_address == None
+                && self.supervisor_rotation_next_signing_public_key == None
+                && self.supervisor_rotation_next_epoch == None)
+            || (self.supervisor_rotation_operation_id != None
+                && self.supervisor_rotation_phase != None
+                && self.supervisor_rotation_previous_name != None
+                && self.supervisor_rotation_previous_peer_id != None
+                && self.supervisor_rotation_previous_address != None
+                && self.supervisor_rotation_previous_signing_public_key != None
+                && self.supervisor_rotation_previous_epoch != None
+                && self.supervisor_rotation_next_name != None
+                && self.supervisor_rotation_next_peer_id != None
+                && self.supervisor_rotation_next_address != None
+                && self.supervisor_rotation_next_signing_public_key != None
+                && self.supervisor_rotation_next_epoch != None
+                && ((self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected)
+                        && self.supervisor_rotation_rejection != None)
+                    || (self.supervisor_rotation_phase != Some(SupervisorRotationPhase::Rejected)
+                        && self.supervisor_rotation_rejection == None)))
+        }
+
+        invariant supervisor_rotation_terminal_receipts_closed_shape {
+            self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_previous_names.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_previous_peer_ids.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_previous_addresses.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_previous_signing_public_keys.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_previous_epochs.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_next_names.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_next_peer_ids.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_next_addresses.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_next_signing_public_keys.keys()
+            && self.supervisor_rotation_terminal_phases.keys()
+                == self.supervisor_rotation_terminal_next_epochs.keys()
+            && for_all(operation_id in self.supervisor_rotation_terminal_phases.keys(),
+                (self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                    == Some(SupervisorRotationPhase::Completed)
+                    && !self.supervisor_rotation_terminal_rejections.contains_key(operation_id))
+                || (self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                    == Some(SupervisorRotationPhase::Rejected)
+                    && self.supervisor_rotation_terminal_rejections.contains_key(operation_id)))
+            && for_all(operation_id in self.supervisor_rotation_terminal_rejections.keys(),
+                self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                    == Some(SupervisorRotationPhase::Rejected))
+        }
+
+        invariant supervisor_rotation_phase_shape {
+            self.supervisor_rotation_phase == None
+            || (self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending)
+                && self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+                && self.supervisor_revoke_pending_name == self.supervisor_rotation_previous_name
+                && self.supervisor_revoke_pending_peer_id == self.supervisor_rotation_previous_peer_id
+                && self.supervisor_revoke_pending_address == self.supervisor_rotation_previous_address
+                && self.supervisor_revoke_pending_signing_public_key == self.supervisor_rotation_previous_signing_public_key
+                && self.supervisor_revoke_pending_epoch == self.supervisor_rotation_previous_epoch)
+            || (self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending)
+                && self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+                && self.supervisor_publish_pending_name == self.supervisor_rotation_next_name
+                && self.supervisor_publish_pending_peer_id == self.supervisor_rotation_next_peer_id
+                && self.supervisor_publish_pending_address == self.supervisor_rotation_next_address
+                && self.supervisor_publish_pending_signing_public_key == self.supervisor_rotation_next_signing_public_key
+                && self.supervisor_publish_pending_epoch == self.supervisor_rotation_next_epoch)
+            || (self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+                && self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                && self.supervisor_bound_name == self.supervisor_rotation_next_name
+                && self.supervisor_bound_peer_id == self.supervisor_rotation_next_peer_id
+                && self.supervisor_bound_address == self.supervisor_rotation_next_address
+                && self.supervisor_bound_signing_public_key == self.supervisor_rotation_next_signing_public_key
+                && self.supervisor_bound_epoch == self.supervisor_rotation_next_epoch)
+            || (self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected)
+                && self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                && self.supervisor_bound_name == self.supervisor_rotation_previous_name
+                && self.supervisor_bound_peer_id == self.supervisor_rotation_previous_peer_id
+                && self.supervisor_bound_address == self.supervisor_rotation_previous_address
+                && self.supervisor_bound_signing_public_key == self.supervisor_rotation_previous_signing_public_key
+                && self.supervisor_bound_epoch == self.supervisor_rotation_previous_epoch)
         }
 
 
@@ -5611,6 +5972,20 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Stopped is handled by the explicit revival arms below (2c/2d): a
         // stopped executor is a fact about the previous runtime epoch, so a
         // re-registration is the machine-owned resume intent, not a self-loop.
+        transition PrepareTerminalSupervisorCleanupBindings {
+            on input PrepareTerminalSupervisorCleanupBindings { session_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {}
+            to Destroyed
+        }
+
         transition RegisterSession {
             per_phase [Idle, Attached, Running, Retired]
             on input RegisterSession { session_id }
@@ -7619,6 +7994,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
+        // A recovered terminal runtime may rebuild only the persistent host
+        // drain needed to finish supervisor cleanup. Presence of one of the
+        // closed durable supervisor authority receipts is the capability; this
+        // does not reopen ordinary runtime work.
+        transition SetPeerIngressContextTerminalSupervisorCleanup {
+            on input SetPeerIngressContext { keep_alive }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_registered" { self.session_id != None }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {}
+            to Destroyed
+        }
+
         // 8b. Peer-ingress receive/dequeue authority.
         //
         // The classified queue supplies only admission-time observations:
@@ -7627,7 +8020,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // result and peer-ingress authority phase. The queue may project the
         // emitted phase for snapshots, but it must not derive these facts.
         transition ResolvePeerIngressReceiveClosed {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input ResolvePeerIngressReceive {
                 kind, auth_required, auth_exempt, trusted, queued_work_present,
                 queue_closed, queue_capacity_available
@@ -7643,7 +8036,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
         transition ResolvePeerIngressReceiveFull {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input ResolvePeerIngressReceive {
                 kind, auth_required, auth_exempt, trusted, queued_work_present,
                 queue_closed, queue_capacity_available
@@ -7698,6 +8091,55 @@ macro_rules! meerkat_catalog_machine_dsl {
                 phase: PeerIngressAuthorityPhaseClass::Received
             }
         }
+        transition ResolvePeerIngressReceiveTrustedTerminalSupervisorCleanup {
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "trusted_sender" { trusted == true }
+            guard "generated_auth_exemption" { auth_exempt == true }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Destroyed
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::TrustedAtAdmission),
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveTerminalOrdinaryDrop {
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "ordinary_terminal_ingress" {
+                kind == PeerIngressAdmittedKind::PlainEvent
+                || auth_exempt == false
+            }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Dropped;
+            }
+            to Destroyed
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::DroppedSessionClosed,
+                admission_diagnostic: None,
+                phase: PeerIngressAuthorityPhaseClass::Dropped
+            }
+        }
         transition ResolvePeerIngressReceiveAuthExemptUntrusted {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ResolvePeerIngressReceive {
@@ -7714,6 +8156,33 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
             }
             to Idle
+            emit PeerIngressReceiveResolved {
+                outcome: PeerIngressReceiveOutcomeClass::Admitted,
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
+                phase: PeerIngressAuthorityPhaseClass::Received
+            }
+        }
+        transition ResolvePeerIngressReceiveAuthExemptUntrustedTerminalSupervisorCleanup {
+            on input ResolvePeerIngressReceive {
+                kind, auth_required, auth_exempt, trusted, queued_work_present,
+                queue_closed, queue_capacity_available
+            }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "queue_open" { queue_closed == false }
+            guard "queue_capacity_available" { queue_capacity_available == true }
+            guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
+            guard "untrusted_sender" { trusted == false }
+            guard "auth_exempt" { auth_exempt == true }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {
+                self.peer_ingress_authority_phase = PeerIngressAuthorityPhaseClass::Received;
+            }
+            to Destroyed
             emit PeerIngressReceiveResolved {
                 outcome: PeerIngressReceiveOutcomeClass::Admitted,
                 admission_diagnostic: Some(PeerIngressAdmissionDiagnosticClass::UntrustedAtAdmission),
@@ -7803,7 +8272,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
         transition ResolvePeerIngressDequeueAuthExemptExternal {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input ResolvePeerIngressDequeue { kind, auth, queued_work_remaining }
             guard "session_registered" { self.session_id != None }
             guard "external_entry" { kind != PeerIngressAdmittedKind::PlainEvent }
@@ -7866,6 +8335,31 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Drain, detail: "drain exited" }
+        }
+
+        transition NotifyDrainExitedTerminalSupervisorCleanup {
+            on input NotifyDrainExited { reason }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_registered" { self.session_id != None }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {
+                if self.drain_phase == DrainPhase::Running {
+                    if self.drain_mode == Some(DrainMode::PersistentHost)
+                        && reason == DrainExitReason::Failed
+                    {
+                        self.drain_phase = DrainPhase::ExitedRespawnable;
+                    } else {
+                        self.drain_phase = DrainPhase::Stopped;
+                    }
+                }
+            }
+            to Destroyed
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Drain, detail: "terminal cleanup drain exited" }
         }
 
         // 10. InterruptCurrentRun: Attached + Running self-loops
@@ -9297,6 +9791,194 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.silent_intent_overrides = silent_intent_overrides;
             }
             to Destroyed
+        }
+
+        // Durable supervisor control-plane facts are restored only after the
+        // coarse runtime authority above has established the recovered phase.
+        // Recovery never emits live trust; the session-owned rotation worker
+        // resumes any pending generated revoke/publish obligation separately.
+        transition RecoverSupervisorBinding {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input RecoverSupervisorBinding { name, peer_id, address, signing_public_key, epoch }
+            guard "session_registered" { self.session_id != None }
+            guard "supervisor_unbound" { self.supervisor_binding_kind == SupervisorBindingKind::Unbound }
+            guard "no_revoked_receipt" { self.supervisor_revoked_peer_id == None }
+            update {
+                self.supervisor_binding_kind = SupervisorBindingKind::Bound;
+                self.supervisor_bound_name = Some(name);
+                self.supervisor_bound_peer_id = Some(peer_id);
+                self.supervisor_bound_address = Some(address);
+                self.supervisor_bound_signing_public_key = Some(signing_public_key);
+                self.supervisor_bound_epoch = Some(epoch);
+            }
+            to Idle
+        }
+
+        transition RecoverRevokedSupervisorReceipt {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input RecoverRevokedSupervisorReceipt { peer_id, signing_public_key, epoch }
+            guard "session_registered" { self.session_id != None }
+            guard "supervisor_unbound" { self.supervisor_binding_kind == SupervisorBindingKind::Unbound }
+            guard "no_revoked_receipt" { self.supervisor_revoked_peer_id == None }
+            update {
+                self.supervisor_revoked_peer_id = Some(peer_id);
+                self.supervisor_revoked_signing_public_key = Some(signing_public_key);
+                self.supervisor_revoked_epoch = Some(epoch);
+            }
+            to Idle
+        }
+
+        transition RecoverSupervisorRevocationPending {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input RecoverSupervisorRevocationPending { name, peer_id, address, signing_public_key, epoch }
+            guard "session_registered" { self.session_id != None }
+            guard "supervisor_unbound" { self.supervisor_binding_kind == SupervisorBindingKind::Unbound }
+            guard "no_pending_revoke" { self.supervisor_revoke_pending_peer_id == None }
+            guard "no_revoked_receipt" { self.supervisor_revoked_peer_id == None }
+            update {
+                self.supervisor_revoke_pending_name = Some(name);
+                self.supervisor_revoke_pending_peer_id = Some(peer_id);
+                self.supervisor_revoke_pending_address = Some(address);
+                self.supervisor_revoke_pending_signing_public_key = Some(signing_public_key);
+                self.supervisor_revoke_pending_epoch = Some(epoch);
+            }
+            to Idle
+        }
+
+        transition RecoverSupervisorRotationOperation {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input RecoverSupervisorRotationOperation {
+                operation_id,
+                phase,
+                rejection,
+                previous_name,
+                previous_peer_id,
+                previous_address,
+                previous_signing_public_key,
+                previous_epoch,
+                next_name,
+                next_peer_id,
+                next_address,
+                next_signing_public_key,
+                next_epoch
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "no_incomplete_rotation" {
+                self.supervisor_rotation_phase == None
+                || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+                || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected)
+            }
+            guard "supervisor_unbound" { self.supervisor_binding_kind == SupervisorBindingKind::Unbound }
+            guard "rejection_matches_phase" {
+                (phase == SupervisorRotationPhase::Rejected && rejection != None)
+                || (phase != SupervisorRotationPhase::Rejected && rejection == None)
+            }
+            update {
+                self.supervisor_rotation_operation_id = Some(operation_id);
+                self.supervisor_rotation_phase = Some(phase);
+                self.supervisor_rotation_rejection = rejection;
+                self.supervisor_rotation_previous_name = Some(previous_name);
+                self.supervisor_rotation_previous_peer_id = Some(previous_peer_id);
+                self.supervisor_rotation_previous_address = Some(previous_address);
+                self.supervisor_rotation_previous_signing_public_key = Some(previous_signing_public_key);
+                self.supervisor_rotation_previous_epoch = Some(previous_epoch);
+                self.supervisor_rotation_next_name = Some(next_name);
+                self.supervisor_rotation_next_peer_id = Some(next_peer_id);
+                self.supervisor_rotation_next_address = Some(next_address);
+                self.supervisor_rotation_next_signing_public_key = Some(next_signing_public_key);
+                self.supervisor_rotation_next_epoch = Some(next_epoch);
+                if phase == SupervisorRotationPhase::PreviousRevokePending {
+                    self.supervisor_revoke_pending_name = Some(self.supervisor_rotation_previous_name.get("value"));
+                    self.supervisor_revoke_pending_peer_id = Some(self.supervisor_rotation_previous_peer_id.get("value"));
+                    self.supervisor_revoke_pending_address = Some(self.supervisor_rotation_previous_address.get("value"));
+                    self.supervisor_revoke_pending_signing_public_key = Some(self.supervisor_rotation_previous_signing_public_key.get("value"));
+                    self.supervisor_revoke_pending_epoch = Some(self.supervisor_rotation_previous_epoch.get("value"));
+                }
+                if phase == SupervisorRotationPhase::NextPublishPending {
+                    self.supervisor_publish_pending_name = Some(self.supervisor_rotation_next_name.get("value"));
+                    self.supervisor_publish_pending_peer_id = Some(self.supervisor_rotation_next_peer_id.get("value"));
+                    self.supervisor_publish_pending_address = Some(self.supervisor_rotation_next_address.get("value"));
+                    self.supervisor_publish_pending_signing_public_key = Some(self.supervisor_rotation_next_signing_public_key.get("value"));
+                    self.supervisor_publish_pending_epoch = Some(self.supervisor_rotation_next_epoch.get("value"));
+                }
+                if phase == SupervisorRotationPhase::Completed {
+                    self.supervisor_binding_kind = SupervisorBindingKind::Bound;
+                    self.supervisor_bound_name = Some(self.supervisor_rotation_next_name.get("value"));
+                    self.supervisor_bound_peer_id = Some(self.supervisor_rotation_next_peer_id.get("value"));
+                    self.supervisor_bound_address = Some(self.supervisor_rotation_next_address.get("value"));
+                    self.supervisor_bound_signing_public_key = Some(self.supervisor_rotation_next_signing_public_key.get("value"));
+                    self.supervisor_bound_epoch = Some(self.supervisor_rotation_next_epoch.get("value"));
+                    self.supervisor_rotation_terminal_phases.insert(operation_id, phase);
+                    self.supervisor_rotation_terminal_previous_names.insert(operation_id, self.supervisor_rotation_previous_name.get("value"));
+                    self.supervisor_rotation_terminal_previous_peer_ids.insert(operation_id, self.supervisor_rotation_previous_peer_id.get("value"));
+                    self.supervisor_rotation_terminal_previous_addresses.insert(operation_id, self.supervisor_rotation_previous_address.get("value"));
+                    self.supervisor_rotation_terminal_previous_signing_public_keys.insert(operation_id, self.supervisor_rotation_previous_signing_public_key.get("value"));
+                    self.supervisor_rotation_terminal_previous_epochs.insert(operation_id, self.supervisor_rotation_previous_epoch.get("value"));
+                    self.supervisor_rotation_terminal_next_names.insert(operation_id, self.supervisor_rotation_next_name.get("value"));
+                    self.supervisor_rotation_terminal_next_peer_ids.insert(operation_id, self.supervisor_rotation_next_peer_id.get("value"));
+                    self.supervisor_rotation_terminal_next_addresses.insert(operation_id, self.supervisor_rotation_next_address.get("value"));
+                    self.supervisor_rotation_terminal_next_signing_public_keys.insert(operation_id, self.supervisor_rotation_next_signing_public_key.get("value"));
+                    self.supervisor_rotation_terminal_next_epochs.insert(operation_id, self.supervisor_rotation_next_epoch.get("value"));
+                }
+                if phase == SupervisorRotationPhase::Rejected {
+                    self.supervisor_binding_kind = SupervisorBindingKind::Bound;
+                    self.supervisor_bound_name = Some(self.supervisor_rotation_previous_name.get("value"));
+                    self.supervisor_bound_peer_id = Some(self.supervisor_rotation_previous_peer_id.get("value"));
+                    self.supervisor_bound_address = Some(self.supervisor_rotation_previous_address.get("value"));
+                    self.supervisor_bound_signing_public_key = Some(self.supervisor_rotation_previous_signing_public_key.get("value"));
+                    self.supervisor_bound_epoch = Some(self.supervisor_rotation_previous_epoch.get("value"));
+                    self.supervisor_rotation_terminal_phases.insert(operation_id, phase);
+                    self.supervisor_rotation_terminal_rejections.insert(operation_id, rejection.get("value"));
+                    self.supervisor_rotation_terminal_previous_names.insert(operation_id, self.supervisor_rotation_previous_name.get("value"));
+                    self.supervisor_rotation_terminal_previous_peer_ids.insert(operation_id, self.supervisor_rotation_previous_peer_id.get("value"));
+                    self.supervisor_rotation_terminal_previous_addresses.insert(operation_id, self.supervisor_rotation_previous_address.get("value"));
+                    self.supervisor_rotation_terminal_previous_signing_public_keys.insert(operation_id, self.supervisor_rotation_previous_signing_public_key.get("value"));
+                    self.supervisor_rotation_terminal_previous_epochs.insert(operation_id, self.supervisor_rotation_previous_epoch.get("value"));
+                    self.supervisor_rotation_terminal_next_names.insert(operation_id, self.supervisor_rotation_next_name.get("value"));
+                    self.supervisor_rotation_terminal_next_peer_ids.insert(operation_id, self.supervisor_rotation_next_peer_id.get("value"));
+                    self.supervisor_rotation_terminal_next_addresses.insert(operation_id, self.supervisor_rotation_next_address.get("value"));
+                    self.supervisor_rotation_terminal_next_signing_public_keys.insert(operation_id, self.supervisor_rotation_next_signing_public_key.get("value"));
+                    self.supervisor_rotation_terminal_next_epochs.insert(operation_id, self.supervisor_rotation_next_epoch.get("value"));
+                }
+            }
+            to Idle
+        }
+
+        transition RecoverSupervisorRotationTerminalReceipt {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input RecoverSupervisorRotationTerminalReceipt {
+                operation_id, phase, rejection,
+                previous_name, previous_peer_id, previous_address,
+                previous_signing_public_key, previous_epoch,
+                next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch
+            }
+            guard "terminal_phase" {
+                phase == SupervisorRotationPhase::Completed
+                || phase == SupervisorRotationPhase::Rejected
+            }
+            guard "rejection_matches_phase" {
+                (phase == SupervisorRotationPhase::Rejected && rejection != None)
+                || (phase == SupervisorRotationPhase::Completed && rejection == None)
+            }
+            guard "receipt_not_recovered" { !self.supervisor_rotation_terminal_phases.contains_key(operation_id) }
+            update {
+                self.supervisor_rotation_terminal_phases.insert(operation_id, phase);
+                if phase == SupervisorRotationPhase::Rejected {
+                    self.supervisor_rotation_terminal_rejections.insert(operation_id, rejection.get("value"));
+                }
+                self.supervisor_rotation_terminal_previous_names.insert(operation_id, previous_name);
+                self.supervisor_rotation_terminal_previous_peer_ids.insert(operation_id, previous_peer_id);
+                self.supervisor_rotation_terminal_previous_addresses.insert(operation_id, previous_address);
+                self.supervisor_rotation_terminal_previous_signing_public_keys.insert(operation_id, previous_signing_public_key);
+                self.supervisor_rotation_terminal_previous_epochs.insert(operation_id, previous_epoch);
+                self.supervisor_rotation_terminal_next_names.insert(operation_id, next_name);
+                self.supervisor_rotation_terminal_next_peer_ids.insert(operation_id, next_peer_id);
+                self.supervisor_rotation_terminal_next_addresses.insert(operation_id, next_address);
+                self.supervisor_rotation_terminal_next_signing_public_keys.insert(operation_id, next_signing_public_key);
+                self.supervisor_rotation_terminal_next_epochs.insert(operation_id, next_epoch);
+            }
+            to Idle
         }
 
         // =====================================================================
@@ -12010,6 +12692,84 @@ macro_rules! meerkat_catalog_machine_dsl {
                 response_terminality: None
             }
         }
+        transition ClassifyExternalEnvelopeRequestSupervisorSilentRetired {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Retired
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorSilentStopped {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Stopped
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorSilentDestroyed {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Destroyed
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                actionable: false,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
         transition ClassifyExternalEnvelopeRequestSilentAttached {
             on signal ClassifyExternalEnvelope {
                 item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
@@ -12128,6 +12888,84 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorRetired {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Retired
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorStopped {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Stopped
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                actionable: true,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                from_peer_id: Some(from_peer_id),
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorDestroyed {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class,
+                lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent_class == PeerIngressRequestClass::SupervisorBridge
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Destroyed
             emit PeerIngressClassified {
                 class: PeerIngressInputClass::ActionableRequest,
                 actionable: true,
@@ -18729,6 +19567,26 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit SpawnDrainTask
         }
 
+        transition SpawnTerminalSupervisorCleanupDrain {
+            on input SpawnDrain { mode }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "persistent_host_only" { mode == DrainMode::PersistentHost }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            guard "peer_ingress_owned" { self.peer_ingress_owner_kind != PeerIngressOwnerKind::Unattached }
+            guard "drain_can_spawn" { self.drain_phase == DrainPhase::Inactive || self.drain_phase == DrainPhase::Stopped || self.drain_phase == DrainPhase::ExitedRespawnable }
+            update {
+                self.drain_phase = DrainPhase::Running;
+                self.drain_mode = Some(mode);
+            }
+            to Destroyed
+            emit SpawnDrainTask
+        }
+
         // StopDrain: stop the running drain
         transition StopDrain {
             per_phase [Idle, Attached, Running, Retired, Stopped]
@@ -18738,6 +19596,22 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.drain_phase = DrainPhase::Stopped;
             }
             to Idle
+        }
+
+        transition StopTerminalSupervisorCleanupDrain {
+            on input StopDrain
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            guard "drain_is_running" { self.drain_phase == DrainPhase::Running }
+            update {
+                self.drain_phase = DrainPhase::Stopped;
+            }
+            to Destroyed
         }
 
         // =====================================================================
@@ -19201,8 +20075,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit PeerInteractionCleanup { corr_id: corr_id }
         }
 
+        // Destroyed remains open only for the bookkeeping surrounding the
+        // supervisor-only bridge envelopes classified above. Cleanup-command
+        // admission still decides which payloads may execute.
         transition PeerRequestReceived {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input PeerRequestReceived { corr_id, handling_mode }
             guard "session_registered" { self.session_id != None }
             guard "not_already_inbound" { !self.inbound_peer_requests.contains_key(corr_id) }
@@ -19215,7 +20092,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition PeerResponseReplied {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input PeerResponseReplied { corr_id }
             guard "session_registered" { self.session_id != None }
             guard "inbound_exists" { self.inbound_peer_requests.contains_key(corr_id) }
@@ -19532,6 +20409,32 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
+        transition AttachSessionIngressTerminalSupervisorCleanup {
+            on input AttachSessionIngress { comms_runtime_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_registered" { self.session_id != None }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            guard "owner_allows_session_attach" {
+                self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
+                || (
+                    self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+                    && self.peer_ingress_comms_runtime_id == Some(comms_runtime_id)
+                    && self.peer_ingress_mob_id == None
+                )
+            }
+            update {
+                self.peer_ingress_owner_kind = PeerIngressOwnerKind::SessionOwned;
+                self.peer_ingress_comms_runtime_id = Some(comms_runtime_id);
+                self.peer_ingress_mob_id = None;
+            }
+            to Destroyed
+        }
+
         // AttachMobIngress: valid from `Unattached`, `SessionOwned`, or as
         // an exact idempotent re-assertion of the same mob-owned runtime.
         // Mob provisioning is allowed to take over a session-owned drain
@@ -19557,6 +20460,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
+        transition AttachMobIngressTerminalSupervisorCleanup {
+            on input AttachMobIngress { comms_runtime_id, mob_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_registered" { self.session_id != None }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            guard "owner_allows_mob_attach" {
+                self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
+                || self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+                || (
+                    self.peer_ingress_owner_kind == PeerIngressOwnerKind::MobOwned
+                    && self.peer_ingress_comms_runtime_id == Some(comms_runtime_id)
+                    && self.peer_ingress_mob_id == Some(mob_id)
+                )
+            }
+            update {
+                self.peer_ingress_owner_kind = PeerIngressOwnerKind::MobOwned;
+                self.peer_ingress_comms_runtime_id = Some(comms_runtime_id);
+                self.peer_ingress_mob_id = Some(mob_id);
+            }
+            to Destroyed
+        }
+
         // DetachIngress: clear any active ownership back to `Unattached`;
         // exact no-op detach is accepted as idempotence by the DSL itself.
         transition DetachIngress {
@@ -19569,6 +20499,24 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.peer_ingress_mob_id = None;
             }
             to Idle
+        }
+
+        transition DetachIngressTerminalSupervisorCleanup {
+            on input DetachIngress
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "session_registered" { self.session_id != None }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {
+                self.peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached;
+                self.peer_ingress_comms_runtime_id = None;
+                self.peer_ingress_mob_id = None;
+            }
+            to Destroyed
         }
 
         // =====================================================================
@@ -19587,6 +20535,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "supervisor_unbound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
+            guard "no_pending_revoke" {
+                self.supervisor_revoke_pending_peer_id == None
+            }
+            guard "no_rotation_pending" { self.supervisor_rotation_phase == None }
             update {}
             to Idle
             emit SupervisorBindAdmissionResolved {
@@ -19656,6 +20608,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit SupervisorBindAdmissionResolved {
                 result: SupervisorBindAdmissionResultKind::Reject,
                 rejection: Some(SupervisorBindRejectionKind::AlreadyBound)
+            }
+        }
+
+        transition ResolveSupervisorBindAdmissionRevocationPending {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorBindAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+            }
+            guard "pending_revoke" {
+                self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {}
+            to Idle
+            emit SupervisorBindAdmissionResolved {
+                result: SupervisorBindAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBindRejectionKind::RevocationPending)
             }
         }
 
@@ -19804,14 +20774,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // ResolveSupervisorAuthorizeAdmission: generated authority for
-        // `AuthorizeSupervisor` admission. Accepted rotations carry the
-        // previous binding in the local feedback so rollback and revoke
-        // staging consume generated facts instead of a shell-classified
-        // snapshot.
+        // `AuthorizeSupervisor` verifies or refreshes the currently bound
+        // authority. Durable lifecycle rotation is owned exclusively by
+        // `SubmitSupervisorRotation` and its operation worker.
         transition ResolveSupervisorAuthorizeAdmissionNotBound {
-            per_phase [Idle, Attached, Running]
-            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key }
             guard "supervisor_not_bound" {
                 self.supervisor_binding_kind != SupervisorBindingKind::Bound
             }
@@ -19829,8 +20797,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ResolveSupervisorAuthorizeAdmissionStaleSupervisor {
-            per_phase [Idle, Attached, Running]
-            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
             }
@@ -19851,8 +20819,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ResolveSupervisorAuthorizeAdmissionSenderMismatch {
-            per_phase [Idle, Attached, Running]
-            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
             }
@@ -19861,6 +20829,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "sender_peer_id_mismatch" {
                 sender_peer_id != self.supervisor_bound_peer_id
+                || sender_signing_public_key != self.supervisor_bound_signing_public_key
             }
             update {}
             to Idle
@@ -19876,19 +20845,23 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ResolveSupervisorAuthorizeAdmissionIdempotentAck {
-            per_phase [Idle, Attached, Running]
-            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
             }
             guard "supervisor_peer_id_matches_current" {
                 self.supervisor_bound_peer_id == Some(supervisor_peer_id)
             }
+            guard "supervisor_signing_key_matches_current" {
+                self.supervisor_bound_signing_public_key == Some(supervisor_signing_public_key)
+            }
             guard "supervisor_epoch_matches_current" {
                 self.supervisor_bound_epoch == Some(supervisor_epoch)
             }
             guard "sender_peer_id_matches_current" {
                 sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
             }
             update {}
             to Idle
@@ -19903,9 +20876,43 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        transition ResolveSupervisorAuthorizeAdmissionProceed {
+        transition ResolveSupervisorAuthorizeAdmissionIdentityChangeRejected {
             per_phase [Idle, Attached, Running]
-            on input ResolveSupervisorAuthorizeAdmission { supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_epoch_not_stale" {
+                supervisor_epoch >= self.supervisor_bound_epoch.get("value")
+            }
+            guard "identity_change_requested" {
+                self.supervisor_bound_peer_id != Some(supervisor_peer_id)
+                || self.supervisor_bound_signing_public_key != Some(supervisor_signing_public_key)
+            }
+            guard "sender_peer_id_matches_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
+            }
+            update {}
+            to Idle
+            emit SupervisorAuthorizeAdmissionResolved {
+                result: SupervisorAuthorizeAdmissionResultKind::Reject,
+                rejection: Some(SupervisorAuthorizeRejectionKind::RotationNotAllowed),
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        // Terminal/stopped runtimes may acknowledge an exact restatement of
+        // the existing authority (above), but may not advance it. This branch
+        // keeps a newer/different supervisor request typed instead of falling
+        // through as a missing transition/Internal error.
+        transition ResolveSupervisorAuthorizeAdmissionRotationNotAllowed {
+            per_phase [Retired, Stopped, Destroyed]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
             }
@@ -19914,10 +20921,43 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "sender_peer_id_matches_current" {
                 sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
             }
             guard "not_idempotent" {
                 self.supervisor_bound_peer_id != Some(supervisor_peer_id)
+                || self.supervisor_bound_signing_public_key != Some(supervisor_signing_public_key)
                 || self.supervisor_bound_epoch != Some(supervisor_epoch)
+            }
+            update {}
+            to Idle
+            emit SupervisorAuthorizeAdmissionResolved {
+                result: SupervisorAuthorizeAdmissionResultKind::Reject,
+                rejection: Some(SupervisorAuthorizeRejectionKind::RotationNotAllowed),
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        transition ResolveSupervisorAuthorizeAdmissionProceed {
+            per_phase [Idle, Attached, Running]
+            on input ResolveSupervisorAuthorizeAdmission { supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key }
+            guard "supervisor_bound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "supervisor_epoch_not_stale" {
+                supervisor_epoch >= self.supervisor_bound_epoch.get("value")
+            }
+            guard "sender_peer_id_matches_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
+            }
+            guard "same_authority_version_advance" {
+                self.supervisor_bound_peer_id == Some(supervisor_peer_id)
+                && self.supervisor_bound_signing_public_key == Some(supervisor_signing_public_key)
+                && supervisor_epoch > self.supervisor_bound_epoch.get("value")
             }
             update {}
             to Idle
@@ -19942,6 +20982,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "supervisor_unbound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Unbound
             }
+            guard "no_pending_revoke" {
+                self.supervisor_revoke_pending_peer_id == None
+            }
+            guard "no_rotation_pending" { self.supervisor_rotation_phase == None }
             update {
                 self.supervisor_binding_kind = SupervisorBindingKind::Bound;
                 self.supervisor_bound_name = Some(name);
@@ -19959,6 +21003,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_revoke_pending_address = None;
                 self.supervisor_revoke_pending_signing_public_key = None;
                 self.supervisor_revoke_pending_epoch = None;
+                self.supervisor_revoked_peer_id = None;
+                self.supervisor_revoked_signing_public_key = None;
+                self.supervisor_revoked_epoch = None;
             }
             to Idle
             emit PublishSupervisorTrustEdge {
@@ -19971,14 +21018,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // AuthorizeSupervisor: only valid from `Bound`. Generated
-        // `ResolveSupervisorAuthorizeAdmission` accepts the rotation before
-        // the shell fires this mutation input.
+        // AuthorizeSupervisor: only valid from `Bound`. Generated admission
+        // permits a monotonic version advance for the same peer and signing
+        // key. Identity rotation belongs exclusively to the durable submit
+        // operation.
         transition AuthorizeSupervisor {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input AuthorizeSupervisor { name, peer_id, address, signing_public_key, epoch }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
+            }
+            guard "same_peer_version_advance_only" {
+                self.supervisor_bound_peer_id == Some(peer_id)
+                && epoch > self.supervisor_bound_epoch.get("value")
+            }
+            guard "no_pending_rotation" {
+                self.supervisor_rotation_phase == None
+                || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+                || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected)
             }
             update {
                 self.supervisor_bound_name = Some(name);
@@ -20008,12 +21065,833 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // Exact identity/key/epoch reassertion may refresh only mutable route
+        // metadata after supervisor restart. This is not a rotation. The live
+        // trust publication and its durable Bound commit still close through
+        // SupervisorTrustEdgePublished before a response uses the new route.
+        transition RefreshSupervisorBindingRoute {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input RefreshSupervisorBindingRoute { name, peer_id, address, signing_public_key, epoch, sender_peer_id }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "peer_id_matches_current" { self.supervisor_bound_peer_id == Some(peer_id) }
+            guard "signing_key_matches_current" { self.supervisor_bound_signing_public_key == Some(signing_public_key) }
+            guard "epoch_matches_current" { self.supervisor_bound_epoch == Some(epoch) }
+            guard "sender_matches_current" { sender_peer_id == self.supervisor_bound_peer_id }
+            update {
+                self.supervisor_bound_name = Some(name);
+                self.supervisor_bound_address = Some(address);
+                self.supervisor_publish_pending_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_publish_pending_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_publish_pending_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_publish_pending_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_publish_pending_epoch = Some(self.supervisor_bound_epoch.get("value"));
+            }
+            to Idle
+            emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: self.supervisor_publish_pending_peer_id.get("value"),
+                name: self.supervisor_publish_pending_name.get("value"),
+                address: self.supervisor_publish_pending_address.get("value"),
+                signing_public_key: Some(self.supervisor_publish_pending_signing_public_key.get("value")),
+                epoch: self.supervisor_publish_pending_epoch.get("value")
+            }
+        }
+
+        // One-way rotation submission records the stable operation identity
+        // and full target before the old authority is fenced. Transport
+        // completion is deliberately absent from this machine vocabulary.
+        transition SubmitSupervisorRotationNew {
+            per_phase [Idle, Attached, Running]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "new_operation_slot" {
+                self.supervisor_rotation_phase == None
+                || ((self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+                        || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected))
+                    && self.supervisor_rotation_operation_id != Some(operation_id))
+            }
+            guard "operation_id_not_terminal" { !self.supervisor_rotation_terminal_phases.contains_key(operation_id) }
+            guard "target_preflight_accepted" { preflight_rejection == None }
+            guard "sender_is_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
+            }
+            guard "target_epoch_advances" { next_epoch > self.supervisor_bound_epoch.get("value") }
+            update {
+                self.supervisor_rotation_operation_id = Some(operation_id);
+                self.supervisor_rotation_phase = Some(SupervisorRotationPhase::PreviousRevokePending);
+                self.supervisor_rotation_rejection = None;
+                self.supervisor_rotation_previous_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_rotation_previous_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_rotation_previous_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_rotation_previous_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_rotation_previous_epoch = Some(self.supervisor_bound_epoch.get("value"));
+                self.supervisor_rotation_next_name = Some(next_name);
+                self.supervisor_rotation_next_peer_id = Some(next_peer_id);
+                self.supervisor_rotation_next_address = Some(next_address);
+                self.supervisor_rotation_next_signing_public_key = Some(next_signing_public_key);
+                self.supervisor_rotation_next_epoch = Some(next_epoch);
+                self.supervisor_revoke_pending_name = Some(self.supervisor_rotation_previous_name.get("value"));
+                self.supervisor_revoke_pending_peer_id = Some(self.supervisor_rotation_previous_peer_id.get("value"));
+                self.supervisor_revoke_pending_address = Some(self.supervisor_rotation_previous_address.get("value"));
+                self.supervisor_revoke_pending_signing_public_key = Some(self.supervisor_rotation_previous_signing_public_key.get("value"));
+                self.supervisor_revoke_pending_epoch = Some(self.supervisor_rotation_previous_epoch.get("value"));
+                self.supervisor_binding_kind = SupervisorBindingKind::Unbound;
+                self.supervisor_bound_name = None;
+                self.supervisor_bound_peer_id = None;
+                self.supervisor_bound_address = None;
+                self.supervisor_bound_signing_public_key = None;
+                self.supervisor_bound_epoch = None;
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
+                self.supervisor_revoked_peer_id = None;
+                self.supervisor_revoked_signing_public_key = None;
+                self.supervisor_revoked_epoch = None;
+            }
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: self.supervisor_rotation_operation_id.get("value"),
+                result: SupervisorRotationSubmissionResultKind::New,
+                rejection: None,
+                previous_name: self.supervisor_rotation_previous_name,
+                previous_peer_id: self.supervisor_rotation_previous_peer_id,
+                previous_address: self.supervisor_rotation_previous_address,
+                previous_signing_public_key: self.supervisor_rotation_previous_signing_public_key,
+                previous_epoch: self.supervisor_rotation_previous_epoch
+            }
+            emit RevokeSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: self.supervisor_rotation_previous_peer_id.get("value"),
+                epoch: self.supervisor_rotation_previous_epoch.get("value")
+            }
+        }
+
+        transition SubmitSupervisorRotationAdoptCurrent {
+            per_phase [Idle, Attached, Running]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "new_operation_slot" {
+                self.supervisor_rotation_phase == None
+                || ((self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+                        || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected))
+                    && self.supervisor_rotation_operation_id != Some(operation_id))
+            }
+            guard "operation_id_not_terminal" { !self.supervisor_rotation_terminal_phases.contains_key(operation_id) }
+            guard "target_preflight_accepted" { preflight_rejection == None }
+            guard "sender_is_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
+            }
+            guard "target_is_exact_current" {
+                self.supervisor_bound_name == Some(next_name)
+                && self.supervisor_bound_peer_id == Some(next_peer_id)
+                && self.supervisor_bound_address == Some(next_address)
+                && self.supervisor_bound_signing_public_key == Some(next_signing_public_key)
+                && self.supervisor_bound_epoch == Some(next_epoch)
+            }
+            update {
+                self.supervisor_rotation_operation_id = Some(operation_id);
+                self.supervisor_rotation_phase = Some(SupervisorRotationPhase::Completed);
+                self.supervisor_rotation_rejection = None;
+                self.supervisor_rotation_previous_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_rotation_previous_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_rotation_previous_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_rotation_previous_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_rotation_previous_epoch = Some(self.supervisor_bound_epoch.get("value"));
+                self.supervisor_rotation_next_name = Some(next_name);
+                self.supervisor_rotation_next_peer_id = Some(next_peer_id);
+                self.supervisor_rotation_next_address = Some(next_address);
+                self.supervisor_rotation_next_signing_public_key = Some(next_signing_public_key);
+                self.supervisor_rotation_next_epoch = Some(next_epoch);
+                self.supervisor_rotation_terminal_phases.insert(operation_id, SupervisorRotationPhase::Completed);
+                self.supervisor_rotation_terminal_previous_names.insert(operation_id, self.supervisor_rotation_previous_name.get("value"));
+                self.supervisor_rotation_terminal_previous_peer_ids.insert(operation_id, self.supervisor_rotation_previous_peer_id.get("value"));
+                self.supervisor_rotation_terminal_previous_addresses.insert(operation_id, self.supervisor_rotation_previous_address.get("value"));
+                self.supervisor_rotation_terminal_previous_signing_public_keys.insert(operation_id, self.supervisor_rotation_previous_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_previous_epochs.insert(operation_id, self.supervisor_rotation_previous_epoch.get("value"));
+                self.supervisor_rotation_terminal_next_names.insert(operation_id, self.supervisor_rotation_next_name.get("value"));
+                self.supervisor_rotation_terminal_next_peer_ids.insert(operation_id, self.supervisor_rotation_next_peer_id.get("value"));
+                self.supervisor_rotation_terminal_next_addresses.insert(operation_id, self.supervisor_rotation_next_address.get("value"));
+                self.supervisor_rotation_terminal_next_signing_public_keys.insert(operation_id, self.supervisor_rotation_next_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_next_epochs.insert(operation_id, self.supervisor_rotation_next_epoch.get("value"));
+            }
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: self.supervisor_rotation_operation_id.get("value"),
+                result: SupervisorRotationSubmissionResultKind::ExistingTerminal,
+                rejection: None,
+                previous_name: self.supervisor_rotation_previous_name,
+                previous_peer_id: self.supervisor_rotation_previous_peer_id,
+                previous_address: self.supervisor_rotation_previous_address,
+                previous_signing_public_key: self.supervisor_rotation_previous_signing_public_key,
+                previous_epoch: self.supervisor_rotation_previous_epoch
+            }
+        }
+
+        // Authenticated submissions rejected before transport material can be
+        // trusted are still durable operations. Persist the raw requested
+        // target so the current authority can observe a stable terminal
+        // receipt instead of polling NotFound forever.
+        transition SubmitSupervisorRotationPersistPreflightRejected {
+            per_phase [Idle, Attached, Running]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "new_operation_slot" {
+                self.supervisor_rotation_phase == None
+                || ((self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+                        || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected))
+                    && self.supervisor_rotation_operation_id != Some(operation_id))
+            }
+            guard "operation_id_not_terminal" { !self.supervisor_rotation_terminal_phases.contains_key(operation_id) }
+            guard "target_preflight_rejected" { preflight_rejection != None }
+            guard "sender_is_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
+            }
+            update {
+                self.supervisor_rotation_operation_id = Some(operation_id);
+                self.supervisor_rotation_phase = Some(SupervisorRotationPhase::Rejected);
+                self.supervisor_rotation_rejection = Some(preflight_rejection.get("value"));
+                self.supervisor_rotation_previous_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_rotation_previous_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_rotation_previous_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_rotation_previous_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_rotation_previous_epoch = Some(self.supervisor_bound_epoch.get("value"));
+                self.supervisor_rotation_next_name = Some(next_name);
+                self.supervisor_rotation_next_peer_id = Some(next_peer_id);
+                self.supervisor_rotation_next_address = Some(next_address);
+                self.supervisor_rotation_next_signing_public_key = Some(next_signing_public_key);
+                self.supervisor_rotation_next_epoch = Some(next_epoch);
+                self.supervisor_rotation_terminal_phases.insert(operation_id, SupervisorRotationPhase::Rejected);
+                self.supervisor_rotation_terminal_rejections.insert(operation_id, preflight_rejection.get("value"));
+                self.supervisor_rotation_terminal_previous_names.insert(operation_id, self.supervisor_rotation_previous_name.get("value"));
+                self.supervisor_rotation_terminal_previous_peer_ids.insert(operation_id, self.supervisor_rotation_previous_peer_id.get("value"));
+                self.supervisor_rotation_terminal_previous_addresses.insert(operation_id, self.supervisor_rotation_previous_address.get("value"));
+                self.supervisor_rotation_terminal_previous_signing_public_keys.insert(operation_id, self.supervisor_rotation_previous_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_previous_epochs.insert(operation_id, self.supervisor_rotation_previous_epoch.get("value"));
+                self.supervisor_rotation_terminal_next_names.insert(operation_id, self.supervisor_rotation_next_name.get("value"));
+                self.supervisor_rotation_terminal_next_peer_ids.insert(operation_id, self.supervisor_rotation_next_peer_id.get("value"));
+                self.supervisor_rotation_terminal_next_addresses.insert(operation_id, self.supervisor_rotation_next_address.get("value"));
+                self.supervisor_rotation_terminal_next_signing_public_keys.insert(operation_id, self.supervisor_rotation_next_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_next_epochs.insert(operation_id, self.supervisor_rotation_next_epoch.get("value"));
+            }
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: self.supervisor_rotation_operation_id.get("value"),
+                result: SupervisorRotationSubmissionResultKind::Rejected,
+                rejection: self.supervisor_rotation_rejection,
+                previous_name: self.supervisor_rotation_previous_name,
+                previous_peer_id: self.supervisor_rotation_previous_peer_id,
+                previous_address: self.supervisor_rotation_previous_address,
+                previous_signing_public_key: self.supervisor_rotation_previous_signing_public_key,
+                previous_epoch: self.supervisor_rotation_previous_epoch
+            }
+        }
+
+        transition SubmitSupervisorRotationPersistRejected {
+            per_phase [Idle, Attached, Running]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "new_operation_slot" {
+                self.supervisor_rotation_phase == None
+                || ((self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+                        || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Rejected))
+                    && self.supervisor_rotation_operation_id != Some(operation_id))
+            }
+            guard "operation_id_not_terminal" { !self.supervisor_rotation_terminal_phases.contains_key(operation_id) }
+            guard "target_preflight_accepted" { preflight_rejection == None }
+            guard "sender_is_current" {
+                sender_peer_id == self.supervisor_bound_peer_id
+                && sender_signing_public_key == self.supervisor_bound_signing_public_key
+            }
+            guard "target_not_adoptable_or_advanced" {
+                next_epoch < self.supervisor_bound_epoch.get("value")
+                || (next_epoch == self.supervisor_bound_epoch.get("value")
+                    && (self.supervisor_bound_name != Some(next_name)
+                        || self.supervisor_bound_peer_id != Some(next_peer_id)
+                        || self.supervisor_bound_address != Some(next_address)
+                        || self.supervisor_bound_signing_public_key != Some(next_signing_public_key)))
+            }
+            update {
+                self.supervisor_rotation_operation_id = Some(operation_id);
+                self.supervisor_rotation_phase = Some(SupervisorRotationPhase::Rejected);
+                self.supervisor_rotation_rejection = Some(SupervisorRotationRejectionKind::TargetEpochNotAdvanced);
+                self.supervisor_rotation_previous_name = Some(self.supervisor_bound_name.get("value"));
+                self.supervisor_rotation_previous_peer_id = Some(self.supervisor_bound_peer_id.get("value"));
+                self.supervisor_rotation_previous_address = Some(self.supervisor_bound_address.get("value"));
+                self.supervisor_rotation_previous_signing_public_key = Some(self.supervisor_bound_signing_public_key.get("value"));
+                self.supervisor_rotation_previous_epoch = Some(self.supervisor_bound_epoch.get("value"));
+                self.supervisor_rotation_next_name = Some(next_name);
+                self.supervisor_rotation_next_peer_id = Some(next_peer_id);
+                self.supervisor_rotation_next_address = Some(next_address);
+                self.supervisor_rotation_next_signing_public_key = Some(next_signing_public_key);
+                self.supervisor_rotation_next_epoch = Some(next_epoch);
+                self.supervisor_rotation_terminal_phases.insert(operation_id, SupervisorRotationPhase::Rejected);
+                self.supervisor_rotation_terminal_rejections.insert(operation_id, SupervisorRotationRejectionKind::TargetEpochNotAdvanced);
+                self.supervisor_rotation_terminal_previous_names.insert(operation_id, self.supervisor_rotation_previous_name.get("value"));
+                self.supervisor_rotation_terminal_previous_peer_ids.insert(operation_id, self.supervisor_rotation_previous_peer_id.get("value"));
+                self.supervisor_rotation_terminal_previous_addresses.insert(operation_id, self.supervisor_rotation_previous_address.get("value"));
+                self.supervisor_rotation_terminal_previous_signing_public_keys.insert(operation_id, self.supervisor_rotation_previous_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_previous_epochs.insert(operation_id, self.supervisor_rotation_previous_epoch.get("value"));
+                self.supervisor_rotation_terminal_next_names.insert(operation_id, self.supervisor_rotation_next_name.get("value"));
+                self.supervisor_rotation_terminal_next_peer_ids.insert(operation_id, self.supervisor_rotation_next_peer_id.get("value"));
+                self.supervisor_rotation_terminal_next_addresses.insert(operation_id, self.supervisor_rotation_next_address.get("value"));
+                self.supervisor_rotation_terminal_next_signing_public_keys.insert(operation_id, self.supervisor_rotation_next_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_next_epochs.insert(operation_id, self.supervisor_rotation_next_epoch.get("value"));
+            }
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: self.supervisor_rotation_operation_id.get("value"),
+                result: SupervisorRotationSubmissionResultKind::Rejected,
+                rejection: self.supervisor_rotation_rejection,
+                previous_name: self.supervisor_rotation_previous_name,
+                previous_peer_id: self.supervisor_rotation_previous_peer_id,
+                previous_address: self.supervisor_rotation_previous_address,
+                previous_signing_public_key: self.supervisor_rotation_previous_signing_public_key,
+                previous_epoch: self.supervisor_rotation_previous_epoch
+            }
+        }
+
+        transition SubmitSupervisorRotationExistingPending {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "pending_operation" {
+                self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending)
+                || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending)
+            }
+            guard "exact_operation_and_target" {
+                self.supervisor_rotation_operation_id == Some(operation_id)
+                && self.supervisor_rotation_next_name == Some(next_name)
+                && self.supervisor_rotation_next_peer_id == Some(next_peer_id)
+                && self.supervisor_rotation_next_address == Some(next_address)
+                && self.supervisor_rotation_next_signing_public_key == Some(next_signing_public_key)
+                && self.supervisor_rotation_next_epoch == Some(next_epoch)
+            }
+            guard "sender_is_rotation_participant" {
+                (sender_peer_id == self.supervisor_rotation_previous_peer_id
+                    && sender_signing_public_key == self.supervisor_rotation_previous_signing_public_key)
+                || (sender_peer_id == self.supervisor_rotation_next_peer_id
+                    && sender_signing_public_key == self.supervisor_rotation_next_signing_public_key)
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: operation_id,
+                result: SupervisorRotationSubmissionResultKind::ExistingPending,
+                rejection: None,
+                previous_name: self.supervisor_rotation_previous_name,
+                previous_peer_id: self.supervisor_rotation_previous_peer_id,
+                previous_address: self.supervisor_rotation_previous_address,
+                previous_signing_public_key: self.supervisor_rotation_previous_signing_public_key,
+                previous_epoch: self.supervisor_rotation_previous_epoch
+            }
+        }
+
+        transition SubmitSupervisorRotationExistingCompleted {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "completed_receipt" {
+                self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                    == Some(SupervisorRotationPhase::Completed)
+            }
+            guard "exact_operation_and_target" {
+                self.supervisor_rotation_terminal_next_names.get_cloned(operation_id) == Some(next_name)
+                && self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id) == Some(next_peer_id)
+                && self.supervisor_rotation_terminal_next_addresses.get_cloned(operation_id) == Some(next_address)
+                && self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id) == Some(next_signing_public_key)
+                && self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id) == Some(next_epoch)
+            }
+            guard "sender_is_terminal_authority" {
+                (sender_peer_id == self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id)
+                    && sender_signing_public_key == self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id))
+                || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                    && sender_peer_id == self.supervisor_bound_peer_id
+                    && sender_signing_public_key == self.supervisor_bound_signing_public_key)
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: operation_id,
+                result: SupervisorRotationSubmissionResultKind::ExistingTerminal,
+                rejection: None,
+                previous_name: self.supervisor_rotation_terminal_previous_names.get_cloned(operation_id),
+                previous_peer_id: self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id),
+                previous_address: self.supervisor_rotation_terminal_previous_addresses.get_cloned(operation_id),
+                previous_signing_public_key: self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id),
+                previous_epoch: self.supervisor_rotation_terminal_previous_epochs.get_copied(operation_id)
+            }
+        }
+
+        transition SubmitSupervisorRotationExistingRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "rejected_receipt" {
+                self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                    == Some(SupervisorRotationPhase::Rejected)
+            }
+            guard "exact_operation_and_target" {
+                self.supervisor_rotation_terminal_next_names.get_cloned(operation_id) == Some(next_name)
+                && self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id) == Some(next_peer_id)
+                && self.supervisor_rotation_terminal_next_addresses.get_cloned(operation_id) == Some(next_address)
+                && self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id) == Some(next_signing_public_key)
+                && self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id) == Some(next_epoch)
+            }
+            guard "sender_is_retained_authority" {
+                (sender_peer_id == self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id)
+                    && sender_signing_public_key == self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id))
+                || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                    && sender_peer_id == self.supervisor_bound_peer_id
+                    && sender_signing_public_key == self.supervisor_bound_signing_public_key)
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: operation_id,
+                result: SupervisorRotationSubmissionResultKind::ExistingTerminal,
+                rejection: self.supervisor_rotation_terminal_rejections.get_copied(operation_id),
+                previous_name: self.supervisor_rotation_terminal_previous_names.get_cloned(operation_id),
+                previous_peer_id: self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id),
+                previous_address: self.supervisor_rotation_terminal_previous_addresses.get_cloned(operation_id),
+                previous_signing_public_key: self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id),
+                previous_epoch: self.supervisor_rotation_terminal_previous_epochs.get_copied(operation_id)
+            }
+        }
+
+        transition SubmitSupervisorRotationConflict {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "receipt_present" { self.supervisor_rotation_phase != None }
+            guard "not_valid_new_operation" {
+                self.supervisor_binding_kind != SupervisorBindingKind::Bound
+                || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending)
+                || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending)
+                || self.supervisor_rotation_operation_id == Some(operation_id)
+                || sender_peer_id != self.supervisor_bound_peer_id
+                || sender_signing_public_key != self.supervisor_bound_signing_public_key
+            }
+            guard "not_exact_authorized_existing" {
+                !((self.supervisor_rotation_operation_id == Some(operation_id)
+                        && self.supervisor_rotation_next_name == Some(next_name)
+                        && self.supervisor_rotation_next_peer_id == Some(next_peer_id)
+                        && self.supervisor_rotation_next_address == Some(next_address)
+                        && self.supervisor_rotation_next_signing_public_key == Some(next_signing_public_key)
+                        && self.supervisor_rotation_next_epoch == Some(next_epoch)
+                        && (self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending)
+                            || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending))
+                        && ((sender_peer_id == self.supervisor_rotation_previous_peer_id
+                                && sender_signing_public_key == self.supervisor_rotation_previous_signing_public_key)
+                            || (sender_peer_id == self.supervisor_rotation_next_peer_id
+                                && sender_signing_public_key == self.supervisor_rotation_next_signing_public_key)))
+                    || (self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                            == Some(SupervisorRotationPhase::Completed)
+                        && self.supervisor_rotation_terminal_next_names.get_cloned(operation_id) == Some(next_name)
+                        && self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id) == Some(next_peer_id)
+                        && self.supervisor_rotation_terminal_next_addresses.get_cloned(operation_id) == Some(next_address)
+                        && self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id) == Some(next_signing_public_key)
+                        && self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id) == Some(next_epoch)
+                        && ((sender_peer_id == self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id)
+                                && sender_signing_public_key == self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id))
+                            || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                                && sender_peer_id == self.supervisor_bound_peer_id
+                                && sender_signing_public_key == self.supervisor_bound_signing_public_key)))
+                    || (self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                            == Some(SupervisorRotationPhase::Rejected)
+                        && self.supervisor_rotation_terminal_next_names.get_cloned(operation_id) == Some(next_name)
+                        && self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id) == Some(next_peer_id)
+                        && self.supervisor_rotation_terminal_next_addresses.get_cloned(operation_id) == Some(next_address)
+                        && self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id) == Some(next_signing_public_key)
+                        && self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id) == Some(next_epoch)
+                        && ((sender_peer_id == self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id)
+                                && sender_signing_public_key == self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id))
+                            || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                                && sender_peer_id == self.supervisor_bound_peer_id
+                                && sender_signing_public_key == self.supervisor_bound_signing_public_key))))
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: operation_id,
+                result: SupervisorRotationSubmissionResultKind::Conflict,
+                rejection: Some(SupervisorRotationRejectionKind::OperationConflict),
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        transition SubmitSupervisorRotationUnavailable {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input SubmitSupervisorRotation {
+                operation_id, next_name, next_peer_id, next_address,
+                next_signing_public_key, next_epoch, preflight_rejection,
+                sender_peer_id, sender_signing_public_key
+            }
+            guard "no_receipt" { self.supervisor_rotation_phase == None }
+            guard "not_authorized_current" {
+                self.supervisor_binding_kind != SupervisorBindingKind::Bound
+                || sender_peer_id != self.supervisor_bound_peer_id
+                || sender_signing_public_key != self.supervisor_bound_signing_public_key
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationSubmissionResolved {
+                operation_id: operation_id,
+                result: SupervisorRotationSubmissionResultKind::Conflict,
+                rejection: Some(SupervisorRotationRejectionKind::SenderMismatch),
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None
+            }
+        }
+
+        transition ResumeSupervisorRotationPreviousRevoke {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResumeSupervisorRotation { operation_id }
+            guard "operation_matches" { self.supervisor_rotation_operation_id == Some(operation_id) }
+            guard "previous_revoke_pending" {
+                self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending)
+            }
+            update {}
+            to Idle
+            emit RevokeSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: self.supervisor_rotation_previous_peer_id.get("value"),
+                epoch: self.supervisor_rotation_previous_epoch.get("value")
+            }
+        }
+
+        transition SupervisorRotationPreviousRevoked {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input SupervisorRotationPreviousRevoked { operation_id, peer_id, epoch }
+            guard "operation_matches" { self.supervisor_rotation_operation_id == Some(operation_id) }
+            guard "previous_revoke_pending" {
+                self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending)
+            }
+            guard "previous_peer_matches" { self.supervisor_rotation_previous_peer_id == Some(peer_id) }
+            guard "previous_epoch_matches" { self.supervisor_rotation_previous_epoch == Some(epoch) }
+            update {
+                self.supervisor_rotation_phase = Some(SupervisorRotationPhase::NextPublishPending);
+                self.supervisor_revoke_pending_name = None;
+                self.supervisor_revoke_pending_peer_id = None;
+                self.supervisor_revoke_pending_address = None;
+                self.supervisor_revoke_pending_signing_public_key = None;
+                self.supervisor_revoke_pending_epoch = None;
+                self.supervisor_publish_pending_name = Some(self.supervisor_rotation_next_name.get("value"));
+                self.supervisor_publish_pending_peer_id = Some(self.supervisor_rotation_next_peer_id.get("value"));
+                self.supervisor_publish_pending_address = Some(self.supervisor_rotation_next_address.get("value"));
+                self.supervisor_publish_pending_signing_public_key = Some(self.supervisor_rotation_next_signing_public_key.get("value"));
+                self.supervisor_publish_pending_epoch = Some(self.supervisor_rotation_next_epoch.get("value"));
+            }
+            to Idle
+            emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: self.supervisor_rotation_next_peer_id.get("value"),
+                name: self.supervisor_rotation_next_name.get("value"),
+                address: self.supervisor_rotation_next_address.get("value"),
+                signing_public_key: Some(self.supervisor_rotation_next_signing_public_key.get("value")),
+                epoch: self.supervisor_rotation_next_epoch.get("value")
+            }
+        }
+
+        transition ResumeSupervisorRotationNextPublish {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResumeSupervisorRotation { operation_id }
+            guard "operation_matches" { self.supervisor_rotation_operation_id == Some(operation_id) }
+            guard "next_publish_pending" {
+                self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending)
+            }
+            update {}
+            to Idle
+            emit PublishSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: self.supervisor_rotation_next_peer_id.get("value"),
+                name: self.supervisor_rotation_next_name.get("value"),
+                address: self.supervisor_rotation_next_address.get("value"),
+                signing_public_key: Some(self.supervisor_rotation_next_signing_public_key.get("value")),
+                epoch: self.supervisor_rotation_next_epoch.get("value")
+            }
+        }
+
+        transition SupervisorRotationNextPublished {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input SupervisorRotationNextPublished { operation_id, peer_id, epoch }
+            guard "operation_matches" { self.supervisor_rotation_operation_id == Some(operation_id) }
+            guard "next_publish_pending" {
+                self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending)
+            }
+            guard "next_peer_matches" { self.supervisor_rotation_next_peer_id == Some(peer_id) }
+            guard "next_epoch_matches" { self.supervisor_rotation_next_epoch == Some(epoch) }
+            update {
+                self.supervisor_rotation_phase = Some(SupervisorRotationPhase::Completed);
+                self.supervisor_binding_kind = SupervisorBindingKind::Bound;
+                self.supervisor_bound_name = Some(self.supervisor_rotation_next_name.get("value"));
+                self.supervisor_bound_peer_id = Some(self.supervisor_rotation_next_peer_id.get("value"));
+                self.supervisor_bound_address = Some(self.supervisor_rotation_next_address.get("value"));
+                self.supervisor_bound_signing_public_key = Some(self.supervisor_rotation_next_signing_public_key.get("value"));
+                self.supervisor_bound_epoch = Some(self.supervisor_rotation_next_epoch.get("value"));
+                self.supervisor_publish_pending_name = None;
+                self.supervisor_publish_pending_peer_id = None;
+                self.supervisor_publish_pending_address = None;
+                self.supervisor_publish_pending_signing_public_key = None;
+                self.supervisor_publish_pending_epoch = None;
+                self.supervisor_rotation_terminal_phases.insert(operation_id, SupervisorRotationPhase::Completed);
+                self.supervisor_rotation_terminal_previous_names.insert(operation_id, self.supervisor_rotation_previous_name.get("value"));
+                self.supervisor_rotation_terminal_previous_peer_ids.insert(operation_id, self.supervisor_rotation_previous_peer_id.get("value"));
+                self.supervisor_rotation_terminal_previous_addresses.insert(operation_id, self.supervisor_rotation_previous_address.get("value"));
+                self.supervisor_rotation_terminal_previous_signing_public_keys.insert(operation_id, self.supervisor_rotation_previous_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_previous_epochs.insert(operation_id, self.supervisor_rotation_previous_epoch.get("value"));
+                self.supervisor_rotation_terminal_next_names.insert(operation_id, self.supervisor_rotation_next_name.get("value"));
+                self.supervisor_rotation_terminal_next_peer_ids.insert(operation_id, self.supervisor_rotation_next_peer_id.get("value"));
+                self.supervisor_rotation_terminal_next_addresses.insert(operation_id, self.supervisor_rotation_next_address.get("value"));
+                self.supervisor_rotation_terminal_next_signing_public_keys.insert(operation_id, self.supervisor_rotation_next_signing_public_key.get("value"));
+                self.supervisor_rotation_terminal_next_epochs.insert(operation_id, self.supervisor_rotation_next_epoch.get("value"));
+            }
+            to Idle
+        }
+
+        transition ResumeSupervisorRotationCompleted {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResumeSupervisorRotation { operation_id }
+            guard "operation_matches" { self.supervisor_rotation_operation_id == Some(operation_id) }
+            guard "completed_rotation_receipt" {
+                self.supervisor_rotation_phase == Some(SupervisorRotationPhase::Completed)
+            }
+            update {}
+            to Idle
+        }
+
+        transition ObserveSupervisorRotationPreviousRevokePending {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ObserveSupervisorRotation { operation_id, observer_peer_id, observer_signing_public_key, observer_epoch }
+            guard "operation_matches" { self.supervisor_rotation_operation_id == Some(operation_id) }
+            guard "phase_matches" { self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending) }
+            guard "observer_is_participant" {
+                (observer_peer_id == self.supervisor_rotation_previous_peer_id
+                    && observer_signing_public_key == self.supervisor_rotation_previous_signing_public_key
+                    && self.supervisor_rotation_previous_epoch == Some(observer_epoch))
+                || (observer_peer_id == self.supervisor_rotation_next_peer_id
+                    && observer_signing_public_key == self.supervisor_rotation_next_signing_public_key
+                    && self.supervisor_rotation_next_epoch == Some(observer_epoch))
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationObservationResolved {
+                operation_id: operation_id,
+                status: SupervisorRotationObservationStatusKind::PreviousRevokePending,
+                rejection: None,
+                previous_name: self.supervisor_rotation_previous_name,
+                previous_peer_id: self.supervisor_rotation_previous_peer_id,
+                previous_address: self.supervisor_rotation_previous_address,
+                previous_signing_public_key: self.supervisor_rotation_previous_signing_public_key,
+                previous_epoch: self.supervisor_rotation_previous_epoch,
+                next_name: self.supervisor_rotation_next_name,
+                next_peer_id: self.supervisor_rotation_next_peer_id,
+                next_address: self.supervisor_rotation_next_address,
+                next_signing_public_key: self.supervisor_rotation_next_signing_public_key,
+                next_epoch: self.supervisor_rotation_next_epoch
+            }
+        }
+
+        transition ObserveSupervisorRotationNextPublishPending {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ObserveSupervisorRotation { operation_id, observer_peer_id, observer_signing_public_key, observer_epoch }
+            guard "operation_matches" { self.supervisor_rotation_operation_id == Some(operation_id) }
+            guard "phase_matches" { self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending) }
+            guard "observer_is_participant" {
+                (observer_peer_id == self.supervisor_rotation_previous_peer_id
+                    && observer_signing_public_key == self.supervisor_rotation_previous_signing_public_key
+                    && self.supervisor_rotation_previous_epoch == Some(observer_epoch))
+                || (observer_peer_id == self.supervisor_rotation_next_peer_id
+                    && observer_signing_public_key == self.supervisor_rotation_next_signing_public_key
+                    && self.supervisor_rotation_next_epoch == Some(observer_epoch))
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationObservationResolved {
+                operation_id: operation_id,
+                status: SupervisorRotationObservationStatusKind::NextPublishPending,
+                rejection: None,
+                previous_name: self.supervisor_rotation_previous_name,
+                previous_peer_id: self.supervisor_rotation_previous_peer_id,
+                previous_address: self.supervisor_rotation_previous_address,
+                previous_signing_public_key: self.supervisor_rotation_previous_signing_public_key,
+                previous_epoch: self.supervisor_rotation_previous_epoch,
+                next_name: self.supervisor_rotation_next_name,
+                next_peer_id: self.supervisor_rotation_next_peer_id,
+                next_address: self.supervisor_rotation_next_address,
+                next_signing_public_key: self.supervisor_rotation_next_signing_public_key,
+                next_epoch: self.supervisor_rotation_next_epoch
+            }
+        }
+
+        transition ObserveSupervisorRotationCompleted {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ObserveSupervisorRotation { operation_id, observer_peer_id, observer_signing_public_key, observer_epoch }
+            guard "completed_receipt" {
+                self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                    == Some(SupervisorRotationPhase::Completed)
+            }
+            guard "observer_is_current" {
+                (observer_peer_id == self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id)
+                    && observer_signing_public_key == self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id)
+                    && self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id) == Some(observer_epoch))
+                || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                    && observer_peer_id == self.supervisor_bound_peer_id
+                    && observer_signing_public_key == self.supervisor_bound_signing_public_key
+                    && self.supervisor_bound_epoch == Some(observer_epoch))
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationObservationResolved {
+                operation_id: operation_id,
+                status: SupervisorRotationObservationStatusKind::Completed,
+                rejection: None,
+                previous_name: self.supervisor_rotation_terminal_previous_names.get_cloned(operation_id),
+                previous_peer_id: self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id),
+                previous_address: self.supervisor_rotation_terminal_previous_addresses.get_cloned(operation_id),
+                previous_signing_public_key: self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id),
+                previous_epoch: self.supervisor_rotation_terminal_previous_epochs.get_copied(operation_id),
+                next_name: self.supervisor_rotation_terminal_next_names.get_cloned(operation_id),
+                next_peer_id: self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id),
+                next_address: self.supervisor_rotation_terminal_next_addresses.get_cloned(operation_id),
+                next_signing_public_key: self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id),
+                next_epoch: self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id)
+            }
+        }
+
+        transition ObserveSupervisorRotationRejected {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ObserveSupervisorRotation { operation_id, observer_peer_id, observer_signing_public_key, observer_epoch }
+            guard "rejected_receipt" {
+                self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                    == Some(SupervisorRotationPhase::Rejected)
+            }
+            guard "observer_is_retained_current" {
+                (observer_peer_id == self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id)
+                    && observer_signing_public_key == self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id)
+                    && self.supervisor_rotation_terminal_previous_epochs.get_copied(operation_id) == Some(observer_epoch))
+                || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                    && observer_peer_id == self.supervisor_bound_peer_id
+                    && observer_signing_public_key == self.supervisor_bound_signing_public_key
+                    && self.supervisor_bound_epoch == Some(observer_epoch))
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationObservationResolved {
+                operation_id: operation_id,
+                status: SupervisorRotationObservationStatusKind::Rejected,
+                rejection: self.supervisor_rotation_terminal_rejections.get_copied(operation_id),
+                previous_name: self.supervisor_rotation_terminal_previous_names.get_cloned(operation_id),
+                previous_peer_id: self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id),
+                previous_address: self.supervisor_rotation_terminal_previous_addresses.get_cloned(operation_id),
+                previous_signing_public_key: self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id),
+                previous_epoch: self.supervisor_rotation_terminal_previous_epochs.get_copied(operation_id),
+                next_name: self.supervisor_rotation_terminal_next_names.get_cloned(operation_id),
+                next_peer_id: self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id),
+                next_address: self.supervisor_rotation_terminal_next_addresses.get_cloned(operation_id),
+                next_signing_public_key: self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id),
+                next_epoch: self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id)
+            }
+        }
+
+        transition ObserveSupervisorRotationNotFound {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ObserveSupervisorRotation { operation_id, observer_peer_id, observer_signing_public_key, observer_epoch }
+            guard "operation_absent_or_observer_unauthorized" {
+                (self.supervisor_rotation_operation_id != Some(operation_id)
+                    && !self.supervisor_rotation_terminal_phases.contains_key(operation_id))
+                || (self.supervisor_rotation_operation_id == Some(operation_id)
+                    && (self.supervisor_rotation_phase == Some(SupervisorRotationPhase::PreviousRevokePending)
+                        || self.supervisor_rotation_phase == Some(SupervisorRotationPhase::NextPublishPending))
+                    && !((observer_peer_id == self.supervisor_rotation_previous_peer_id
+                            && observer_signing_public_key == self.supervisor_rotation_previous_signing_public_key
+                            && self.supervisor_rotation_previous_epoch == Some(observer_epoch))
+                        || (observer_peer_id == self.supervisor_rotation_next_peer_id
+                            && observer_signing_public_key == self.supervisor_rotation_next_signing_public_key
+                            && self.supervisor_rotation_next_epoch == Some(observer_epoch))))
+                || (self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                        == Some(SupervisorRotationPhase::Completed)
+                    && !((observer_peer_id == self.supervisor_rotation_terminal_next_peer_ids.get_cloned(operation_id)
+                            && observer_signing_public_key == self.supervisor_rotation_terminal_next_signing_public_keys.get_cloned(operation_id)
+                            && self.supervisor_rotation_terminal_next_epochs.get_copied(operation_id) == Some(observer_epoch))
+                        || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                            && observer_peer_id == self.supervisor_bound_peer_id
+                            && observer_signing_public_key == self.supervisor_bound_signing_public_key
+                            && self.supervisor_bound_epoch == Some(observer_epoch))))
+                || (self.supervisor_rotation_terminal_phases.get_copied(operation_id)
+                        == Some(SupervisorRotationPhase::Rejected)
+                    && !((observer_peer_id == self.supervisor_rotation_terminal_previous_peer_ids.get_cloned(operation_id)
+                            && observer_signing_public_key == self.supervisor_rotation_terminal_previous_signing_public_keys.get_cloned(operation_id)
+                            && self.supervisor_rotation_terminal_previous_epochs.get_copied(operation_id) == Some(observer_epoch))
+                        || (self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                            && observer_peer_id == self.supervisor_bound_peer_id
+                            && observer_signing_public_key == self.supervisor_bound_signing_public_key
+                            && self.supervisor_bound_epoch == Some(observer_epoch))))
+            }
+            update {}
+            to Idle
+            emit SupervisorRotationObservationResolved {
+                operation_id: operation_id,
+                status: SupervisorRotationObservationStatusKind::NotFound,
+                rejection: None,
+                previous_name: None,
+                previous_peer_id: None,
+                previous_address: None,
+                previous_signing_public_key: None,
+                previous_epoch: None,
+                next_name: None,
+                next_peer_id: None,
+                next_address: None,
+                next_signing_public_key: None,
+                next_epoch: None
+            }
+        }
+
         // RequestSupervisorTrustPublish: valid only as an exact restatement
         // of the current binding. Used by repair/idempotence paths that need
         // a fresh generated publish obligation without changing the
         // supervisor identity.
         transition RequestSupervisorTrustPublish {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input RequestSupervisorTrustPublish { name, peer_id, address, signing_public_key, epoch }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
@@ -20056,7 +21934,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // revoke for a superseded supervisor/epoch cannot tear down a
         // freshly rotated binding.
         transition RevokeSupervisor {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input RevokeSupervisor { peer_id, epoch }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
@@ -20084,7 +21962,45 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_publish_pending_address = None;
                 self.supervisor_publish_pending_signing_public_key = None;
                 self.supervisor_publish_pending_epoch = None;
+                self.supervisor_rotation_operation_id = None;
+                self.supervisor_rotation_phase = None;
+                self.supervisor_rotation_rejection = None;
+                self.supervisor_rotation_previous_name = None;
+                self.supervisor_rotation_previous_peer_id = None;
+                self.supervisor_rotation_previous_address = None;
+                self.supervisor_rotation_previous_signing_public_key = None;
+                self.supervisor_rotation_previous_epoch = None;
+                self.supervisor_rotation_next_name = None;
+                self.supervisor_rotation_next_peer_id = None;
+                self.supervisor_rotation_next_address = None;
+                self.supervisor_rotation_next_signing_public_key = None;
+                self.supervisor_rotation_next_epoch = None;
             }
+            to Idle
+            emit RevokeSupervisorTrustEdge {
+                local_endpoint: self.local_endpoint,
+                peer_id: peer_id,
+                epoch: epoch
+            }
+        }
+
+        // Durable RevokePending retries are mechanically idempotent.  They do
+        // not rewrite the closed authority projection; they only rematerialize
+        // the generated router-removal obligation after a transient failure or
+        // cold restart.
+        transition RetryPendingSupervisorRevoke {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input RevokeSupervisor { peer_id, epoch }
+            guard "supervisor_unbound" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Unbound
+            }
+            guard "peer_id_matches_pending_revoke" {
+                self.supervisor_revoke_pending_peer_id == Some(peer_id)
+            }
+            guard "epoch_matches_pending_revoke" {
+                self.supervisor_revoke_pending_epoch == Some(epoch)
+            }
+            update {}
             to Idle
             emit RevokeSupervisorTrustEdge {
                 local_endpoint: self.local_endpoint,
@@ -20101,7 +22017,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // to epoch `N` is rejected by the DSL — the outstanding
         // obligation stays open and the stale ack cannot satisfy it.
         transition SupervisorTrustEdgePublished {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input SupervisorTrustEdgePublished { peer_id, epoch }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
@@ -20129,7 +22045,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition SupervisorTrustEdgePublishFailed {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input SupervisorTrustEdgePublishFailed { peer_id, epoch, reason }
             guard "supervisor_bound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Bound
@@ -20157,7 +22073,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition SupervisorTrustEdgeRevoked {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input SupervisorTrustEdgeRevoked { peer_id, epoch }
             guard "supervisor_unbound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Unbound
@@ -20169,6 +22085,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.supervisor_revoke_pending_epoch == Some(epoch)
             }
             update {
+                self.supervisor_revoked_peer_id = Some(self.supervisor_revoke_pending_peer_id.get("value"));
+                self.supervisor_revoked_signing_public_key = Some(self.supervisor_revoke_pending_signing_public_key.get("value"));
+                self.supervisor_revoked_epoch = Some(self.supervisor_revoke_pending_epoch.get("value"));
                 self.supervisor_revoke_pending_name = None;
                 self.supervisor_revoke_pending_peer_id = None;
                 self.supervisor_revoke_pending_address = None;
@@ -20179,7 +22098,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition SupervisorTrustEdgeRevokeFailed {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input SupervisorTrustEdgeRevokeFailed { peer_id, epoch, reason }
             guard "supervisor_unbound" {
                 self.supervisor_binding_kind == SupervisorBindingKind::Unbound
@@ -20190,19 +22109,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "epoch_matches_pending_revoke" {
                 self.supervisor_revoke_pending_epoch == Some(epoch)
             }
-            update {
-                self.supervisor_binding_kind = SupervisorBindingKind::Bound;
-                self.supervisor_bound_name = Some(self.supervisor_revoke_pending_name.get("value"));
-                self.supervisor_bound_peer_id = Some(self.supervisor_revoke_pending_peer_id.get("value"));
-                self.supervisor_bound_address = Some(self.supervisor_revoke_pending_address.get("value"));
-                self.supervisor_bound_signing_public_key = Some(self.supervisor_revoke_pending_signing_public_key.get("value"));
-                self.supervisor_bound_epoch = Some(self.supervisor_revoke_pending_epoch.get("value"));
-                self.supervisor_revoke_pending_name = None;
-                self.supervisor_revoke_pending_peer_id = None;
-                self.supervisor_revoke_pending_address = None;
-                self.supervisor_revoke_pending_signing_public_key = None;
-                self.supervisor_revoke_pending_epoch = None;
-            }
+            // Fail closed. Durable Pending remains the retry anchor; restoring
+            // Bound here would claim live router trust after removal may have
+            // partially or fully succeeded.
+            update {}
             to Idle
         }
 
@@ -20224,6 +22134,22 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.local_endpoint = Some(endpoint);
             }
             to Idle
+            emit LocalEndpointChanged { endpoint: Some(endpoint) }
+        }
+
+        transition PublishLocalEndpointTerminalSupervisorCleanup {
+            per_phase [Retired, Stopped, Destroyed]
+            on input PublishLocalEndpoint { endpoint }
+            guard "durable_supervisor_cleanup_authority_present" {
+                self.supervisor_binding_kind == SupervisorBindingKind::Bound
+                || self.supervisor_revoke_pending_peer_id != None
+                || self.supervisor_revoked_peer_id != None
+                || self.supervisor_rotation_phase != None
+            }
+            update {
+                self.local_endpoint = Some(endpoint);
+            }
+            to Retired
             emit LocalEndpointChanged { endpoint: Some(endpoint) }
         }
 
@@ -20337,6 +22263,162 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit SupervisorBridgeCommandAdmissionResolved {
                 result: SupervisorBridgeCommandAdmissionResultKind::Reject,
                 rejection: Some(SupervisorBridgeCommandRejectionKind::SenderMismatch)
+            }
+        }
+
+        // Cleanup commands have a deliberately narrower, lifecycle-aware
+        // admission surface. Before Destroyed all four commands are safe:
+        // Retire is idempotent in Retired, Observe is read-only, Destroy may
+        // advance Retired to Destroyed, and Revoke closes supervisor trust.
+        // Once Destroyed, only Observe and Revoke remain meaningful.
+        transition ResolveSupervisorCleanupCommandAdmissionAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_matches_current" { sender_peer_id == self.supervisor_bound_peer_id }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Accept,
+                rejection: None
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionAcceptedDestroyed {
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "destroyed_cleanup_command_allowed" {
+                command_kind == SupervisorCleanupCommandKind::Observe
+                || command_kind == SupervisorCleanupCommandKind::Revoke
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_matches_current" { sender_peer_id == self.supervisor_bound_peer_id }
+            update {}
+            to Destroyed
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Accept,
+                rejection: None
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevoke {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "revoke_command" { command_kind == SupervisorCleanupCommandKind::Revoke }
+            guard "supervisor_unbound" { self.supervisor_binding_kind == SupervisorBindingKind::Unbound }
+            guard "pending_revoke_present" { self.supervisor_revoke_pending_peer_id != None }
+            guard "supervisor_peer_id_matches_pending" { self.supervisor_revoke_pending_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_pending" { self.supervisor_revoke_pending_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_matches_pending" { sender_peer_id == self.supervisor_revoke_pending_peer_id }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::ResumePendingRevoke,
+                rejection: None
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionNotBound {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_not_bound" { self.supervisor_binding_kind != SupervisorBindingKind::Bound }
+            guard "not_pending_revoke_retry" {
+                command_kind != SupervisorCleanupCommandKind::Revoke
+                || self.supervisor_revoke_pending_peer_id == None
+            }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::NotBound)
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionStaleSupervisor {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_binding_mismatch" {
+                self.supervisor_bound_peer_id != Some(supervisor_peer_id)
+                || self.supervisor_bound_epoch != Some(supervisor_epoch)
+            }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::StaleSupervisor)
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionSenderMismatch {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_mismatch" { sender_peer_id != self.supervisor_bound_peer_id }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::SenderMismatch)
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisor {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "revoke_command" { command_kind == SupervisorCleanupCommandKind::Revoke }
+            guard "supervisor_unbound" { self.supervisor_binding_kind == SupervisorBindingKind::Unbound }
+            guard "pending_revoke_present" { self.supervisor_revoke_pending_peer_id != None }
+            guard "supervisor_binding_mismatch" {
+                self.supervisor_revoke_pending_peer_id != Some(supervisor_peer_id)
+                || self.supervisor_revoke_pending_epoch != Some(supervisor_epoch)
+            }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::StaleSupervisor)
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatch {
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard "revoke_command" { command_kind == SupervisorCleanupCommandKind::Revoke }
+            guard "supervisor_unbound" { self.supervisor_binding_kind == SupervisorBindingKind::Unbound }
+            guard "supervisor_peer_id_matches_pending" { self.supervisor_revoke_pending_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_pending" { self.supervisor_revoke_pending_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_mismatch" { sender_peer_id != self.supervisor_revoke_pending_peer_id }
+            update {}
+            to Idle
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::SenderMismatch)
+            }
+        }
+
+        transition ResolveSupervisorCleanupCommandAdmissionCommandNotAllowed {
+            on input ResolveSupervisorCleanupCommandAdmission { command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "destroyed_cleanup_command_not_allowed" {
+                command_kind == SupervisorCleanupCommandKind::Retire
+                || command_kind == SupervisorCleanupCommandKind::Destroy
+            }
+            guard "supervisor_bound" { self.supervisor_binding_kind == SupervisorBindingKind::Bound }
+            guard "supervisor_peer_id_matches_current" { self.supervisor_bound_peer_id == Some(supervisor_peer_id) }
+            guard "supervisor_epoch_matches_current" { self.supervisor_bound_epoch == Some(supervisor_epoch) }
+            guard "sender_peer_id_matches_current" { sender_peer_id == self.supervisor_bound_peer_id }
+            update {}
+            to Destroyed
+            emit SupervisorBridgeCommandAdmissionResolved {
+                result: SupervisorBridgeCommandAdmissionResultKind::Reject,
+                rejection: Some(SupervisorBridgeCommandRejectionKind::CommandNotAllowed)
             }
         }
 

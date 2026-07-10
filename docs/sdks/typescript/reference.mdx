@@ -156,6 +156,9 @@ const channel = LiveChannel.session(client, session.id, {
 });
 
 const opened: LiveOpenResult = await channel.open();
+await channel.sendInputImage("turn-42-diagram", "image/png", imageDataBase64);
+// Queue acceptance is not durability; wait for user_content_committed with
+// idempotency_key === "turn-42-diagram" before sending dependent input.
 await channel.sendInputText("hello");
 await channel.commitInput("text");
 const status: LiveStatusResult = await channel.status();
@@ -166,6 +169,9 @@ await channel.close();
 The helper stores the `channel_id` returned by `live/open`. It does not own the
 WebSocket transport; connect to `opened.transport.url` with the returned token
 using the transport appropriate for your app.
+
+The direct helper has the same required identity:
+`client.liveSendInputImage(channelId, idempotencyKey, mime, dataBase64)`.
 
 ### Usage
 

@@ -54,6 +54,7 @@ fn attach_stub_driver(
                 InputVariantId::parse("PrepareBindings").expect("input slug"),
             ),
         }],
+        refusal_closures: vec![],
     });
     schema
 }

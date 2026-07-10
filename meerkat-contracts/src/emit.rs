@@ -137,6 +137,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "RealtimeTextChunk": schema_for!(crate::wire::RealtimeTextChunk),
         "RealtimeAudioChunk": schema_for!(crate::wire::RealtimeAudioChunk),
         "RealtimeVideoChunk": schema_for!(crate::wire::RealtimeVideoChunk),
+        "RealtimeImageChunk": schema_for!(crate::wire::RealtimeImageChunk),
         "RealtimeInputChunk": schema_for!(crate::wire::RealtimeInputChunk),
         "LiveOpenParams": schema_for!(crate::wire::LiveOpenParams),
         "LiveOpenTransport": schema_for!(crate::wire::LiveOpenTransport),
@@ -165,6 +166,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         // #234: typed live-command results (send_input/commit_input/interrupt/truncate)
         // replace the prior ad-hoc `Value` results from the RPC handler.
         "LiveSendInputResult": schema_for!(crate::wire::LiveSendInputResult),
+        "LiveSendInputErrorData": schema_for!(crate::wire::LiveSendInputErrorData),
         "LiveSendInputStatus": schema_for!(crate::wire::LiveSendInputStatus),
         "LiveCommitInputResult": schema_for!(crate::wire::LiveCommitInputResult),
         "LiveCommitInputStatus": schema_for!(crate::wire::LiveCommitInputStatus),
@@ -188,6 +190,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         // adapter observations (R5-4 identity fields on
         // `assistant_audio_chunk`, R5-9 `command_rejected` typed channel
         // survives error) rather than treating them as opaque blobs.
+        // The Rust owner is `WireRealtimeTranscriptEvent`; its schema keeps
+        // the historical `RealtimeTranscriptEvent` name for SDK compatibility
+        // while excluding the internal byte-bearing `UserContentFinal` event.
+        "RealtimeTranscriptEvent": schema_for!(crate::wire::WireRealtimeTranscriptEvent),
         "WireLiveAdapterObservation": schema_for!(crate::wire::WireLiveAdapterObservation),
         "WireLiveAdapterStatus": schema_for!(crate::wire::WireLiveAdapterStatus),
         "WireLiveDegradationReason": schema_for!(crate::wire::WireLiveDegradationReason),
@@ -319,7 +325,18 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "BridgeRejectionCause": schema_for!(crate::wire::supervisor_bridge::BridgeRejectionCause),
         "BridgeReply": schema_for!(crate::wire::BridgeReply),
         "BridgeRetireResponse": schema_for!(crate::wire::BridgeRetireResponse),
+        "BridgeSupervisorDelivery": schema_for!(crate::wire::BridgeSupervisorDelivery),
         "BridgeSupervisorPayload": schema_for!(crate::wire::BridgeSupervisorPayload),
+        "BridgeSupervisorRotationObservation": schema_for!(crate::wire::BridgeSupervisorRotationObservation),
+        "BridgeSupervisorRotationObserve": schema_for!(crate::wire::BridgeSupervisorRotationObserve),
+        "BridgeSupervisorRotationOperationReceipt": schema_for!(crate::wire::BridgeSupervisorRotationOperationReceipt),
+        "BridgeSupervisorRotationPendingPhase": schema_for!(crate::wire::BridgeSupervisorRotationPendingPhase),
+        "BridgeSupervisorRotationRejectionCause": schema_for!(crate::wire::BridgeSupervisorRotationRejectionCause),
+        "BridgeSupervisorRotationRejectionReceipt": schema_for!(crate::wire::BridgeSupervisorRotationRejectionReceipt),
+        "BridgeSupervisorRotationState": schema_for!(crate::wire::BridgeSupervisorRotationState),
+        "BridgeSupervisorRotationSubmit": schema_for!(crate::wire::BridgeSupervisorRotationSubmit),
+        "BridgeSupervisorRotationTargetReceipt": schema_for!(crate::wire::BridgeSupervisorRotationTargetReceipt),
+        "SupervisorRotationOperationId": schema_for!(crate::wire::SupervisorRotationOperationId),
         "CommsChecksumTokenParams": schema_for!(crate::wire::CommsChecksumTokenParams),
         "CommsChecksumTokenResult": schema_for!(crate::wire::CommsChecksumTokenResult),
         "CommsChecksumTokenResultIntent": schema_for!(crate::wire::CommsChecksumTokenResultIntent),
@@ -369,7 +386,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "EventsLatestCursorResult": schema_for!(crate::wire::EventsLatestCursorResult),
         "EventsListSinceResult": schema_for!(crate::wire::EventsListSinceResult),
         "EventsSnapshotResult": schema_for!(crate::wire::EventsSnapshotResult),
-        "Schedule": schema_for!(meerkat_schedule::Schedule),
+        "Schedule": schema_for!(crate::wire::Schedule),
     });
     write_pretty_json(output_dir.join("wire-types.json"), &wire_types)?;
 
@@ -1085,6 +1102,204 @@ mod tests {
             auth_status["result_type"], "WireAuthStatusDetail",
             "auth/status/get should catalog its concrete detailed response"
         );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_schemas_export_named_realtime_image_chunk() {
+        let output_dir = temp_output_dir("realtime-image-chunk");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        let image = wire_types
+            .get("RealtimeImageChunk")
+            .expect("RealtimeImageChunk must be a top-level SDK schema");
+        let properties = image
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("RealtimeImageChunk schema properties");
+        assert!(properties.contains_key("idempotency_key"));
+        assert!(properties.contains_key("mime_type"));
+        assert!(properties.contains_key("data"));
+        let required = image
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .expect("RealtimeImageChunk schema required fields");
+        for field in ["idempotency_key", "mime_type", "data"] {
+            assert!(
+                required.iter().any(|value| value == field),
+                "RealtimeImageChunk schema must require {field}"
+            );
+        }
+
+        let live_image = wire_types
+            .get("LiveInputChunkWire")
+            .and_then(|schema| schema.get("oneOf"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|variants| {
+                variants.iter().find(|variant| {
+                    variant
+                        .pointer("/properties/kind/const")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("image")
+                })
+            })
+            .expect("LiveInputChunkWire image variant");
+        assert!(live_image.pointer("/properties/idempotency_key").is_some());
+        assert!(
+            live_image
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| {
+                    required.iter().any(|value| value == "idempotency_key")
+                })
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_supervisor_rotation_schemas_are_named_and_uuid_typed() {
+        let output_dir = temp_output_dir("supervisor-rotation");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        for name in [
+            "BridgeSupervisorDelivery",
+            "BridgeSupervisorRotationObservation",
+            "BridgeSupervisorRotationObserve",
+            "BridgeSupervisorRotationOperationReceipt",
+            "BridgeSupervisorRotationPendingPhase",
+            "BridgeSupervisorRotationRejectionCause",
+            "BridgeSupervisorRotationRejectionReceipt",
+            "BridgeSupervisorRotationState",
+            "BridgeSupervisorRotationSubmit",
+            "BridgeSupervisorRotationTargetReceipt",
+            "SupervisorRotationOperationId",
+        ] {
+            assert!(
+                wire_types.get(name).is_some(),
+                "wire schema inventory must contain {name}"
+            );
+        }
+        assert_eq!(
+            wire_types["SupervisorRotationOperationId"]["type"],
+            serde_json::json!("string")
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_schedule_schema_matches_flat_public_projection() {
+        let output_dir = temp_output_dir("flat-public-schedule");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        let schedule_schema = wire_types
+            .get("Schedule")
+            .expect("Schedule public schema must be emitted");
+        let properties = schedule_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("Schedule schema properties");
+        assert!(properties.contains_key("planning_horizon_days"));
+        assert!(properties.contains_key("planning_horizon_occurrences"));
+        assert!(properties.contains_key("created_at_utc"));
+        assert!(properties.contains_key("updated_at_utc"));
+        assert!(
+            !properties.contains_key("config"),
+            "public Schedule must flatten ScheduleConfig"
+        );
+        assert!(
+            !properties.contains_key("machine_state"),
+            "public Schedule must not expose durable machine authority"
+        );
+
+        let now = chrono::Utc::now();
+        let public_schedule = crate::wire::Schedule {
+            schedule_id: meerkat_schedule::ScheduleId::new(),
+            phase: meerkat_schedule::SchedulePhase::Active,
+            revision: meerkat_schedule::ScheduleRevision::initial(),
+            trigger: meerkat_schedule::TriggerSpec::Once { due_at_utc: now },
+            target: meerkat_schedule::TargetBinding::host_runnable(
+                meerkat_schedule::HostRunnableTargetBinding {
+                    runnable: meerkat_schedule::HostRunnableName::parse("contract-test")
+                        .expect("valid runnable name"),
+                    params: None,
+                },
+            ),
+            misfire_policy: meerkat_schedule::MisfirePolicy::default(),
+            overlap_policy: meerkat_schedule::OverlapPolicy::default(),
+            missing_target_policy: meerkat_schedule::MissingTargetPolicy::default(),
+            next_occurrence_ordinal: meerkat_schedule::OccurrenceOrdinal::default(),
+            planning_cursor_utc: None,
+            superseded_ack_ids: std::collections::BTreeSet::new(),
+            config: meerkat_schedule::ScheduleConfig {
+                name: Some("contract test".to_string()),
+                description: None,
+                planning_horizon_days: 30,
+                planning_horizon_occurrences: 64,
+                labels: std::collections::BTreeMap::new(),
+                created_at_utc: now,
+                updated_at_utc: now,
+                deleted_at_utc: None,
+            },
+        };
+        let public_value = serde_json::to_value(public_schedule).expect("serialize schedule");
+        assert!(public_value.get("config").is_none());
+        assert!(public_value.get("machine_state").is_none());
+        assert_schema_accepts(schedule_schema, &public_value);
+
+        let mut nested_config = public_value;
+        let object = nested_config.as_object_mut().expect("schedule object");
+        let config = serde_json::json!({
+            "planning_horizon_days": object.remove("planning_horizon_days").unwrap(),
+            "planning_horizon_occurrences": object
+                .remove("planning_horizon_occurrences")
+                .unwrap(),
+            "created_at_utc": object.remove("created_at_utc").unwrap(),
+            "updated_at_utc": object.remove("updated_at_utc").unwrap()
+        });
+        object.insert("config".to_string(), config);
+        assert_schema_rejects(schedule_schema, &nested_config);
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_realtime_transcript_schema_excludes_internal_user_content() {
+        let output_dir = temp_output_dir("safe-realtime-transcript-event");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        let transcript = wire_types
+            .get("RealtimeTranscriptEvent")
+            .expect("safe realtime transcript event must be a top-level SDK schema");
+        let schema_text = serde_json::to_string(transcript).expect("schema serializes");
+        assert!(schema_text.contains("user_transcript_final"));
+        assert!(!schema_text.contains("user_content_final"));
+
+        let validator = jsonschema::validator_for(transcript).expect("schema compiles");
+        assert!(validator.is_valid(&serde_json::json!({
+            "type": "user_transcript_final",
+            "item_id": "item_user",
+            "previous_item_id": null,
+            "content_index": 0,
+            "text": "hello"
+        })));
+        assert!(!validator.is_valid(&serde_json::json!({
+            "type": "user_content_final",
+            "item_id": "item_private",
+            "previous_item_id": null,
+            "content_index": 0,
+            "content": []
+        })));
 
         fs::remove_dir_all(&output_dir).unwrap();
     }

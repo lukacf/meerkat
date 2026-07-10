@@ -1165,6 +1165,7 @@ fn sample_driver() -> CompositionDriver {
                 InputVariantId::parse("PrepareBindings").expect("input slug"),
             ),
         }],
+        refusal_closures: vec![],
     }
 }
 
@@ -1295,6 +1296,35 @@ fn render_composition_driver_emits_generated_route_facts() {
     assert!(
         rendered.contains("@generated"),
         "rendered module must carry the @generated marker:\n{rendered}"
+    );
+}
+
+#[test]
+fn meerkat_mob_driver_generates_typed_consumer_refusal_closures() {
+    let rendered = render_composition_driver(&meerkat_mob_seam_composition())
+        .expect("canonical mob seam has a generated driver");
+
+    for required in [
+        "pub struct TypedDispatchRefusalClosure",
+        "pub enum GeneratedRefusalFieldSource",
+        "pub fn refusal_closure_binding_request_reaches_meerkat()",
+        "pub fn refusal_closure_work_request_reaches_meerkat()",
+        "pub fn refusal_closure_retire_request_reaches_meerkat()",
+        "pub fn refusal_closure_for_route(",
+        "GeneratedRefusalFieldSource::ConsumerErrorCode",
+        "GeneratedRefusalFieldSource::ConsumerErrorMessage",
+        "InputVariantId::parse(\"ResolveRuntimeBindingRefusal\")",
+        "InputVariantId::parse(\"ResolveRuntimeIngressRefusal\")",
+        "InputVariantId::parse(\"ResolveRuntimeRetireRefusal\")",
+    ] {
+        assert!(
+            rendered.contains(required),
+            "generated refusal closure is missing `{required}`:\n{rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains("refusal_closure_destroy_request_reaches_meerkat"),
+        "destroy keeps the explicit incomplete-destroy retry contract rather than an ordinary refusal closure"
     );
 }
 

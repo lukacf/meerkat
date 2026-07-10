@@ -960,10 +960,49 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterMemberResetRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverRosterMemberRetirementStartedReleasing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRosterMemberRetirementStartedReleasingAlreadyApplied`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRosterMemberRetirementStartedPreservingBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRosterMemberRetirementStartedPeerOnly`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberRuntimeRetiredFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberRuntimeRetiredFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberRuntimeRetiredAlreadyRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberRuntimeRetiredAlreadyRecordedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberSupervisorRevokedFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberSupervisorRevokedFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberSupervisorRevokedAlreadyRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteMemberSupervisorRevokedAlreadyRecordedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRosterMemberRetiredRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverRosterMemberRetiredAlreadyAbsent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRosterMemberRetiredStaleGeneration`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverMemberKickoffPending`
@@ -1371,10 +1410,46 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `RetireMember`
-  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
-- `RetireMemberPeerOnly`
+- `ResolveRuntimeBindingRefusalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeIngressRefusalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeRetireRefusalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeRetireRefusalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryRuntimeRetireRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryRuntimeRetireStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberRuntimeRetiredFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberRuntimeRetiredFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberRuntimeRetiredAlreadyRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberRuntimeRetiredAlreadyRecordedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberSupervisorRevokedFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberSupervisorRevokedFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberSupervisorRevokedAlreadyRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteMemberSupervisorRevokedAlreadyRecordedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AdmitDestroyMemberRetireLiveRunning`
@@ -1389,13 +1464,40 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitDestroyMemberRetirePeerOnlyStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `AdmitDestroyMemberRetireAlreadyRetiringRunning`
+- `AdmitDestroyMemberRetireAlreadyRetiringSessionRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `AdmitDestroyMemberRetireAlreadyRetiringStopped`
+- `AdmitDestroyMemberRetireAlreadyRetiringSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireAlreadyArchivedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireAlreadyArchivedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ObserveRuntimeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRuntimeRetiredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ObserveMemberRetirementArchivedLive`
@@ -1422,6 +1524,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveMemberRetirementArchivedAlreadyClearedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedStaleRuntimeAlreadyCleared`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedStaleRuntimeAlreadyClearedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ObserveDestroyMemberRetirementArchivedLiveRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1432,6 +1540,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ObserveDestroyMemberRetirementArchivedRetiredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveDestroyMemberRetirementArchivedAlreadyClearedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveDestroyMemberRetirementArchivedAlreadyClearedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResetMember`
@@ -1551,10 +1665,49 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterUnwireAlreadyAbsent`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ConvergeRecoveredRosterTopologyPruneRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRosterTopologyPruneStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRosterTopologyPruneCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRosterTopologyRetainRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRosterTopologyRetainStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRosterTopologyRetainCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRosterTopologyDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `UnwireMembersRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `UnwireMembersAlreadyAbsent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringMemberWiringRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringMemberWiringStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringMemberWiringAlreadyAbsentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringMemberWiringAlreadyAbsentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreRetiringMemberWiringRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreRetiringMemberWiringStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `WireExternalPeerRunning`
@@ -1578,10 +1731,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeMemberTrustUnwiringRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeMemberTrustUnwiringStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeMemberTrustCleanupRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeMemberTrustCleanupStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeMemberTrustCleanupObservedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeMemberTrustCleanupObservedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRetiringMemberTrustCleanupObservedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRetiringMemberTrustCleanupObservedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeExternalPeerReciprocalTrustRunning`
@@ -1603,6 +1771,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `UnwireExternalPeerAlreadyAbsent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringExternalPeerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringExternalPeerStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreRetiringExternalPeerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreRetiringExternalPeerStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringExternalPeerObservedAbsentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CleanupRetiringExternalPeerObservedAbsentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreRetiringExternalPeerObservedAbsentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreRetiringExternalPeerObservedAbsentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitSupervisorRotationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitSupervisorRotationStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ProvisionSupervisorAuthorityRunning`
@@ -1627,15 +1825,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverSupervisorAuthorityDestroyed`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ClearSupervisorPendingRotationRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ClearSupervisorPendingRotationStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ClearSupervisorPendingRotationCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecordSupervisorPendingRotationRunning`
@@ -2149,17 +2338,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RetireRunningReleasing`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireRunningPreservingBinding`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireRunningNoBinding`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireStoppedReleasing`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RequestPendingSessionIngressDetachForMobDestroyRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2179,11 +2368,11 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RetireStoppedPreservingBinding`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireStoppedNoBinding`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireAbsentRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2322,6 +2511,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RequestRuntimeDestroy`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeBindingRefusalClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeIngressRefusalClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RuntimeRetireRefusalClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PendingSpawnOperationOwnerAuthorized`
@@ -2638,6 +2836,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `member_spawn_material_matches_runtime_binding`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `pending_session_ingress_detach_has_session_correlation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `remote_runtime_retired_is_still_retiring`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `remote_supervisor_revoked_has_retired_runtime_anchor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `spawn_exec_membership_commit_requires_runtime`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2648,6 +2855,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `supervisor_pending_authority_tuple_consistent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `supervisor_pending_authority_member_targets_aligned`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `supervisor_pending_authority_acceptance_has_target`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `supervisor_pending_authority_requires_current`

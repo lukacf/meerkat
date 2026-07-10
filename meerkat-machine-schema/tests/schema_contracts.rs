@@ -19,9 +19,10 @@ use meerkat_machine_schema::identity::{
     RouteId, TransitionId,
 };
 use meerkat_machine_schema::{
-    ActorKind, ActorSchema, CompositionDriver, CompositionDriverRustBinding, CompositionSchema,
-    CompositionSchemaError, CompositionStateLimits, CompositionWitness, CompositionWitnessField,
-    CompositionWitnessInput, CompositionWitnessState, DriverDispatchRoute, Expr, MachineInstance,
+    ActorKind, ActorSchema, CommsTrustAuthoritySourceKind, CompositionDriver,
+    CompositionDriverRustBinding, CompositionSchema, CompositionSchemaError,
+    CompositionStateLimits, CompositionWitness, CompositionWitnessField, CompositionWitnessInput,
+    CompositionWitnessState, DriverDispatchRoute, DriverRefusalFieldSource, Expr, MachineInstance,
     Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
     RouteVariantId, RustTypeAtom, TypePathStructField, TypeRef, WatchedEffect,
     canonical_composition_coverage_manifests, canonical_composition_schemas,
@@ -659,6 +660,34 @@ fn composition_schema_rejects_divergent_named_type_bindings_across_machines() {
             "composition validation must reject divergent machine-owned named-type bindings, got {other:?}"
         ),
     }
+}
+
+#[test]
+fn mob_refusal_closure_fails_closed_without_stable_consumer_code() {
+    let meerkat = meerkat_machine();
+    let mob = mob_machine();
+    let mut composition = meerkat_mob_seam_composition();
+    let closure = composition
+        .driver
+        .as_mut()
+        .expect("mob seam driver")
+        .refusal_closures
+        .iter_mut()
+        .find(|closure| closure.dispatch_route.as_str() == "work_request_reaches_meerkat")
+        .expect("ingress refusal closure");
+    closure
+        .field_bindings
+        .retain(|binding| binding.source != DriverRefusalFieldSource::ConsumerErrorCode);
+
+    let result = composition.validate_against(&[&meerkat, &mob]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionSchemaError::InvalidCompositionDriverBinding { ref detail, .. })
+                if detail.contains("refusal_code")
+        ),
+        "missing stable refusal code must invalidate the composition, got {result:?}"
+    );
 }
 
 #[test]
@@ -1371,6 +1400,7 @@ fn noop_driver_on_meerkat_mob_seam() -> CompositionDriver {
                 InputVariantId::parse("PrepareBindings").expect("valid input-variant slug"),
             ),
         }],
+        refusal_closures: vec![],
     }
 }
 

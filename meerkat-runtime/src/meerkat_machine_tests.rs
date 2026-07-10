@@ -2251,6 +2251,15 @@ async fn spawn_test_comms_drain(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut *authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::AttachSessionIngress {
+                comms_runtime_id: crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(
+                    &comms_runtime,
+                ),
+            },
+        )
+        .expect("test drain peer-ingress authority should accept");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
             crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
                 mode: crate::meerkat_machine::dsl::DrainMode::from(mode),
             },
@@ -2264,6 +2273,50 @@ async fn spawn_test_comms_drain(
         Some(idle_timeout),
     );
     entry.drain_slot.install_task(comms_runtime, handle);
+}
+
+struct TestRotationCarrierDropSignal(Arc<AtomicBool>);
+
+impl Drop for TestRotationCarrierDropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+async fn install_test_rotation_carrier(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    runtime: Arc<dyn CommsRuntime>,
+    operation_id: &str,
+) -> Arc<AtomicBool> {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Notify::new());
+    let carrier = tokio::spawn({
+        let dropped = Arc::clone(&dropped);
+        let started = Arc::clone(&started);
+        async move {
+            let _drop_signal = TestRotationCarrierDropSignal(dropped);
+            started.notify_one();
+            std::future::pending::<()>().await;
+        }
+    });
+    started.notified().await;
+    let rotation_slot = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(session_id)
+                .expect("registered session entry")
+                .supervisor_rotation_task,
+        )
+    };
+    assert!(
+        rotation_slot
+            .install(operation_id.to_string(), runtime, carrier)
+            .await,
+        "test rotation carrier should install"
+    );
+    dropped
 }
 
 async fn current_phase(
@@ -2367,6 +2420,85 @@ async fn idle_timeout_updates_authority_before_join() {
 }
 
 #[tokio::test]
+async fn non_respawnable_drain_exit_quiesces_rotation_carrier_before_clearing_runtime() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    adapter
+        .test_authorize_direct_comms_drain_runtime(&session_id, Arc::clone(&runtime))
+        .await
+        .expect("install timed drain authority fixture");
+    let carrier_dropped = install_test_rotation_carrier(
+        &adapter,
+        &session_id,
+        Arc::clone(&runtime),
+        "natural-exit-carrier",
+    )
+    .await;
+
+    adapter
+        .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
+        .await
+        .expect("notify non-respawnable drain exit");
+
+    assert!(
+        carrier_dropped.load(Ordering::SeqCst),
+        "non-respawnable exit must join the rotation carrier before clearing task_runtime"
+    );
+    assert!(
+        !adapter
+            .peer_ingress_runtime_is_current(&session_id, &runtime)
+            .await
+            .expect("inspect cleared runtime fence"),
+        "cleared non-respawnable drain runtime must fail the worker fence"
+    );
+}
+
+#[tokio::test]
+async fn abort_all_quiesces_rotation_carriers_with_drain_tasks() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    assert!(
+        adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&runtime)))
+            .await
+            .expect("attach drain runtime")
+    );
+    let carrier_dropped = install_test_rotation_carrier(
+        &adapter,
+        &session_id,
+        Arc::clone(&runtime),
+        "abort-all-carrier",
+    )
+    .await;
+
+    adapter
+        .abort_comms_drains()
+        .await
+        .expect("abort all comms producers");
+
+    assert!(
+        carrier_dropped.load(Ordering::SeqCst),
+        "AbortAll must abort and join every session rotation carrier"
+    );
+    assert!(
+        !adapter
+            .peer_ingress_runtime_is_current(&session_id, &runtime)
+            .await
+            .expect("inspect aborted runtime fence")
+    );
+}
+
+#[tokio::test]
 async fn unregister_session_aborts_and_removes_drain_slot() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -2400,6 +2532,146 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
         !sessions.contains_key(&session_id),
         "unregister must remove the session entry (which owns the comms drain slot)"
     );
+}
+
+#[tokio::test]
+async fn unregister_session_quiesces_supervisor_rotation_carrier_before_removal() {
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(Notify::new());
+    let carrier = tokio::spawn({
+        let dropped = Arc::clone(&dropped);
+        let started = Arc::clone(&started);
+        async move {
+            let _drop_signal = DropSignal(dropped);
+            started.notify_one();
+            std::future::pending::<()>().await;
+        }
+    });
+    started.notified().await;
+    let rotation_slot = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session entry")
+                .supervisor_rotation_task,
+        )
+    };
+    assert!(
+        rotation_slot
+            .install("unregister-carrier".to_string(), runtime, carrier)
+            .await
+    );
+
+    adapter.unregister_session(&session_id).await;
+
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "unregister must abort and join the session rotation carrier before final removal"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "session may be removed only after the carrier has quiesced"
+    );
+}
+
+#[tokio::test]
+async fn peer_ingress_runtime_refresh_quiesces_carrier_and_fences_stale_runtime() {
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let runtime_a: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let runtime_b: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    assert!(
+        adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&runtime_a)))
+            .await
+            .expect("attach first runtime")
+    );
+
+    let carrier_dropped = Arc::new(AtomicBool::new(false));
+    let carrier_started = Arc::new(Notify::new());
+    let carrier = tokio::spawn({
+        let carrier_dropped = Arc::clone(&carrier_dropped);
+        let carrier_started = Arc::clone(&carrier_started);
+        async move {
+            let _drop_signal = DropSignal(carrier_dropped);
+            carrier_started.notify_one();
+            std::future::pending::<()>().await;
+        }
+    });
+    carrier_started.notified().await;
+    let rotation_slot = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session entry")
+                .supervisor_rotation_task,
+        )
+    };
+    assert!(
+        rotation_slot
+            .install(
+                "refresh-carrier".to_string(),
+                Arc::clone(&runtime_a),
+                carrier,
+            )
+            .await
+    );
+
+    assert!(
+        adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&runtime_b)))
+            .await
+            .expect("refresh to second runtime")
+    );
+    assert!(
+        carrier_dropped.load(Ordering::SeqCst),
+        "runtime replacement must abort and join the old rotation carrier"
+    );
+    assert!(
+        !adapter
+            .peer_ingress_runtime_is_current(&session_id, &runtime_a)
+            .await
+            .expect("inspect stale runtime fence"),
+        "old runtime must fail the generated-id and drain-slot fence"
+    );
+    assert!(
+        adapter
+            .peer_ingress_runtime_is_current(&session_id, &runtime_b)
+            .await
+            .expect("inspect current runtime fence"),
+        "replacement runtime must own both generated and mechanical authority"
+    );
+
+    adapter.unregister_session(&session_id).await;
 }
 
 /// Regression (0.7.2): `unregister_session` must BOUND its comms-drain await.
@@ -17389,6 +17661,222 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
     }
 }
 
+struct RotationEndpointRuntime {
+    notify: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl CommsRuntime for RotationEndpointRuntime {
+    fn peer_id(&self) -> Option<meerkat_core::comms::PeerId> {
+        Some(meerkat_core::comms::PeerId::from_ed25519_pubkey(
+            &[0xaa; 32],
+        ))
+    }
+
+    fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        Some([0xaa; 32])
+    }
+
+    fn comms_name(&self) -> Option<String> {
+        Some("rotation-persistence-member".to_string())
+    }
+
+    fn advertised_address(&self) -> Option<String> {
+        Some("inproc://rotation-persistence-member".to_string())
+    }
+
+    async fn drain_messages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn inbox_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.notify)
+    }
+}
+
+async fn assert_recovered_rotation_phase(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+    expected: dsl::SupervisorRotationPhase,
+) {
+    let receipt = machine
+        .active_supervisor_rotation(session_id)
+        .await
+        .expect("read recovered rotation")
+        .expect("recovered rotation receipt");
+    assert_eq!(receipt.phase, expected);
+}
+
+#[tokio::test]
+async fn supervisor_rotation_persistence_failures_leave_cold_resumable_checkpoints() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let fault_store = Arc::new(RuntimeCommitAtomicityStore::pass_through(inner));
+    let store: Arc<dyn RuntimeStore> = fault_store.clone();
+    let session_id = SessionId::new();
+    let previous_peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&[0xbb; 32]).as_str();
+    let next_peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&[0xdd; 32]).as_str();
+    let previous_signing_key = crate::comms_drain::encode_supervisor_signing_public_key([0xbb; 32]);
+    let next_signing_key = crate::comms_drain::encode_supervisor_signing_public_key([0xdd; 32]);
+    let operation_id = uuid::Uuid::new_v4().to_string();
+
+    let mut machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register persistent supervisor rotation");
+    let endpoint_runtime: Arc<dyn CommsRuntime> = Arc::new(RotationEndpointRuntime {
+        notify: Arc::new(Notify::new()),
+    });
+    machine
+        .stage_local_endpoint_for_comms_runtime(&session_id, endpoint_runtime.as_ref())
+        .await
+        .expect("stage rotation local endpoint");
+    machine
+        .stage_supervisor_bind(
+            &session_id,
+            "previous-supervisor".to_string(),
+            previous_peer_id.clone(),
+            "inproc://previous-supervisor".to_string(),
+            previous_signing_key.clone(),
+            1,
+        )
+        .await
+        .expect("stage previous supervisor");
+    machine
+        .stage_supervisor_trust_published(&session_id, previous_peer_id.clone(), 1)
+        .await
+        .expect("persist previous supervisor binding");
+
+    fault_store
+        .fail_commit_machine_lifecycle
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        machine
+            .submit_supervisor_rotation(
+                &session_id,
+                GeneratedSupervisorRotationSubmit {
+                    operation_id: operation_id.clone(),
+                    next: GeneratedSupervisorBinding {
+                        name: "next-supervisor".to_string(),
+                        peer_id: next_peer_id.clone(),
+                        address: "inproc://next-supervisor".to_string(),
+                        signing_public_key: next_signing_key.clone(),
+                        epoch: 2,
+                    },
+                    preflight_rejection: None,
+                    sender_peer_id: Some(previous_peer_id.clone()),
+                    sender_signing_public_key: Some(previous_signing_key.clone()),
+                },
+            )
+            .await,
+        Err(SupervisorBindingStageError::Persistence(_))
+    ));
+    assert!(matches!(
+        machine.supervisor_binding(&session_id).await,
+        SupervisorBinding::Bound { ref peer_id, epoch: 1, .. } if peer_id == &previous_peer_id
+    ));
+
+    machine
+        .submit_supervisor_rotation(
+            &session_id,
+            GeneratedSupervisorRotationSubmit {
+                operation_id: operation_id.clone(),
+                next: GeneratedSupervisorBinding {
+                    name: "next-supervisor".to_string(),
+                    peer_id: next_peer_id.clone(),
+                    address: "inproc://next-supervisor".to_string(),
+                    signing_public_key: next_signing_key.clone(),
+                    epoch: 2,
+                },
+                preflight_rejection: None,
+                sender_peer_id: Some(previous_peer_id.clone()),
+                sender_signing_public_key: Some(previous_signing_key.clone()),
+            },
+        )
+        .await
+        .expect("persist previous-revoke checkpoint");
+    fault_store
+        .fail_commit_machine_lifecycle
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        machine
+            .stage_supervisor_rotation_previous_revoked(
+                &session_id,
+                operation_id.clone(),
+                previous_peer_id.clone(),
+                1,
+            )
+            .await,
+        Err(SupervisorBindingStageError::Persistence(_))
+    ));
+    drop(machine);
+
+    machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("recover previous-revoke checkpoint");
+    assert_recovered_rotation_phase(
+        &machine,
+        &session_id,
+        dsl::SupervisorRotationPhase::PreviousRevokePending,
+    )
+    .await;
+    machine
+        .stage_supervisor_rotation_previous_revoked(
+            &session_id,
+            operation_id.clone(),
+            previous_peer_id.clone(),
+            1,
+        )
+        .await
+        .expect("persist next-publish checkpoint");
+    fault_store
+        .fail_commit_machine_lifecycle
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        machine
+            .stage_supervisor_rotation_next_published(
+                &session_id,
+                operation_id.clone(),
+                next_peer_id.clone(),
+                2,
+            )
+            .await,
+        Err(SupervisorBindingStageError::Persistence(_))
+    ));
+    drop(machine);
+
+    machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("recover next-publish checkpoint");
+    assert_recovered_rotation_phase(
+        &machine,
+        &session_id,
+        dsl::SupervisorRotationPhase::NextPublishPending,
+    )
+    .await;
+    machine
+        .stage_supervisor_rotation_next_published(&session_id, operation_id, next_peer_id, 2)
+        .await
+        .expect("persist completed rotation receipt");
+    drop(machine);
+
+    let recovered = MeerkatMachine::persistent_without_blobs(store);
+    recovered
+        .register_session(session_id.clone())
+        .await
+        .expect("recover completed rotation receipt");
+    assert_recovered_rotation_phase(
+        &recovered,
+        &session_id,
+        dsl::SupervisorRotationPhase::Completed,
+    )
+    .await;
+}
+
 async fn persistent_staged_run_driver(
     store: Arc<dyn RuntimeStore>,
 ) -> (SharedDriver, LogicalRuntimeId, RunId, InputId) {
@@ -17432,6 +17920,7 @@ async fn persistent_driver_recover_preserves_durable_runtime_authority() {
         crate::store::MachineLifecycleCommit::new_with_binding(
             RuntimeState::Retired,
             crate::store::MachineLifecycleBindingFacts::default(),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
         ),
         &[],
     )
@@ -21252,6 +21741,7 @@ async fn rejected_cold_executor_attach_rolls_back_recovered_session_entry() {
                 Some(1),
                 None,
             ),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
         ),
         &[],
     )
@@ -26024,7 +26514,6 @@ async fn attach_session_ingress_transitions_owner() {
         .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
         .await
         .expect("update_peer_ingress_context");
-
     let owner = adapter.peer_ingress_owner(&session_id).await;
     let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
     match owner {
@@ -26426,6 +26915,13 @@ async fn detach_ingress_clears_owner() {
         .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
         .await
         .expect("update_peer_ingress_context");
+    let carrier_dropped = install_test_rotation_carrier(
+        &adapter,
+        &session_id,
+        Arc::clone(&comms_runtime),
+        "detach-carrier",
+    )
+    .await;
 
     // Now request detach (keep_alive=false). The shell stages
     // `DetachIngress` into the DSL.
@@ -26438,6 +26934,10 @@ async fn detach_ingress_clears_owner() {
     assert!(
         matches!(owner, crate::meerkat_machine::PeerIngressOwner::Unattached),
         "keep_alive=false should detach peer-ingress owner, got {owner:?}"
+    );
+    assert!(
+        carrier_dropped.load(Ordering::SeqCst),
+        "detach must abort and join the old runtime's rotation carrier before publishing Unattached"
     );
 }
 
@@ -26511,6 +27011,13 @@ async fn attach_mob_ingress_promotes_from_session_owned() {
         .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&session_comms)))
         .await
         .expect("update_peer_ingress_context");
+    let carrier_dropped = install_test_rotation_carrier(
+        &adapter,
+        &session_id,
+        Arc::clone(&session_comms),
+        "promotion-carrier",
+    )
+    .await;
 
     // Step 2: mob provisioning promotes to MobOwned with (possibly) a
     // different comms runtime.
@@ -26533,6 +27040,10 @@ async fn attach_mob_ingress_promotes_from_session_owned() {
         }
         other => panic!("expected MobOwned after promotion, got {other:?}"),
     }
+    assert!(
+        carrier_dropped.load(Ordering::SeqCst),
+        "SessionOwned -> MobOwned runtime change must quiesce the old rotation carrier"
+    );
 }
 
 /// The transcript-edit session-liveness verdict is MeerkatMachine-owned: the

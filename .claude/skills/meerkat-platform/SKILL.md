@@ -77,7 +77,7 @@ For a remote `rkat` process, use `rkat run --comms-listen-tcp <host:port> --comm
 |---------|----------|----------|
 | `rkat` CLI | Shell commands | Developer workflows, scripting |
 | REST (`rkat-rest`) | HTTP/JSON + SSE | Services and language-agnostic clients |
-| JSON-RPC (`rkat-rpc`) | JSON-RPC 2.0 over stdio (default) or TCP (`--tcp <addr>`); optional live audio WebSocket (`--live-ws`, serves `/live/ws`) | IDE integration, SDK backend, embeddable services |
+| JSON-RPC (`rkat-rpc`) | JSON-RPC 2.0 over stdio (default) or TCP (`--tcp <addr>`); optional live-channel WebSocket (`--live-ws`, serves `/live/ws`) | IDE integration, SDK backend, embeddable services |
 | MCP (`rkat-mcp`) | Model Context Protocol | Expose Meerkat as tools to other agents |
 | Python SDK (`meerkat`) | Async Python over RPC | Python applications |
 | TypeScript SDK (`@rkat/sdk`) | TypeScript over RPC | Node.js applications |
@@ -224,10 +224,34 @@ Live is the single subsystem for audio and other realtime modalities. Pick a rea
 |---------|--------------|-------------------|
 | JSON-RPC | `live/open` (returns `LiveOpenResult` with transport bootstrap + capabilities) | `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close` |
 | Python SDK | `client.live_open(session_id)` | `client.live_status / live_refresh / live_send_input_text / live_send_input_audio / live_send_input_image / live_send_input_video_frame / live_commit_input / live_interrupt / live_truncate / live_close` |
-| TypeScript SDK | `client.liveOpen({ sessionId })` | `client.liveStatus / liveRefresh / liveSendInput / liveSendInputImage / liveSendInputVideoFrame / liveCommitInput / liveInterrupt / liveTruncate / liveClose` |
+| TypeScript SDK | `client.liveOpen({ session_id: sessionId })` | `client.liveStatus / liveRefresh / liveSendInput / liveSendInputImage / liveSendInputVideoFrame / liveCommitInput / liveInterrupt / liveTruncate / liveClose` |
 | Rust | `meerkat_live::LiveAdapterHost` + `meerkat_core::live_adapter` adapter trait, exercised through `SessionRuntime` | typed observations and capability reads through the live host |
 
-The `--live-ws` listener (`rkat-rpc --live-ws <addr>`) must be enabled for transports that need WebSocket bootstrap; the `live/*` JSON-RPC methods are not registered when the listener is absent. Each session keeps a single canonical history; audio commits at turn boundaries via `live/commit_input` / `live/interrupt` / `live/truncate`.
+Live image input requires a caller-stable, session-scoped `idempotency_key` on
+both `LiveInputChunkWire::Image` and `RealtimeImageChunk`. The convenience
+signatures are
+`live_send_input_image(channel_id, idempotency_key, mime, data_base64)` in
+Python and `liveSendInputImage(channelId, idempotencyKey, mime, dataBase64)` in
+TypeScript. A successful call is queue acceptance only. Route later scoped
+failures from `command_rejected`; treat only the redacted
+`user_content_committed` observation with the matching key as durable success.
+An exact same-key replay returns the committed identity without another
+provider send, while changed MIME/bytes reject as
+`image_input_idempotency_conflict`. Commit staged text/audio before an image or
+expect `image_input_requires_commit`. Reconnect image hydration is bounded to
+40 MiB decoded across all user-image occurrences. New input that would cross
+that canonical ceiling rejects before provider send as
+`image_input_history_budget_exceeded`, so accepted live input cannot make a
+valid session unreopenable. Legacy/out-of-band aggregate overflow, a missing
+blob, or a content-address mismatch still fails `live/open`; replay never trims
+or substitutes accepted image context.
+
+Malformed base64 rejects as `image_input_invalid_base64`. `live/refresh` never
+replays history: model/provider swaps and canonical transcript or user-content
+registry rewrites require close + reopen, with rewrites reported as
+`refresh_transcript_rewrite_requires_reopen`.
+
+The `--live-ws` listener (`rkat-rpc --live-ws <addr>`) must be enabled for clients that need WebSocket bootstrap. A WebRTC-only deployment can register the `live/*` JSON-RPC methods through its WebRTC transport configuration instead; the methods are absent only when no live transport is configured. Each session keeps a single canonical history; audio commits at turn boundaries via `live/commit_input` / `live/interrupt` / `live/truncate`.
 
 Practical caveats:
 
@@ -767,6 +791,12 @@ Spawned/forked members can be capability-contained without changing their model-
 ### Inter-agent comms
 
 Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; Meerkat uses realm namespace for isolation.
+
+**Peer directory contract**: `comms/peers` and REST `GET /comms/peers` return
+typed `PeerDirectoryEntry` objects: canonical routing `peer_id`, display-only
+`name`, `address: { transport, endpoint }`, discovery `source`,
+`sendable_kinds`, versioned `capabilities`, and supplementary `meta`. Send with
+`peer_id`; names can collide and address strings are not routing identities.
 
 **Peer handling_mode override**: `PeerInput` with `Message`, `Request`, or no convention supports an explicit `handling_mode` field (`Queue` or `Steer`) that overrides kind-based policy defaults. `ResponseProgress` and `ResponseTerminal` reject the field at runtime admission. Built-in comms bridges leave it `None` (kind-based policy). The override is available on RPC `comms/send`, REST, and MCP `meerkat_comms_send` surfaces.
 

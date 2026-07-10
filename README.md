@@ -236,7 +236,7 @@ make release-preflight
 
 **Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
-**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the `live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, and `live/close` JSON-RPC methods, or the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
+**Live channels.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live audio/text channel through the `live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, and `live/close` JSON-RPC methods, or the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. Vision-capable realtime bindings also accept still-image context when `live/open` returns `capabilities.image_in: true`. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
 
 **Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 
@@ -258,7 +258,7 @@ All surfaces share the same session lifecycle and runtime-backed contracts.
 | **Web SDK (`@rkat/web`)** | Browser/WASM sessions, mobs, subscriptions, JS tools, provider proxy/auth resolver | [Web/WASM](https://docs.rkat.ai/examples/wasm) |
 | **CLI (`rkat`)** | Terminal, CI/CD, cron jobs, shell scripts | [CLI guide](https://docs.rkat.ai/cli/commands) |
 | **REST API** | HTTP integration for web services | [REST guide](https://docs.rkat.ai/api/rest) |
-| **JSON-RPC (`rkat-rpc`)** | SDK backend and IDE/desktop integration over stdio or TCP, with optional live audio WebSocket (`--live-ws`) | [RPC guide](https://docs.rkat.ai/api/rpc) |
+| **JSON-RPC (`rkat-rpc`)** | SDK backend and IDE/desktop integration over stdio or TCP, with optional live-channel WebSocket (`--live-ws`) | [RPC guide](https://docs.rkat.ai/api/rpc) |
 | **MCP Server (`rkat-mcp`)** | Expose Meerkat as tools to other AI agents | [MCP guide](https://docs.rkat.ai/api/mcp) |
 
 ## Architecture
@@ -469,7 +469,7 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
 | [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, realms, auth and bindings, tools, providers, scheduling, mobs, comms, live |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Auth, scheduling, live audio, image generation, Web/WASM, hooks, skills, memory, mobs, CD/distribution |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Auth, scheduling, live channels, image generation, Web/WASM, hooks, skills, memory, mobs, CD/distribution |
 | [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI, REST, JSON-RPC, MCP |
 | [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript, Web |
 | [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, builtin tools, session contracts |

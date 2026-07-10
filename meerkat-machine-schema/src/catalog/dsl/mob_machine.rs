@@ -96,6 +96,30 @@ macro_rules! mob_catalog_machine_dsl {
             // MobMachine. Projection code may surface the reason, but the
             // Broken/terminal classification comes from this map.
             member_restore_failures: Map<AgentIdentity, String>,
+            // Stable consumer refusal code paired with a restore failure that
+            // specifically came from the generated runtime-binding route.
+            // The reason remains display detail; this map preserves the
+            // typed code without parsing that detail.
+            member_restore_failure_codes: Map<AgentIdentity, String>,
+            // Runtime retirement is a durable pending obligation from
+            // admission until archival completion. Consumer-refusal code and
+            // detail are diagnostic facts; the session correlation is broader
+            // than a refusal and survives restart so the route can be retried.
+            runtime_retire_refusal_codes: Map<AgentRuntimeId, String>,
+            runtime_retire_refusal_reasons: Map<AgentRuntimeId, String>,
+            runtime_retire_pending_sessions: Map<AgentRuntimeId, SessionId>,
+            // Durable intermediate proof for peer-only/external runtimes: the
+            // remote runtime has acknowledged retirement, but supervisor
+            // revocation and terminal member archival may still be pending.
+            // This exact runtime-scoped marker prevents a cold retry from
+            // re-authorizing or re-retiring an already-terminal remote owner.
+            remote_runtime_retired_ids: Set<AgentRuntimeId>,
+            // Durable second-stage proof for peer-only/external runtimes: the
+            // exact supervisor binding has acknowledged revocation. Once this
+            // marker exists, retry is purely local (recipient-trust cleanup +
+            // terminal journal publication) and must never depend on the
+            // intentionally retired remote runtime remaining reachable.
+            remote_supervisor_revoked_ids: Set<AgentRuntimeId>,
             // Machine-owned revival obligation: members whose live
             // materialization was observed missing while a durable session
             // snapshot still exists. Inserted by the revivable arm of
@@ -145,7 +169,14 @@ macro_rules! mob_catalog_machine_dsl {
             supervisor_pending_authority_signing_key: Option<PeerSigningKey>,
             supervisor_pending_authority_epoch: Option<u64>,
             supervisor_pending_authority_protocol_version: Option<SupervisorProtocolVersion>,
+            // Stable mob-wide operation identity for the in-flight supervisor
+            // rotation. This is recorded before the first remote submission so
+            // caller retries observe/re-submit the same operation rather than
+            // inferring mutation truth from a bridge reply.
+            supervisor_pending_authority_operation_id: Option<String>,
             supervisor_pending_authority_accepted_peer_ids: Set<PeerId>,
+            supervisor_pending_authority_member_target_names: Map<PeerId, String>,
+            supervisor_pending_authority_member_target_addresses: Map<PeerId, String>,
             // Machine-owned trust-install-before-authorization-terminality
             // window (dogma row R044). The comms router requires recipient
             // trust before a bridge command can be routed, so the shell must
@@ -368,6 +399,12 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_cancelled = EmptySet,
             member_kickoff_error = EmptyMap,
             member_restore_failures = EmptyMap,
+            member_restore_failure_codes = EmptyMap,
+            runtime_retire_refusal_codes = EmptyMap,
+            runtime_retire_refusal_reasons = EmptyMap,
+            runtime_retire_pending_sessions = EmptyMap,
+            remote_runtime_retired_ids = EmptySet,
+            remote_supervisor_revoked_ids = EmptySet,
             member_revival_pending = EmptySet,
             spawn_exec_phase = EmptyMap,
             member_state_markers = EmptyMap,
@@ -382,7 +419,10 @@ macro_rules! mob_catalog_machine_dsl {
             supervisor_pending_authority_signing_key = None,
             supervisor_pending_authority_epoch = None,
             supervisor_pending_authority_protocol_version = None,
+            supervisor_pending_authority_operation_id = None,
             supervisor_pending_authority_accepted_peer_ids = EmptySet,
+            supervisor_pending_authority_member_target_names = EmptyMap,
+            supervisor_pending_authority_member_target_addresses = EmptyMap,
             pending_recipient_trust = EmptySet,
             owner_bridge_session_id = None,
             owner_bridge_destroy_on_archive = false,
@@ -763,6 +803,8 @@ macro_rules! mob_catalog_machine_dsl {
             WireMembers { edge: WiringEdge },
             WireMembersWithTrust { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             UnwireMembers { edge: WiringEdge },
+            CleanupRetiringMemberWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            RestoreRetiringMemberWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             RegisterMemberPeer { agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint },
             AuthorizeMemberPeerRebind { agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint },
@@ -771,14 +813,19 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeMemberTrustUnwiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeMemberTrustCleanup { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             AuthorizeMemberTrustCleanupObserved { edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId },
+            AuthorizeRetiringMemberTrustCleanupObserved { edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey, agent_identity: AgentIdentity },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
+            CleanupRetiringExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            RestoreRetiringExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            CleanupRetiringExternalPeerObservedAbsent { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            RestoreRetiringExternalPeerObservedAbsent { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            AdmitSupervisorRotation,
             ProvisionSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion },
-            ClearSupervisorPendingRotation { current_peer_id: PeerId, current_epoch: u64, protocol_version: SupervisorProtocolVersion },
-            RecordSupervisorPendingRotation { current_peer_id: PeerId, current_epoch: u64, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId> },
-            CommitSupervisorRotation { current_peer_id: PeerId, current_epoch: u64, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, protocol_version: SupervisorProtocolVersion },
+            RecordSupervisorPendingRotation { current_peer_id: PeerId, current_epoch: u64, current_protocol_version: SupervisorProtocolVersion, operation_id: String, pending_peer_id: PeerId, pending_signing_key: PeerSigningKey, pending_epoch: u64, pending_protocol_version: SupervisorProtocolVersion, accepted_peer_ids: Set<PeerId>, active_peer_ids: Set<PeerId>, member_target_names: Map<PeerId, String>, member_target_addresses: Map<PeerId, String> },
+            CommitSupervisorRotation { current_peer_id: PeerId, current_epoch: u64, current_protocol_version: SupervisorProtocolVersion, operation_id: String, next_peer_id: PeerId, next_signing_key: PeerSigningKey, next_epoch: u64, next_protocol_version: SupervisorProtocolVersion },
             ClearSupervisorAuthorityForDestroy { current_peer_id: PeerId, current_signing_key: PeerSigningKey, current_epoch: u64, protocol_version: SupervisorProtocolVersion },
-            RestoreSupervisorAuthorityAfterDestroyRollback { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId> },
+            RestoreSupervisorAuthorityAfterDestroyRollback { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String> },
             // Dogma row R044: trust-install-before-terminality obligation.
             // Recorded before the shell installs recipient trust for a routed
             // bridge command; removed on authorization terminality success
@@ -793,6 +840,15 @@ macro_rules! mob_catalog_machine_dsl {
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
             SubmitWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             ResolveSubmitWorkRejection { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: Enum<WorkOrigin> },
+            // Generated composition refusal closure. Each input is bound by
+            // `meerkat_mob_seam` to one concrete routed effect kind; the shell
+            // supplies only the consumer's stable code + display detail.
+            ResolveRuntimeBindingRefusal { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String },
+            ResolveRuntimeIngressRefusal { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId, work_id: WorkId, origin: Enum<WorkOrigin>, refusal_code: String, reason: String },
+            ResolveRuntimeRetireRefusal { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String },
+            RetryRuntimeRetire { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
+            RecordRemoteMemberRuntimeRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            RecordRemoteMemberSupervisorRevoked { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             CancelWork { work_id: WorkId },
             CancelAllWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             ResolveCancelAllWorkRejection { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
@@ -1065,10 +1121,10 @@ macro_rules! mob_catalog_machine_dsl {
 
         signal MobMachineSignal {
             ObserveRuntimeReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            RetireMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: Option<SessionId> },
-            AdmitDestroyMemberRetire { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: Option<SessionId> },
+            AdmitDestroyMemberRetire { mob_id: MobId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId> },
             ObserveRuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
-            ObserveMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            ObserveMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId> },
+            ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             ObserveDestroyMemberRetirementArchived { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId> },
             ResetMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, session_id: SessionId },
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, session_id: SessionId },
@@ -1078,13 +1134,17 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool },
             RecoverMemberSessionBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId> },
             RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            RecoverRosterMemberRetirementStarted { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>, retiring_peer_endpoint: Option<MemberPeerEndpoint> },
+            RecoverRemoteMemberRuntimeRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            RecoverRemoteMemberSupervisorRevoked { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
+            ConvergeRecoveredRosterTopology { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             RecoverMemberKickoff { member_id: AgentIdentity, phase: KickoffPhase, error: Option<String> },
             RecoverRosterWiring { edge: WiringEdge },
             RecoverRosterUnwire { edge: WiringEdge },
             RecoverExternalPeerWiring { key: ExternalPeerKey, edge: ExternalPeerEdge },
             RecoverExternalPeerUnwire { key: ExternalPeerKey },
-            RecoverSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId> },
+            RecoverSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String> },
             RecoverOwnerBridgeSession { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
             ClassifyMemberLiveMaterialization { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, reason: String },
@@ -1122,8 +1182,11 @@ macro_rules! mob_catalog_machine_dsl {
             RequestPeerRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: Enum<WorkOrigin> },
             SubmitWorkRejected { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin>, reason: Enum<SubmitWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
             CancelAllWorkRejected { agent_runtime_id: AgentRuntimeId, reason: Enum<CancelAllWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
-            RequestRuntimeRetire { session_id: SessionId },
+            RequestRuntimeRetire { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId },
             RequestRuntimeDestroy { session_id: SessionId },
+            RuntimeBindingRefusalClassified { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String },
+            RuntimeIngressRefusalClassified { agent_runtime_id: AgentRuntimeId, session_id: SessionId, work_id: WorkId, origin: Enum<WorkOrigin>, refusal_code: String, reason: String },
+            RuntimeRetireRefusalClassified { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId, refusal_code: String, reason: String },
             PendingSpawnOperationOwnerAuthorized { agent_identity: AgentIdentity, session_id: SessionId },
             RequestSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             AppendLifecycleJournal { kind: Enum<MobLifecycleJournalKind>, agent_identity: Option<AgentIdentity>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, session_id: Option<SessionId> },
@@ -1306,7 +1369,7 @@ macro_rules! mob_catalog_machine_dsl {
             MemberPeerRebindAuthorized { agent_identity: AgentIdentity, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint },
             MemberPeerOverlayAuthorized { agent_identity: AgentIdentity, peer_id: PeerId, peer_overlay_endpoints: Set<MemberPeerEndpoint>, epoch: u64 },
             ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64 },
-            PersistSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId> },
+            PersistSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String> },
             DeleteSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion },
             // D-wiring-observability (#27): pair-valued notice emitted from
             // `WireMembers`/`UnwireMembers` alongside `WiringGraphChanged`.
@@ -1396,6 +1459,9 @@ macro_rules! mob_catalog_machine_dsl {
         disposition CancelAllWorkRejected => local seam SurfaceResultAlignment,
         disposition RequestRuntimeRetire => routed [MeerkatMachine] seam NoOwnerRealization,
         disposition RequestRuntimeDestroy => routed [MeerkatMachine] seam NoOwnerRealization,
+        disposition RuntimeBindingRefusalClassified => local seam SurfaceResultAlignment,
+        disposition RuntimeIngressRefusalClassified => local seam SurfaceResultAlignment,
+        disposition RuntimeRetireRefusalClassified => local seam SurfaceResultAlignment,
         disposition PendingSpawnOperationOwnerAuthorized => local seam NoOwnerRealization,
         disposition RequestSessionIngressDetachForMobDestroy => external handoff mob_destroying_session_ingress seam NoOwnerRealization,
         disposition AppendLifecycleJournal => local seam NoOwnerRealization,
@@ -1532,6 +1598,22 @@ macro_rules! mob_catalog_machine_dsl {
             && for_all(id in self.member_runtime_modes.keys(), self.identity_to_runtime.contains_key(id))
         }
 
+        invariant pending_session_ingress_detach_has_session_correlation {
+            for_all(agent_runtime_id in self.pending_session_ingress_detach_runtime_ids,
+                self.runtime_retire_pending_sessions.contains_key(agent_runtime_id))
+        }
+
+        invariant remote_runtime_retired_is_still_retiring {
+            for_all(agent_runtime_id in self.remote_runtime_retired_ids,
+                self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring))
+        }
+
+        invariant remote_supervisor_revoked_has_retired_runtime_anchor {
+            for_all(agent_runtime_id in self.remote_supervisor_revoked_ids,
+                self.remote_runtime_retired_ids.contains(agent_runtime_id) == true
+                && self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring))
+        }
+
         // Spawn-exec phase ladder: once a spawn-exec has committed membership
         // (phase == MembershipCommitted), the identity must already appear in
         // identity_to_runtime (the membership commit inserts it in the same
@@ -1574,7 +1656,10 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.supervisor_pending_authority_signing_key == None
                 && self.supervisor_pending_authority_epoch == None
                 && self.supervisor_pending_authority_protocol_version == None
+                && self.supervisor_pending_authority_operation_id == None
                 && self.supervisor_pending_authority_accepted_peer_ids == EmptySet
+                && self.supervisor_pending_authority_member_target_names == EmptyMap
+                && self.supervisor_pending_authority_member_target_addresses == EmptyMap
             )
             || (
                 self.supervisor_pending_authority_peer_id != None
@@ -1582,6 +1667,18 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.supervisor_pending_authority_epoch != None
                 && self.supervisor_pending_authority_protocol_version != None
             )
+        }
+
+        invariant supervisor_pending_authority_member_targets_aligned {
+            self.supervisor_pending_authority_member_target_names.keys()
+                == self.supervisor_pending_authority_member_target_addresses.keys()
+        }
+
+        invariant supervisor_pending_authority_acceptance_has_target {
+            self.supervisor_pending_authority_operation_id == None
+            || for_all(peer_id in self.supervisor_pending_authority_accepted_peer_ids,
+                self.supervisor_pending_authority_member_target_names.contains_key(peer_id)
+                && self.supervisor_pending_authority_member_target_addresses.contains_key(peer_id))
         }
 
         invariant supervisor_pending_authority_requires_current {
@@ -3342,6 +3439,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
@@ -3394,6 +3492,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
@@ -3445,6 +3544,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.spawn_profile_authority_profile_names.remove(agent_identity);
                 self.spawn_profile_authority_models.remove(agent_identity);
@@ -3683,6 +3783,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
@@ -3705,6 +3806,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
             }
             to Running
@@ -3762,6 +3864,13 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "previous_runtime_recovered" { self.live_runtime_ids.contains(previous_agent_runtime_id) == true }
             guard "identity_recovered" { self.identity_to_runtime.get_cloned(agent_identity) == Some(previous_agent_runtime_id) }
+            guard "previous_runtime_session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(previous_agent_runtime_id) == false }
+            guard "previous_runtime_not_retiring" { self.member_state_markers.get_cloned(previous_agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "previous_runtime_retirement_closed" { self.runtime_retire_pending_sessions.contains_key(previous_agent_runtime_id) == false }
+            guard "previous_runtime_retire_refusal_closed" {
+                self.runtime_retire_refusal_codes.contains_key(previous_agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(previous_agent_runtime_id) == false
+            }
             update {
                 self.live_runtime_ids.remove(previous_agent_runtime_id);
                 self.runtime_fence_tokens.remove(previous_agent_runtime_id);
@@ -3769,6 +3878,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(previous_agent_runtime_id);
                 self.member_startup_ready.remove(previous_agent_runtime_id);
                 self.member_state_markers.remove(previous_agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(previous_agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(previous_agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(previous_agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(previous_agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(previous_agent_runtime_id);
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if self.externally_addressable_runtime_ids.contains(previous_agent_runtime_id) {
                     self.externally_addressable_runtime_ids.remove(previous_agent_runtime_id);
@@ -3781,9 +3895,176 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
+            to Running
+        }
+
+        // A retirement-start journal is a durable in-flight obligation, not a
+        // completed roster removal. Replay keeps the member live-but-Retiring
+        // and restores the exact session correlation needed for a routed
+        // retire retry. The three arms mirror the releasing, preserving, and
+        // peer-only admission shapes without emitting live side effects during
+        // recovery.
+        transition RecoverRosterMemberRetirementStartedReleasing {
+            on signal RecoverRosterMemberRetirementStarted { agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "releasing_present" { releasing != None }
+            guard "session_matches_releasing" { session_id == releasing }
+            guard "binding_matches_releasing" { self.member_session_bindings.get_cloned(agent_identity) == releasing }
+            guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.member_session_bindings.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+                if retiring_peer_endpoint != None {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(retiring_peer_endpoint.get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, retiring_peer_endpoint.get("value"));
+                }
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        // Event replay may legitimately encounter the same start marker more
+        // than once (for example after an at-least-once journal copy). The
+        // releasing arm removed the binding on its first application, so make
+        // that already-applied shape explicitly idempotent instead of letting
+        // duplicate recovery fail closed as an invalid transition.
+        transition RecoverRosterMemberRetirementStartedReleasingAlreadyApplied {
+            on signal RecoverRosterMemberRetirementStarted { agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "releasing_present" { releasing != None }
+            guard "session_matches_releasing" { session_id == releasing }
+            guard "binding_already_released" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "member_already_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_already_pending" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "ingress_detach_still_pending" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true }
+            guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
+            update {
+                if retiring_peer_endpoint != None {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(retiring_peer_endpoint.get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, retiring_peer_endpoint.get("value"));
+                }
+            }
+            to Running
+        }
+
+        transition RecoverRosterMemberRetirementStartedPreservingBinding {
+            on signal RecoverRosterMemberRetirementStarted { agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "releasing_absent" { releasing == None }
+            guard "session_present" { session_id != None }
+            guard "binding_matches_session" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
+                if retiring_peer_endpoint != None {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(retiring_peer_endpoint.get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, retiring_peer_endpoint.get("value"));
+                }
+            }
+            to Running
+        }
+
+        transition RecoverRosterMemberRetirementStartedPeerOnly {
+            on signal RecoverRosterMemberRetirementStarted { agent_identity, agent_runtime_id, generation, releasing, session_id, retiring_peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "releasing_absent" { releasing == None }
+            guard "session_absent" { session_id == None }
+            guard "binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "retiring_peer_endpoint_consistent" { retiring_peer_endpoint == None || self.member_peer_endpoints.contains_key(agent_identity) == false || self.member_peer_endpoints.get_cloned(agent_identity) == retiring_peer_endpoint }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
+                self.member_revival_pending.remove(agent_identity);
+                if retiring_peer_endpoint != None {
+                    self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(retiring_peer_endpoint.get("value")));
+                    self.member_peer_endpoints.insert(agent_identity, retiring_peer_endpoint.get("value"));
+                }
+            }
+            to Running
+        }
+
+        transition RecoverRemoteMemberRuntimeRetiredFresh {
+            per_phase [Running, Stopped]
+            on signal RecoverRemoteMemberRuntimeRetired { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_not_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == false }
+            update {
+                self.remote_runtime_retired_ids.insert(agent_runtime_id);
+            }
+            to Running
+        }
+
+        transition RecoverRemoteMemberRuntimeRetiredAlreadyRecorded {
+            per_phase [Running, Stopped]
+            on signal RecoverRemoteMemberRuntimeRetired { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == true }
+            update {}
+            to Running
+        }
+
+        transition RecoverRemoteMemberSupervisorRevokedFresh {
+            per_phase [Running, Stopped]
+            on signal RecoverRemoteMemberSupervisorRevoked { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == true }
+            guard "remote_supervisor_not_recorded" { self.remote_supervisor_revoked_ids.contains(agent_runtime_id) == false }
+            update {
+                self.remote_supervisor_revoked_ids.insert(agent_runtime_id);
+            }
+            to Running
+        }
+
+        transition RecoverRemoteMemberSupervisorRevokedAlreadyRecorded {
+            per_phase [Running, Stopped]
+            on signal RecoverRemoteMemberSupervisorRevoked { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == true }
+            guard "remote_supervisor_recorded" { self.remote_supervisor_revoked_ids.contains(agent_runtime_id) == true }
+            update {}
             to Running
         }
 
@@ -3791,6 +4072,7 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
@@ -3798,7 +4080,23 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_binding_requested.remove(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
+                // Preserve a replacement spawn's pre-membership Opened phase;
+                // only the retired membership's committed phase is terminal.
+                if self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::MembershipCommitted) {
+                    self.spawn_exec_phase.remove(agent_identity);
+                }
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                // A durable MemberRetired event can only have been appended
+                // after the live detach handoff closed. Replay therefore
+                // consumes the transient obligation reopened by the earlier
+                // retirement-start event instead of attempting the external
+                // side effect again after terminal completion.
+                self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_runtime_generations.remove(agent_identity);
                 self.identity_runtime_fence_tokens.remove(agent_identity);
@@ -3808,7 +4106,17 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
+                self.member_kickoff_pending.remove(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.external_member_rebind_capability.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -3817,8 +4125,21 @@ macro_rules! mob_catalog_machine_dsl {
         transition RecoverRosterMemberRetiredAlreadyAbsent {
             on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             update {
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
                 self.identity_runtime_generations.remove(agent_identity);
                 self.identity_runtime_fence_tokens.remove(agent_identity);
@@ -3828,7 +4149,45 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
+                self.member_kickoff_pending.remove(agent_identity);
+                self.member_kickoff_starting.remove(agent_identity);
+                self.member_kickoff_callback_pending.remove(agent_identity);
+                self.member_kickoff_started.remove(agent_identity);
+                self.member_kickoff_failed.remove(agent_identity);
+                self.member_kickoff_cancelled.remove(agent_identity);
+                self.member_kickoff_error.remove(agent_identity);
+                self.external_member_rebind_capability.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+        }
+
+        transition RecoverRosterMemberRetiredStaleGeneration {
+            on signal RecoverRosterMemberRetired { agent_identity, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_remapped" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                && self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id)
+            }
+            update {
+                // The identity belongs to a newer incarnation, so retain its
+                // identity-scoped facts while converging every runtime-scoped
+                // residue owned by the terminal event's older runtime.
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
             }
             to Running
         }
@@ -4749,122 +5108,443 @@ macro_rules! mob_catalog_machine_dsl {
             }
         }
 
-        transition RetireMember {
-            on signal RetireMember { agent_identity, agent_runtime_id, fence_token, session_id }
+        // Generated routed-effect refusal closure. The composition binds each
+        // consumer refusal back to one of these typed inputs. The shell never
+        // chooses terminality from a generic dispatch error:
+        //
+        // * binding refusal is the only arm that records Broken/restore
+        //   terminality for the affected identity;
+        // * ingress refusal terminates only that work delivery;
+        // * retire refusal preserves a retry anchor while the member remains
+        //   Retiring.
+        transition ResolveRuntimeBindingRefusalRunning {
+            on input ResolveRuntimeBindingRefusal { agent_identity, agent_runtime_id, session_id, refusal_code, reason }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
-            guard "session_present" { session_id != None }
-            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
             update {
-                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                // Spawn-exec phase ladder: retire drops this identity's window to
-                // Settled (any late CommitSpawnActivation/AbortSpawnExec becomes a
-                // no-op; the membership-commit invariant stays satisfied).
-                self.spawn_exec_phase.remove(agent_identity);
+                self.member_restore_failures.insert(agent_identity, reason);
+                self.member_restore_failure_codes.insert(agent_identity, refusal_code);
             }
             to Running
-            emit RequestRuntimeRetire { session_id: session_id.get("value") }
-            // 0.7.2 L5: every member-retire admission opens the kickoff-waiter
-            // drain obligation; the shell closes it with `KickoffQuiesced`
-            // before the retirement archival observation can commit.
-            emit RequestKickoffQuiesce { member_id: agent_identity }
+            emit RuntimeBindingRefusalClassified {
+                agent_identity: agent_identity,
+                agent_runtime_id: agent_runtime_id,
+                session_id: session_id,
+                refusal_code: refusal_code,
+                reason: reason
+            }
         }
 
-        transition RetireMemberPeerOnly {
-            on signal RetireMember { agent_identity, agent_runtime_id, fence_token, session_id }
+        transition ResolveRuntimeIngressRefusalRunning {
+            on input ResolveRuntimeIngressRefusal { agent_runtime_id, fence_token, session_id, work_id, origin, refusal_code, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {}
+            to Running
+            emit RuntimeIngressRefusalClassified {
+                agent_runtime_id: agent_runtime_id,
+                session_id: session_id,
+                work_id: work_id,
+                origin: origin,
+                refusal_code: refusal_code,
+                reason: reason
+            }
+        }
+
+        transition ResolveRuntimeRetireRefusalRunning {
+            on input ResolveRuntimeRetireRefusal { agent_identity, agent_runtime_id, session_id, refusal_code, reason }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
-            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
-            guard "session_absent" { session_id == None }
-            guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             update {
-                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                // Spawn-exec phase ladder: retire drops this identity's window to
-                // Settled (see RetireMember).
-                self.spawn_exec_phase.remove(agent_identity);
+                self.runtime_retire_refusal_codes.insert(agent_runtime_id, refusal_code);
+                self.runtime_retire_refusal_reasons.insert(agent_runtime_id, reason);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id);
             }
             to Running
-            emit RequestKickoffQuiesce { member_id: agent_identity }
+            emit RuntimeRetireRefusalClassified {
+                agent_identity: agent_identity,
+                agent_runtime_id: agent_runtime_id,
+                session_id: session_id,
+                refusal_code: refusal_code,
+                reason: reason
+            }
+        }
+
+        transition ResolveRuntimeRetireRefusalStopped {
+            on input ResolveRuntimeRetireRefusal { agent_identity, agent_runtime_id, session_id, refusal_code, reason }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {
+                self.runtime_retire_refusal_codes.insert(agent_runtime_id, refusal_code);
+                self.runtime_retire_refusal_reasons.insert(agent_runtime_id, reason);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id);
+            }
+            to Stopped
+            emit RuntimeRetireRefusalClassified {
+                agent_identity: agent_identity,
+                agent_runtime_id: agent_runtime_id,
+                session_id: session_id,
+                refusal_code: refusal_code,
+                reason: reason
+            }
+        }
+
+        transition RetryRuntimeRetireRunning {
+            on input RetryRuntimeRetire { agent_identity, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_pending" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true }
+            update {}
+            to Running
+            emit RequestRuntimeRetire {
+                agent_identity: agent_identity,
+                agent_runtime_id: agent_runtime_id,
+                session_id: self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id).get("value")
+            }
+        }
+
+        transition RetryRuntimeRetireStopped {
+            on input RetryRuntimeRetire { agent_identity, agent_runtime_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_pending" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true }
+            update {}
+            to Stopped
+            emit RequestRuntimeRetire {
+                agent_identity: agent_identity,
+                agent_runtime_id: agent_runtime_id,
+                session_id: self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id).get("value")
+            }
+        }
+
+        transition RecordRemoteMemberRuntimeRetiredFresh {
+            per_phase [Running, Stopped]
+            on input RecordRemoteMemberRuntimeRetired { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_not_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == false }
+            update {
+                self.remote_runtime_retired_ids.insert(agent_runtime_id);
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::RemoteMemberRuntimeRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(fence_token),
+                generation: Some(generation),
+                session_id: None
+            }
+        }
+
+        transition RecordRemoteMemberRuntimeRetiredAlreadyRecorded {
+            per_phase [Running, Stopped]
+            on input RecordRemoteMemberRuntimeRetired { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == true }
+            update {}
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::RemoteMemberRuntimeRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(fence_token),
+                generation: Some(generation),
+                session_id: None
+            }
+        }
+
+        transition RecordRemoteMemberSupervisorRevokedFresh {
+            per_phase [Running, Stopped]
+            on input RecordRemoteMemberSupervisorRevoked { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == true }
+            guard "remote_supervisor_not_recorded" { self.remote_supervisor_revoked_ids.contains(agent_runtime_id) == false }
+            update {
+                self.remote_supervisor_revoked_ids.insert(agent_runtime_id);
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::RemoteMemberSupervisorRevoked,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(fence_token),
+                generation: Some(generation),
+                session_id: None
+            }
+        }
+
+        transition RecordRemoteMemberSupervisorRevokedAlreadyRecorded {
+            per_phase [Running, Stopped]
+            on input RecordRemoteMemberSupervisorRevoked { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_runtime_recorded" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == true }
+            guard "remote_supervisor_recorded" { self.remote_supervisor_revoked_ids.contains(agent_runtime_id) == true }
+            update {}
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::RemoteMemberSupervisorRevoked,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: Some(fence_token),
+                generation: Some(generation),
+                session_id: None
+            }
         }
 
         transition AdmitDestroyMemberRetireLiveRunning {
-            on signal AdmitDestroyMemberRetire { agent_identity, agent_runtime_id, fence_token, session_id }
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
             guard "session_present" { session_id != None }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
             }
             to Running
-            emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
+            emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetireLiveStopped {
-            on signal AdmitDestroyMemberRetire { agent_identity, agent_runtime_id, fence_token, session_id }
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
             guard "session_present" { session_id != None }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
             }
             to Stopped
-            emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: session_id
+            }
+            emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetirePeerOnlyRunning {
-            on signal AdmitDestroyMemberRetire { agent_identity, agent_runtime_id, fence_token, session_id }
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
             guard "session_absent" { session_id == None }
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
             to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPeerOnly,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: None
+            }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
         transition AdmitDestroyMemberRetirePeerOnlyStopped {
-            on signal AdmitDestroyMemberRetire { agent_identity, agent_runtime_id, fence_token, session_id }
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
             guard "session_absent" { session_id == None }
             guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
             to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPeerOnly,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: None
+            }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
-        transition AdmitDestroyMemberRetireAlreadyRetiringRunning {
-            on signal AdmitDestroyMemberRetire { agent_identity, agent_runtime_id, fence_token, session_id }
+        transition AdmitDestroyMemberRetireAlreadyRetiringSessionRunning {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
-            guard "session_matches_binding_or_absent" {
-                (session_id == None && self.member_session_bindings.get_cloned(agent_identity) == None)
-                || (session_id != None && self.member_session_bindings.get_cloned(agent_identity) == session_id)
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            update {
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+            }
+            to Running
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        transition AdmitDestroyMemberRetireAlreadyRetiringSessionStopped {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_present" { session_id != None }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            update {
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+            }
+            to Stopped
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // Ordinary releasing retirement consumes the live session binding as
+        // soon as detach authority opens. A later destroy takeover therefore
+        // proves session ownership through the still-durable pending retire
+        // correlation, not through the already-released binding.
+        transition AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionRunning {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_present" { session_id != None }
+            guard "session_binding_released" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            update {
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+            }
+            to Running
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        transition AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionStopped {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_present" { session_id != None }
+            guard "session_binding_released" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            update {
+                self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
+            }
+            to Stopped
+            emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
+            emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        transition AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyRunning {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_absent" { session_id == None }
+            guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
             }
             update {}
             to Running
@@ -4873,19 +5553,67 @@ macro_rules! mob_catalog_machine_dsl {
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
-        transition AdmitDestroyMemberRetireAlreadyRetiringStopped {
-            on signal AdmitDestroyMemberRetire { agent_identity, agent_runtime_id, fence_token, session_id }
+        transition AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyStopped {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
-            guard "session_matches_binding_or_absent" {
-                (session_id == None && self.member_session_bindings.get_cloned(agent_identity) == None)
-                || (session_id != None && self.member_session_bindings.get_cloned(agent_identity) == session_id)
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_absent" { session_id == None }
+            guard "session_binding_absent" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "session_ingress_detach_absent" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "retire_refusal_absent" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
             }
             update {}
             to Stopped
             emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        transition AdmitDestroyMemberRetireAlreadyArchivedRunning {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_binding_cleared" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "retry_observes_cleared_session" { session_id == None }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "runtime_retirement_closed" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "runtime_retire_refusal_closed" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
+            update {}
+            to Running
+        }
+
+        transition AdmitDestroyMemberRetireAlreadyArchivedStopped {
+            on signal AdmitDestroyMemberRetire { mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_binding_cleared" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "retry_observes_cleared_session" { session_id == None }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "runtime_retirement_closed" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "runtime_retire_refusal_closed" {
+                self.runtime_retire_refusal_codes.contains_key(agent_runtime_id) == false
+                && self.runtime_retire_refusal_reasons.contains_key(agent_runtime_id) == false
+            }
+            update {}
+            to Stopped
         }
 
         transition ObserveRuntimeRetired {
@@ -4906,12 +5634,86 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
+        transition ObserveRuntimeRetiredStopped {
+            on signal ObserveRuntimeRetired { agent_runtime_id, fence_token }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            update {
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.active_run_count = 0;
+            }
+            to Stopped
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+        }
+
+        // Peer-only terminality is a distinct exact proof path. The shell may
+        // emit this signal only after the remote retirement checkpoint is
+        // durable and direct supervisor revocation has acknowledged (or
+        // returned the typed idempotent NotBound result). Generic session
+        // archive observations cannot terminalize this sessionless shape.
+        transition ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked {
+            per_phase [Running, Stopped]
+            on signal ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked { agent_identity, agent_runtime_id, fence_token, generation }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "remote_runtime_retired" { self.remote_runtime_retired_ids.contains(agent_runtime_id) == true }
+            guard "remote_supervisor_revoked" { self.remote_supervisor_revoked_ids.contains(agent_runtime_id) == true }
+            guard "remote_member_session_absent" { self.member_session_bindings.contains_key(agent_identity) == false }
+            guard "remote_retirement_session_absent" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "kickoff_quiesced" {
+                !self.member_kickoff_pending.contains(agent_identity)
+                && !self.member_kickoff_starting.contains(agent_identity)
+                && !self.member_kickoff_callback_pending.contains(agent_identity)
+            }
+            update {
+                self.live_runtime_ids.remove(agent_runtime_id);
+                self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.active_run_count = 0;
+            }
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: None
+            }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
+        }
+
         transition ObserveMemberRetirementArchivedLive {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
             // 0.7.2 L5: retirement archival is the member-level teardown
             // completion; it may only commit after the kickoff-waiter drain
             // obligation closed (`KickoffQuiesced` / a natural `KickoffResolve*`
@@ -4929,18 +5731,31 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.active_run_count = 0;
             }
             to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
         transition ObserveMemberRetirementArchivedLiveStopped {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
             guard "kickoff_quiesced" {
                 !self.member_kickoff_pending.contains(agent_identity)
                 && !self.member_kickoff_starting.contains(agent_identity)
@@ -4954,18 +5769,30 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
                 self.active_run_count = 0;
             }
             to Stopped
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
         transition ObserveMemberRetirementArchivedRetired {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
             guard "kickoff_quiesced" {
                 !self.member_kickoff_pending.contains(agent_identity)
                 && !self.member_kickoff_starting.contains(agent_identity)
@@ -4973,16 +5800,28 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
             }
             to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
         }
 
         transition ObserveMemberRetirementArchivedRetiredStopped {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
             guard "kickoff_quiesced" {
                 !self.member_kickoff_pending.contains(agent_identity)
                 && !self.member_kickoff_starting.contains(agent_identity)
@@ -4990,61 +5829,135 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
             }
             to Stopped
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
         }
 
         transition ObserveMemberRetirementArchivedStaleRuntime {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_remapped" { self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
             }
             to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
         }
 
         transition ObserveMemberRetirementArchivedStaleRuntimeStopped {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "identity_remapped" { self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
+            guard "session_present" { session_id != None }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
             }
             to Stopped
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
         }
 
         transition ObserveMemberRetirementArchivedAlreadyCleared {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             update {}
             to Running
+            // Re-emit durable-write authority for a retry that landed after
+            // the first transition committed but before the shell released
+            // its retained roster anchor. The event store remains the
+            // idempotency owner and skips an already-present exact event.
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
         }
 
         transition ObserveMemberRetirementArchivedAlreadyClearedStopped {
-            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token }
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             update {}
             to Stopped
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+        }
+
+        transition ObserveMemberRetirementArchivedStaleRuntimeAlreadyCleared {
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_remapped" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                && self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id)
+            }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            update {}
+            to Running
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
+        }
+
+        transition ObserveMemberRetirementArchivedStaleRuntimeAlreadyClearedStopped {
+            on signal ObserveMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_remapped" {
+                self.identity_to_runtime.contains_key(agent_identity) == true
+                && self.identity_to_runtime.get_cloned(agent_identity) != Some(agent_runtime_id)
+            }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            update {}
+            to Stopped
+            emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
         }
 
         transition ObserveDestroyMemberRetirementArchivedLiveRunning {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "session_present" { session_id != None }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
             guard "kickoff_quiesced" {
                 !self.member_kickoff_pending.contains(agent_identity)
                 && !self.member_kickoff_starting.contains(agent_identity)
@@ -5058,10 +5971,16 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.active_run_count = 0;
                 self.topology_epoch += 1;
@@ -5082,12 +6001,16 @@ macro_rules! mob_catalog_machine_dsl {
         transition ObserveDestroyMemberRetirementArchivedLiveStopped {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "session_present" { session_id != None }
             guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
             guard "kickoff_quiesced" {
                 !self.member_kickoff_pending.contains(agent_identity)
                 && !self.member_kickoff_starting.contains(agent_identity)
@@ -5101,10 +6024,16 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.active_run_count = 0;
                 self.topology_epoch += 1;
@@ -5125,12 +6054,15 @@ macro_rules! mob_catalog_machine_dsl {
         transition ObserveDestroyMemberRetirementArchivedRetiredRunning {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "session_present" { session_id != None }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
             guard "kickoff_quiesced" {
                 !self.member_kickoff_pending.contains(agent_identity)
                 && !self.member_kickoff_starting.contains(agent_identity)
@@ -5138,10 +6070,16 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
@@ -5160,12 +6098,15 @@ macro_rules! mob_catalog_machine_dsl {
         transition ObserveDestroyMemberRetirementArchivedRetiredStopped {
             on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
             guard "destroy_admitted" { self.destroy_admitted == true }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
             guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
+            guard "session_present" { session_id != None }
             guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retirement_session_matches" { self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) == session_id }
             guard "kickoff_quiesced" {
                 !self.member_kickoff_pending.contains(agent_identity)
                 && !self.member_kickoff_starting.contains(agent_identity)
@@ -5173,10 +6114,16 @@ macro_rules! mob_catalog_machine_dsl {
             }
             update {
                 self.member_state_markers.remove(agent_runtime_id);
+                self.remote_runtime_retired_ids.remove(agent_runtime_id);
+                self.remote_supervisor_revoked_ids.remove(agent_runtime_id);
+                self.runtime_retire_refusal_codes.remove(agent_runtime_id);
+                self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.topology_epoch += 1;
             }
@@ -5192,16 +6139,90 @@ macro_rules! mob_catalog_machine_dsl {
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: session_id, new_session_id: None }
         }
 
+        transition ObserveDestroyMemberRetirementArchivedAlreadyClearedRunning {
+            on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_binding_cleared" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "retry_observes_cleared_session" { session_id == None }
+            update {}
+            to Running
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: None
+            }
+        }
+
+        transition ObserveDestroyMemberRetirementArchivedAlreadyClearedStopped {
+            on signal ObserveDestroyMemberRetirementArchived { agent_identity, agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "destroy_admitted" { self.destroy_admitted == true }
+            guard "session_ingress_detach_closed" { self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "runtime_not_live" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_binding_cleared" { self.member_session_bindings.get_cloned(agent_identity) == None }
+            guard "retry_observes_cleared_session" { session_id == None }
+            update {}
+            to Stopped
+            emit AppendLifecycleJournal {
+                kind: MobLifecycleJournalKind::MemberRetired,
+                agent_identity: Some(agent_identity),
+                agent_runtime_id: Some(agent_runtime_id),
+                fence_token: None,
+                generation: Some(generation),
+                session_id: None
+            }
+        }
+
         transition ResetMember {
             on signal ResetMember { agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable, session_id }
             guard {
                 self.lifecycle_phase == Phase::Running
                 || self.lifecycle_phase == Phase::Stopped
             }
+            guard "identity_binding_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "previous_runtime_session_ingress_detach_closed" {
+                self.pending_session_ingress_detach_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+            }
+            guard "previous_runtime_not_retiring" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
+            }
+            guard "previous_runtime_retirement_closed" {
+                self.runtime_retire_pending_sessions.contains_key(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+            }
+            guard "previous_runtime_retire_refusal_closed" {
+                self.runtime_retire_refusal_codes.contains_key(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+                && self.runtime_retire_refusal_reasons.contains_key(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+            }
             update {
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.pending_spawn_sessions = EmptyMap;
+                self.live_runtime_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.externally_addressable_runtime_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_fence_tokens.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_state_markers.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.remote_runtime_retired_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.remote_supervisor_revoked_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_retire_refusal_codes.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_retire_refusal_reasons.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_retire_pending_sessions.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -5218,6 +6239,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
             }
             to Running
@@ -5228,10 +6250,36 @@ macro_rules! mob_catalog_machine_dsl {
         transition RespawnMember {
             on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, profile_name, runtime_mode, external_addressable, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_binding_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "previous_runtime_session_ingress_detach_closed" {
+                self.pending_session_ingress_detach_runtime_ids.contains(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+            }
+            guard "previous_runtime_not_retiring" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
+            }
+            guard "previous_runtime_retirement_closed" {
+                self.runtime_retire_pending_sessions.contains_key(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+            }
+            guard "previous_runtime_retire_refusal_closed" {
+                self.runtime_retire_refusal_codes.contains_key(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+                && self.runtime_retire_refusal_reasons.contains_key(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == false
+            }
             update {
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.pending_spawn_sessions = EmptyMap;
+                self.live_runtime_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.externally_addressable_runtime_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_fence_tokens.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_state_markers.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.remote_runtime_retired_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.remote_supervisor_revoked_ids.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_retire_refusal_codes.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_retire_refusal_reasons.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.runtime_retire_pending_sessions.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -5248,6 +6296,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
             }
             to Running
@@ -5288,6 +6337,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_restore_failures.insert(agent_identity, reason);
+                self.member_restore_failure_codes.remove(agent_identity);
             }
             to Running
         }
@@ -5334,6 +6384,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_revival_pending.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
+                self.member_restore_failure_codes.remove(agent_identity);
             }
             to Running
             emit MemberLiveMaterializationClassified {
@@ -5361,6 +6412,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_revival_pending.remove(agent_identity);
                 self.member_restore_failures.insert(agent_identity, reason);
+                self.member_restore_failure_codes.remove(agent_identity);
             }
             to Running
         }
@@ -5461,6 +6513,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_ready = EmptySet;
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
+                self.member_restore_failure_codes = EmptyMap;
+                self.runtime_retire_refusal_codes = EmptyMap;
+                self.runtime_retire_refusal_reasons = EmptyMap;
+                self.runtime_retire_pending_sessions = EmptyMap;
+                self.remote_runtime_retired_ids = EmptySet;
+                self.remote_supervisor_revoked_ids = EmptySet;
                 self.member_revival_pending = EmptySet;
                 // Spawn-exec phase ladder: total teardown — clear the whole phase
                 // map so no in-flight spawn-exec survives into Destroyed (every
@@ -5482,6 +6540,7 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Completed
                 || self.lifecycle_phase == Phase::Destroyed
             }
+            guard "session_ingress_detaches_closed" { self.pending_session_ingress_detach_runtime_ids == EmptySet }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             update {
@@ -5489,6 +6548,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
+                self.member_restore_failure_codes = EmptyMap;
+                self.runtime_retire_refusal_codes = EmptyMap;
+                self.runtime_retire_refusal_reasons = EmptyMap;
+                self.runtime_retire_pending_sessions = EmptyMap;
+                self.remote_runtime_retired_ids = EmptySet;
+                self.remote_supervisor_revoked_ids = EmptySet;
                 self.member_revival_pending = EmptySet;
                 // Spawn-exec phase ladder: total teardown (see DestroyMob).
                 self.spawn_exec_phase = EmptyMap;
@@ -5876,6 +6941,47 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // Durable wiring events describe historical intent, while terminal
+        // member events decide which identity incarnations survived replay.
+        // Prune only after the full event stream so a later respawn of the
+        // same identity retains its topology and a finally-absent identity
+        // cannot resurrect stale trust on the next fresh spawn.
+        transition ConvergeRecoveredRosterTopologyPrune {
+            per_phase [Running, Stopped, Completed]
+            on signal ConvergeRecoveredRosterTopology { edge, a_identity, b_identity }
+            guard "edge_recovered" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "edge_has_absent_endpoint" {
+                self.identity_to_runtime.contains_key(a_identity) == false
+                || self.identity_to_runtime.contains_key(b_identity) == false
+            }
+            update {
+                self.wiring_edges.remove(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition ConvergeRecoveredRosterTopologyRetain {
+            per_phase [Running, Stopped, Completed]
+            on signal ConvergeRecoveredRosterTopology { edge, a_identity, b_identity }
+            guard "edge_recovered" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "edge_endpoints_present" {
+                self.identity_to_runtime.contains_key(a_identity) == true
+                && self.identity_to_runtime.contains_key(b_identity) == true
+            }
+            update {}
+            to Running
+        }
+
+        transition ConvergeRecoveredRosterTopologyDestroyed {
+            on signal ConvergeRecoveredRosterTopology { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
         transition UnwireMembersRunning {
             on input UnwireMembers { edge }
             guard { self.lifecycle_phase == Phase::Running }
@@ -5895,6 +7001,56 @@ macro_rules! mob_catalog_machine_dsl {
             guard "edge_already_absent" { self.wiring_edges.contains(edge) == false }
             update {}
             to Running
+        }
+
+        transition CleanupRetiringMemberWiring {
+            per_phase [Running, Stopped]
+            on input CleanupRetiringMemberWiring { edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "retiring_identity_is_endpoint" { agent_identity == a_identity || agent_identity == b_identity }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {
+                self.wiring_edges.remove(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+        }
+
+        transition CleanupRetiringMemberWiringAlreadyAbsent {
+            per_phase [Running, Stopped]
+            on input CleanupRetiringMemberWiring { edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "edge_absent" { self.wiring_edges.contains(edge) == false }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "retiring_identity_is_endpoint" { agent_identity == a_identity || agent_identity == b_identity }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {}
+            to Running
+        }
+
+        transition RestoreRetiringMemberWiring {
+            per_phase [Running, Stopped]
+            on input RestoreRetiringMemberWiring { edge, a_identity, b_identity, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "edge_absent" { self.wiring_edges.contains(edge) == false }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "retiring_identity_is_endpoint" { agent_identity == a_identity || agent_identity == b_identity }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
         }
 
         transition WireExternalPeerRunning {
@@ -5941,6 +7097,11 @@ macro_rules! mob_catalog_machine_dsl {
             on input RegisterMemberPeer { agent_identity, peer_endpoint }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "retiring_endpoint_not_replaced" {
+                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
+                || self.member_peer_endpoints.contains_key(agent_identity) == false
+                || self.member_peer_endpoints.get_cloned(agent_identity) == Some(peer_endpoint)
+            }
             update {
                 self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
                 self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
@@ -6024,6 +7185,23 @@ macro_rules! mob_catalog_machine_dsl {
             }
         }
 
+        transition AuthorizeMemberTrustUnwiringStopped {
+            on input AuthorizeMemberTrustUnwiring { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            update {}
+            to Stopped
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch + 1
+            }
+        }
+
         transition AuthorizeMemberTrustCleanupRunning {
             on input AuthorizeMemberTrustCleanup { edge, a_identity, b_identity }
             guard { self.lifecycle_phase == Phase::Running }
@@ -6040,12 +7218,71 @@ macro_rules! mob_catalog_machine_dsl {
             }
         }
 
+        transition AuthorizeMemberTrustCleanupStopped {
+            on input AuthorizeMemberTrustCleanup { edge, a_identity, b_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "a_member_peer_registered" { self.member_peer_ids.contains_key(a_identity) == true }
+            guard "b_member_peer_registered" { self.member_peer_ids.contains_key(b_identity) == true }
+            update {}
+            to Stopped
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: self.member_peer_ids.get_cloned(a_identity).get("value"),
+                b_peer_id: self.member_peer_ids.get_cloned(b_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+        }
+
         transition AuthorizeMemberTrustCleanupObservedRunning {
             on input AuthorizeMemberTrustCleanupObserved { edge, a_identity, a_peer_id, b_identity, b_peer_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
             guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
             guard "cleanup_has_restore_failure" { self.member_restore_failures.contains_key(a_identity) == true || self.member_restore_failures.contains_key(b_identity) == true }
+            update {}
+            to Running
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: a_peer_id,
+                b_peer_id: b_peer_id,
+                epoch: self.topology_epoch
+            }
+        }
+
+        transition AuthorizeMemberTrustCleanupObservedStopped {
+            on input AuthorizeMemberTrustCleanupObserved { edge, a_identity, a_peer_id, b_identity, b_peer_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "cleanup_has_restore_failure" { self.member_restore_failures.contains_key(a_identity) == true || self.member_restore_failures.contains_key(b_identity) == true }
+            update {}
+            to Stopped
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: a_peer_id,
+                b_peer_id: b_peer_id,
+                epoch: self.topology_epoch
+            }
+        }
+
+        // Cold retirement retry may have only observed trust rows left: the
+        // retirement-start journal deliberately clears restore diagnostics,
+        // while peer endpoint registration can be unavailable after the
+        // crashed runtime vanished. The exact current runtime binding, fence,
+        // generation, and Retiring marker are the machine-owned authority for
+        // accepting those observed peer ids. This path never authorizes an
+        // active or stale runtime to remove trust.
+        transition AuthorizeRetiringMemberTrustCleanupObserved {
+            per_phase [Running, Stopped]
+            on input AuthorizeRetiringMemberTrustCleanupObserved { edge, a_identity, a_peer_id, b_identity, b_peer_id, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "edge_matches_members" { mob_machine_wiring_edge_matches_members(edge, a_identity, b_identity) }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "retiring_identity_is_endpoint" { agent_identity == a_identity || agent_identity == b_identity }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
             update {}
             to Running
             emit MemberTrustUnwiringRequested {
@@ -6151,10 +7388,128 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        transition CleanupRetiringExternalPeer {
+            per_phase [Running, Stopped]
+            on input CleanupRetiringExternalPeer { key, edge, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
+            guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
+            guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
+            guard "external_peer_edge_currently_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            update {
+                self.external_peer_edges.remove(edge);
+                self.external_peer_edges_by_key.remove(key);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit ExternalPeerTrustUnwiringRequested {
+                edge: edge,
+                local_peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
+                peer_id: mob_machine_external_peer_edge_peer_id(edge),
+                epoch: self.topology_epoch
+            }
+        }
+
+        transition RestoreRetiringExternalPeer {
+            per_phase [Running, Stopped]
+            on input RestoreRetiringExternalPeer { key, edge, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
+            guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
+            guard "external_peer_key_absent" { self.external_peer_edges_by_key.contains_key(key) == false }
+            guard "external_peer_edge_absent" { self.external_peer_edges.contains(edge) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "local_member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            update {
+                self.external_peer_edges.insert(edge);
+                self.external_peer_edges_by_key.insert(key, edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+            emit ExternalPeerTrustWiringRequested {
+                edge: edge,
+                local_peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
+                peer_id: mob_machine_external_peer_edge_peer_id(edge),
+                epoch: self.topology_epoch
+            }
+        }
+
+        // A cold retirement retry can prove that the retiring runtime no
+        // longer has a live comms owner. In that shape there is no trust store
+        // on which to realize an ExternalPeerTrustUnwiringRequested effect.
+        // The durable retiring endpoint plus exact runtime/fence/generation
+        // authorizes topology convergence without publishing an unrealizable
+        // trust obligation. A failed event append uses the symmetric restore
+        // transition, which likewise emits no live trust effect.
+        transition CleanupRetiringExternalPeerObservedAbsent {
+            per_phase [Running, Stopped]
+            on input CleanupRetiringExternalPeerObservedAbsent { key, edge, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
+            guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
+            guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.get_cloned(key) == Some(edge) }
+            guard "external_peer_edge_currently_wired" { self.external_peer_edges.contains(edge) == true }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retiring_peer_endpoint_retained" { self.member_peer_endpoints.contains_key(agent_identity) == true }
+            guard "retiring_peer_id_retained" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(agent_identity).get("value"))) }
+            update {
+                self.external_peer_edges.remove(edge);
+                self.external_peer_edges_by_key.remove(key);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+        }
+
+        transition RestoreRetiringExternalPeerObservedAbsent {
+            per_phase [Running, Stopped]
+            on input RestoreRetiringExternalPeerObservedAbsent { key, edge, agent_identity, agent_runtime_id, fence_token, generation }
+            guard "external_peer_key_matches_edge" { mob_machine_external_peer_key_matches_edge(key, edge) }
+            guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
+            guard "external_peer_key_absent" { self.external_peer_edges_by_key.contains_key(key) == false }
+            guard "external_peer_edge_absent" { self.external_peer_edges.contains(edge) == false }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "member_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring) }
+            guard "retiring_peer_endpoint_retained" { self.member_peer_endpoints.contains_key(agent_identity) == true }
+            guard "retiring_peer_id_retained" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(agent_identity).get("value"))) }
+            update {
+                self.external_peer_edges.insert(edge);
+                self.external_peer_edges_by_key.insert(key, edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit WiringGraphChanged { epoch: self.topology_epoch }
+        }
+
+
         // Mob-wide supervisor authority. The shell may generate key material,
         // but MobMachine owns whether the current/pending authority tuple is
         // admitted and which exact tuple may be persisted or used by the
         // bridge.
+
+        transition AdmitSupervisorRotation {
+            per_phase [Running, Stopped]
+            on input AdmitSupervisorRotation
+            guard "destroy_not_admitted" { self.destroy_admitted == false }
+            guard "no_member_retiring" {
+                for_all(agent_runtime_id in self.member_state_markers.keys(),
+                    self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring))
+            }
+            update {}
+            to Running
+        }
 
         transition ProvisionSupervisorAuthority {
             per_phase [Running, Stopped, Completed, Destroyed]
@@ -6175,7 +7530,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.supervisor_pending_authority_signing_key = None;
                 self.supervisor_pending_authority_epoch = None;
                 self.supervisor_pending_authority_protocol_version = None;
+                self.supervisor_pending_authority_operation_id = None;
                 self.supervisor_pending_authority_accepted_peer_ids = EmptySet;
+                self.supervisor_pending_authority_member_target_names = EmptyMap;
+                self.supervisor_pending_authority_member_target_addresses = EmptyMap;
             }
             to Running
             emit PersistSupervisorAuthority {
@@ -6183,11 +7541,14 @@ macro_rules! mob_catalog_machine_dsl {
                 signing_key: signing_key,
                 epoch: epoch,
                 protocol_version: protocol_version,
+                pending_operation_id: None,
                 pending_peer_id: None,
                 pending_signing_key: None,
                 pending_epoch: None,
                 pending_protocol_version: None,
-                pending_accepted_peer_ids: EmptySet
+                pending_accepted_peer_ids: EmptySet,
+                pending_member_target_names: EmptyMap,
+                pending_member_target_addresses: EmptyMap
             }
         }
 
@@ -6198,11 +7559,14 @@ macro_rules! mob_catalog_machine_dsl {
                 signing_key,
                 epoch,
                 protocol_version,
+                pending_operation_id,
                 pending_peer_id,
                 pending_signing_key,
                 pending_epoch,
                 pending_protocol_version,
-                pending_accepted_peer_ids
+                pending_accepted_peer_ids,
+                pending_member_target_names,
+                pending_member_target_addresses
             }
             guard "supervisor_authority_absent" {
                 self.supervisor_authority_peer_id == None
@@ -6216,7 +7580,10 @@ macro_rules! mob_catalog_machine_dsl {
                     && pending_signing_key == None
                     && pending_epoch == None
                     && pending_protocol_version == None
+                    && pending_operation_id == None
                     && pending_accepted_peer_ids == EmptySet
+                    && pending_member_target_names == EmptyMap
+                    && pending_member_target_addresses == EmptyMap
                 )
                 || (
                     pending_peer_id != None
@@ -6224,6 +7591,9 @@ macro_rules! mob_catalog_machine_dsl {
                     && pending_epoch != None
                     && pending_protocol_version != None
                 )
+            }
+            guard "pending_member_targets_aligned" {
+                pending_member_target_names.keys() == pending_member_target_addresses.keys()
             }
             update {
                 self.supervisor_authority_peer_id = Some(peer_id);
@@ -6234,39 +7604,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.supervisor_pending_authority_signing_key = pending_signing_key;
                 self.supervisor_pending_authority_epoch = pending_epoch;
                 self.supervisor_pending_authority_protocol_version = pending_protocol_version;
+                self.supervisor_pending_authority_operation_id = pending_operation_id;
                 self.supervisor_pending_authority_accepted_peer_ids = pending_accepted_peer_ids;
+                self.supervisor_pending_authority_member_target_names = pending_member_target_names;
+                self.supervisor_pending_authority_member_target_addresses = pending_member_target_addresses;
             }
             to Running
-        }
-
-        transition ClearSupervisorPendingRotation {
-            per_phase [Running, Stopped, Completed]
-            on input ClearSupervisorPendingRotation { current_peer_id, current_epoch, protocol_version }
-            guard "current_supervisor_matches" {
-                self.supervisor_authority_peer_id == Some(current_peer_id)
-                && self.supervisor_authority_signing_key != None
-                && self.supervisor_authority_epoch == Some(current_epoch)
-                && self.supervisor_authority_protocol_version == Some(protocol_version)
-            }
-            update {
-                self.supervisor_pending_authority_peer_id = None;
-                self.supervisor_pending_authority_signing_key = None;
-                self.supervisor_pending_authority_epoch = None;
-                self.supervisor_pending_authority_protocol_version = None;
-                self.supervisor_pending_authority_accepted_peer_ids = EmptySet;
-            }
-            to Running
-            emit PersistSupervisorAuthority {
-                peer_id: current_peer_id,
-                signing_key: self.supervisor_authority_signing_key.get("value"),
-                epoch: current_epoch,
-                protocol_version: protocol_version,
-                pending_peer_id: None,
-                pending_signing_key: None,
-                pending_epoch: None,
-                pending_protocol_version: None,
-                pending_accepted_peer_ids: EmptySet
-            }
         }
 
         transition RecordSupervisorPendingRotation {
@@ -6274,37 +7617,96 @@ macro_rules! mob_catalog_machine_dsl {
             on input RecordSupervisorPendingRotation {
                 current_peer_id,
                 current_epoch,
+                current_protocol_version,
+                operation_id,
                 pending_peer_id,
                 pending_signing_key,
                 pending_epoch,
-                protocol_version,
-                accepted_peer_ids
+                pending_protocol_version,
+                accepted_peer_ids,
+                active_peer_ids,
+                member_target_names,
+                member_target_addresses
             }
             guard "current_supervisor_matches" {
                 self.supervisor_authority_peer_id == Some(current_peer_id)
                 && self.supervisor_authority_signing_key != None
                 && self.supervisor_authority_epoch == Some(current_epoch)
-                && self.supervisor_authority_protocol_version == Some(protocol_version)
+                && self.supervisor_authority_protocol_version == Some(current_protocol_version)
             }
             guard "pending_authority_changes_peer" { pending_peer_id != current_peer_id }
+            guard "pending_epoch_is_successor" { pending_epoch == current_epoch + 1 }
+            guard "operation_id_not_empty" { operation_id != "" }
+            guard "member_targets_aligned" {
+                member_target_names.keys() == member_target_addresses.keys()
+            }
+            guard "accepted_peers_have_targets" {
+                for_all(peer_id in accepted_peer_ids,
+                    member_target_names.contains_key(peer_id)
+                    && member_target_addresses.contains_key(peer_id))
+            }
+            guard "pending_slot_empty_legacy_reconciled_or_exact_retry" {
+                (
+                    self.supervisor_pending_authority_operation_id == None
+                    && self.supervisor_pending_authority_peer_id == None
+                    && accepted_peer_ids == EmptySet
+                )
+                || (
+                    self.supervisor_pending_authority_operation_id == None
+                    && self.supervisor_pending_authority_peer_id == Some(pending_peer_id)
+                    && self.supervisor_pending_authority_signing_key == Some(pending_signing_key)
+                    && self.supervisor_pending_authority_epoch == Some(pending_epoch)
+                    // Legacy V2/V3 records predate operation ids and exact
+                    // targets. The shell supplies the current active-peer set;
+                    // the machine admits exactly old-accepted intersect active,
+                    // deterministically dropping retired/missing peer ids before
+                    // installing the first operation id.
+                    && for_all(peer_id in accepted_peer_ids,
+                        self.supervisor_pending_authority_accepted_peer_ids.contains(peer_id)
+                        && active_peer_ids.contains(peer_id))
+                    && for_all(peer_id in self.supervisor_pending_authority_accepted_peer_ids,
+                        accepted_peer_ids.contains(peer_id) == active_peer_ids.contains(peer_id))
+                )
+                || (
+                    self.supervisor_pending_authority_operation_id == Some(operation_id)
+                    && self.supervisor_pending_authority_peer_id == Some(pending_peer_id)
+                    && self.supervisor_pending_authority_signing_key == Some(pending_signing_key)
+                    && self.supervisor_pending_authority_epoch == Some(pending_epoch)
+                    && self.supervisor_pending_authority_protocol_version == Some(pending_protocol_version)
+                    && for_all(peer_id in self.supervisor_pending_authority_accepted_peer_ids,
+                        accepted_peer_ids.contains(peer_id))
+                    && for_all(peer_id in self.supervisor_pending_authority_member_target_names.keys(),
+                        member_target_names.get_cloned(peer_id)
+                            == self.supervisor_pending_authority_member_target_names.get_cloned(peer_id))
+                    && for_all(peer_id in self.supervisor_pending_authority_member_target_addresses.keys(),
+                        member_target_addresses.get_cloned(peer_id)
+                            == self.supervisor_pending_authority_member_target_addresses.get_cloned(peer_id))
+                )
+            }
             update {
                 self.supervisor_pending_authority_peer_id = Some(pending_peer_id);
                 self.supervisor_pending_authority_signing_key = Some(pending_signing_key);
                 self.supervisor_pending_authority_epoch = Some(pending_epoch);
-                self.supervisor_pending_authority_protocol_version = Some(protocol_version);
+                self.supervisor_pending_authority_protocol_version = Some(pending_protocol_version);
+                self.supervisor_pending_authority_operation_id = Some(operation_id);
                 self.supervisor_pending_authority_accepted_peer_ids = accepted_peer_ids;
+                self.supervisor_pending_authority_member_target_names = member_target_names;
+                self.supervisor_pending_authority_member_target_addresses = member_target_addresses;
             }
             to Running
             emit PersistSupervisorAuthority {
                 peer_id: current_peer_id,
                 signing_key: self.supervisor_authority_signing_key.get("value"),
                 epoch: current_epoch,
-                protocol_version: protocol_version,
+                protocol_version: current_protocol_version,
+                pending_operation_id: Some(operation_id),
                 pending_peer_id: Some(pending_peer_id),
                 pending_signing_key: Some(pending_signing_key),
                 pending_epoch: Some(pending_epoch),
-                pending_protocol_version: Some(protocol_version),
-                pending_accepted_peer_ids: accepted_peer_ids
+                pending_protocol_version: Some(pending_protocol_version),
+                pending_accepted_peer_ids: accepted_peer_ids,
+                pending_member_target_names: member_target_names,
+                pending_member_target_addresses: member_target_addresses
             }
         }
 
@@ -6350,37 +7752,52 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition CommitSupervisorRotation {
             per_phase [Running, Stopped, Completed]
-            on input CommitSupervisorRotation { current_peer_id, current_epoch, next_peer_id, next_signing_key, next_epoch, protocol_version }
+            on input CommitSupervisorRotation { current_peer_id, current_epoch, current_protocol_version, operation_id, next_peer_id, next_signing_key, next_epoch, next_protocol_version }
             guard "current_supervisor_matches" {
                 self.supervisor_authority_peer_id == Some(current_peer_id)
                 && self.supervisor_authority_signing_key != None
                 && self.supervisor_authority_epoch == Some(current_epoch)
-                && self.supervisor_authority_protocol_version == Some(protocol_version)
+                && self.supervisor_authority_protocol_version == Some(current_protocol_version)
             }
             guard "next_epoch_is_successor" { next_epoch == current_epoch + 1 }
             guard "next_authority_changes_peer" { next_peer_id != current_peer_id }
+            guard "pending_operation_matches" {
+                self.supervisor_pending_authority_operation_id == Some(operation_id)
+            }
+            guard "pending_authority_matches_next" {
+                self.supervisor_pending_authority_peer_id == Some(next_peer_id)
+                && self.supervisor_pending_authority_signing_key == Some(next_signing_key)
+                && self.supervisor_pending_authority_epoch == Some(next_epoch)
+                && self.supervisor_pending_authority_protocol_version == Some(next_protocol_version)
+            }
             update {
                 self.supervisor_authority_peer_id = Some(next_peer_id);
                 self.supervisor_authority_signing_key = Some(next_signing_key);
                 self.supervisor_authority_epoch = Some(next_epoch);
-                self.supervisor_authority_protocol_version = Some(protocol_version);
+                self.supervisor_authority_protocol_version = Some(next_protocol_version);
                 self.supervisor_pending_authority_peer_id = None;
                 self.supervisor_pending_authority_signing_key = None;
                 self.supervisor_pending_authority_epoch = None;
                 self.supervisor_pending_authority_protocol_version = None;
+                self.supervisor_pending_authority_operation_id = None;
                 self.supervisor_pending_authority_accepted_peer_ids = EmptySet;
+                self.supervisor_pending_authority_member_target_names = EmptyMap;
+                self.supervisor_pending_authority_member_target_addresses = EmptyMap;
             }
             to Running
             emit PersistSupervisorAuthority {
                 peer_id: next_peer_id,
                 signing_key: next_signing_key,
                 epoch: next_epoch,
-                protocol_version: protocol_version,
+                protocol_version: next_protocol_version,
+                pending_operation_id: None,
                 pending_peer_id: None,
                 pending_signing_key: None,
                 pending_epoch: None,
                 pending_protocol_version: None,
-                pending_accepted_peer_ids: EmptySet
+                pending_accepted_peer_ids: EmptySet,
+                pending_member_target_names: EmptyMap,
+                pending_member_target_addresses: EmptyMap
             }
         }
 
@@ -6402,7 +7819,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.supervisor_pending_authority_signing_key = None;
                 self.supervisor_pending_authority_epoch = None;
                 self.supervisor_pending_authority_protocol_version = None;
+                self.supervisor_pending_authority_operation_id = None;
                 self.supervisor_pending_authority_accepted_peer_ids = EmptySet;
+                self.supervisor_pending_authority_member_target_names = EmptyMap;
+                self.supervisor_pending_authority_member_target_addresses = EmptyMap;
             }
             to Destroyed
             emit DeleteSupervisorAuthority {
@@ -6419,11 +7839,14 @@ macro_rules! mob_catalog_machine_dsl {
                 signing_key,
                 epoch,
                 protocol_version,
+                pending_operation_id,
                 pending_peer_id,
                 pending_signing_key,
                 pending_epoch,
                 pending_protocol_version,
-                pending_accepted_peer_ids
+                pending_accepted_peer_ids,
+                pending_member_target_names,
+                pending_member_target_addresses
             }
             guard { self.lifecycle_phase == Phase::Destroyed }
             guard "supervisor_authority_absent" {
@@ -6438,7 +7861,10 @@ macro_rules! mob_catalog_machine_dsl {
                     && pending_signing_key == None
                     && pending_epoch == None
                     && pending_protocol_version == None
+                    && pending_operation_id == None
                     && pending_accepted_peer_ids == EmptySet
+                    && pending_member_target_names == EmptyMap
+                    && pending_member_target_addresses == EmptyMap
                 )
                 || (
                     pending_peer_id != None
@@ -6446,6 +7872,9 @@ macro_rules! mob_catalog_machine_dsl {
                     && pending_epoch != None
                     && pending_protocol_version != None
                 )
+            }
+            guard "pending_member_targets_aligned" {
+                pending_member_target_names.keys() == pending_member_target_addresses.keys()
             }
             update {
                 self.supervisor_authority_peer_id = Some(peer_id);
@@ -6456,7 +7885,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.supervisor_pending_authority_signing_key = pending_signing_key;
                 self.supervisor_pending_authority_epoch = pending_epoch;
                 self.supervisor_pending_authority_protocol_version = pending_protocol_version;
+                self.supervisor_pending_authority_operation_id = pending_operation_id;
                 self.supervisor_pending_authority_accepted_peer_ids = pending_accepted_peer_ids;
+                self.supervisor_pending_authority_member_target_names = pending_member_target_names;
+                self.supervisor_pending_authority_member_target_addresses = pending_member_target_addresses;
             }
             to Destroyed
             emit PersistSupervisorAuthority {
@@ -6464,11 +7896,14 @@ macro_rules! mob_catalog_machine_dsl {
                 signing_key: signing_key,
                 epoch: epoch,
                 protocol_version: protocol_version,
+                pending_operation_id: pending_operation_id,
                 pending_peer_id: pending_peer_id,
                 pending_signing_key: pending_signing_key,
                 pending_epoch: pending_epoch,
                 pending_protocol_version: pending_protocol_version,
-                pending_accepted_peer_ids: pending_accepted_peer_ids
+                pending_accepted_peer_ids: pending_accepted_peer_ids,
+                pending_member_target_names: pending_member_target_names,
+                pending_member_target_addresses: pending_member_target_addresses
             }
         }
 
@@ -8584,24 +10019,24 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_matches_releasing" { session_id == releasing }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_session_bindings.remove(agent_identity);
-                self.member_peer_ids.remove(agent_identity);
-                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
             to Running
             emit AppendLifecycleJournal {
-                kind: MobLifecycleJournalKind::MemberRetired,
+                kind: MobLifecycleJournalKind::MemberRetirementStartedReleasing,
                 agent_identity: Some(agent_identity),
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
                 session_id: session_id
             }
-            emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
             // 0.7.2 L5: member retire opens the kickoff-waiter drain
@@ -8621,21 +10056,21 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                self.member_peer_ids.remove(agent_identity);
-                self.member_peer_endpoints.remove(agent_identity);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
-                kind: MobLifecycleJournalKind::MemberRetired,
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
                 agent_identity: Some(agent_identity),
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
                 session_id: session_id
             }
-            emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
@@ -8651,14 +10086,14 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_absent" { session_id == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                self.member_peer_ids.remove(agent_identity);
-                self.member_peer_endpoints.remove(agent_identity);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal {
-                kind: MobLifecycleJournalKind::MemberRetired,
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPeerOnly,
                 agent_identity: Some(agent_identity),
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
@@ -8681,24 +10116,24 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_matches_releasing" { session_id == releasing }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_session_bindings.remove(agent_identity);
-                self.member_peer_ids.remove(agent_identity);
-                self.member_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
             to Stopped
             emit AppendLifecycleJournal {
-                kind: MobLifecycleJournalKind::MemberRetired,
+                kind: MobLifecycleJournalKind::MemberRetirementStartedReleasing,
                 agent_identity: Some(agent_identity),
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
                 session_id: session_id
             }
-            emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit MemberSessionBindingChanged { epoch: self.topology_epoch, agent_identity: agent_identity, old_session_id: Some(releasing.get("value")), new_session_id: None }
             emit RequestKickoffQuiesce { member_id: agent_identity }
@@ -8773,21 +10208,21 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == session_id }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                self.member_peer_ids.remove(agent_identity);
-                self.member_peer_endpoints.remove(agent_identity);
+                self.runtime_retire_pending_sessions.insert(agent_runtime_id, session_id.get("value"));
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
-                kind: MobLifecycleJournalKind::MemberRetired,
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
                 agent_identity: Some(agent_identity),
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
                 generation: Some(generation),
                 session_id: session_id
             }
-            emit RequestRuntimeRetire { session_id: session_id.get("value") }
+            emit RequestRuntimeRetire { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, session_id: session_id.get("value") }
             emit RequestKickoffQuiesce { member_id: agent_identity }
         }
 
@@ -8803,14 +10238,14 @@ macro_rules! mob_catalog_machine_dsl {
             guard "session_absent" { session_id == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
-                self.member_peer_ids.remove(agent_identity);
-                self.member_peer_endpoints.remove(agent_identity);
+                self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_restore_failures.remove(agent_identity);
+                self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal {
-                kind: MobLifecycleJournalKind::MemberRetired,
+                kind: MobLifecycleJournalKind::MemberRetirementStartedPeerOnly,
                 agent_identity: Some(agent_identity),
                 agent_runtime_id: Some(agent_runtime_id),
                 fence_token: None,
@@ -8977,6 +10412,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_runtime_modes = EmptyMap;
                 self.member_peer_ids = EmptyMap;
                 self.member_peer_endpoints = EmptyMap;
+                self.runtime_retire_refusal_codes = EmptyMap;
+                self.runtime_retire_refusal_reasons = EmptyMap;
+                self.runtime_retire_pending_sessions = EmptyMap;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.coordinator_bound = false;
@@ -10000,6 +11438,7 @@ macro_rules! mob_catalog_machine_dsl {
                 .cloned()
                 .collect()
         }
+
         }
     };
 }
@@ -11070,6 +12509,11 @@ pub enum MobLifecycleJournalKind {
     Destroying,
     DestroyStorageFinalizing,
     MemberSpawned,
+    MemberRetirementStartedReleasing,
+    MemberRetirementStartedPreservingBinding,
+    MemberRetirementStartedPeerOnly,
+    RemoteMemberRuntimeRetired,
+    RemoteMemberSupervisorRevoked,
     MemberRetired,
     Reset,
 }

@@ -21,7 +21,7 @@ use meerkat_core::live_adapter::{
     LiveConfigRejectionReason, LiveContinuityMode, LiveDegradationReason, LiveResponseModality,
     LiveTransportBootstrap,
 };
-use meerkat_core::realtime_transcript::RealtimeTranscriptEvent;
+use meerkat_core::realtime_transcript::{RealtimeTranscriptEvent, RealtimeTranscriptRole};
 
 use crate::wire::realtime::RealtimeTurningMode;
 use crate::wire::session::WireStopReason;
@@ -313,8 +313,8 @@ pub struct WireLiveChannelCapabilities {
     pub text_in: bool,
     /// Adapter emits display text via `AssistantTextDelta` observations.
     pub text_out: bool,
-    /// Adapter accepts image input via `live/send_input` (e.g. future
-    /// `gpt-realtime-2` image support). Today: `false` for OpenAI realtime.
+    /// Adapter accepts image input via `live/send_input`. OpenAI advertises
+    /// this for vision-capable realtime bindings such as `gpt-realtime-2`.
     pub image_in: bool,
     /// Adapter accepts video-frame input via `live/send_input` (e.g.
     /// Gemini Live). Today: `false` for OpenAI realtime.
@@ -740,6 +740,16 @@ pub struct LiveSendInputResult {
     pub status: LiveSendInputStatus,
 }
 
+/// Typed JSON-RPC error data for scoped `live/send_input` rejections.
+///
+/// The channel remains usable; callers route on the structured adapter error
+/// code instead of parsing the human-readable JSON-RPC error message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveSendInputErrorData {
+    pub error_code: WireLiveAdapterErrorCode,
+}
+
 impl LiveSendInputResult {
     /// Project the generated `Sent` authority result to the wire shape.
     pub fn sent() -> Self {
@@ -876,6 +886,8 @@ pub enum LiveInputChunkWire {
         text: String,
     },
     Image {
+        /// Required caller-stable, session-scoped idempotency identity.
+        idempotency_key: String,
         mime: String,
         data: String,
     },
@@ -1137,6 +1149,42 @@ pub enum WireLiveConfigRejectionReason {
         detail: String,
     },
     ImageInputNotImplemented,
+    ImageInputUnsupportedMime {
+        mime_type: String,
+    },
+    ImageInputContentMismatch {
+        mime_type: String,
+    },
+    /// The image payload's `data` field is not valid base64. This remains a
+    /// scoped input rejection so clients can retry without reopening a live
+    /// channel.
+    ImageInputInvalidBase64,
+    ImageInputTooLarge {
+        max_bytes: u64,
+        actual_bytes: u64,
+    },
+    ImageInputIdempotencyKeyInvalid {
+        max_bytes: u64,
+        actual_bytes: u64,
+    },
+    ImageInputIdempotencyConflict,
+    ImageInputHistoryBudgetExceeded {
+        max_decoded_bytes: u64,
+    },
+    ImageInputRequiresCommit,
+    InputTooLarge {
+        max_bytes: u64,
+        actual_bytes: u64,
+    },
+    InputBackpressured {
+        max_pending_bytes: u64,
+    },
+    ImageInputBackpressured {
+        max_pending_bytes: u64,
+    },
+    ImageInputTransportUnsupported {
+        transport: String,
+    },
     VideoFrameInputNotImplemented,
     UnsupportedInputChunkVariant,
     RefreshModelSwap {
@@ -1150,6 +1198,11 @@ pub enum WireLiveConfigRejectionReason {
     RefreshAudioConfigMismatch {
         detail: String,
     },
+    /// The refreshed canonical transcript changed an item identity or
+    /// tombstone that the already-created provider session cannot retract.
+    /// The live channel must close and reopen instead of pretending the
+    /// provider's immutable context was rewritten in place.
+    RefreshTranscriptRewriteRequiresReopen,
     /// R6-4 (P2): typed mirror of
     /// [`LiveConfigRejectionReason::AudioInputFormatMismatch`]. The
     /// bound provider session has a fixed input audio format (OpenAI
@@ -1211,6 +1264,50 @@ impl From<LiveConfigRejectionReason> for WireLiveConfigRejectionReason {
                 Self::NonRealtimeResolution { detail }
             }
             LiveConfigRejectionReason::ImageInputNotImplemented => Self::ImageInputNotImplemented,
+            LiveConfigRejectionReason::ImageInputUnsupportedMime { mime_type } => {
+                Self::ImageInputUnsupportedMime { mime_type }
+            }
+            LiveConfigRejectionReason::ImageInputContentMismatch { mime_type } => {
+                Self::ImageInputContentMismatch { mime_type }
+            }
+            LiveConfigRejectionReason::ImageInputInvalidBase64 => Self::ImageInputInvalidBase64,
+            LiveConfigRejectionReason::ImageInputTooLarge {
+                max_bytes,
+                actual_bytes,
+            } => Self::ImageInputTooLarge {
+                max_bytes,
+                actual_bytes,
+            },
+            LiveConfigRejectionReason::ImageInputIdempotencyKeyInvalid {
+                max_bytes,
+                actual_bytes,
+            } => Self::ImageInputIdempotencyKeyInvalid {
+                max_bytes,
+                actual_bytes,
+            },
+            LiveConfigRejectionReason::ImageInputIdempotencyConflict => {
+                Self::ImageInputIdempotencyConflict
+            }
+            LiveConfigRejectionReason::ImageInputHistoryBudgetExceeded { max_decoded_bytes } => {
+                Self::ImageInputHistoryBudgetExceeded { max_decoded_bytes }
+            }
+            LiveConfigRejectionReason::ImageInputRequiresCommit => Self::ImageInputRequiresCommit,
+            LiveConfigRejectionReason::InputTooLarge {
+                max_bytes,
+                actual_bytes,
+            } => Self::InputTooLarge {
+                max_bytes,
+                actual_bytes,
+            },
+            LiveConfigRejectionReason::InputBackpressured { max_pending_bytes } => {
+                Self::InputBackpressured { max_pending_bytes }
+            }
+            LiveConfigRejectionReason::ImageInputBackpressured { max_pending_bytes } => {
+                Self::ImageInputBackpressured { max_pending_bytes }
+            }
+            LiveConfigRejectionReason::ImageInputTransportUnsupported { transport } => {
+                Self::ImageInputTransportUnsupported { transport }
+            }
             LiveConfigRejectionReason::VideoFrameInputNotImplemented => {
                 Self::VideoFrameInputNotImplemented
             }
@@ -1233,6 +1330,9 @@ impl From<LiveConfigRejectionReason> for WireLiveConfigRejectionReason {
             },
             LiveConfigRejectionReason::RefreshAudioConfigMismatch { detail } => {
                 Self::RefreshAudioConfigMismatch { detail }
+            }
+            LiveConfigRejectionReason::RefreshTranscriptRewriteRequiresReopen => {
+                Self::RefreshTranscriptRewriteRequiresReopen
             }
             LiveConfigRejectionReason::AudioInputFormatMismatch {
                 expected_sample_rate_hz,
@@ -1298,6 +1398,54 @@ impl TryFrom<WireLiveConfigRejectionReason> for LiveConfigRejectionReason {
             WireLiveConfigRejectionReason::ImageInputNotImplemented => {
                 Ok(Self::ImageInputNotImplemented)
             }
+            WireLiveConfigRejectionReason::ImageInputUnsupportedMime { mime_type } => {
+                Ok(Self::ImageInputUnsupportedMime { mime_type })
+            }
+            WireLiveConfigRejectionReason::ImageInputContentMismatch { mime_type } => {
+                Ok(Self::ImageInputContentMismatch { mime_type })
+            }
+            WireLiveConfigRejectionReason::ImageInputInvalidBase64 => {
+                Ok(Self::ImageInputInvalidBase64)
+            }
+            WireLiveConfigRejectionReason::ImageInputTooLarge {
+                max_bytes,
+                actual_bytes,
+            } => Ok(Self::ImageInputTooLarge {
+                max_bytes,
+                actual_bytes,
+            }),
+            WireLiveConfigRejectionReason::ImageInputIdempotencyKeyInvalid {
+                max_bytes,
+                actual_bytes,
+            } => Ok(Self::ImageInputIdempotencyKeyInvalid {
+                max_bytes,
+                actual_bytes,
+            }),
+            WireLiveConfigRejectionReason::ImageInputIdempotencyConflict => {
+                Ok(Self::ImageInputIdempotencyConflict)
+            }
+            WireLiveConfigRejectionReason::ImageInputHistoryBudgetExceeded {
+                max_decoded_bytes,
+            } => Ok(Self::ImageInputHistoryBudgetExceeded { max_decoded_bytes }),
+            WireLiveConfigRejectionReason::ImageInputRequiresCommit => {
+                Ok(Self::ImageInputRequiresCommit)
+            }
+            WireLiveConfigRejectionReason::InputTooLarge {
+                max_bytes,
+                actual_bytes,
+            } => Ok(Self::InputTooLarge {
+                max_bytes,
+                actual_bytes,
+            }),
+            WireLiveConfigRejectionReason::InputBackpressured { max_pending_bytes } => {
+                Ok(Self::InputBackpressured { max_pending_bytes })
+            }
+            WireLiveConfigRejectionReason::ImageInputBackpressured { max_pending_bytes } => {
+                Ok(Self::ImageInputBackpressured { max_pending_bytes })
+            }
+            WireLiveConfigRejectionReason::ImageInputTransportUnsupported { transport } => {
+                Ok(Self::ImageInputTransportUnsupported { transport })
+            }
             WireLiveConfigRejectionReason::VideoFrameInputNotImplemented => {
                 Ok(Self::VideoFrameInputNotImplemented)
             }
@@ -1320,6 +1468,9 @@ impl TryFrom<WireLiveConfigRejectionReason> for LiveConfigRejectionReason {
             }),
             WireLiveConfigRejectionReason::RefreshAudioConfigMismatch { detail } => {
                 Ok(Self::RefreshAudioConfigMismatch { detail })
+            }
+            WireLiveConfigRejectionReason::RefreshTranscriptRewriteRequiresReopen => {
+                Ok(Self::RefreshTranscriptRewriteRequiresReopen)
             }
             WireLiveConfigRejectionReason::AudioInputFormatMismatch {
                 expected_sample_rate_hz,
@@ -1398,6 +1549,183 @@ impl TryFrom<WireLiveAdapterErrorCode> for LiveAdapterErrorCode {
     }
 }
 
+/// Public-wire mirror of [`RealtimeTranscriptEvent`].
+///
+/// The core event stream also contains
+/// [`RealtimeTranscriptEvent::UserContentFinal`], an internal canonical-state
+/// command that may carry inline image bytes. That variant is deliberately
+/// absent here, making private user content unrepresentable on
+/// [`WireLiveAdapterObservation`] by construction rather than relying on each
+/// transport to remember an output filter.
+///
+/// The schema retains the historical `RealtimeTranscriptEvent` name so SDK
+/// consumers keep the existing generated type name while the Rust public wire
+/// surface gains a distinct, safe type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "RealtimeTranscriptEvent"))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WireRealtimeTranscriptEvent {
+    ItemObserved {
+        item_id: String,
+        previous_item_id: Option<String>,
+        role: RealtimeTranscriptRole,
+        response_id: Option<String>,
+    },
+    ItemSkipped {
+        item_id: String,
+        previous_item_id: Option<String>,
+    },
+    UserTranscriptFinal {
+        item_id: String,
+        previous_item_id: Option<String>,
+        content_index: u32,
+        text: String,
+    },
+    AssistantTextDelta {
+        response_id: String,
+        delta_id: String,
+        item_id: String,
+        previous_item_id: Option<String>,
+        content_index: u32,
+        delta: String,
+    },
+    AssistantTranscriptDelta {
+        response_id: String,
+        delta_id: String,
+        item_id: String,
+        previous_item_id: Option<String>,
+        content_index: u32,
+        delta: String,
+    },
+    AssistantTranscriptTruncated {
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        text: String,
+    },
+    AssistantTranscriptFinalText {
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        text: String,
+    },
+    AssistantTurnCompleted {
+        response_id: String,
+        stop_reason: meerkat_core::StopReason,
+        usage: meerkat_core::Usage,
+    },
+    AssistantTurnInterrupted {
+        response_id: String,
+    },
+}
+
+impl TryFrom<RealtimeTranscriptEvent> for WireRealtimeTranscriptEvent {
+    type Error = WireConversionError;
+
+    fn try_from(value: RealtimeTranscriptEvent) -> Result<Self, Self::Error> {
+        match value {
+            RealtimeTranscriptEvent::ItemObserved {
+                item_id,
+                previous_item_id,
+                role,
+                response_id,
+            } => Ok(Self::ItemObserved {
+                item_id,
+                previous_item_id,
+                role,
+                response_id,
+            }),
+            RealtimeTranscriptEvent::ItemSkipped {
+                item_id,
+                previous_item_id,
+            } => Ok(Self::ItemSkipped {
+                item_id,
+                previous_item_id,
+            }),
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id,
+                previous_item_id,
+                content_index,
+                text,
+            } => Ok(Self::UserTranscriptFinal {
+                item_id,
+                previous_item_id,
+                content_index,
+                text,
+            }),
+            RealtimeTranscriptEvent::UserContentFinal { .. } => {
+                Err(WireConversionError::InternalRealtimeUserContent)
+            }
+            RealtimeTranscriptEvent::AssistantTextDelta {
+                response_id,
+                delta_id,
+                item_id,
+                previous_item_id,
+                content_index,
+                delta,
+            } => Ok(Self::AssistantTextDelta {
+                response_id,
+                delta_id,
+                item_id,
+                previous_item_id,
+                content_index,
+                delta,
+            }),
+            RealtimeTranscriptEvent::AssistantTranscriptDelta {
+                response_id,
+                delta_id,
+                item_id,
+                previous_item_id,
+                content_index,
+                delta,
+            } => Ok(Self::AssistantTranscriptDelta {
+                response_id,
+                delta_id,
+                item_id,
+                previous_item_id,
+                content_index,
+                delta,
+            }),
+            RealtimeTranscriptEvent::AssistantTranscriptTruncated {
+                response_id,
+                item_id,
+                content_index,
+                text,
+            } => Ok(Self::AssistantTranscriptTruncated {
+                response_id,
+                item_id,
+                content_index,
+                text,
+            }),
+            RealtimeTranscriptEvent::AssistantTranscriptFinalText {
+                response_id,
+                item_id,
+                content_index,
+                text,
+            } => Ok(Self::AssistantTranscriptFinalText {
+                response_id,
+                item_id,
+                content_index,
+                text,
+            }),
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id,
+                stop_reason,
+                usage,
+            } => Ok(Self::AssistantTurnCompleted {
+                response_id,
+                stop_reason,
+                usage,
+            }),
+            RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id } => {
+                Ok(Self::AssistantTurnInterrupted { response_id })
+            }
+        }
+    }
+}
+
 /// Wire mirror of [`meerkat_core::live_adapter::LiveAdapterObservation`].
 ///
 /// FIX-SDK-OBS: closes the R5-4 verifier gap. The core enum is the canonical
@@ -1410,15 +1738,14 @@ impl TryFrom<WireLiveAdapterErrorCode> for LiveAdapterErrorCode {
 /// makes every variant visible to schema codegen and produces a discriminated
 /// TypeScript union / typed Python `TypedDict` union.
 ///
-/// Serde shape mirrors the core enum exactly: internally-tagged on
-/// `observation` (snake_case). Round-trip with the core type is byte-
-/// identical (see `wire_live_adapter_observation_byte_compatible_with_core`).
+/// Serde shape mirrors the public subset of the core enum: internally-tagged
+/// on `observation` (snake_case). Round-trip with public core variants is
+/// byte-identical (see `wire_live_adapter_observation_byte_compatible_with_core`).
 ///
 /// Field types reference other wire mirrors where they exist
 /// ([`WireStopReason`], [`WireUsage`], [`WireLiveAdapterStatus`],
-/// [`WireLiveAdapterErrorCode`]) and the canonical
-/// [`RealtimeTranscriptEvent`] (which already derives `JsonSchema` and is
-/// auto-promoted by the SDK codegen `Realtime*` allowlist rule).
+/// [`WireLiveAdapterErrorCode`]) and the public-safe
+/// [`WireRealtimeTranscriptEvent`].
 ///
 /// Audio data is base64-encoded on the wire (matches the core
 /// [`LiveAdapterObservation::AssistantAudioChunk`] base64 mode); the wire
@@ -1506,12 +1833,25 @@ pub enum WireLiveAdapterObservation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
-    /// Pass-through of a structured `RealtimeTranscriptEvent` from the
-    /// provider. The core type already derives `JsonSchema` and the SDK
-    /// codegen auto-promotes `Realtime*` schemas, so the typed shape lands
-    /// in generated SDK types without an additional wire mirror.
+    /// Public-safe projection of a structured [`RealtimeTranscriptEvent`]
+    /// from the provider. Internal byte-bearing user-content events cannot be
+    /// represented by [`WireRealtimeTranscriptEvent`].
     RealtimeTranscript {
-        event: RealtimeTranscriptEvent,
+        event: WireRealtimeTranscriptEvent,
+    },
+    /// Public, redacted ordering receipt for committed user content.
+    ///
+    /// The byte-bearing canonical transcript event is internal and filtered
+    /// by live transports. WebRTC clients must wait for this observation
+    /// before relying on an image as context for independently transported
+    /// RTP audio.
+    UserContentCommitted {
+        idempotency_key: String,
+        item_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_item_id: Option<String>,
+        content_index: u32,
+        media_type: String,
     },
     ToolCallRequested {
         provider_call_id: String,
@@ -1663,8 +2003,30 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
                 text,
             },
             LiveAdapterObservation::RealtimeTranscript { event } => {
-                Self::RealtimeTranscript { event }
+                match WireRealtimeTranscriptEvent::try_from(event) {
+                    Ok(event) => Self::RealtimeTranscript { event },
+                    Err(_) => Self::Unknown {
+                        // The conversion error deliberately carries no source
+                        // payload. Never place content, identity, or Debug
+                        // output from the internal canonical command on the
+                        // public wire.
+                        debug: "internal_user_content_filtered".to_string(),
+                    },
+                }
             }
+            LiveAdapterObservation::UserContentCommitted {
+                idempotency_key,
+                item_id,
+                previous_item_id,
+                content_index,
+                media_type,
+            } => Self::UserContentCommitted {
+                idempotency_key,
+                item_id,
+                previous_item_id,
+                content_index,
+                media_type,
+            },
             LiveAdapterObservation::ToolCallRequested {
                 provider_call_id,
                 tool_name,
@@ -1834,6 +2196,7 @@ mod tests {
         let v = LiveSendInputParams {
             channel_id: "live_1".into(),
             chunk: LiveInputChunkWire::Image {
+                idempotency_key: "image-request-1".into(),
                 mime: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
             },
@@ -1844,6 +2207,29 @@ mod tests {
         let back: LiveSendInputParams =
             serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
+    }
+
+    #[test]
+    fn live_send_input_error_data_carries_typed_scoped_rejection() {
+        let data = LiveSendInputErrorData {
+            error_code: WireLiveAdapterErrorCode::ConfigRejected {
+                reason: WireLiveConfigRejectionReason::ImageInputTooLarge {
+                    max_bytes: 20,
+                    actual_bytes: 21,
+                },
+            },
+        };
+        let value = serde_json::to_value(&data).expect("error data must serialize");
+        assert_eq!(value["error_code"]["code"], "config_rejected");
+        assert_eq!(
+            value["error_code"]["reason"]["kind"],
+            "image_input_too_large"
+        );
+        assert_eq!(
+            serde_json::from_value::<LiveSendInputErrorData>(value)
+                .expect("error data must round trip"),
+            data
+        );
     }
 
     #[test]
@@ -2075,6 +2461,176 @@ mod tests {
 
     // FIX-SDK-OBS — typed `LiveAdapterObservation` wire mirror.
 
+    fn public_core_realtime_transcript_events() -> Vec<RealtimeTranscriptEvent> {
+        vec![
+            RealtimeTranscriptEvent::ItemObserved {
+                item_id: "item_observed".into(),
+                previous_item_id: None,
+                role: RealtimeTranscriptRole::User,
+                response_id: None,
+            },
+            RealtimeTranscriptEvent::ItemSkipped {
+                item_id: "item_skipped".into(),
+                previous_item_id: Some("item_observed".into()),
+            },
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "item_user".into(),
+                previous_item_id: Some("item_skipped".into()),
+                content_index: 0,
+                text: "hello".into(),
+            },
+            RealtimeTranscriptEvent::AssistantTextDelta {
+                response_id: "resp_text".into(),
+                delta_id: "delta_text".into(),
+                item_id: "item_text".into(),
+                previous_item_id: Some("item_user".into()),
+                content_index: 0,
+                delta: "display".into(),
+            },
+            RealtimeTranscriptEvent::AssistantTranscriptDelta {
+                response_id: "resp_audio".into(),
+                delta_id: "delta_audio".into(),
+                item_id: "item_audio".into(),
+                previous_item_id: Some("item_text".into()),
+                content_index: 1,
+                delta: "spoken".into(),
+            },
+            RealtimeTranscriptEvent::AssistantTranscriptTruncated {
+                response_id: "resp_audio".into(),
+                item_id: "item_audio".into(),
+                content_index: 1,
+                text: "spo".into(),
+            },
+            RealtimeTranscriptEvent::AssistantTranscriptFinalText {
+                response_id: "resp_audio".into(),
+                item_id: "item_audio".into(),
+                content_index: 1,
+                text: "spoken".into(),
+            },
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_audio".into(),
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: meerkat_core::Usage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    cache_creation_tokens: Some(1),
+                    cache_read_tokens: Some(2),
+                },
+            },
+            RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                response_id: "resp_interrupted".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn wire_realtime_transcript_event_public_variants_are_byte_compatible() {
+        for core in public_core_realtime_transcript_events() {
+            let core_json = serde_json::to_value(&core).expect("core event must serialize");
+            let wire = WireRealtimeTranscriptEvent::try_from(core)
+                .expect("public core event must convert to the wire mirror");
+            let wire_json = serde_json::to_value(&wire).expect("wire event must serialize");
+            assert_eq!(wire_json, core_json);
+            assert_eq!(
+                serde_json::from_value::<WireRealtimeTranscriptEvent>(wire_json)
+                    .expect("public wire event must deserialize"),
+                wire
+            );
+        }
+    }
+
+    #[test]
+    fn wire_realtime_transcript_event_rejects_internal_user_content() {
+        use meerkat_core::types::{ContentBlock, ImageData};
+
+        let internal = RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "image-request-1".into(),
+            item_id: "private_item".into(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: ImageData::Inline {
+                    data: "private-image-base64".into(),
+                },
+            }],
+        };
+        assert_eq!(
+            WireRealtimeTranscriptEvent::try_from(internal),
+            Err(WireConversionError::InternalRealtimeUserContent)
+        );
+
+        let private_json = serde_json::json!({
+            "type": "user_content_final",
+            "item_id": "private_item",
+            "previous_item_id": null,
+            "content_index": 0,
+            "content": [{
+                "type": "image",
+                "media_type": "image/png",
+                "source": "inline",
+                "data": "private-image-base64"
+            }]
+        });
+        assert!(
+            serde_json::from_value::<WireRealtimeTranscriptEvent>(private_json.clone()).is_err(),
+            "the public transcript mirror must reject the internal serde discriminator"
+        );
+        assert!(
+            serde_json::from_value::<WireLiveAdapterObservation>(serde_json::json!({
+                "observation": "realtime_transcript",
+                "event": private_json,
+            }))
+            .is_err(),
+            "the public observation must not deserialize byte-bearing user content"
+        );
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn wire_realtime_transcript_schema_matches_the_safe_serde_boundary() {
+        let schema = serde_json::to_value(schemars::schema_for!(WireLiveAdapterObservation))
+            .expect("wire observation schema must serialize");
+        let validator =
+            jsonschema::validator_for(&schema).expect("wire observation schema compiles");
+
+        for core in public_core_realtime_transcript_events() {
+            let wire =
+                WireLiveAdapterObservation::from(LiveAdapterObservation::RealtimeTranscript {
+                    event: core,
+                });
+            let value = serde_json::to_value(&wire).expect("public observation must serialize");
+            assert!(
+                validator.is_valid(&value),
+                "schema rejected serde-valid public observation: {value}"
+            );
+            serde_json::from_value::<WireLiveAdapterObservation>(value)
+                .expect("schema-valid public observation must deserialize");
+        }
+
+        let private_value = serde_json::json!({
+            "observation": "realtime_transcript",
+            "event": {
+                "type": "user_content_final",
+                "item_id": "private_item",
+                "previous_item_id": null,
+                "content_index": 0,
+                "content": [{
+                    "type": "image",
+                    "media_type": "image/png",
+                    "source": "inline",
+                    "data": "private-image-base64"
+                }]
+            }
+        });
+        assert!(!validator.is_valid(&private_value));
+        assert!(serde_json::from_value::<WireLiveAdapterObservation>(private_value).is_err());
+
+        let schema_text = serde_json::to_string(&schema).expect("schema must serialize");
+        assert!(schema_text.contains("RealtimeTranscriptEvent"));
+        assert!(!schema_text.contains("user_content_final"));
+    }
+
     #[test]
     fn wire_live_adapter_observation_round_trips_for_all_variants() {
         // Each typed variant survives serde round-trip with its
@@ -2138,6 +2694,13 @@ mod tests {
                 content_index: Some(0),
                 response_id: Some("resp_trunc".into()),
                 text: Some("partial".into()),
+            },
+            WireLiveAdapterObservation::UserContentCommitted {
+                idempotency_key: "image-request-1".into(),
+                item_id: "item_image".into(),
+                previous_item_id: Some("item_text".into()),
+                content_index: 0,
+                media_type: "image/png".into(),
             },
             WireLiveAdapterObservation::ToolCallRequested {
                 provider_call_id: "call_1".into(),
@@ -2208,6 +2771,56 @@ mod tests {
         assert_eq!(j["content_index"], 2);
         assert_eq!(j["sample_rate_hz"], 24_000);
         assert_eq!(j["channels"], 1);
+    }
+
+    #[test]
+    fn wire_live_adapter_observation_user_content_committed_is_redacted() {
+        let core = LiveAdapterObservation::UserContentCommitted {
+            idempotency_key: "image-request-1".into(),
+            item_id: "item_image".into(),
+            previous_item_id: Some("item_text".into()),
+            content_index: 2,
+            media_type: "image/webp".into(),
+        };
+        let wire: WireLiveAdapterObservation = core.clone().into();
+        let json = serde_json::to_value(&wire).expect("receipt should serialize");
+
+        assert_eq!(json["observation"], "user_content_committed");
+        assert_eq!(json["idempotency_key"], "image-request-1");
+        assert_eq!(json["item_id"], "item_image");
+        assert_eq!(json["previous_item_id"], "item_text");
+        assert_eq!(json["content_index"], 2);
+        assert_eq!(json["media_type"], "image/webp");
+        assert!(json.get("content").is_none());
+        assert!(json.get("data").is_none());
+        assert_eq!(
+            serde_json::to_value(&core).expect("core receipt should serialize"),
+            json
+        );
+    }
+
+    #[test]
+    fn wire_conversion_defensively_redacts_internal_user_content_event() {
+        use meerkat_core::types::{ContentBlock, ImageData};
+
+        let wire = WireLiveAdapterObservation::from(LiveAdapterObservation::RealtimeTranscript {
+            event: RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: "image-request-1".into(),
+                item_id: "item_image".into(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: ImageData::Inline {
+                        data: "private-image-base64".into(),
+                    },
+                }],
+            },
+        });
+        let json = serde_json::to_string(&wire).expect("filtered sentinel must serialize");
+        assert!(json.contains("internal_user_content_filtered"));
+        assert!(!json.contains("private-image-base64"));
+        assert!(!json.contains("item_image"));
     }
 
     #[test]
@@ -2744,6 +3357,30 @@ mod tests {
         // core via the `TryFrom` inverse.
         let cases = [
             WireLiveConfigRejectionReason::ImageInputNotImplemented,
+            WireLiveConfigRejectionReason::ImageInputUnsupportedMime {
+                mime_type: "image/svg+xml".into(),
+            },
+            WireLiveConfigRejectionReason::ImageInputContentMismatch {
+                mime_type: "image/png".into(),
+            },
+            WireLiveConfigRejectionReason::ImageInputInvalidBase64,
+            WireLiveConfigRejectionReason::ImageInputTooLarge {
+                max_bytes: 20 * 1024 * 1024,
+                actual_bytes: 20 * 1024 * 1024 + 1,
+            },
+            WireLiveConfigRejectionReason::InputTooLarge {
+                max_bytes: 64 * 1024 * 1024,
+                actual_bytes: 64 * 1024 * 1024 + 1,
+            },
+            WireLiveConfigRejectionReason::InputBackpressured {
+                max_pending_bytes: 64 * 1024 * 1024,
+            },
+            WireLiveConfigRejectionReason::ImageInputBackpressured {
+                max_pending_bytes: 40 * 1024 * 1024,
+            },
+            WireLiveConfigRejectionReason::ImageInputTransportUnsupported {
+                transport: "webrtc_data_channel".into(),
+            },
             WireLiveConfigRejectionReason::VideoFrameInputNotImplemented,
             WireLiveConfigRejectionReason::UnsupportedInputChunkVariant,
             WireLiveConfigRejectionReason::NonRealtimeResolution {
@@ -2753,6 +3390,7 @@ mod tests {
                 from_model: "a".into(),
                 to_model: "b".into(),
             },
+            WireLiveConfigRejectionReason::RefreshTranscriptRewriteRequiresReopen,
             WireLiveConfigRejectionReason::AudioInputFormatMismatch {
                 expected_sample_rate_hz: 24_000,
                 expected_channels: 1,
@@ -2778,6 +3416,42 @@ mod tests {
             let back: WireLiveConfigRejectionReason = core.into();
             assert_eq!(v, back);
         }
+    }
+
+    #[test]
+    fn refresh_transcript_rewrite_requires_reopen_is_typed_on_the_wire() {
+        let wire = WireLiveConfigRejectionReason::RefreshTranscriptRewriteRequiresReopen;
+        let json = serde_json::to_value(&wire).expect("rejection should serialize");
+        assert_eq!(json["kind"], "refresh_transcript_rewrite_requires_reopen");
+        assert!(json.get("detail").is_none());
+
+        let core: LiveConfigRejectionReason = wire
+            .clone()
+            .try_into()
+            .expect("known rejection should convert to core");
+        assert!(matches!(
+            core,
+            LiveConfigRejectionReason::RefreshTranscriptRewriteRequiresReopen
+        ));
+        assert_eq!(WireLiveConfigRejectionReason::from(core), wire);
+    }
+
+    #[test]
+    fn invalid_image_base64_is_a_typed_scoped_wire_rejection() {
+        let wire = WireLiveConfigRejectionReason::ImageInputInvalidBase64;
+        let json = serde_json::to_value(&wire).expect("rejection should serialize");
+        assert_eq!(json["kind"], "image_input_invalid_base64");
+        assert!(json.get("detail").is_none());
+
+        let core: LiveConfigRejectionReason = wire
+            .clone()
+            .try_into()
+            .expect("known rejection should convert to core");
+        assert!(matches!(
+            core,
+            LiveConfigRejectionReason::ImageInputInvalidBase64
+        ));
+        assert_eq!(WireLiveConfigRejectionReason::from(core), wire);
     }
 
     // --- WireProvider regression tests ---

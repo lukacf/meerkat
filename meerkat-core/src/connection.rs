@@ -827,7 +827,7 @@ fn env_default_target(
         })?;
     materialize_connection_target(
         realm,
-        provider,
+        Some(provider),
         binding,
         profile,
         BindingOrigin::SyntheticEnvDefault,
@@ -894,7 +894,7 @@ fn collect_provider_candidates_on_chain(
         if let Some(binding_id) = binding_id {
             out.push(materialize_connection_target(
                 realm,
-                provider,
+                Some(provider),
                 binding_id,
                 None,
                 BindingOrigin::Configured,
@@ -916,7 +916,7 @@ fn collect_provider_candidates_on_chain(
 /// binding propagates as `ProviderMismatch` (explicit requests are strict).
 fn resolve_explicit_binding_on_chain(
     config: &Config,
-    provider: Provider,
+    expected_provider: Option<Provider>,
     head: &RealmId,
     binding: &BindingId,
     profile: Option<&ProfileId>,
@@ -948,7 +948,7 @@ fn resolve_explicit_binding_on_chain(
         if realm.bindings.contains_key(binding.as_str()) {
             return materialize_connection_target(
                 realm,
-                provider,
+                expected_provider,
                 binding.clone(),
                 profile.cloned(),
                 BindingOrigin::Configured,
@@ -960,6 +960,35 @@ fn resolve_explicit_binding_on_chain(
         binding: binding.as_str().to_string(),
         source: ProviderBindingError::UnknownBinding(binding.as_str().to_string()),
     })
+}
+
+/// Resolve an explicitly named auth binding and infer its provider from the
+/// effective realm configuration.
+///
+/// This is the provider-neutral companion to
+/// [`resolve_auth_binding_or_default_for_provider`]. It exists for ingress
+/// seams where a caller supplied `auth_binding` but omitted `provider`: the
+/// binding's configured backend/auth pair is the typed provider authority.
+/// Resolution walks the named realm's inheritance chain and returns the
+/// owner-stamped binding; callers must not reimplement that walk or infer a
+/// provider from binding names.
+pub fn resolve_explicit_auth_binding_target(
+    config: &Config,
+    auth_binding: &AuthBindingRef,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    if auth_binding.is_env_default() {
+        return Err(ConnectionTargetError::UnknownRealm(
+            auth_binding.realm.as_str().to_string(),
+        ));
+    }
+    resolve_explicit_binding_on_chain(
+        config,
+        None,
+        &auth_binding.realm,
+        &auth_binding.binding,
+        auth_binding.profile.as_ref(),
+        /* head_required = */ true,
+    )
 }
 
 /// Resolve a connection target from config-owned identity facts.
@@ -990,7 +1019,7 @@ pub fn resolve_realm_binding_target_for_provider(
     if let Some(binding) = explicit_binding {
         return resolve_explicit_binding_on_chain(
             config,
-            provider,
+            Some(provider),
             head,
             binding,
             explicit_profile,
@@ -1036,7 +1065,7 @@ pub fn resolve_auth_binding_or_default_for_provider(
         // is defined only in a parent/global resolves at its OWNING realm.
         return resolve_explicit_binding_on_chain(
             config,
-            provider,
+            Some(provider),
             &auth_binding.realm,
             &auth_binding.binding,
             auth_binding.profile.as_ref(),
@@ -1241,7 +1270,7 @@ pub fn resolve_write_owner(
 
 fn materialize_connection_target(
     realm: RealmConnectionSet,
-    provider: Provider,
+    expected_provider: Option<Provider>,
     binding: BindingId,
     profile: Option<ProfileId>,
     origin: BindingOrigin,
@@ -1262,6 +1291,7 @@ fn materialize_connection_target(
                 source,
             }
         })?;
+    let provider = expected_provider.unwrap_or(backend.provider);
     if backend.provider != provider || auth_profile.provider != provider {
         return Err(ConnectionTargetError::ProviderMismatch {
             realm: auth_binding.realm.to_string(),

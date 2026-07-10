@@ -1,4 +1,4 @@
-//! meerkat-live — Live audio/text transport for Meerkat.
+//! meerkat-live — Live multimodal transport for Meerkat.
 //!
 //! Composable WebSocket bridge between browser/test clients and
 //! `LiveAdapterHost`. Any Meerkat surface (CLI, RPC, REST, MCP) can
@@ -33,7 +33,9 @@ pub use webrtc::{
     LIVE_WEBRTC_ANSWER_METHOD, LIVE_WEBRTC_ANSWER_PATH, LiveWebrtcAnswerAccepted, LiveWebrtcError,
     LiveWebrtcState, WebrtcAudioBridge, live_webrtc_router, serve_live_ws_and_webrtc_listener,
 };
-pub use wire_input::{LiveInputChunkDecodeError, live_input_chunk_from_wire};
+pub use wire_input::{
+    LiveInputChunkDecodeError, live_input_chunk_decode_rejection, live_input_chunk_from_wire,
+};
 
 // E26 regression: `meerkat-live` must not depend on `meerkat-runtime`. The
 // dependency direction is: `meerkat-live` owns the live-adapter host

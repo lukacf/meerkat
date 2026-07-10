@@ -33,6 +33,25 @@ pub struct TypedRoutedSignal {
     pub bindings: Vec<(FieldId, FieldId)>,
 }
 
+/// Generated source for one consumer-refusal feedback field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedRefusalFieldSource {
+    EffectField(FieldId),
+    ConsumerErrorCode,
+    ConsumerErrorMessage,
+}
+
+/// Generated feedback closure for a consumer-refused dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedDispatchRefusalClosure {
+    pub route_id: RouteId,
+    pub producer_instance: MachineInstanceId,
+    pub effect_variant: EffectVariantId,
+    pub feedback_instance: MachineInstanceId,
+    pub feedback_input: InputVariantId,
+    pub field_bindings: Vec<(GeneratedRefusalFieldSource, FieldId)>,
+}
+
 /// Generated producer identity declared by this composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerFacts {
@@ -136,6 +155,18 @@ pub mod inputs {
         InputVariantId::parse("PrepareBindings").expect("input variant slug")
     }
 
+    pub fn resolve_runtime_binding_refusal() -> InputVariantId {
+        InputVariantId::parse("ResolveRuntimeBindingRefusal").expect("input variant slug")
+    }
+
+    pub fn resolve_runtime_ingress_refusal() -> InputVariantId {
+        InputVariantId::parse("ResolveRuntimeIngressRefusal").expect("input variant slug")
+    }
+
+    pub fn resolve_runtime_retire_refusal() -> InputVariantId {
+        InputVariantId::parse("ResolveRuntimeRetireRefusal").expect("input variant slug")
+    }
+
     pub fn retire() -> InputVariantId {
         InputVariantId::parse("Retire").expect("input variant slug")
     }
@@ -162,6 +193,10 @@ pub mod signals {
 pub mod fields {
     use super::*;
 
+    pub fn agent_identity() -> FieldId {
+        FieldId::parse("agent_identity").expect("field slug")
+    }
+
     pub fn agent_runtime_id() -> FieldId {
         FieldId::parse("agent_runtime_id").expect("field slug")
     }
@@ -176,6 +211,14 @@ pub mod fields {
 
     pub fn origin() -> FieldId {
         FieldId::parse("origin").expect("field slug")
+    }
+
+    pub fn reason() -> FieldId {
+        FieldId::parse("reason").expect("field slug")
+    }
+
+    pub fn refusal_code() -> FieldId {
+        FieldId::parse("refusal_code").expect("field slug")
     }
 
     pub fn runtime_id() -> FieldId {
@@ -277,6 +320,155 @@ pub fn route_destroy_request_reaches_meerkat() -> TypedRoutedInput {
             FieldId::parse("session_id").expect("route consumer field slug"),
         )],
     }
+}
+
+/// Generated consumer-refusal closure for route `binding_request_reaches_meerkat`.
+pub fn refusal_closure_binding_request_reaches_meerkat() -> TypedDispatchRefusalClosure {
+    TypedDispatchRefusalClosure {
+        route_id: RouteId::parse("binding_request_reaches_meerkat").expect("route slug"),
+        producer_instance: MachineInstanceId::parse("mob").expect("producer instance slug"),
+        effect_variant: EffectVariantId::parse("RequestRuntimeBinding")
+            .expect("effect variant slug"),
+        feedback_instance: MachineInstanceId::parse("mob").expect("feedback instance slug"),
+        feedback_input: InputVariantId::parse("ResolveRuntimeBindingRefusal")
+            .expect("feedback input slug"),
+        field_bindings: vec![
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("agent_identity").expect("effect field slug"),
+                ),
+                FieldId::parse("agent_identity").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("agent_runtime_id").expect("effect field slug"),
+                ),
+                FieldId::parse("agent_runtime_id").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("session_id").expect("effect field slug"),
+                ),
+                FieldId::parse("session_id").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::ConsumerErrorCode,
+                FieldId::parse("refusal_code").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::ConsumerErrorMessage,
+                FieldId::parse("reason").expect("feedback field slug"),
+            ),
+        ],
+    }
+}
+
+/// Generated consumer-refusal closure for route `work_request_reaches_meerkat`.
+pub fn refusal_closure_work_request_reaches_meerkat() -> TypedDispatchRefusalClosure {
+    TypedDispatchRefusalClosure {
+        route_id: RouteId::parse("work_request_reaches_meerkat").expect("route slug"),
+        producer_instance: MachineInstanceId::parse("mob").expect("producer instance slug"),
+        effect_variant: EffectVariantId::parse("RequestRuntimeIngress")
+            .expect("effect variant slug"),
+        feedback_instance: MachineInstanceId::parse("mob").expect("feedback instance slug"),
+        feedback_input: InputVariantId::parse("ResolveRuntimeIngressRefusal")
+            .expect("feedback input slug"),
+        field_bindings: vec![
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("agent_runtime_id").expect("effect field slug"),
+                ),
+                FieldId::parse("agent_runtime_id").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("fence_token").expect("effect field slug"),
+                ),
+                FieldId::parse("fence_token").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("session_id").expect("effect field slug"),
+                ),
+                FieldId::parse("session_id").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("work_id").expect("effect field slug"),
+                ),
+                FieldId::parse("work_id").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("origin").expect("effect field slug"),
+                ),
+                FieldId::parse("origin").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::ConsumerErrorCode,
+                FieldId::parse("refusal_code").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::ConsumerErrorMessage,
+                FieldId::parse("reason").expect("feedback field slug"),
+            ),
+        ],
+    }
+}
+
+/// Generated consumer-refusal closure for route `retire_request_reaches_meerkat`.
+pub fn refusal_closure_retire_request_reaches_meerkat() -> TypedDispatchRefusalClosure {
+    TypedDispatchRefusalClosure {
+        route_id: RouteId::parse("retire_request_reaches_meerkat").expect("route slug"),
+        producer_instance: MachineInstanceId::parse("mob").expect("producer instance slug"),
+        effect_variant: EffectVariantId::parse("RequestRuntimeRetire")
+            .expect("effect variant slug"),
+        feedback_instance: MachineInstanceId::parse("mob").expect("feedback instance slug"),
+        feedback_input: InputVariantId::parse("ResolveRuntimeRetireRefusal")
+            .expect("feedback input slug"),
+        field_bindings: vec![
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("agent_identity").expect("effect field slug"),
+                ),
+                FieldId::parse("agent_identity").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("agent_runtime_id").expect("effect field slug"),
+                ),
+                FieldId::parse("agent_runtime_id").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::EffectField(
+                    FieldId::parse("session_id").expect("effect field slug"),
+                ),
+                FieldId::parse("session_id").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::ConsumerErrorCode,
+                FieldId::parse("refusal_code").expect("feedback field slug"),
+            ),
+            (
+                GeneratedRefusalFieldSource::ConsumerErrorMessage,
+                FieldId::parse("reason").expect("feedback field slug"),
+            ),
+        ],
+    }
+}
+
+/// Resolve a generated route to its consumer-refusal feedback closure.
+pub fn refusal_closure_for_route(route_id: &RouteId) -> Option<TypedDispatchRefusalClosure> {
+    if route_id == &RouteId::parse("binding_request_reaches_meerkat").expect("route slug") {
+        return Some(refusal_closure_binding_request_reaches_meerkat());
+    }
+    if route_id == &RouteId::parse("work_request_reaches_meerkat").expect("route slug") {
+        return Some(refusal_closure_work_request_reaches_meerkat());
+    }
+    if route_id == &RouteId::parse("retire_request_reaches_meerkat").expect("route slug") {
+        return Some(refusal_closure_retire_request_reaches_meerkat());
+    }
+    None
 }
 
 /// Generated facts for signal route `runtime_bound_reaches_mob`.

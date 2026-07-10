@@ -95,6 +95,41 @@ pub enum RealtimeTranscriptMaterializeDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentIdentityDisposition {
+    #[default]
+    RejectInvalidIdentity,
+    RejectUnmaterializedPredecessor,
+    RejectConflict,
+    AlreadyCommitted,
+    CommitNew,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentBlobStageDisposition {
+    #[default]
+    RejectOccupied,
+    StageNew,
+    ReuseExact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentBlobRecoveryDisposition {
+    #[default]
+    NoPending,
+    RetryExact,
+    CommitVerifiedBeforeCurrent,
+    ClearInvalidBeforeCurrent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentBlobFinalizeDisposition {
+    #[default]
+    RejectMismatch,
+    NoPending,
+    ClearCommitted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum TranscriptEditKind {
     #[default]
     Fork,
@@ -195,6 +230,14 @@ pub enum SessionArchiveDisposition {
     AlreadyArchived,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionArchiveRuntimeObservation {
+    #[default]
+    Absent,
+    RetirementRequired,
+    QuiescentTerminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionDocumentInput {
     MarkSessionInitialTurnPending {
@@ -263,6 +306,34 @@ pub enum SessionDocumentInput {
         segment_empty: bool,
         segment_matches: bool,
     },
+    ResolveRealtimeUserContentFinal {
+        content_present: bool,
+        segment_empty: bool,
+        segment_matches: bool,
+    },
+    ResolveRealtimeUserContentIdentity {
+        identity_fields_valid: bool,
+        key_tombstoned: bool,
+        predecessor_materialized: bool,
+        existing_identity_present: bool,
+        existing_payload_matches: bool,
+        target_item_id_available: bool,
+        reducer_commit_proof_required: bool,
+        reducer_commit_proof_present: bool,
+    },
+    ResolveRealtimeUserContentBlobStage {
+        pending_present: bool,
+        pending_matches_request: bool,
+    },
+    ResolveRealtimeUserContentBlobRecovery {
+        pending_present: bool,
+        request_matches_pending: bool,
+        pending_blob_valid: bool,
+    },
+    ResolveRealtimeUserContentBlobFinalize {
+        pending_present: bool,
+        pending_matches_committed: bool,
+    },
     ResolveRealtimeAssistantDelta {
         response_id_valid: bool,
         response_discarded: bool,
@@ -309,7 +380,19 @@ pub enum SessionDocumentInput {
         first_seen_unique_count: u64,
         every_item_has_order_entry: bool,
         every_order_entry_has_item: bool,
+        all_materialized_predecessor_references_exist: bool,
+        no_self_predecessor_references: bool,
+        causal_graph_acyclic: bool,
+        all_materialized_items_have_materialized_ancestry: bool,
         all_identity_fields_valid: bool,
+        all_user_content_identity_keys_match: bool,
+        all_user_content_identity_fields_valid: bool,
+        all_user_content_identity_item_ids_unique: bool,
+        all_user_content_identities_reference_materialized_user_items: bool,
+        all_user_content_tombstones_valid: bool,
+        user_content_identities_and_tombstones_disjoint: bool,
+        pending_user_content_blob_fields_valid: bool,
+        pending_user_content_blob_uncommitted: bool,
         all_delta_ids_valid: bool,
         all_completion_response_ids_valid: bool,
         all_discarded_response_ids_valid: bool,
@@ -383,8 +466,8 @@ pub enum SessionDocumentInput {
     ArchiveSessionDocument {
         session_id: SessionDocumentKey,
         runtime_backed: bool,
-        durable_snapshot_present: bool,
-        runtime_session_registered: bool,
+        durable_document_present: bool,
+        runtime_observation: SessionArchiveRuntimeObservation,
     },
 }
 
@@ -444,6 +527,18 @@ pub enum SessionDocumentEffect {
     RealtimeMaterializeCandidateResolved {
         decision: RealtimeTranscriptMaterializeDecision,
         consume_usage: bool,
+    },
+    RealtimeUserContentIdentityResolved {
+        disposition: RealtimeUserContentIdentityDisposition,
+    },
+    RealtimeUserContentBlobStageResolved {
+        disposition: RealtimeUserContentBlobStageDisposition,
+    },
+    RealtimeUserContentBlobRecoveryResolved {
+        disposition: RealtimeUserContentBlobRecoveryDisposition,
+    },
+    RealtimeUserContentBlobFinalizeResolved {
+        disposition: RealtimeUserContentBlobFinalizeDisposition,
     },
     RealtimeTranscriptSnapshotRestoreAuthorized,
     SessionMetadataPersistAuthorized,
@@ -567,6 +662,24 @@ enum SessionDocumentTransition {
     ResolveRealtimeUserTranscriptFinalEmpty,
     ResolveRealtimeUserTranscriptFinalStore,
     ResolveRealtimeUserTranscriptFinalReplayOrConflict,
+    ResolveRealtimeUserContentIdentityInvalid,
+    ResolveRealtimeUserContentIdentityUnmaterializedPredecessor,
+    ResolveRealtimeUserContentIdentityConflict,
+    ResolveRealtimeUserContentIdentityReplay,
+    ResolveRealtimeUserContentIdentityCommitNew,
+    ResolveRealtimeUserContentBlobStageNew,
+    ResolveRealtimeUserContentBlobStageReuseExact,
+    ResolveRealtimeUserContentBlobStageRejectOccupied,
+    ResolveRealtimeUserContentBlobRecoveryNone,
+    ResolveRealtimeUserContentBlobRecoveryExact,
+    ResolveRealtimeUserContentBlobRecoveryCommitVerified,
+    ResolveRealtimeUserContentBlobRecoveryClearInvalid,
+    ResolveRealtimeUserContentBlobFinalizeNone,
+    ResolveRealtimeUserContentBlobFinalizeClearCommitted,
+    ResolveRealtimeUserContentBlobFinalizeRejectMismatch,
+    ResolveRealtimeUserContentFinalEmpty,
+    ResolveRealtimeUserContentFinalStore,
+    ResolveRealtimeUserContentFinalReplayOrConflict,
     ResolveRealtimeAssistantDeltaInvalidOrDuplicate,
     ResolveRealtimeAssistantDeltaDiscarded,
     ResolveRealtimeAssistantDeltaLaneConflict,
@@ -1531,6 +1644,359 @@ impl SessionDocumentMachineAuthority {
                     #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveRealtimeUserTranscriptFinal_transition" }),
                 }
             }
+            SessionDocumentInput::ResolveRealtimeUserContentFinal {
+                content_present,
+                segment_empty,
+                segment_matches,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (content_present == false)
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentFinalEmpty);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((content_present) && (segment_empty))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentFinalStore);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((content_present) && (segment_empty == false))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRealtimeUserContentFinalReplayOrConflict,
+                    );
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRealtimeUserContentFinal")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRealtimeUserContentFinalEmpty => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeTranscriptEventResolved {
+                                observe_item: true,
+                                observe_skipped: false,
+                                write_user_segment: false,
+                                append_assistant_segment: false,
+                                replace_assistant_segment: false,
+                                promote_lane: false,
+                                mark_item_ready: true,
+                                record_delta_id: false,
+                                remove_completion: false,
+                                record_completion: false,
+                                discard_response: false,
+                                discard_response_by_lane: false,
+                                mark_response_ready: false,
+                                materialize_ready_items: true,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentFinalStore => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeTranscriptEventResolved {
+                                observe_item: true,
+                                observe_skipped: false,
+                                write_user_segment: true,
+                                append_assistant_segment: false,
+                                replace_assistant_segment: false,
+                                promote_lane: false,
+                                mark_item_ready: true,
+                                record_delta_id: false,
+                                remove_completion: false,
+                                record_completion: false,
+                                discard_response: false,
+                                discard_response_by_lane: false,
+                                mark_response_ready: false,
+                                materialize_ready_items: true,
+                            },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentFinalReplayOrConflict => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeTranscriptEventResolved {
+                                observe_item: true,
+                                observe_skipped: false,
+                                write_user_segment: false,
+                                append_assistant_segment: false,
+                                replace_assistant_segment: false,
+                                promote_lane: false,
+                                mark_item_ready: true,
+                                record_delta_id: false,
+                                remove_completion: false,
+                                record_completion: false,
+                                discard_response: false,
+                                discard_response_by_lane: false,
+                                mark_response_ready: false,
+                                materialize_ready_items: true,
+                            },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ResolveRealtimeUserContentFinal_transition",
+                    }),
+                }
+            }
+            SessionDocumentInput::ResolveRealtimeUserContentIdentity {
+                identity_fields_valid,
+                key_tombstoned,
+                predecessor_materialized,
+                existing_identity_present,
+                existing_payload_matches,
+                target_item_id_available,
+                reducer_commit_proof_required,
+                reducer_commit_proof_present,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((identity_fields_valid == false)
+                        || ((key_tombstoned == false)
+                            && (predecessor_materialized)
+                            && (existing_identity_present == false)
+                            && (target_item_id_available)
+                            && (reducer_commit_proof_required)
+                            && (reducer_commit_proof_present == false)))
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolveRealtimeUserContentIdentityInvalid);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((identity_fields_valid)
+                        && (key_tombstoned == false)
+                        && (predecessor_materialized == false))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentIdentityUnmaterializedPredecessor);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((identity_fields_valid)
+                        && ((key_tombstoned)
+                            || ((predecessor_materialized)
+                                && (((existing_identity_present)
+                                    && (existing_payload_matches == false))
+                                    || ((existing_identity_present == false)
+                                        && (target_item_id_available == false))))))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRealtimeUserContentIdentityConflict,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((identity_fields_valid)
+                        && (key_tombstoned == false)
+                        && (predecessor_materialized)
+                        && (existing_identity_present)
+                        && (existing_payload_matches))
+                {
+                    matches
+                        .push(SessionDocumentTransition::ResolveRealtimeUserContentIdentityReplay);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((identity_fields_valid)
+                        && (key_tombstoned == false)
+                        && (predecessor_materialized)
+                        && (existing_identity_present == false)
+                        && (target_item_id_available)
+                        && ((reducer_commit_proof_required == false)
+                            || (reducer_commit_proof_present)))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRealtimeUserContentIdentityCommitNew,
+                    );
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRealtimeUserContentIdentity")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRealtimeUserContentIdentityInvalid => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentIdentityResolved { disposition: RealtimeUserContentIdentityDisposition::RejectInvalidIdentity, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentIdentityUnmaterializedPredecessor => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentIdentityResolved { disposition: RealtimeUserContentIdentityDisposition::RejectUnmaterializedPredecessor, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentIdentityConflict => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentIdentityResolved { disposition: RealtimeUserContentIdentityDisposition::RejectConflict, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentIdentityReplay => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentIdentityResolved { disposition: RealtimeUserContentIdentityDisposition::AlreadyCommitted, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentIdentityCommitNew => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentIdentityResolved { disposition: RealtimeUserContentIdentityDisposition::CommitNew, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveRealtimeUserContentIdentity_transition" }),
+                }
+            }
+            SessionDocumentInput::ResolveRealtimeUserContentBlobStage {
+                pending_present,
+                pending_matches_request,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (pending_present == false)
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentBlobStageNew);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((pending_present) && (pending_matches_request))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRealtimeUserContentBlobStageReuseExact,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((pending_present) && (pending_matches_request == false))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentBlobStageRejectOccupied);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRealtimeUserContentBlobStage")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobStageNew => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobStageResolved { disposition: RealtimeUserContentBlobStageDisposition::StageNew, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobStageReuseExact => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobStageResolved { disposition: RealtimeUserContentBlobStageDisposition::ReuseExact, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobStageRejectOccupied => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobStageResolved { disposition: RealtimeUserContentBlobStageDisposition::RejectOccupied, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveRealtimeUserContentBlobStage_transition" }),
+                }
+            }
+            SessionDocumentInput::ResolveRealtimeUserContentBlobRecovery {
+                pending_present,
+                request_matches_pending,
+                pending_blob_valid,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (pending_present == false)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryNone,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((pending_present) && (request_matches_pending))
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryExact,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((pending_present)
+                        && (request_matches_pending == false)
+                        && (pending_blob_valid))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryCommitVerified);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((pending_present)
+                        && (request_matches_pending == false)
+                        && (pending_blob_valid == false))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryClearInvalid);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRealtimeUserContentBlobRecovery")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryNone => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobRecoveryResolved { disposition: RealtimeUserContentBlobRecoveryDisposition::NoPending, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryExact => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobRecoveryResolved { disposition: RealtimeUserContentBlobRecoveryDisposition::RetryExact, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryCommitVerified => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobRecoveryResolved { disposition: RealtimeUserContentBlobRecoveryDisposition::CommitVerifiedBeforeCurrent, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobRecoveryClearInvalid => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobRecoveryResolved { disposition: RealtimeUserContentBlobRecoveryDisposition::ClearInvalidBeforeCurrent, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveRealtimeUserContentBlobRecovery_transition" }),
+                }
+            }
+            SessionDocumentInput::ResolveRealtimeUserContentBlobFinalize {
+                pending_present,
+                pending_matches_committed,
+            } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (pending_present == false)
+                {
+                    matches.push(
+                        SessionDocumentTransition::ResolveRealtimeUserContentBlobFinalizeNone,
+                    );
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((pending_present) && (pending_matches_committed))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentBlobFinalizeClearCommitted);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((pending_present) && (pending_matches_committed == false))
+                {
+                    matches.push(SessionDocumentTransition::ResolveRealtimeUserContentBlobFinalizeRejectMismatch);
+                }
+                let transition =
+                    Self::single_transition(matches, "ResolveRealtimeUserContentBlobFinalize")?;
+                match transition {
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobFinalizeNone => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobFinalizeResolved { disposition: RealtimeUserContentBlobFinalizeDisposition::NoPending, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobFinalizeClearCommitted => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobFinalizeResolved { disposition: RealtimeUserContentBlobFinalizeDisposition::ClearCommitted, },
+                        ])
+                    }
+                    SessionDocumentTransition::ResolveRealtimeUserContentBlobFinalizeRejectMismatch => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::RealtimeUserContentBlobFinalizeResolved { disposition: RealtimeUserContentBlobFinalizeDisposition::RejectMismatch, },
+                        ])
+                    }
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveRealtimeUserContentBlobFinalize_transition" }),
+                }
+            }
             SessionDocumentInput::ResolveRealtimeAssistantDelta {
                 response_id_valid,
                 response_discarded,
@@ -2165,7 +2631,19 @@ impl SessionDocumentMachineAuthority {
                 first_seen_unique_count,
                 every_item_has_order_entry,
                 every_order_entry_has_item,
+                all_materialized_predecessor_references_exist,
+                no_self_predecessor_references,
+                causal_graph_acyclic,
+                all_materialized_items_have_materialized_ancestry,
                 all_identity_fields_valid,
+                all_user_content_identity_keys_match,
+                all_user_content_identity_fields_valid,
+                all_user_content_identity_item_ids_unique,
+                all_user_content_identities_reference_materialized_user_items,
+                all_user_content_tombstones_valid,
+                user_content_identities_and_tombstones_disjoint,
+                pending_user_content_blob_fields_valid,
+                pending_user_content_blob_uncommitted,
                 all_delta_ids_valid,
                 all_completion_response_ids_valid,
                 all_discarded_response_ids_valid,
@@ -2182,7 +2660,19 @@ impl SessionDocumentMachineAuthority {
                         && (first_seen_count == first_seen_unique_count)
                         && (every_item_has_order_entry)
                         && (every_order_entry_has_item)
+                        && (all_materialized_predecessor_references_exist)
+                        && (no_self_predecessor_references)
+                        && (causal_graph_acyclic)
+                        && (all_materialized_items_have_materialized_ancestry)
                         && (all_identity_fields_valid)
+                        && (all_user_content_identity_keys_match)
+                        && (all_user_content_identity_fields_valid)
+                        && (all_user_content_identity_item_ids_unique)
+                        && (all_user_content_identities_reference_materialized_user_items)
+                        && (all_user_content_tombstones_valid)
+                        && (user_content_identities_and_tombstones_disjoint)
+                        && (pending_user_content_blob_fields_valid)
+                        && (pending_user_content_blob_uncommitted)
                         && (all_delta_ids_valid)
                         && (all_completion_response_ids_valid)
                         && (all_discarded_response_ids_valid)
@@ -2787,8 +3277,8 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ArchiveSessionDocument {
                 session_id,
                 runtime_backed,
-                durable_snapshot_present,
-                runtime_session_registered,
+                durable_document_present,
+                runtime_observation,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -2800,14 +3290,14 @@ impl SessionDocumentMachineAuthority {
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (self.session_lifecycle_terminal_value(&session_id)?
                         == SessionDocumentLifecycle::Archived)
-                    && (runtime_session_registered == false)
+                    && (runtime_observation != SessionArchiveRuntimeObservation::RetirementRequired)
                 {
                     matches.push(SessionDocumentTransition::ArchiveSessionDocumentAlreadyArchived);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (self.session_lifecycle_terminal_value(&session_id)?
                         == SessionDocumentLifecycle::Archived)
-                    && (runtime_session_registered == true)
+                    && (runtime_observation == SessionArchiveRuntimeObservation::RetirementRequired)
                 {
                     matches.push(SessionDocumentTransition::ArchiveSessionDocumentCompleteRetire);
                 }
@@ -2820,11 +3310,10 @@ impl SessionDocumentMachineAuthority {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![SessionDocumentEffect::SessionArchiveResolved {
                             disposition: SessionArchiveDisposition::Archive,
-                            write_document: durable_snapshot_present,
+                            write_document: durable_document_present,
                             retire_runtime: archive_should_retire_runtime(
                                 runtime_backed,
-                                durable_snapshot_present,
-                                runtime_session_registered,
+                                runtime_observation,
                             ),
                         }])
                     }
@@ -3026,6 +3515,81 @@ impl SessionDocumentMachineAuthority {
         })
     }
 
+    pub fn resolve_realtime_user_content_final(
+        &mut self,
+        content_present: bool,
+        segment_empty: bool,
+        segment_matches: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveRealtimeUserContentFinal {
+            content_present,
+            segment_empty,
+            segment_matches,
+        })
+    }
+
+    pub fn resolve_realtime_user_content_identity(
+        &mut self,
+        identity_fields_valid: bool,
+        key_tombstoned: bool,
+        predecessor_materialized: bool,
+        existing_identity_present: bool,
+        existing_payload_matches: bool,
+        target_item_id_available: bool,
+        reducer_commit_proof_required: bool,
+        reducer_commit_proof_present: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveRealtimeUserContentIdentity {
+            identity_fields_valid,
+            key_tombstoned,
+            predecessor_materialized,
+            existing_identity_present,
+            existing_payload_matches,
+            target_item_id_available,
+            reducer_commit_proof_required,
+            reducer_commit_proof_present,
+        })
+    }
+
+    pub fn resolve_realtime_user_content_blob_stage(
+        &mut self,
+        pending_present: bool,
+        pending_matches_request: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ResolveRealtimeUserContentBlobStage {
+            pending_present,
+            pending_matches_request,
+        })
+    }
+
+    pub fn resolve_realtime_user_content_blob_recovery(
+        &mut self,
+        pending_present: bool,
+        request_matches_pending: bool,
+        pending_blob_valid: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(
+            SessionDocumentInput::ResolveRealtimeUserContentBlobRecovery {
+                pending_present,
+                request_matches_pending,
+                pending_blob_valid,
+            },
+        )
+    }
+
+    pub fn resolve_realtime_user_content_blob_finalize(
+        &mut self,
+        pending_present: bool,
+        pending_matches_committed: bool,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(
+            SessionDocumentInput::ResolveRealtimeUserContentBlobFinalize {
+                pending_present,
+                pending_matches_committed,
+            },
+        )
+    }
+
     pub fn resolve_realtime_assistant_delta(
         &mut self,
         response_id_valid: bool,
@@ -3132,7 +3696,19 @@ impl SessionDocumentMachineAuthority {
         first_seen_unique_count: u64,
         every_item_has_order_entry: bool,
         every_order_entry_has_item: bool,
+        all_materialized_predecessor_references_exist: bool,
+        no_self_predecessor_references: bool,
+        causal_graph_acyclic: bool,
+        all_materialized_items_have_materialized_ancestry: bool,
         all_identity_fields_valid: bool,
+        all_user_content_identity_keys_match: bool,
+        all_user_content_identity_fields_valid: bool,
+        all_user_content_identity_item_ids_unique: bool,
+        all_user_content_identities_reference_materialized_user_items: bool,
+        all_user_content_tombstones_valid: bool,
+        user_content_identities_and_tombstones_disjoint: bool,
+        pending_user_content_blob_fields_valid: bool,
+        pending_user_content_blob_uncommitted: bool,
         all_delta_ids_valid: bool,
         all_completion_response_ids_valid: bool,
         all_discarded_response_ids_valid: bool,
@@ -3149,7 +3725,19 @@ impl SessionDocumentMachineAuthority {
             first_seen_unique_count,
             every_item_has_order_entry,
             every_order_entry_has_item,
+            all_materialized_predecessor_references_exist,
+            no_self_predecessor_references,
+            causal_graph_acyclic,
+            all_materialized_items_have_materialized_ancestry,
             all_identity_fields_valid,
+            all_user_content_identity_keys_match,
+            all_user_content_identity_fields_valid,
+            all_user_content_identity_item_ids_unique,
+            all_user_content_identities_reference_materialized_user_items,
+            all_user_content_tombstones_valid,
+            user_content_identities_and_tombstones_disjoint,
+            pending_user_content_blob_fields_valid,
+            pending_user_content_blob_uncommitted,
             all_delta_ids_valid,
             all_completion_response_ids_valid,
             all_discarded_response_ids_valid,
@@ -3326,14 +3914,14 @@ impl SessionDocumentMachineAuthority {
         &mut self,
         session_id: SessionDocumentKey,
         runtime_backed: bool,
-        durable_snapshot_present: bool,
-        runtime_session_registered: bool,
+        durable_document_present: bool,
+        runtime_observation: SessionArchiveRuntimeObservation,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ArchiveSessionDocument {
             session_id,
             runtime_backed,
-            durable_snapshot_present,
-            runtime_session_registered,
+            durable_document_present,
+            runtime_observation,
         })
     }
 }
@@ -3472,10 +4060,10 @@ fn store_projection_can_recover_authority(
 
 fn archive_should_retire_runtime(
     runtime_backed: bool,
-    durable_snapshot_present: bool,
-    runtime_session_registered: bool,
+    runtime_observation: SessionArchiveRuntimeObservation,
 ) -> bool {
-    (runtime_backed) && ((durable_snapshot_present) || (runtime_session_registered))
+    (runtime_backed)
+        && (runtime_observation == SessionArchiveRuntimeObservation::RetirementRequired)
 }
 
 impl Default for SessionDocumentMachineAuthority {

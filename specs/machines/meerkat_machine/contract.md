@@ -271,6 +271,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_revoke_pending_address`: `Option<String>`
 - `supervisor_revoke_pending_signing_public_key`: `Option<String>`
 - `supervisor_revoke_pending_epoch`: `Option<u64>`
+- `supervisor_revoked_peer_id`: `Option<String>`
+- `supervisor_revoked_signing_public_key`: `Option<String>`
+- `supervisor_revoked_epoch`: `Option<u64>`
+- `supervisor_rotation_operation_id`: `Option<String>`
+- `supervisor_rotation_phase`: `Option<SupervisorRotationPhase>`
+- `supervisor_rotation_rejection`: `Option<SupervisorRotationRejectionKind>`
+- `supervisor_rotation_previous_name`: `Option<String>`
+- `supervisor_rotation_previous_peer_id`: `Option<String>`
+- `supervisor_rotation_previous_address`: `Option<String>`
+- `supervisor_rotation_previous_signing_public_key`: `Option<String>`
+- `supervisor_rotation_previous_epoch`: `Option<u64>`
+- `supervisor_rotation_next_name`: `Option<String>`
+- `supervisor_rotation_next_peer_id`: `Option<String>`
+- `supervisor_rotation_next_address`: `Option<String>`
+- `supervisor_rotation_next_signing_public_key`: `Option<String>`
+- `supervisor_rotation_next_epoch`: `Option<u64>`
+- `supervisor_rotation_terminal_phases`: `Map<String, SupervisorRotationPhase>`
+- `supervisor_rotation_terminal_rejections`: `Map<String, SupervisorRotationRejectionKind>`
+- `supervisor_rotation_terminal_previous_names`: `Map<String, String>`
+- `supervisor_rotation_terminal_previous_peer_ids`: `Map<String, String>`
+- `supervisor_rotation_terminal_previous_addresses`: `Map<String, String>`
+- `supervisor_rotation_terminal_previous_signing_public_keys`: `Map<String, String>`
+- `supervisor_rotation_terminal_previous_epochs`: `Map<String, u64>`
+- `supervisor_rotation_terminal_next_names`: `Map<String, String>`
+- `supervisor_rotation_terminal_next_peer_ids`: `Map<String, String>`
+- `supervisor_rotation_terminal_next_addresses`: `Map<String, String>`
+- `supervisor_rotation_terminal_next_signing_public_keys`: `Map<String, String>`
+- `supervisor_rotation_terminal_next_epochs`: `Map<String, u64>`
 - `local_endpoint`: `Option<PeerEndpoint>`
 - `direct_peer_endpoints`: `Set<PeerEndpoint>`
 - `mob_overlay_peer_endpoints`: `Set<PeerEndpoint>`
@@ -279,6 +307,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
+- `PrepareTerminalSupervisorCleanupBindings`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -292,6 +321,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Reset`
 - `StopRuntimeExecutor`(reason: String)
 - `Destroy`(session_id: SessionId)
+- `RecoverSupervisorBinding`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
+- `RecoverSupervisorRevocationPending`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
+- `RecoverSupervisorRotationOperation`(operation_id: String, phase: SupervisorRotationPhase, rejection: Option<SupervisorRotationRejectionKind>, previous_name: String, previous_peer_id: String, previous_address: String, previous_signing_public_key: String, previous_epoch: u64, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64)
+- `RecoverSupervisorRotationTerminalReceipt`(operation_id: String, phase: SupervisorRotationPhase, rejection: Option<SupervisorRotationRejectionKind>, previous_name: String, previous_peer_id: String, previous_address: String, previous_signing_public_key: String, previous_epoch: u64, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64)
+- `RecoverRevokedSupervisorReceipt`(peer_id: String, signing_public_key: String, epoch: u64)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
 - `ContainsSession`(session_id: SessionId)
@@ -319,6 +353,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Recycle`
 - `ServiceTurnCommitted`(run_id: RunId)
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
+- `RefreshSupervisorBindingRoute`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64, sender_peer_id: Option<String>)
+- `SubmitSupervisorRotation`(operation_id: String, next_name: String, next_peer_id: String, next_address: String, next_signing_public_key: String, next_epoch: u64, preflight_rejection: Option<SupervisorRotationRejectionKind>, sender_peer_id: Option<String>, sender_signing_public_key: Option<String>)
+- `ResumeSupervisorRotation`(operation_id: String)
+- `SupervisorRotationPreviousRevoked`(operation_id: String, peer_id: String, epoch: u64)
+- `SupervisorRotationNextPublished`(operation_id: String, peer_id: String, epoch: u64)
+- `ObserveSupervisorRotation`(operation_id: String, observer_peer_id: Option<String>, observer_signing_public_key: Option<String>, observer_epoch: u64)
+- `ResolveSupervisorCleanupCommandAdmission`(command_kind: SupervisorCleanupCommandKind, supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -553,7 +594,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveSupervisorBindAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 - `ResolveSupervisorBindMaterialAdmission`(address_matches: Bool, sender_matches_supervisor: Bool, expected_peer_id_matches: Bool, bootstrap_token_matches: Bool)
 - `ResolveTranscriptEditAdmission`(runtime_running: Bool, has_active_inputs: Bool)
-- `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
+- `ResolveSupervisorAuthorizeAdmission`(supervisor_name: String, supervisor_peer_id: String, supervisor_address: String, supervisor_signing_public_key: String, supervisor_epoch: u64, sender_peer_id: Option<String>, sender_signing_public_key: Option<String>)
 - `BindSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `AuthorizeSupervisor`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
 - `RequestSupervisorTrustPublish`(name: String, peer_id: String, address: String, signing_public_key: String, epoch: u64)
@@ -729,6 +770,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SupervisorBindMaterialAdmissionResolved`(verdict: SupervisorBindMaterialAdmissionKind)
 - `TranscriptEditAdmissionResolved`(verdict: TranscriptEditAdmissionKind)
 - `SupervisorAuthorizeAdmissionResolved`(result: SupervisorAuthorizeAdmissionResultKind, rejection: Option<SupervisorAuthorizeRejectionKind>, previous_name: Option<String>, previous_peer_id: Option<String>, previous_address: Option<String>, previous_signing_public_key: Option<String>, previous_epoch: Option<u64>)
+- `SupervisorRotationSubmissionResolved`(operation_id: String, result: SupervisorRotationSubmissionResultKind, rejection: Option<SupervisorRotationRejectionKind>, previous_name: Option<String>, previous_peer_id: Option<String>, previous_address: Option<String>, previous_signing_public_key: Option<String>, previous_epoch: Option<u64>)
+- `SupervisorRotationObservationResolved`(operation_id: String, status: SupervisorRotationObservationStatusKind, rejection: Option<SupervisorRotationRejectionKind>, previous_name: Option<String>, previous_peer_id: Option<String>, previous_address: Option<String>, previous_signing_public_key: Option<String>, previous_epoch: Option<u64>, next_name: Option<String>, next_peer_id: Option<String>, next_address: Option<String>, next_signing_public_key: Option<String>, next_epoch: Option<u64>)
 - `SupervisorBridgeCommandAdmissionResolved`(result: SupervisorBridgeCommandAdmissionResultKind, rejection: Option<SupervisorBridgeCommandRejectionKind>)
 - `SessionLlmReconfigurePlanResolved`(previous_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface: Option<SessionLlmCapabilitySurface>, capability_changed: Bool, previous_capability_base_filter: ToolFilter, current_capability_base_filter: ToolFilter, committed_visible_set_changed: Bool, revision_bumped: Bool, active_visibility_revision: u64)
 - `PeerProjectionChanged`(peer_projection_epoch: u64)
@@ -962,13 +1005,27 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `peer_ingress_owner_consistency`
 - `supervisor_binding_consistency`
 - `supervisor_revoke_pending_consistency`
+- `supervisor_revoked_receipt_consistency`
+- `supervisor_live_binding_excludes_revoked_receipt`
+- `supervisor_authority_is_closed`
 - `supervisor_publish_pending_consistency`
+- `supervisor_rotation_receipt_consistency`
+- `supervisor_rotation_terminal_receipts_closed_shape`
+- `supervisor_rotation_phase_shape`
 
 ## Transitions
 ### `Initialize`
 - From: `Initializing`
 - On: `Initialize`()
 - To: `Idle`
+
+### `PrepareTerminalSupervisorCleanupBindings`
+- From: `Destroyed`
+- On: `PrepareTerminalSupervisorCleanupBindings`(session_id)
+- Guards:
+  - `session_matches_current`
+  - `durable_supervisor_cleanup_authority_present`
+- To: `Destroyed`
 
 ### `RegisterSessionIdle`
 - From: `Idle`
@@ -2688,6 +2745,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Stopped`
 
+### `SetPeerIngressContextTerminalSupervisorCleanup`
+- From: `Destroyed`
+- On: `SetPeerIngressContext`(keep_alive)
+- Guards:
+  - `session_registered`
+  - `durable_supervisor_cleanup_authority_present`
+- To: `Destroyed`
+
 ### `ResolvePeerIngressReceiveClosedIdle`
 - From: `Idle`
 - On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
@@ -2732,6 +2797,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `queue_closed`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Stopped`
+
+### `ResolvePeerIngressReceiveClosedDestroyed`
+- From: `Destroyed`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_closed`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Destroyed`
 
 ### `ResolvePeerIngressReceiveFullIdle`
 - From: `Idle`
@@ -2782,6 +2856,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `queue_full`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Stopped`
+
+### `ResolvePeerIngressReceiveFullDestroyed`
+- From: `Destroyed`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `session_registered`
+  - `queue_open`
+  - `queue_full`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Destroyed`
 
 ### `ResolvePeerIngressReceivePlainEventIdle`
 - From: `Idle`
@@ -2898,6 +2982,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PeerIngressReceiveResolved`
 - To: `Stopped`
 
+### `ResolvePeerIngressReceiveTrustedTerminalSupervisorCleanup`
+- From: `Destroyed`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
+  - `trusted_sender`
+  - `generated_auth_exemption`
+  - `durable_supervisor_cleanup_authority_present`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Destroyed`
+
+### `ResolvePeerIngressReceiveTerminalOrdinaryDrop`
+- From: `Destroyed`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `queue_open`
+  - `queue_capacity_available`
+  - `ordinary_terminal_ingress`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Destroyed`
+
 ### `ResolvePeerIngressReceiveAuthExemptUntrustedIdle`
 - From: `Idle`
 - On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
@@ -2962,6 +3069,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `auth_exempt`
 - Emits: `PeerIngressReceiveResolved`
 - To: `Stopped`
+
+### `ResolvePeerIngressReceiveAuthExemptUntrustedTerminalSupervisorCleanup`
+- From: `Destroyed`
+- On: `ResolvePeerIngressReceive`(kind, auth_required, auth_exempt, trusted, queued_work_present, queue_closed, queue_capacity_available)
+- Guards:
+  - `queue_open`
+  - `queue_capacity_available`
+  - `external_entry`
+  - `untrusted_sender`
+  - `auth_exempt`
+  - `durable_supervisor_cleanup_authority_present`
+- Emits: `PeerIngressReceiveResolved`
+- To: `Destroyed`
 
 ### `ResolvePeerIngressReceiveAuthOpenUntrustedIdle`
 - From: `Idle`
@@ -3278,6 +3398,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PeerIngressDequeueResolved`
 - To: `Stopped`
 
+### `ResolvePeerIngressDequeueAuthExemptExternalDestroyed`
+- From: `Destroyed`
+- On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
+- Guards:
+  - `session_registered`
+  - `external_entry`
+  - `auth_exempt`
+- Emits: `PeerIngressDequeueResolved`
+- To: `Destroyed`
+
 ### `ResolvePeerIngressDequeueRequiredRemainingIdle`
 - From: `Idle`
 - On: `ResolvePeerIngressDequeue`(kind, auth, queued_work_remaining)
@@ -3427,6 +3557,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - Emits: `RuntimeNotice`
 - To: `Stopped`
+
+### `NotifyDrainExitedTerminalSupervisorCleanup`
+- From: `Destroyed`
+- On: `NotifyDrainExited`(reason)
+- Guards:
+  - `session_registered`
+  - `durable_supervisor_cleanup_authority_present`
+- Emits: `RuntimeNotice`
+- To: `Destroyed`
 
 ### `InterruptCurrentRunAttached`
 - From: `Attached`
@@ -5392,6 +5531,335 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `binding_identity_present_when_runtime_bound`
 - To: `Destroyed`
 
+### `RecoverSupervisorBindingInitializing`
+- From: `Initializing`
+- On: `RecoverSupervisorBinding`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Initializing`
+
+### `RecoverSupervisorBindingIdle`
+- From: `Idle`
+- On: `RecoverSupervisorBinding`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Idle`
+
+### `RecoverSupervisorBindingAttached`
+- From: `Attached`
+- On: `RecoverSupervisorBinding`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Attached`
+
+### `RecoverSupervisorBindingRunning`
+- From: `Running`
+- On: `RecoverSupervisorBinding`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Running`
+
+### `RecoverSupervisorBindingRetired`
+- From: `Retired`
+- On: `RecoverSupervisorBinding`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Retired`
+
+### `RecoverSupervisorBindingStopped`
+- From: `Stopped`
+- On: `RecoverSupervisorBinding`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Stopped`
+
+### `RecoverSupervisorBindingDestroyed`
+- From: `Destroyed`
+- On: `RecoverSupervisorBinding`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Destroyed`
+
+### `RecoverRevokedSupervisorReceiptInitializing`
+- From: `Initializing`
+- On: `RecoverRevokedSupervisorReceipt`(peer_id, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Initializing`
+
+### `RecoverRevokedSupervisorReceiptIdle`
+- From: `Idle`
+- On: `RecoverRevokedSupervisorReceipt`(peer_id, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Idle`
+
+### `RecoverRevokedSupervisorReceiptAttached`
+- From: `Attached`
+- On: `RecoverRevokedSupervisorReceipt`(peer_id, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Attached`
+
+### `RecoverRevokedSupervisorReceiptRunning`
+- From: `Running`
+- On: `RecoverRevokedSupervisorReceipt`(peer_id, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Running`
+
+### `RecoverRevokedSupervisorReceiptRetired`
+- From: `Retired`
+- On: `RecoverRevokedSupervisorReceipt`(peer_id, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Retired`
+
+### `RecoverRevokedSupervisorReceiptStopped`
+- From: `Stopped`
+- On: `RecoverRevokedSupervisorReceipt`(peer_id, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Stopped`
+
+### `RecoverRevokedSupervisorReceiptDestroyed`
+- From: `Destroyed`
+- On: `RecoverRevokedSupervisorReceipt`(peer_id, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_revoked_receipt`
+- To: `Destroyed`
+
+### `RecoverSupervisorRevocationPendingInitializing`
+- From: `Initializing`
+- On: `RecoverSupervisorRevocationPending`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_revoked_receipt`
+- To: `Initializing`
+
+### `RecoverSupervisorRevocationPendingIdle`
+- From: `Idle`
+- On: `RecoverSupervisorRevocationPending`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_revoked_receipt`
+- To: `Idle`
+
+### `RecoverSupervisorRevocationPendingAttached`
+- From: `Attached`
+- On: `RecoverSupervisorRevocationPending`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_revoked_receipt`
+- To: `Attached`
+
+### `RecoverSupervisorRevocationPendingRunning`
+- From: `Running`
+- On: `RecoverSupervisorRevocationPending`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_revoked_receipt`
+- To: `Running`
+
+### `RecoverSupervisorRevocationPendingRetired`
+- From: `Retired`
+- On: `RecoverSupervisorRevocationPending`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_revoked_receipt`
+- To: `Retired`
+
+### `RecoverSupervisorRevocationPendingStopped`
+- From: `Stopped`
+- On: `RecoverSupervisorRevocationPending`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_revoked_receipt`
+- To: `Stopped`
+
+### `RecoverSupervisorRevocationPendingDestroyed`
+- From: `Destroyed`
+- On: `RecoverSupervisorRevocationPending`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `session_registered`
+  - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_revoked_receipt`
+- To: `Destroyed`
+
+### `RecoverSupervisorRotationOperationInitializing`
+- From: `Initializing`
+- On: `RecoverSupervisorRotationOperation`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `session_registered`
+  - `no_incomplete_rotation`
+  - `supervisor_unbound`
+  - `rejection_matches_phase`
+- To: `Initializing`
+
+### `RecoverSupervisorRotationOperationIdle`
+- From: `Idle`
+- On: `RecoverSupervisorRotationOperation`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `session_registered`
+  - `no_incomplete_rotation`
+  - `supervisor_unbound`
+  - `rejection_matches_phase`
+- To: `Idle`
+
+### `RecoverSupervisorRotationOperationAttached`
+- From: `Attached`
+- On: `RecoverSupervisorRotationOperation`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `session_registered`
+  - `no_incomplete_rotation`
+  - `supervisor_unbound`
+  - `rejection_matches_phase`
+- To: `Attached`
+
+### `RecoverSupervisorRotationOperationRunning`
+- From: `Running`
+- On: `RecoverSupervisorRotationOperation`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `session_registered`
+  - `no_incomplete_rotation`
+  - `supervisor_unbound`
+  - `rejection_matches_phase`
+- To: `Running`
+
+### `RecoverSupervisorRotationOperationRetired`
+- From: `Retired`
+- On: `RecoverSupervisorRotationOperation`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `session_registered`
+  - `no_incomplete_rotation`
+  - `supervisor_unbound`
+  - `rejection_matches_phase`
+- To: `Retired`
+
+### `RecoverSupervisorRotationOperationStopped`
+- From: `Stopped`
+- On: `RecoverSupervisorRotationOperation`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `session_registered`
+  - `no_incomplete_rotation`
+  - `supervisor_unbound`
+  - `rejection_matches_phase`
+- To: `Stopped`
+
+### `RecoverSupervisorRotationOperationDestroyed`
+- From: `Destroyed`
+- On: `RecoverSupervisorRotationOperation`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `session_registered`
+  - `no_incomplete_rotation`
+  - `supervisor_unbound`
+  - `rejection_matches_phase`
+- To: `Destroyed`
+
+### `RecoverSupervisorRotationTerminalReceiptInitializing`
+- From: `Initializing`
+- On: `RecoverSupervisorRotationTerminalReceipt`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `terminal_phase`
+  - `rejection_matches_phase`
+  - `receipt_not_recovered`
+- To: `Initializing`
+
+### `RecoverSupervisorRotationTerminalReceiptIdle`
+- From: `Idle`
+- On: `RecoverSupervisorRotationTerminalReceipt`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `terminal_phase`
+  - `rejection_matches_phase`
+  - `receipt_not_recovered`
+- To: `Idle`
+
+### `RecoverSupervisorRotationTerminalReceiptAttached`
+- From: `Attached`
+- On: `RecoverSupervisorRotationTerminalReceipt`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `terminal_phase`
+  - `rejection_matches_phase`
+  - `receipt_not_recovered`
+- To: `Attached`
+
+### `RecoverSupervisorRotationTerminalReceiptRunning`
+- From: `Running`
+- On: `RecoverSupervisorRotationTerminalReceipt`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `terminal_phase`
+  - `rejection_matches_phase`
+  - `receipt_not_recovered`
+- To: `Running`
+
+### `RecoverSupervisorRotationTerminalReceiptRetired`
+- From: `Retired`
+- On: `RecoverSupervisorRotationTerminalReceipt`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `terminal_phase`
+  - `rejection_matches_phase`
+  - `receipt_not_recovered`
+- To: `Retired`
+
+### `RecoverSupervisorRotationTerminalReceiptStopped`
+- From: `Stopped`
+- On: `RecoverSupervisorRotationTerminalReceipt`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `terminal_phase`
+  - `rejection_matches_phase`
+  - `receipt_not_recovered`
+- To: `Stopped`
+
+### `RecoverSupervisorRotationTerminalReceiptDestroyed`
+- From: `Destroyed`
+- On: `RecoverSupervisorRotationTerminalReceipt`(operation_id, phase, rejection, previous_name, previous_peer_id, previous_address, previous_signing_public_key, previous_epoch, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch)
+- Guards:
+  - `terminal_phase`
+  - `rejection_matches_phase`
+  - `receipt_not_recovered`
+- To: `Destroyed`
+
 ### `EnsureSessionWithExecutorIdle`
 - From: `Idle`
 - On: `EnsureSessionWithExecutor`(session_id)
@@ -7311,6 +7779,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PeerIngressClassified`
 - To: `Running`
 
+### `ClassifyExternalEnvelopeRequestSupervisorSilentRetired`
+- From: `Retired`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_silent_request`
+- Emits: `PeerIngressClassified`
+- To: `Retired`
+
+### `ClassifyExternalEnvelopeRequestSupervisorSilentStopped`
+- From: `Stopped`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_silent_request`
+- Emits: `PeerIngressClassified`
+- To: `Stopped`
+
+### `ClassifyExternalEnvelopeRequestSupervisorSilentDestroyed`
+- From: `Destroyed`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_silent_request`
+- Emits: `PeerIngressClassified`
+- To: `Destroyed`
+
 ### `ClassifyExternalEnvelopeRequestSilentAttached`
 - From: `Attached`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -7355,6 +7850,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `peer_ingress_supervisor_request`
 - Emits: `PeerIngressClassified`
 - To: `Running`
+
+### `ClassifyExternalEnvelopeRequestSupervisorRetired`
+- From: `Retired`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_request`
+- Emits: `PeerIngressClassified`
+- To: `Retired`
+
+### `ClassifyExternalEnvelopeRequestSupervisorStopped`
+- From: `Stopped`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_request`
+- Emits: `PeerIngressClassified`
+- To: `Stopped`
+
+### `ClassifyExternalEnvelopeRequestSupervisorDestroyed`
+- From: `Destroyed`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, from_peer_id, envelope_kind, request_intent, request_intent_class, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_request`
+- Emits: `PeerIngressClassified`
+- To: `Destroyed`
 
 ### `ClassifyExternalEnvelopeRequestActionableAttached`
 - From: `Attached`
@@ -13692,6 +14214,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SpawnDrainTask`
 - To: `Stopped`
 
+### `SpawnTerminalSupervisorCleanupDrain`
+- From: `Destroyed`
+- On: `SpawnDrain`(mode)
+- Guards:
+  - `persistent_host_only`
+  - `durable_supervisor_cleanup_authority_present`
+  - `peer_ingress_owned`
+  - `drain_can_spawn`
+- Emits: `SpawnDrainTask`
+- To: `Destroyed`
+
 ### `StopDrainIdle`
 - From: `Idle`
 - On: `StopDrain`()
@@ -13726,6 +14259,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `drain_is_running`
 - To: `Stopped`
+
+### `StopTerminalSupervisorCleanupDrain`
+- From: `Destroyed`
+- On: `StopDrain`()
+- Guards:
+  - `durable_supervisor_cleanup_authority_present`
+  - `drain_is_running`
+- To: `Destroyed`
 
 ### `StageVisibilityFilterIdle`
 - From: `Idle`
@@ -14782,6 +15323,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Stopped`
 
+### `PeerRequestReceivedDestroyed`
+- From: `Destroyed`
+- On: `PeerRequestReceived`(corr_id, handling_mode)
+- Guards:
+  - `session_registered`
+  - `not_already_inbound`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Destroyed`
+
 ### `PeerResponseRepliedIdle`
 - From: `Idle`
 - On: `PeerResponseReplied`(corr_id)
@@ -14826,6 +15376,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `inbound_exists`
 - Emits: `InboundPeerInteractionStateChanged`
 - To: `Stopped`
+
+### `PeerResponseRepliedDestroyed`
+- From: `Destroyed`
+- On: `PeerResponseReplied`(corr_id)
+- Guards:
+  - `session_registered`
+  - `inbound_exists`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Destroyed`
 
 ### `AdvanceSessionContextIdle`
 - From: `Idle`
@@ -15270,6 +15829,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `owner_allows_session_attach`
 - To: `Stopped`
 
+### `AttachSessionIngressTerminalSupervisorCleanup`
+- From: `Destroyed`
+- On: `AttachSessionIngress`(comms_runtime_id)
+- Guards:
+  - `session_registered`
+  - `durable_supervisor_cleanup_authority_present`
+  - `owner_allows_session_attach`
+- To: `Destroyed`
+
 ### `AttachMobIngressIdle`
 - From: `Idle`
 - On: `AttachMobIngress`(comms_runtime_id, mob_id)
@@ -15310,6 +15878,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `owner_allows_mob_attach`
 - To: `Stopped`
 
+### `AttachMobIngressTerminalSupervisorCleanup`
+- From: `Destroyed`
+- On: `AttachMobIngress`(comms_runtime_id, mob_id)
+- Guards:
+  - `session_registered`
+  - `durable_supervisor_cleanup_authority_present`
+  - `owner_allows_mob_attach`
+- To: `Destroyed`
+
 ### `DetachIngressIdle`
 - From: `Idle`
 - On: `DetachIngress`()
@@ -15345,11 +15922,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Stopped`
 
+### `DetachIngressTerminalSupervisorCleanup`
+- From: `Destroyed`
+- On: `DetachIngress`()
+- Guards:
+  - `session_registered`
+  - `durable_supervisor_cleanup_authority_present`
+- To: `Destroyed`
+
 ### `ResolveSupervisorBindAdmissionBootstrapIdle`
 - From: `Idle`
 - On: `ResolveSupervisorBindAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `SupervisorBindAdmissionResolved`
 - To: `Idle`
 
@@ -15358,6 +15945,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveSupervisorBindAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `SupervisorBindAdmissionResolved`
 - To: `Attached`
 
@@ -15366,6 +15955,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveSupervisorBindAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `SupervisorBindAdmissionResolved`
 - To: `Running`
 
@@ -15459,6 +16050,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `supervisor_bound`
   - `supervisor_binding_mismatch`
+- Emits: `SupervisorBindAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorBindAdmissionRevocationPendingIdle`
+- From: `Idle`
+- On: `ResolveSupervisorBindAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_unbound`
+  - `pending_revoke`
+- Emits: `SupervisorBindAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorBindAdmissionRevocationPendingAttached`
+- From: `Attached`
+- On: `ResolveSupervisorBindAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_unbound`
+  - `pending_revoke`
+- Emits: `SupervisorBindAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorBindAdmissionRevocationPendingRunning`
+- From: `Running`
+- On: `ResolveSupervisorBindAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_unbound`
+  - `pending_revoke`
 - Emits: `SupervisorBindAdmissionResolved`
 - To: `Running`
 
@@ -15659,7 +16277,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionNotBoundIdle`
 - From: `Idle`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_not_bound`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
@@ -15667,7 +16285,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionNotBoundAttached`
 - From: `Attached`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_not_bound`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
@@ -15675,15 +16293,39 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionNotBoundRunning`
 - From: `Running`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_not_bound`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
 - To: `Running`
 
+### `ResolveSupervisorAuthorizeAdmissionNotBoundRetired`
+- From: `Retired`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_not_bound`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorAuthorizeAdmissionNotBoundStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_not_bound`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorAuthorizeAdmissionNotBoundDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_not_bound`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Destroyed`
+
 ### `ResolveSupervisorAuthorizeAdmissionStaleSupervisorIdle`
 - From: `Idle`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `stale_supervisor_epoch`
@@ -15692,7 +16334,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionStaleSupervisorAttached`
 - From: `Attached`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `stale_supervisor_epoch`
@@ -15701,16 +16343,43 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionStaleSupervisorRunning`
 - From: `Running`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `stale_supervisor_epoch`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
 - To: `Running`
 
+### `ResolveSupervisorAuthorizeAdmissionStaleSupervisorRetired`
+- From: `Retired`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `stale_supervisor_epoch`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorAuthorizeAdmissionStaleSupervisorStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `stale_supervisor_epoch`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorAuthorizeAdmissionStaleSupervisorDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `stale_supervisor_epoch`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Destroyed`
+
 ### `ResolveSupervisorAuthorizeAdmissionSenderMismatchIdle`
 - From: `Idle`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_epoch_not_stale`
@@ -15720,7 +16389,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionSenderMismatchAttached`
 - From: `Attached`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_epoch_not_stale`
@@ -15730,7 +16399,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionSenderMismatchRunning`
 - From: `Running`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_epoch_not_stale`
@@ -15738,12 +16407,43 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SupervisorAuthorizeAdmissionResolved`
 - To: `Running`
 
+### `ResolveSupervisorAuthorizeAdmissionSenderMismatchRetired`
+- From: `Retired`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorAuthorizeAdmissionSenderMismatchStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorAuthorizeAdmissionSenderMismatchDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Destroyed`
+
 ### `ResolveSupervisorAuthorizeAdmissionIdempotentAckIdle`
 - From: `Idle`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_peer_id_matches_current`
+  - `supervisor_signing_key_matches_current`
   - `supervisor_epoch_matches_current`
   - `sender_peer_id_matches_current`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
@@ -15751,10 +16451,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionIdempotentAckAttached`
 - From: `Attached`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_peer_id_matches_current`
+  - `supervisor_signing_key_matches_current`
   - `supervisor_epoch_matches_current`
   - `sender_peer_id_matches_current`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
@@ -15762,45 +16463,148 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSupervisorAuthorizeAdmissionIdempotentAckRunning`
 - From: `Running`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_peer_id_matches_current`
+  - `supervisor_signing_key_matches_current`
   - `supervisor_epoch_matches_current`
   - `sender_peer_id_matches_current`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
 - To: `Running`
 
-### `ResolveSupervisorAuthorizeAdmissionProceedIdle`
+### `ResolveSupervisorAuthorizeAdmissionIdempotentAckRetired`
+- From: `Retired`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_signing_key_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorAuthorizeAdmissionIdempotentAckStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_signing_key_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorAuthorizeAdmissionIdempotentAckDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_signing_key_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedIdle`
 - From: `Idle`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `identity_change_requested`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedAttached`
+- From: `Attached`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `identity_change_requested`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedRunning`
+- From: `Running`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `identity_change_requested`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorAuthorizeAdmissionRotationNotAllowedRetired`
+- From: `Retired`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_epoch_not_stale`
   - `sender_peer_id_matches_current`
   - `not_idempotent`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorAuthorizeAdmissionRotationNotAllowedStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `sender_peer_id_matches_current`
+  - `not_idempotent`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorAuthorizeAdmissionRotationNotAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `sender_peer_id_matches_current`
+  - `not_idempotent`
+- Emits: `SupervisorAuthorizeAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorAuthorizeAdmissionProceedIdle`
+- From: `Idle`
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_epoch_not_stale`
+  - `sender_peer_id_matches_current`
+  - `same_authority_version_advance`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
 - To: `Idle`
 
 ### `ResolveSupervisorAuthorizeAdmissionProceedAttached`
 - From: `Attached`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_epoch_not_stale`
   - `sender_peer_id_matches_current`
-  - `not_idempotent`
+  - `same_authority_version_advance`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
 - To: `Attached`
 
 ### `ResolveSupervisorAuthorizeAdmissionProceedRunning`
 - From: `Running`
-- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- On: `ResolveSupervisorAuthorizeAdmission`(supervisor_name, supervisor_peer_id, supervisor_address, supervisor_signing_public_key, supervisor_epoch, sender_peer_id, sender_signing_public_key)
 - Guards:
   - `supervisor_bound`
   - `supervisor_epoch_not_stale`
   - `sender_peer_id_matches_current`
-  - `not_idempotent`
+  - `same_authority_version_advance`
 - Emits: `SupervisorAuthorizeAdmissionResolved`
 - To: `Running`
 
@@ -15809,6 +16613,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Idle`
 
@@ -15817,6 +16623,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Attached`
 
@@ -15825,6 +16633,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Running`
 
@@ -15833,6 +16643,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Retired`
 
@@ -15841,6 +16653,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BindSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_unbound`
+  - `no_pending_revoke`
+  - `no_rotation_pending`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Stopped`
 
@@ -15849,6 +16663,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
+  - `same_peer_version_advance_only`
+  - `no_pending_rotation`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Idle`
 
@@ -15857,6 +16673,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
+  - `same_peer_version_advance_only`
+  - `no_pending_rotation`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Attached`
 
@@ -15865,6 +16683,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
+  - `same_peer_version_advance_only`
+  - `no_pending_rotation`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Running`
 
@@ -15873,6 +16693,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
+  - `same_peer_version_advance_only`
+  - `no_pending_rotation`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Retired`
 
@@ -15881,8 +16703,1087 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeSupervisor`(name, peer_id, address, signing_public_key, epoch)
 - Guards:
   - `supervisor_bound`
+  - `same_peer_version_advance_only`
+  - `no_pending_rotation`
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Stopped`
+
+### `RefreshSupervisorBindingRouteIdle`
+- From: `Idle`
+- On: `RefreshSupervisorBindingRoute`(name, peer_id, address, signing_public_key, epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `signing_key_matches_current`
+  - `epoch_matches_current`
+  - `sender_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Idle`
+
+### `RefreshSupervisorBindingRouteAttached`
+- From: `Attached`
+- On: `RefreshSupervisorBindingRoute`(name, peer_id, address, signing_public_key, epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `signing_key_matches_current`
+  - `epoch_matches_current`
+  - `sender_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Attached`
+
+### `RefreshSupervisorBindingRouteRunning`
+- From: `Running`
+- On: `RefreshSupervisorBindingRoute`(name, peer_id, address, signing_public_key, epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `signing_key_matches_current`
+  - `epoch_matches_current`
+  - `sender_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Running`
+
+### `RefreshSupervisorBindingRouteRetired`
+- From: `Retired`
+- On: `RefreshSupervisorBindingRoute`(name, peer_id, address, signing_public_key, epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `signing_key_matches_current`
+  - `epoch_matches_current`
+  - `sender_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Retired`
+
+### `RefreshSupervisorBindingRouteStopped`
+- From: `Stopped`
+- On: `RefreshSupervisorBindingRoute`(name, peer_id, address, signing_public_key, epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `signing_key_matches_current`
+  - `epoch_matches_current`
+  - `sender_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Stopped`
+
+### `RefreshSupervisorBindingRouteDestroyed`
+- From: `Destroyed`
+- On: `RefreshSupervisorBindingRoute`(name, peer_id, address, signing_public_key, epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `signing_key_matches_current`
+  - `epoch_matches_current`
+  - `sender_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Destroyed`
+
+### `SubmitSupervisorRotationNewIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_epoch_advances`
+- Emits: `SupervisorRotationSubmissionResolved`, `RevokeSupervisorTrustEdge`
+- To: `Idle`
+
+### `SubmitSupervisorRotationNewAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_epoch_advances`
+- Emits: `SupervisorRotationSubmissionResolved`, `RevokeSupervisorTrustEdge`
+- To: `Attached`
+
+### `SubmitSupervisorRotationNewRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_epoch_advances`
+- Emits: `SupervisorRotationSubmissionResolved`, `RevokeSupervisorTrustEdge`
+- To: `Running`
+
+### `SubmitSupervisorRotationAdoptCurrentIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_is_exact_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationAdoptCurrentAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_is_exact_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationAdoptCurrentRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_is_exact_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationPersistPreflightRejectedIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_rejected`
+  - `sender_is_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationPersistPreflightRejectedAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_rejected`
+  - `sender_is_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationPersistPreflightRejectedRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_rejected`
+  - `sender_is_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationPersistRejectedIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_not_adoptable_or_advanced`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationPersistRejectedAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_not_adoptable_or_advanced`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationPersistRejectedRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `supervisor_bound`
+  - `new_operation_slot`
+  - `operation_id_not_terminal`
+  - `target_preflight_accepted`
+  - `sender_is_current`
+  - `target_not_adoptable_or_advanced`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationExistingPendingIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `pending_operation`
+  - `exact_operation_and_target`
+  - `sender_is_rotation_participant`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationExistingPendingAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `pending_operation`
+  - `exact_operation_and_target`
+  - `sender_is_rotation_participant`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationExistingPendingRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `pending_operation`
+  - `exact_operation_and_target`
+  - `sender_is_rotation_participant`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationExistingPendingRetired`
+- From: `Retired`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `pending_operation`
+  - `exact_operation_and_target`
+  - `sender_is_rotation_participant`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Retired`
+
+### `SubmitSupervisorRotationExistingPendingStopped`
+- From: `Stopped`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `pending_operation`
+  - `exact_operation_and_target`
+  - `sender_is_rotation_participant`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Stopped`
+
+### `SubmitSupervisorRotationExistingPendingDestroyed`
+- From: `Destroyed`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `pending_operation`
+  - `exact_operation_and_target`
+  - `sender_is_rotation_participant`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Destroyed`
+
+### `SubmitSupervisorRotationExistingCompletedIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `completed_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_terminal_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationExistingCompletedAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `completed_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_terminal_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationExistingCompletedRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `completed_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_terminal_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationExistingCompletedRetired`
+- From: `Retired`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `completed_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_terminal_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Retired`
+
+### `SubmitSupervisorRotationExistingCompletedStopped`
+- From: `Stopped`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `completed_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_terminal_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Stopped`
+
+### `SubmitSupervisorRotationExistingCompletedDestroyed`
+- From: `Destroyed`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `completed_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_terminal_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Destroyed`
+
+### `SubmitSupervisorRotationExistingRejectedIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `rejected_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_retained_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationExistingRejectedAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `rejected_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_retained_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationExistingRejectedRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `rejected_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_retained_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationExistingRejectedRetired`
+- From: `Retired`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `rejected_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_retained_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Retired`
+
+### `SubmitSupervisorRotationExistingRejectedStopped`
+- From: `Stopped`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `rejected_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_retained_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Stopped`
+
+### `SubmitSupervisorRotationExistingRejectedDestroyed`
+- From: `Destroyed`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `rejected_receipt`
+  - `exact_operation_and_target`
+  - `sender_is_retained_authority`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Destroyed`
+
+### `SubmitSupervisorRotationConflictIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `receipt_present`
+  - `not_valid_new_operation`
+  - `not_exact_authorized_existing`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationConflictAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `receipt_present`
+  - `not_valid_new_operation`
+  - `not_exact_authorized_existing`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationConflictRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `receipt_present`
+  - `not_valid_new_operation`
+  - `not_exact_authorized_existing`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationConflictRetired`
+- From: `Retired`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `receipt_present`
+  - `not_valid_new_operation`
+  - `not_exact_authorized_existing`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Retired`
+
+### `SubmitSupervisorRotationConflictStopped`
+- From: `Stopped`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `receipt_present`
+  - `not_valid_new_operation`
+  - `not_exact_authorized_existing`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Stopped`
+
+### `SubmitSupervisorRotationConflictDestroyed`
+- From: `Destroyed`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `receipt_present`
+  - `not_valid_new_operation`
+  - `not_exact_authorized_existing`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Destroyed`
+
+### `SubmitSupervisorRotationUnavailableIdle`
+- From: `Idle`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `no_receipt`
+  - `not_authorized_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Idle`
+
+### `SubmitSupervisorRotationUnavailableAttached`
+- From: `Attached`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `no_receipt`
+  - `not_authorized_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Attached`
+
+### `SubmitSupervisorRotationUnavailableRunning`
+- From: `Running`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `no_receipt`
+  - `not_authorized_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Running`
+
+### `SubmitSupervisorRotationUnavailableRetired`
+- From: `Retired`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `no_receipt`
+  - `not_authorized_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Retired`
+
+### `SubmitSupervisorRotationUnavailableStopped`
+- From: `Stopped`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `no_receipt`
+  - `not_authorized_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Stopped`
+
+### `SubmitSupervisorRotationUnavailableDestroyed`
+- From: `Destroyed`
+- On: `SubmitSupervisorRotation`(operation_id, next_name, next_peer_id, next_address, next_signing_public_key, next_epoch, preflight_rejection, sender_peer_id, sender_signing_public_key)
+- Guards:
+  - `no_receipt`
+  - `not_authorized_current`
+- Emits: `SupervisorRotationSubmissionResolved`
+- To: `Destroyed`
+
+### `ResumeSupervisorRotationPreviousRevokeIdle`
+- From: `Idle`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Idle`
+
+### `ResumeSupervisorRotationPreviousRevokeAttached`
+- From: `Attached`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Attached`
+
+### `ResumeSupervisorRotationPreviousRevokeRunning`
+- From: `Running`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Running`
+
+### `ResumeSupervisorRotationPreviousRevokeRetired`
+- From: `Retired`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Retired`
+
+### `ResumeSupervisorRotationPreviousRevokeStopped`
+- From: `Stopped`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Stopped`
+
+### `ResumeSupervisorRotationPreviousRevokeDestroyed`
+- From: `Destroyed`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Destroyed`
+
+### `SupervisorRotationPreviousRevokedIdle`
+- From: `Idle`
+- On: `SupervisorRotationPreviousRevoked`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+  - `previous_peer_matches`
+  - `previous_epoch_matches`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Idle`
+
+### `SupervisorRotationPreviousRevokedAttached`
+- From: `Attached`
+- On: `SupervisorRotationPreviousRevoked`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+  - `previous_peer_matches`
+  - `previous_epoch_matches`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Attached`
+
+### `SupervisorRotationPreviousRevokedRunning`
+- From: `Running`
+- On: `SupervisorRotationPreviousRevoked`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+  - `previous_peer_matches`
+  - `previous_epoch_matches`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Running`
+
+### `SupervisorRotationPreviousRevokedRetired`
+- From: `Retired`
+- On: `SupervisorRotationPreviousRevoked`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+  - `previous_peer_matches`
+  - `previous_epoch_matches`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Retired`
+
+### `SupervisorRotationPreviousRevokedStopped`
+- From: `Stopped`
+- On: `SupervisorRotationPreviousRevoked`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+  - `previous_peer_matches`
+  - `previous_epoch_matches`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Stopped`
+
+### `SupervisorRotationPreviousRevokedDestroyed`
+- From: `Destroyed`
+- On: `SupervisorRotationPreviousRevoked`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `previous_revoke_pending`
+  - `previous_peer_matches`
+  - `previous_epoch_matches`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Destroyed`
+
+### `ResumeSupervisorRotationNextPublishIdle`
+- From: `Idle`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Idle`
+
+### `ResumeSupervisorRotationNextPublishAttached`
+- From: `Attached`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Attached`
+
+### `ResumeSupervisorRotationNextPublishRunning`
+- From: `Running`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Running`
+
+### `ResumeSupervisorRotationNextPublishRetired`
+- From: `Retired`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Retired`
+
+### `ResumeSupervisorRotationNextPublishStopped`
+- From: `Stopped`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Stopped`
+
+### `ResumeSupervisorRotationNextPublishDestroyed`
+- From: `Destroyed`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Destroyed`
+
+### `SupervisorRotationNextPublishedIdle`
+- From: `Idle`
+- On: `SupervisorRotationNextPublished`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+  - `next_peer_matches`
+  - `next_epoch_matches`
+- To: `Idle`
+
+### `SupervisorRotationNextPublishedAttached`
+- From: `Attached`
+- On: `SupervisorRotationNextPublished`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+  - `next_peer_matches`
+  - `next_epoch_matches`
+- To: `Attached`
+
+### `SupervisorRotationNextPublishedRunning`
+- From: `Running`
+- On: `SupervisorRotationNextPublished`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+  - `next_peer_matches`
+  - `next_epoch_matches`
+- To: `Running`
+
+### `SupervisorRotationNextPublishedRetired`
+- From: `Retired`
+- On: `SupervisorRotationNextPublished`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+  - `next_peer_matches`
+  - `next_epoch_matches`
+- To: `Retired`
+
+### `SupervisorRotationNextPublishedStopped`
+- From: `Stopped`
+- On: `SupervisorRotationNextPublished`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+  - `next_peer_matches`
+  - `next_epoch_matches`
+- To: `Stopped`
+
+### `SupervisorRotationNextPublishedDestroyed`
+- From: `Destroyed`
+- On: `SupervisorRotationNextPublished`(operation_id, peer_id, epoch)
+- Guards:
+  - `operation_matches`
+  - `next_publish_pending`
+  - `next_peer_matches`
+  - `next_epoch_matches`
+- To: `Destroyed`
+
+### `ResumeSupervisorRotationCompletedIdle`
+- From: `Idle`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `completed_rotation_receipt`
+- To: `Idle`
+
+### `ResumeSupervisorRotationCompletedAttached`
+- From: `Attached`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `completed_rotation_receipt`
+- To: `Attached`
+
+### `ResumeSupervisorRotationCompletedRunning`
+- From: `Running`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `completed_rotation_receipt`
+- To: `Running`
+
+### `ResumeSupervisorRotationCompletedRetired`
+- From: `Retired`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `completed_rotation_receipt`
+- To: `Retired`
+
+### `ResumeSupervisorRotationCompletedStopped`
+- From: `Stopped`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `completed_rotation_receipt`
+- To: `Stopped`
+
+### `ResumeSupervisorRotationCompletedDestroyed`
+- From: `Destroyed`
+- On: `ResumeSupervisorRotation`(operation_id)
+- Guards:
+  - `operation_matches`
+  - `completed_rotation_receipt`
+- To: `Destroyed`
+
+### `ObserveSupervisorRotationPreviousRevokePendingIdle`
+- From: `Idle`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Idle`
+
+### `ObserveSupervisorRotationPreviousRevokePendingAttached`
+- From: `Attached`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Attached`
+
+### `ObserveSupervisorRotationPreviousRevokePendingRunning`
+- From: `Running`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Running`
+
+### `ObserveSupervisorRotationPreviousRevokePendingRetired`
+- From: `Retired`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Retired`
+
+### `ObserveSupervisorRotationPreviousRevokePendingStopped`
+- From: `Stopped`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Stopped`
+
+### `ObserveSupervisorRotationPreviousRevokePendingDestroyed`
+- From: `Destroyed`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Destroyed`
+
+### `ObserveSupervisorRotationNextPublishPendingIdle`
+- From: `Idle`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Idle`
+
+### `ObserveSupervisorRotationNextPublishPendingAttached`
+- From: `Attached`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Attached`
+
+### `ObserveSupervisorRotationNextPublishPendingRunning`
+- From: `Running`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Running`
+
+### `ObserveSupervisorRotationNextPublishPendingRetired`
+- From: `Retired`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Retired`
+
+### `ObserveSupervisorRotationNextPublishPendingStopped`
+- From: `Stopped`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Stopped`
+
+### `ObserveSupervisorRotationNextPublishPendingDestroyed`
+- From: `Destroyed`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_matches`
+  - `phase_matches`
+  - `observer_is_participant`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Destroyed`
+
+### `ObserveSupervisorRotationCompletedIdle`
+- From: `Idle`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `completed_receipt`
+  - `observer_is_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Idle`
+
+### `ObserveSupervisorRotationCompletedAttached`
+- From: `Attached`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `completed_receipt`
+  - `observer_is_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Attached`
+
+### `ObserveSupervisorRotationCompletedRunning`
+- From: `Running`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `completed_receipt`
+  - `observer_is_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Running`
+
+### `ObserveSupervisorRotationCompletedRetired`
+- From: `Retired`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `completed_receipt`
+  - `observer_is_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Retired`
+
+### `ObserveSupervisorRotationCompletedStopped`
+- From: `Stopped`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `completed_receipt`
+  - `observer_is_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Stopped`
+
+### `ObserveSupervisorRotationCompletedDestroyed`
+- From: `Destroyed`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `completed_receipt`
+  - `observer_is_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Destroyed`
+
+### `ObserveSupervisorRotationRejectedIdle`
+- From: `Idle`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `rejected_receipt`
+  - `observer_is_retained_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Idle`
+
+### `ObserveSupervisorRotationRejectedAttached`
+- From: `Attached`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `rejected_receipt`
+  - `observer_is_retained_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Attached`
+
+### `ObserveSupervisorRotationRejectedRunning`
+- From: `Running`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `rejected_receipt`
+  - `observer_is_retained_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Running`
+
+### `ObserveSupervisorRotationRejectedRetired`
+- From: `Retired`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `rejected_receipt`
+  - `observer_is_retained_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Retired`
+
+### `ObserveSupervisorRotationRejectedStopped`
+- From: `Stopped`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `rejected_receipt`
+  - `observer_is_retained_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Stopped`
+
+### `ObserveSupervisorRotationRejectedDestroyed`
+- From: `Destroyed`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `rejected_receipt`
+  - `observer_is_retained_current`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Destroyed`
+
+### `ObserveSupervisorRotationNotFoundIdle`
+- From: `Idle`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_absent_or_observer_unauthorized`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Idle`
+
+### `ObserveSupervisorRotationNotFoundAttached`
+- From: `Attached`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_absent_or_observer_unauthorized`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Attached`
+
+### `ObserveSupervisorRotationNotFoundRunning`
+- From: `Running`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_absent_or_observer_unauthorized`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Running`
+
+### `ObserveSupervisorRotationNotFoundRetired`
+- From: `Retired`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_absent_or_observer_unauthorized`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Retired`
+
+### `ObserveSupervisorRotationNotFoundStopped`
+- From: `Stopped`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_absent_or_observer_unauthorized`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Stopped`
+
+### `ObserveSupervisorRotationNotFoundDestroyed`
+- From: `Destroyed`
+- On: `ObserveSupervisorRotation`(operation_id, observer_peer_id, observer_signing_public_key, observer_epoch)
+- Guards:
+  - `operation_absent_or_observer_unauthorized`
+- Emits: `SupervisorRotationObservationResolved`
+- To: `Destroyed`
 
 ### `RequestSupervisorTrustPublishIdle`
 - From: `Idle`
@@ -15949,6 +17850,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `PublishSupervisorTrustEdge`
 - To: `Stopped`
 
+### `RequestSupervisorTrustPublishDestroyed`
+- From: `Destroyed`
+- On: `RequestSupervisorTrustPublish`(name, peer_id, address, signing_public_key, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `name_matches_current`
+  - `peer_id_matches_current`
+  - `address_matches_current`
+  - `signing_public_key_matches_current`
+  - `epoch_matches_current`
+- Emits: `PublishSupervisorTrustEdge`
+- To: `Destroyed`
+
 ### `RevokeSupervisorIdle`
 - From: `Idle`
 - On: `RevokeSupervisor`(peer_id, epoch)
@@ -15998,6 +17912,76 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `epoch_matches_current`
 - Emits: `RevokeSupervisorTrustEdge`
 - To: `Stopped`
+
+### `RevokeSupervisorDestroyed`
+- From: `Destroyed`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Destroyed`
+
+### `RetryPendingSupervisorRevokeIdle`
+- From: `Idle`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Idle`
+
+### `RetryPendingSupervisorRevokeAttached`
+- From: `Attached`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Attached`
+
+### `RetryPendingSupervisorRevokeRunning`
+- From: `Running`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Running`
+
+### `RetryPendingSupervisorRevokeRetired`
+- From: `Retired`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Retired`
+
+### `RetryPendingSupervisorRevokeStopped`
+- From: `Stopped`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Stopped`
+
+### `RetryPendingSupervisorRevokeDestroyed`
+- From: `Destroyed`
+- On: `RevokeSupervisor`(peer_id, epoch)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- Emits: `RevokeSupervisorTrustEdge`
+- To: `Destroyed`
 
 ### `SupervisorTrustEdgePublishedIdle`
 - From: `Idle`
@@ -16054,6 +18038,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `epoch_matches_pending_publish`
 - To: `Stopped`
 
+### `SupervisorTrustEdgePublishedDestroyed`
+- From: `Destroyed`
+- On: `SupervisorTrustEdgePublished`(peer_id, epoch)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
+- To: `Destroyed`
+
 ### `SupervisorTrustEdgePublishFailedIdle`
 - From: `Idle`
 - On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
@@ -16109,6 +18104,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `epoch_matches_pending_publish`
 - To: `Stopped`
 
+### `SupervisorTrustEdgePublishFailedDestroyed`
+- From: `Destroyed`
+- On: `SupervisorTrustEdgePublishFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_bound`
+  - `peer_id_matches_current`
+  - `epoch_matches_current`
+  - `peer_id_matches_pending_publish`
+  - `epoch_matches_pending_publish`
+- To: `Destroyed`
+
 ### `SupervisorTrustEdgeRevokedIdle`
 - From: `Idle`
 - On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
@@ -16153,6 +18159,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `peer_id_matches_pending_revoke`
   - `epoch_matches_pending_revoke`
 - To: `Stopped`
+
+### `SupervisorTrustEdgeRevokedDestroyed`
+- From: `Destroyed`
+- On: `SupervisorTrustEdgeRevoked`(peer_id, epoch)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- To: `Destroyed`
 
 ### `SupervisorTrustEdgeRevokeFailedIdle`
 - From: `Idle`
@@ -16199,6 +18214,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `epoch_matches_pending_revoke`
 - To: `Stopped`
 
+### `SupervisorTrustEdgeRevokeFailedDestroyed`
+- From: `Destroyed`
+- On: `SupervisorTrustEdgeRevokeFailed`(peer_id, epoch, reason)
+- Guards:
+  - `supervisor_unbound`
+  - `peer_id_matches_pending_revoke`
+  - `epoch_matches_pending_revoke`
+- To: `Destroyed`
+
 ### `PublishLocalEndpointIdle`
 - From: `Idle`
 - On: `PublishLocalEndpoint`(endpoint)
@@ -16216,6 +18240,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PublishLocalEndpoint`(endpoint)
 - Emits: `LocalEndpointChanged`
 - To: `Running`
+
+### `PublishLocalEndpointTerminalSupervisorCleanupRetired`
+- From: `Retired`
+- On: `PublishLocalEndpoint`(endpoint)
+- Guards:
+  - `durable_supervisor_cleanup_authority_present`
+- Emits: `LocalEndpointChanged`
+- To: `Retired`
+
+### `PublishLocalEndpointTerminalSupervisorCleanupStopped`
+- From: `Stopped`
+- On: `PublishLocalEndpoint`(endpoint)
+- Guards:
+  - `durable_supervisor_cleanup_authority_present`
+- Emits: `LocalEndpointChanged`
+- To: `Stopped`
+
+### `PublishLocalEndpointTerminalSupervisorCleanupDestroyed`
+- From: `Destroyed`
+- On: `PublishLocalEndpoint`(endpoint)
+- Guards:
+  - `durable_supervisor_cleanup_authority_present`
+- Emits: `LocalEndpointChanged`
+- To: `Destroyed`
 
 ### `ClearLocalEndpointIdle`
 - From: `Idle`
@@ -16453,6 +18501,475 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `sender_peer_id_mismatch`
 - Emits: `SupervisorBridgeCommandAdmissionResolved`
 - To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedIdle`
+- From: `Idle`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedAttached`
+- From: `Attached`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedRunning`
+- From: `Running`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedRetired`
+- From: `Retired`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `destroyed_cleanup_command_allowed`
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeIdle`
+- From: `Idle`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_matches_pending`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeAttached`
+- From: `Attached`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_matches_pending`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeRunning`
+- From: `Running`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_matches_pending`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeRetired`
+- From: `Retired`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_matches_pending`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_matches_pending`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_matches_pending`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorCleanupCommandAdmissionNotBoundIdle`
+- From: `Idle`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_not_bound`
+  - `not_pending_revoke_retry`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorCleanupCommandAdmissionNotBoundAttached`
+- From: `Attached`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_not_bound`
+  - `not_pending_revoke_retry`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorCleanupCommandAdmissionNotBoundRunning`
+- From: `Running`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_not_bound`
+  - `not_pending_revoke_retry`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionNotBoundRetired`
+- From: `Retired`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_not_bound`
+  - `not_pending_revoke_retry`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorCleanupCommandAdmissionNotBoundStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_not_bound`
+  - `not_pending_revoke_retry`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorCleanupCommandAdmissionNotBoundDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_not_bound`
+  - `not_pending_revoke_retry`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorIdle`
+- From: `Idle`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorAttached`
+- From: `Attached`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorRunning`
+- From: `Running`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorRetired`
+- From: `Retired`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorCleanupCommandAdmissionSenderMismatchIdle`
+- From: `Idle`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorCleanupCommandAdmissionSenderMismatchAttached`
+- From: `Attached`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorCleanupCommandAdmissionSenderMismatchRunning`
+- From: `Running`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionSenderMismatchRetired`
+- From: `Retired`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorCleanupCommandAdmissionSenderMismatchStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorCleanupCommandAdmissionSenderMismatchDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorIdle`
+- From: `Idle`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorAttached`
+- From: `Attached`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorRunning`
+- From: `Running`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorRetired`
+- From: `Retired`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `pending_revoke_present`
+  - `supervisor_binding_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchIdle`
+- From: `Idle`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Idle`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchAttached`
+- From: `Attached`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Attached`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchRunning`
+- From: `Running`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Running`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchRetired`
+- From: `Retired`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Retired`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchStopped`
+- From: `Stopped`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchDestroyed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `revoke_command`
+  - `supervisor_unbound`
+  - `supervisor_peer_id_matches_pending`
+  - `supervisor_epoch_matches_pending`
+  - `sender_peer_id_mismatch`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveSupervisorCleanupCommandAdmissionCommandNotAllowed`
+- From: `Destroyed`
+- On: `ResolveSupervisorCleanupCommandAdmission`(command_kind, supervisor_peer_id, supervisor_epoch, sender_peer_id)
+- Guards:
+  - `destroyed_cleanup_command_not_allowed`
+  - `supervisor_bound`
+  - `supervisor_peer_id_matches_current`
+  - `supervisor_epoch_matches_current`
+  - `sender_peer_id_matches_current`
+- Emits: `SupervisorBridgeCommandAdmissionResolved`
+- To: `Destroyed`
 
 ### `AuthorizeSupervisorMobPeerOverlayIdle`
 - From: `Idle`

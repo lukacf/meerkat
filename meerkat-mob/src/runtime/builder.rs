@@ -36,6 +36,37 @@ enum ResumeTrustSource {
     },
 }
 
+fn recovered_endpoint_runtime_is_retiring(
+    state: &crate::machines::mob_machine::MobMachineState,
+    identity: &crate::machines::mob_machine::AgentIdentity,
+) -> bool {
+    let Some(runtime_id) = state.identity_to_runtime.get(identity) else {
+        return false;
+    };
+    state.member_state_markers.get(runtime_id)
+        == Some(&crate::machines::mob_machine::MobMemberState::Retiring)
+}
+
+fn recovered_member_edge_allows_trust_repair(
+    state: &crate::machines::mob_machine::MobMachineState,
+    edge: &crate::machines::mob_machine::WiringEdge,
+) -> bool {
+    !recovered_endpoint_runtime_is_retiring(state, &edge.a)
+        && !recovered_endpoint_runtime_is_retiring(state, &edge.b)
+}
+
+fn recovered_peer_only_overlay_allows_trust_reconcile(
+    state: &crate::machines::mob_machine::MobMachineState,
+    member_edges: &std::collections::BTreeSet<crate::machines::mob_machine::WiringEdge>,
+    identity: &crate::machines::mob_machine::AgentIdentity,
+) -> bool {
+    !recovered_endpoint_runtime_is_retiring(state, identity)
+        && member_edges.iter().all(|edge| {
+            (edge.a != *identity && edge.b != *identity)
+                || recovered_member_edge_allows_trust_repair(state, edge)
+        })
+}
+
 // ---------------------------------------------------------------------------
 // MobBuilder
 // ---------------------------------------------------------------------------
@@ -822,8 +853,8 @@ fn peer_only_trust_overlay_from_mob_machine(
     super::provisioner::PeerOnlyTrustOverlay::from_generated_mob_member_peer_overlay(&obligation)
 }
 
-fn peer_only_member_has_pending_supervisor_acceptance(
-    accepted_peer_ids: &std::collections::BTreeSet<String>,
+fn peer_only_member_has_pending_supervisor_operation(
+    pending_peer_ids: &std::collections::BTreeSet<String>,
     member_ref: &MemberRef,
 ) -> bool {
     matches!(
@@ -832,7 +863,7 @@ fn peer_only_member_has_pending_supervisor_acceptance(
             peer_id,
             session_id: None,
             ..
-        } if accepted_peer_ids.contains(peer_id)
+        } if pending_peer_ids.contains(peer_id)
     )
 }
 
@@ -1426,6 +1457,64 @@ fn seed_mob_authority_sync_from_events(
                     "recover_member_session_binding_recovered",
                 )?;
             }
+            MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                agent_runtime_id,
+                generation,
+                releasing,
+                session_id,
+                retiring_peer_endpoint,
+                ..
+            } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRosterMemberRetirementStarted {
+                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+                        generation: mob_dsl::Generation::from_domain(*generation),
+                        releasing: releasing.as_ref().map(mob_dsl::SessionId::from_domain),
+                        session_id: session_id.as_ref().map(mob_dsl::SessionId::from_domain),
+                        retiring_peer_endpoint: retiring_peer_endpoint
+                            .as_ref()
+                            .map(mob_dsl::MemberPeerEndpoint::from),
+                    },
+                    "recover_member_retirement_started",
+                )?;
+            }
+            MobEventKind::RemoteMemberRuntimeRetired {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+            } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRemoteMemberRuntimeRetired {
+                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+                        fence_token: mob_dsl::FenceToken::from_domain(*fence_token),
+                        generation: mob_dsl::Generation::from_domain(*generation),
+                    },
+                    "recover_remote_member_runtime_retired",
+                )?;
+            }
+            MobEventKind::RemoteMemberSupervisorRevoked {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+            } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRemoteMemberSupervisorRevoked {
+                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+                        fence_token: mob_dsl::FenceToken::from_domain(*fence_token),
+                        generation: mob_dsl::Generation::from_domain(*generation),
+                    },
+                    "recover_remote_member_supervisor_revoked",
+                )?;
+            }
             MobEventKind::MemberRetired {
                 agent_identity,
                 generation,
@@ -1505,6 +1594,23 @@ fn seed_mob_authority_sync_from_events(
             }
             _ => {}
         }
+    }
+    let recovered_wiring_edges = authority
+        .state()
+        .wiring_edges
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for edge in recovered_wiring_edges {
+        apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::ConvergeRecoveredRosterTopology {
+                a_identity: edge.a.clone(),
+                b_identity: edge.b.clone(),
+                edge,
+            },
+            "converge_recovered_roster_topology",
+        )?;
     }
     seed_mob_definition_spawn_policy(authority, definition, "recover_definition_spawn_policy")?;
     Ok(())
@@ -2652,13 +2758,25 @@ impl MobBuilder {
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
         per_spawn_external_tools_seed: &mut BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
     ) -> Result<(), MobError> {
-        let pending_supervisor_accepted_peer_ids: std::collections::BTreeSet<String> =
+        // Every exact operation target is potentially already complete even if
+        // its observation checkpoint timed out. Resume must defer old-authority
+        // authorization/trust reconciliation for the full target set, not only
+        // peers with checkpointed accepted receipts; the rotation retry owns
+        // observation and final activation.
+        let pending_supervisor_operation_peer_ids: std::collections::BTreeSet<String> =
             supervisor_bridge
                 .authority()
                 .await
                 .pending_rotation
                 .as_ref()
-                .map(|pending| pending.accepted_peer_ids.iter().cloned().collect())
+                .map(|pending| {
+                    pending
+                        .accepted_peer_ids
+                        .iter()
+                        .cloned()
+                        .chain(pending.member_targets.keys().cloned())
+                        .collect()
+                })
                 .unwrap_or_default();
         let provisioner = MultiBackendProvisioner::new(
             session_service.clone(),
@@ -2688,6 +2806,17 @@ impl MobBuilder {
             .state()
             .member_session_bindings
             .values()
+            // A releasing retirement-start deliberately removes the ordinary
+            // member binding, but its exact session remains machine-owned by
+            // the durable pending-retirement obligation. Treat that session as
+            // claimed during resume so orphan reconciliation cannot archive it
+            // before the routed retirement retry runs.
+            .chain(
+                dsl_authority
+                    .state()
+                    .runtime_retire_pending_sessions
+                    .values(),
+            )
             .filter_map(|session_id| meerkat_core::types::SessionId::parse(&session_id.0).ok())
             .collect::<std::collections::HashSet<_>>();
 
@@ -3207,6 +3336,15 @@ impl MobBuilder {
             }
         }
         for entry in &entries {
+            let dsl_identity =
+                crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity);
+            if recovered_endpoint_runtime_is_retiring(dsl_authority.state(), &dsl_identity) {
+                // Retirement replay restored the exact endpoint from the
+                // durable start marker. Never replace it with a freshly
+                // materialized runtime identity during resume: reciprocal
+                // cleanup must target the trust row for the retiring runtime.
+                continue;
+            }
             if broken_members.contains(&entry.agent_identity) {
                 let _ = roster.set_comms_identity(&entry.agent_identity, None, None);
                 continue;
@@ -3266,6 +3404,15 @@ impl MobBuilder {
             }
         }
         for entry in &entries {
+            let dsl_identity =
+                crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity);
+            if recovered_endpoint_runtime_is_retiring(dsl_authority.state(), &dsl_identity) {
+                // Retirement replay owns the remaining remote effects. Never
+                // re-authorize or rebind its supervisor during resume: doing
+                // so would undo a completed revoke or consume a redacted
+                // bootstrap secret before the exact cleanup retry runs.
+                continue;
+            }
             if broken_members.contains(&entry.agent_identity)
                 || provisioner.comms_runtime(&entry.member_ref).await.is_some()
             {
@@ -3280,8 +3427,8 @@ impl MobBuilder {
             ) {
                 continue;
             }
-            if peer_only_member_has_pending_supervisor_acceptance(
-                &pending_supervisor_accepted_peer_ids,
+            if peer_only_member_has_pending_supervisor_operation(
+                &pending_supervisor_operation_peer_ids,
                 &entry.member_ref,
             ) {
                 continue;
@@ -3353,6 +3500,15 @@ impl MobBuilder {
                 } else {
                     continue;
                 };
+                // A durable retirement-start marker means scoped topology
+                // cleanup may already have removed one side before the actor
+                // crashed. Recreating either side here would undo that
+                // machine-authorized cleanup. Existing trust is deliberately
+                // left untouched so the retirement retry can finish removing
+                // it through the same scoped path.
+                if !recovered_member_edge_allows_trust_repair(dsl_authority.state(), edge) {
+                    continue;
+                }
                 let peer_identity = AgentIdentity::from(peer_dsl_identity.0.as_str());
                 let peer_member_identity = AgentIdentity::from(peer_identity.as_str());
                 let peer_entry = roster.get(&peer_member_identity).cloned().ok_or_else(|| {
@@ -3416,7 +3572,9 @@ impl MobBuilder {
             }
 
             for edge in &machine_external_peer_edges {
-                if edge.local == local_dsl_identity {
+                if edge.local == local_dsl_identity
+                    && !recovered_endpoint_runtime_is_retiring(dsl_authority.state(), &edge.local)
+                {
                     let spec = trusted_peer_descriptor_from_dsl_external_endpoint(&edge.endpoint)?;
                     desired_trust.push(ResumeDesiredTrust {
                         spec,
@@ -3439,8 +3597,8 @@ impl MobBuilder {
                 if desired_trust.is_empty() {
                     continue;
                 }
-                if peer_only_member_has_pending_supervisor_acceptance(
-                    &pending_supervisor_accepted_peer_ids,
+                if peer_only_member_has_pending_supervisor_operation(
+                    &pending_supervisor_operation_peer_ids,
                     &entry.member_ref,
                 ) {
                     continue;
@@ -3449,6 +3607,18 @@ impl MobBuilder {
                 // the supervisor side; their trust lives on the remote
                 // process, so resume reconciles it through the supervisor
                 // bridge instead of mutating local state.
+                // The V3 handoff carries the complete overlay and replaces
+                // the remote projection atomically. If any connected edge is
+                // retiring, even a filtered add would either recreate that
+                // edge or remove surviving trust that scoped cleanup still
+                // needs. Defer the whole peer-only overlay reconcile instead.
+                if !recovered_peer_only_overlay_allows_trust_reconcile(
+                    dsl_authority.state(),
+                    &machine_wiring_edges,
+                    &local_dsl_identity,
+                ) {
+                    continue;
+                }
                 let desired_peer_trust = peer_only_trust_overlay_from_mob_machine(
                     dsl_authority,
                     topology_epoch,
@@ -3903,5 +4073,367 @@ mod tests {
         assert!(authority.state().member_kickoff_pending.contains(
             &crate::machines::mob_machine::AgentIdentity::from_domain(&identity,)
         ));
+    }
+
+    #[test]
+    fn recovered_retiring_runtime_suppresses_trust_repair_without_erasing_topology() {
+        let definition = MobDefinition::explicit("retiring-trust-replay");
+        let retiring = AgentIdentity::from("alpha");
+        let active_peer = AgentIdentity::from("beta");
+        let unrelated_active = AgentIdentity::from("gamma");
+        let retiring_runtime = AgentRuntimeId::initial(retiring.clone());
+        let active_peer_runtime = AgentRuntimeId::initial(active_peer.clone());
+        let unrelated_runtime = AgentRuntimeId::initial(unrelated_active.clone());
+        let retiring_pubkey = [11; 32];
+        let retiring_peer_id = PeerId::from_ed25519_pubkey(&retiring_pubkey);
+        let retiring_endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "retiring-trust-replay/worker/alpha",
+            retiring_peer_id.to_string(),
+            retiring_pubkey,
+            "inproc://retiring-trust-replay/worker/alpha",
+        )
+        .expect("retiring endpoint");
+        let external_pubkey = [12; 32];
+        let external_peer_id = PeerId::from_ed25519_pubkey(&external_pubkey);
+        let external_endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "external-peer",
+            external_peer_id.to_string(),
+            external_pubkey,
+            "tcp://127.0.0.1:32123",
+        )
+        .expect("external endpoint");
+        let event = |cursor, kind| MobEvent {
+            cursor,
+            timestamp: Utc::now(),
+            mob_id: definition.id.clone(),
+            kind,
+        };
+        let retiring_edge = dsl_wiring_edge(&retiring, &active_peer);
+        let active_edge = dsl_wiring_edge(&active_peer, &unrelated_active);
+        let events = vec![
+            event(
+                1,
+                MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                    retiring.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    retiring_runtime.clone(),
+                    ProfileName::from("worker"),
+                )),
+            ),
+            event(
+                2,
+                MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                    active_peer.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    active_peer_runtime,
+                    ProfileName::from("worker"),
+                )),
+            ),
+            event(
+                3,
+                MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                    unrelated_active.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    unrelated_runtime,
+                    ProfileName::from("worker"),
+                )),
+            ),
+            event(
+                4,
+                MobEventKind::MembersWired {
+                    a: retiring.clone(),
+                    b: active_peer.clone(),
+                },
+            ),
+            event(
+                5,
+                MobEventKind::MembersWired {
+                    a: active_peer.clone(),
+                    b: unrelated_active,
+                },
+            ),
+            event(
+                6,
+                MobEventKind::ExternalPeerWired {
+                    local: retiring.clone(),
+                    spec: external_endpoint.clone(),
+                },
+            ),
+            event(7, MobEventKind::MobDestroying),
+            event(
+                8,
+                MobEventKind::MemberRetirementStarted {
+                    agent_identity: retiring.clone(),
+                    agent_runtime_id: retiring_runtime.clone(),
+                    generation: Generation::INITIAL,
+                    role: ProfileName::from("worker"),
+                    releasing: None,
+                    session_id: None,
+                    retiring_peer_endpoint: Some(retiring_endpoint.clone()),
+                },
+            ),
+            event(
+                9,
+                MobEventKind::RemoteMemberRuntimeRetired {
+                    agent_identity: retiring.clone(),
+                    agent_runtime_id: retiring_runtime.clone(),
+                    fence_token: FenceToken::new(1),
+                    generation: Generation::INITIAL,
+                },
+            ),
+            event(
+                10,
+                MobEventKind::RemoteMemberSupervisorRevoked {
+                    agent_identity: retiring.clone(),
+                    agent_runtime_id: retiring_runtime.clone(),
+                    fence_token: FenceToken::new(1),
+                    generation: Generation::INITIAL,
+                },
+            ),
+        ];
+        let mut authority = seed_mob_authority();
+
+        seed_mob_authority_sync_from_events(&mut authority, &events, &definition)
+            .expect("durable retirement replay should seed MobMachine");
+
+        let retiring_dsl = crate::machines::mob_machine::AgentIdentity::from_domain(&retiring);
+        let active_peer_dsl =
+            crate::machines::mob_machine::AgentIdentity::from_domain(&active_peer);
+        let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+            retiring_dsl.clone(),
+            crate::machines::mob_machine::ExternalPeerEndpoint::from(&external_endpoint),
+        );
+        let external_key = dsl_external_peer_key(&retiring, &external_endpoint.name);
+        {
+            let state = authority.state();
+            assert!(state.wiring_edges.contains(&retiring_edge));
+            assert!(state.wiring_edges.contains(&active_edge));
+            assert!(state.external_peer_edges.contains(&external_edge));
+            assert!(recovered_endpoint_runtime_is_retiring(state, &retiring_dsl));
+            assert!(state.remote_runtime_retired_exact(
+                &retiring_dsl,
+                &crate::machines::mob_machine::AgentRuntimeId::from_domain(&retiring_runtime),
+                crate::machines::mob_machine::FenceToken::from_domain(FenceToken::new(1)),
+                crate::machines::mob_machine::Generation::from_domain(Generation::INITIAL),
+            ));
+            assert!(state.remote_supervisor_revoked_exact(
+                &retiring_dsl,
+                &crate::machines::mob_machine::AgentRuntimeId::from_domain(&retiring_runtime),
+                crate::machines::mob_machine::FenceToken::from_domain(FenceToken::new(1)),
+                crate::machines::mob_machine::Generation::from_domain(Generation::INITIAL),
+            ));
+            assert!(!recovered_endpoint_runtime_is_retiring(
+                state,
+                &active_peer_dsl
+            ));
+            assert_eq!(
+                state.member_peer_endpoints.get(&retiring_dsl),
+                Some(&crate::machines::mob_machine::MemberPeerEndpoint::from(
+                    &retiring_endpoint,
+                )),
+                "retirement replay must retain the exact endpoint used by surviving trust rows"
+            );
+            assert!(!recovered_member_edge_allows_trust_repair(
+                state,
+                &retiring_edge
+            ));
+            assert!(recovered_member_edge_allows_trust_repair(
+                state,
+                &active_edge
+            ));
+            assert!(!recovered_peer_only_overlay_allows_trust_reconcile(
+                state,
+                &state.wiring_edges,
+                &active_peer_dsl,
+            ));
+        }
+
+        let remote_checkpoint = apply_seeded_mob_input_transition(
+            &mut authority,
+            crate::machines::mob_machine::MobMachineInput::RecordRemoteMemberRuntimeRetired {
+                agent_identity: retiring_dsl.clone(),
+                agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                    &retiring_runtime,
+                ),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(
+                    FenceToken::new(1),
+                ),
+                generation: crate::machines::mob_machine::Generation::from_domain(
+                    Generation::INITIAL,
+                ),
+            },
+            "test_recovered_remote_runtime_checkpoint_idempotent",
+        )
+        .expect("exact remote runtime checkpoint should be idempotent after replay");
+        assert!(remote_checkpoint.effects().iter().any(|effect| matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::AppendLifecycleJournal {
+                kind: crate::machines::mob_machine::MobLifecycleJournalKind::RemoteMemberRuntimeRetired,
+                ..
+            }
+        )));
+
+        let supervisor_checkpoint = apply_seeded_mob_input_transition(
+            &mut authority,
+            crate::machines::mob_machine::MobMachineInput::RecordRemoteMemberSupervisorRevoked {
+                agent_identity: retiring_dsl.clone(),
+                agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                    &retiring_runtime,
+                ),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(
+                    FenceToken::new(1),
+                ),
+                generation: crate::machines::mob_machine::Generation::from_domain(
+                    Generation::INITIAL,
+                ),
+            },
+            "test_recovered_remote_supervisor_checkpoint_idempotent",
+        )
+        .expect("exact remote supervisor checkpoint should be idempotent after replay");
+        assert!(supervisor_checkpoint.effects().iter().any(|effect| matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::AppendLifecycleJournal {
+                kind: crate::machines::mob_machine::MobLifecycleJournalKind::RemoteMemberSupervisorRevoked,
+                ..
+            }
+        )));
+
+        let stale_observation = apply_seeded_mob_input_transition(
+            &mut authority,
+            crate::machines::mob_machine::MobMachineInput::AuthorizeRetiringMemberTrustCleanupObserved {
+                edge: retiring_edge.clone(),
+                a_identity: retiring_edge.a.clone(),
+                a_peer_id: crate::machines::mob_machine::PeerId::from("alpha-peer"),
+                b_identity: retiring_edge.b.clone(),
+                b_peer_id: crate::machines::mob_machine::PeerId::from("beta-peer"),
+                agent_identity: retiring_dsl.clone(),
+                agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                    &retiring_runtime,
+                ),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(
+                    FenceToken::new(2),
+                ),
+                generation: crate::machines::mob_machine::Generation::from_domain(
+                    Generation::INITIAL,
+                ),
+            },
+            "test_recovered_retiring_cleanup_stale_fence",
+        );
+        assert!(
+            stale_observation.is_err(),
+            "stale retirement material must not authorize observed trust cleanup"
+        );
+
+        let transition = apply_seeded_mob_input_transition(
+            &mut authority,
+            crate::machines::mob_machine::MobMachineInput::AuthorizeRetiringMemberTrustCleanupObserved {
+                edge: retiring_edge.clone(),
+                a_identity: retiring_edge.a.clone(),
+                a_peer_id: crate::machines::mob_machine::PeerId::from("alpha-peer"),
+                b_identity: retiring_edge.b.clone(),
+                b_peer_id: crate::machines::mob_machine::PeerId::from("beta-peer"),
+                agent_identity: retiring_dsl,
+                agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                    &retiring_runtime,
+                ),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(
+                    FenceToken::new(1),
+                ),
+                generation: crate::machines::mob_machine::Generation::from_domain(
+                    Generation::INITIAL,
+                ),
+            },
+            "test_recovered_retiring_cleanup_exact_runtime",
+        )
+        .expect("exact replayed retirement material should authorize observed trust cleanup");
+        assert!(transition.effects().iter().any(|effect| matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::MemberTrustUnwiringRequested {
+                edge,
+                a_peer_id,
+                b_peer_id,
+                ..
+            } if edge == &retiring_edge
+                && a_peer_id.0 == "alpha-peer"
+                && b_peer_id.0 == "beta-peer"
+        )));
+
+        let external_cleanup = apply_seeded_mob_input_transition(
+            &mut authority,
+            crate::machines::mob_machine::MobMachineInput::CleanupRetiringExternalPeerObservedAbsent {
+                key: external_key,
+                edge: external_edge.clone(),
+                agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(&retiring),
+                agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                    &retiring_runtime,
+                ),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(
+                    FenceToken::new(1),
+                ),
+                generation: crate::machines::mob_machine::Generation::from_domain(
+                    Generation::INITIAL,
+                ),
+            },
+            "test_recovered_retiring_external_cleanup_without_runtime",
+        )
+        .expect("exact replayed endpoint should authorize no-effect external cleanup without live comms");
+        assert!(
+            !authority
+                .state()
+                .external_peer_edges
+                .contains(&external_edge)
+        );
+        assert!(external_cleanup.effects().iter().any(|effect| matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::WiringGraphChanged { .. }
+        )));
+        assert!(external_cleanup.effects().iter().all(|effect| !matches!(
+            effect,
+            crate::machines::mob_machine::MobMachineEffect::ExternalPeerTrustUnwiringRequested { .. }
+        )));
+
+        let generic_terminal = apply_seeded_mob_signal_transition(
+            &mut authority,
+            crate::machines::mob_machine::MobMachineSignal::ObserveMemberRetirementArchived {
+                agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(&retiring),
+                agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                    &retiring_runtime,
+                ),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(
+                    FenceToken::new(1),
+                ),
+                generation: crate::machines::mob_machine::Generation::from_domain(
+                    Generation::INITIAL,
+                ),
+                session_id: None,
+            },
+            "test_remote_runtime_generic_terminal_rejected",
+        );
+        assert!(
+            generic_terminal.is_err(),
+            "generic session archive observation must not terminalize a peer-only runtime"
+        );
+
+        apply_seeded_mob_signal(
+            &mut authority,
+            crate::machines::mob_machine::MobMachineSignal::ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked {
+                agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(&retiring),
+                agent_runtime_id: crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                    &retiring_runtime,
+                ),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(
+                    FenceToken::new(1),
+                ),
+                generation: crate::machines::mob_machine::Generation::from_domain(
+                    Generation::INITIAL,
+                ),
+            },
+            "test_recovered_remote_runtime_revoked_terminal_clear",
+        )
+        .expect("revoked remote terminal proof should clear the runtime checkpoint");
+        assert!(authority.state().remote_runtime_retired_ids.is_empty());
     }
 }

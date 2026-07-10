@@ -374,7 +374,7 @@ The LLM-facing comms tools return lightweight tool receipts. Host-side `comms/se
 </Accordion>
 
 <Accordion title="peers">
-List all discoverable peers and their addresses.
+List all discoverable peers through the canonical typed peer directory.
 
 Entries come from the `TrustStore` (plus runtime-resolved sources when a
 runtime command authority is attached). The current agent and private
@@ -389,13 +389,33 @@ unique — always use `peer_id` for sends.
 {
   "peers": [
     {
+      "peer_id": "550e8400-e29b-41d4-a716-446655440001",
       "name": "review-agent",
-      "peer_id": "018f6b2a-...",
-      "address": "tcp://192.168.1.50:4200"
+      "address": {
+        "transport": "tcp",
+        "endpoint": "192.168.1.50:4200"
+      },
+      "source": "trusted",
+      "sendable_kinds": ["peer_message", "peer_request", "peer_response"],
+      "capabilities": {
+        "version": 1,
+        "extensions": {"review": true}
+      },
+      "meta": {
+        "description": "Reviews pull requests",
+        "labels": {"role": "reviewer"}
+      }
     }
   ]
 }
 ```
+
+Route with `peer_id`, never `name` or a reconstructed address string.
+`address.transport` is one of `inproc`, `uds`, or `tcp`; `source` is one of
+`trusted`, `inproc`, `trusted_and_inproc`, or `unknown`. Check
+`sendable_kinds` before choosing a comms operation. `capabilities` is a
+versioned extension envelope, while `meta` is supplementary display and
+discovery metadata only.
 </Accordion>
 
 ### Tool availability

@@ -34,11 +34,13 @@ rust_library(
     crate_name = "meerkat_comms",
     crate_root = "src/lib.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -68,11 +70,13 @@ rust_library(
     crate_name = "meerkat_comms",
     crate_root = "src/lib.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -110,11 +114,13 @@ rust_test(
     crate_name = "meerkat_comms",
     crate_root = "src/lib.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -164,11 +170,13 @@ rust_test(
     crate_name = "e2e",
     crate_root = "tests/e2e.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = [
@@ -209,6 +217,63 @@ rust_test(
 )
 
 rust_test(
+    name = "embedded_skill_registration_test",
+    aliases = aliases(
+        package_name = "meerkat-comms",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "embedded_skill_registration",
+    crate_root = "tests/embedded_skill_registration.rs",
+    crate_features = [
+        "capability",
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
+        "skills/multi-agent-comms/SKILL.md",
+    ],
+    srcs = [
+        "tests/embedded_skill_registration.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.26",
+        "CARGO_BIN_NAME": "embedded_skill_registration",
+        "CARGO_MANIFEST_DIR": "./meerkat-comms",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-comms",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-capabilities:meerkat_capabilities",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-runtime:meerkat_runtime_test_support",
+        "//meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-comms",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "inbox_admission_toctou_test",
     aliases = aliases(
         package_name = "meerkat-comms",
@@ -220,11 +285,13 @@ rust_test(
     crate_name = "inbox_admission_toctou",
     crate_root = "tests/inbox_admission_toctou.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = [
@@ -275,11 +342,13 @@ rust_test(
     crate_name = "inproc_canonical_peer_routing",
     crate_root = "tests/inproc_canonical_peer_routing.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = [
@@ -330,11 +399,13 @@ rust_test(
     crate_name = "router_ambiguous_name_typed_error",
     crate_root = "tests/router_ambiguous_name_typed_error.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = [
@@ -385,11 +456,13 @@ rust_test(
     crate_name = "router_integration",
     crate_root = "tests/router_integration.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = [
@@ -440,11 +513,13 @@ rust_test(
     crate_name = "trust_duplicate_name_ok_duplicate_id_rejected",
     crate_root = "tests/trust_duplicate_name_ok_duplicate_id_rejected.rs",
     crate_features = [
+        "capability",
         "integration-real-tests",
     ],
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
         "skills/multi-agent-comms/SKILL.md",
     ],
     srcs = [
@@ -486,6 +561,7 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
+        ":embedded_skill_registration_test",
         ":inbox_admission_toctou_test",
         ":inproc_canonical_peer_routing_test",
         ":meerkat_comms_unit_test",

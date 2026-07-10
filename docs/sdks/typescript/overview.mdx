@@ -85,6 +85,13 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `patchConfig(patch)` | Merge-patch runtime configuration |
 | `liveOpen/liveStatus/liveClose/liveSendInput/liveCommitInput/liveInterrupt/liveTruncate/liveRefresh` | Direct wrappers for the `live/*` RPC surface |
 
+Schedule methods parse the canonical flattened response shape: planning,
+timestamps, labels, and other schedule configuration are top-level fields,
+not a nested `config`, and internal `machine_state` is never public. Missing or
+malformed schedule, occurrence, and tool arrays—or required facts within their
+entries—throw `MeerkatError` with `INVALID_RESPONSE` instead of becoming empty
+or zero-valued results.
+
 ### Auth wrappers
 
 The SDK also exposes the auth-profile wrappers from the RPC surface:
@@ -155,10 +162,21 @@ const channel = LiveChannel.session(client, session.id, {
 
 const openResult = await channel.open();
 // Connect to openResult.transport.url externally.
+await channel.sendInputImage(
+  "turn-42-diagram",
+  "image/png",
+  imageDataBase64,
+);
+// Promise resolution is queue acceptance. Wait for user_content_committed
+// carrying "turn-42-diagram" before treating the image as durable context.
 await channel.sendInputText("hello");
 await channel.commitInput("text");
 await channel.close();
 ```
+
+Image keys are required, caller-stable, and session-scoped. See
+[Live Channels](/guides/realtime#sending-image-input) for same-key replay,
+conflict handling, and reconnect hydration limits.
 
 ### Mob methods
 

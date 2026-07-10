@@ -2821,6 +2821,16 @@ impl MultiBackendProvisioner {
         binding: Option<PeerOnlyBindingParts<'_>>,
         rebind_authority: Option<&PeerOnlyRebindAuthority>,
     ) -> Result<PeerOnlySupervisorAuthorization, MobError> {
+        if let Some((current, pending)) = self.pending_supervisor_rotation().await?
+            && pending
+                .accepted_peer_ids
+                .iter()
+                .any(|peer_id| peer_id == &peer.peer_id.to_string())
+        {
+            return Err(Self::pending_supervisor_rotation_blocks_rebind(
+                &current, &pending, peer,
+            ));
+        }
         let payload = self.bridge_supervisor_payload_for_recipient(peer).await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
@@ -2831,9 +2841,9 @@ impl MultiBackendProvisioner {
         // ACCEPTED supervisor (fail closed). Trust that pre-existed the call
         // was established by an earlier confirmed terminality and is left in
         // place. The corresponding MobMachine `pending_recipient_trust`
-        // obligation is owned by the actor around external provisioning — the
-        // provisioner cannot reach MobMachine authority (see
-        // `clear_pending_supervisor_acceptance_for_peer_ids`).
+        // obligation is owned by the actor around external provisioning. The
+        // provisioner can read the durable pending rotation to refuse an old-
+        // authority rebind, but cannot rewrite that MobMachine-owned fact.
         let install = self.supervisor_bridge.trust_recipient(peer).await?;
         // 60s (not 30s): the requester must tolerate the same async
         // trust/peer-registration propagation lag the live peer waits out
@@ -2892,6 +2902,13 @@ impl MultiBackendProvisioner {
                         }),
                     });
                 };
+                if let Some((current, pending)) = self.pending_supervisor_rotation().await? {
+                    let pending_error =
+                        Self::pending_supervisor_rotation_blocks_rebind(&current, &pending, peer);
+                    return Err(self
+                        .rollback_supervisor_recipient_trust(peer, install, pending_error)
+                        .await);
+                }
                 if rebind_authority.peer.name != expected_peer.name
                     || rebind_authority.peer.peer_id != expected_peer.peer_id
                     || rebind_authority.peer.address != expected_peer.address
@@ -2928,11 +2945,6 @@ impl MultiBackendProvisioner {
                         "peer-only bind response changed authorized endpoint for '{peer_id}'"
                     )));
                 }
-                self.clear_pending_supervisor_acceptance_for_peer_ids(&[
-                    peer_id.to_string(),
-                    bind.peer_id.clone(),
-                ])
-                .await?;
                 return Ok(PeerOnlySupervisorAuthorization {
                     peer: expected_peer,
                     rebind_required: None,
@@ -2988,15 +3000,53 @@ impl MultiBackendProvisioner {
         original_error
     }
 
-    async fn clear_pending_supervisor_acceptance_for_peer_ids(
+    async fn pending_supervisor_rotation(
         &self,
-        _peer_ids: &[String],
-    ) -> Result<(), MobError> {
-        // Supervisor pending-rotation facts are owned by MobMachine. The
-        // provisioner can observe a bind fallback, but it does not own the
-        // generated authority needed to rewrite supervisor metadata. Actor
-        // paths that own the DSL perform the authoritative cleanup.
-        Ok(())
+    ) -> Result<
+        Option<(
+            crate::store::SupervisorAuthorityRecord,
+            crate::store::SupervisorPendingRotationRecord,
+        )>,
+        MobError,
+    > {
+        let Some(persistence) = self.binding_persistence.as_ref() else {
+            return Ok(None);
+        };
+        let Some(current) = persistence
+            .runtime_metadata
+            .load_supervisor_authority(&persistence.mob_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(pending) = current.pending_rotation.clone() else {
+            return Ok(None);
+        };
+        Ok(Some((current, pending)))
+    }
+
+    fn pending_supervisor_rotation_blocks_rebind(
+        current: &crate::store::SupervisorAuthorityRecord,
+        pending: &crate::store::SupervisorPendingRotationRecord,
+        peer: &TrustedPeerDescriptor,
+    ) -> MobError {
+        let operation = pending.operation_id.map_or_else(
+            || "legacy operation awaiting migration".to_string(),
+            |operation_id| format!("operation {operation_id}"),
+        );
+        MobError::SupervisorRotationIncomplete {
+            previous_epoch: current.epoch,
+            attempted_epoch: pending.epoch,
+            attempted_public_peer_id: pending.public_peer_id.clone(),
+            rotated_peer_count: pending.accepted_peer_ids.len(),
+            rollback_succeeded: false,
+            pending_authority_recorded: true,
+            rollback_error: None,
+            reason: format!(
+                "supervisor rotation {operation} remains pending; refusing to reauthorize old authority for peer '{}'",
+                peer.peer_id
+            ),
+        }
     }
 
     async fn send_bridge_command_typed<R: super::bridge_protocol::FromBridgeReply>(

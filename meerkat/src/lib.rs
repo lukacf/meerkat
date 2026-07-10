@@ -239,9 +239,11 @@ pub use meerkat_workgraph::{
 mod factory;
 mod model_fallback;
 pub use factory::{
-    AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent,
+    AgentBuildConfig, AgentFactory, BuildAgentError, CreateSessionModelResolution,
+    CreateSessionModelResolutionError, CreateSessionModelResolutionRequest, DynAgent,
     decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,
-    resolve_create_session_default_model, resolve_provider_catalog_default_model,
+    resolve_create_session_default_model, resolve_create_session_model,
+    resolve_provider_catalog_default_model,
 };
 
 pub mod help;
@@ -335,25 +337,13 @@ pub use meerkat_store::SqliteSessionStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolValidationError};
 
-// Embedded skill registration.
-//
-// `mob-communication` must be available across surfaces because sessions can be
-// created under one binary (for example CLI) and resumed under another (for
-// example RPC). Register it from the base crate so any skills-enabled surface
-// links the embedded skill inventory entry even when `meerkat-mob` itself is
-// not compiled into that binary.
+// Cross-surface durable SkillKeys require every skills-enabled facade to link
+// feature-owned embedded declarations, even when the corresponding tool
+// surface is disabled. The declaration and body remain owned by
+// `meerkat-comms`; this static is only the mechanical aggregation edge.
 #[cfg(feature = "skills")]
-inventory::submit! {
-    meerkat_skills::SkillRegistration {
-        id: "mob-communication",
-        name: "Mob Communication",
-        description: "How to communicate with peers in a collaborative mob",
-        scope: meerkat_core::skills::SkillScope::Builtin,
-        requires_capabilities: &["comms"],
-        body: include_str!("../skills/mob-communication/SKILL.md"),
-        extensions: &[],
-    }
-}
+#[used]
+static MEERKAT_COMMS_EMBEDDED_SKILL_LINK: fn() = meerkat_comms::link_embedded_skill_registrations;
 
 #[cfg(feature = "skills")]
 inventory::submit! {

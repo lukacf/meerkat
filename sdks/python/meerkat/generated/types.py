@@ -1036,19 +1036,33 @@ class RuntimeHostInfo:
 
 @dataclass
 class Schedule:
-    """Wire payload for Schedule."""
-    config: dict[str, Any]
+    """Canonical public projection returned by every `schedule/*` RPC method.
+
+The durable schedule domain object has a custom persistence serializer
+which includes generated machine authority state. That persistence shape
+must not double as the public contract. This projection deliberately keeps
+the existing flattened schedule configuration while excluding the private
+machine state, and it is the single source for both production responses
+and generated SDK schemas."""
+    created_at_utc: str
     misfire_policy: dict[str, Any]
     missing_target_policy: Literal['skip', 'mark_misfired']
     next_occurrence_ordinal: int
     overlap_policy: Literal['allow_concurrent', 'skip_if_running']
     phase: Literal['active', 'paused', 'deleted']
+    planning_horizon_days: int
+    planning_horizon_occurrences: int
     revision: int
     schedule_id: str
-    superseded_ack_ids: list[str]
     target: dict[str, Any]
     trigger: dict[str, Any]
+    updated_at_utc: str
+    deleted_at_utc: Optional[str] = None
+    description: Optional[str] = None
+    labels: Optional[dict[str, str]] = None
+    name: Optional[str] = None
     planning_cursor_utc: Optional[str] = None
+    superseded_ack_ids: Optional[list[str]] = None
 
 
 @dataclass
@@ -3012,6 +3026,20 @@ class RealtimeVideoChunk:
 
 
 @dataclass
+class RealtimeImageChunk:
+    """An opaque still-image chunk for vision-capable realtime models.
+
+`mime_type` is the IANA type of the encoded bytes; supported formats are
+provider-specific. The current OpenAI Realtime adapter accepts only
+`image/png` and `image/jpeg`. `data` is the base64-encoded image; the
+provider seam renders it into the provider-native form (for OpenAI
+Realtime, an `input_image` content part carrying a data URL)."""
+    data: str
+    idempotency_key: str
+    mime_type: str
+
+
+@dataclass
 class LiveOpenParams:
     """Request payload for `live/open`.
 
@@ -3189,6 +3217,15 @@ this shape must use the nested form."""
 
 
 @dataclass
+class LiveSendInputErrorData:
+    """Typed JSON-RPC error data for scoped `live/send_input` rejections.
+
+The channel remains usable; callers route on the structured adapter error
+code instead of parsing the human-readable JSON-RPC error message."""
+    error_code: WireLiveAdapterErrorCode
+
+
+@dataclass
 class LiveTruncateParams:
     """Request payload for `live/truncate`.
 
@@ -3345,7 +3382,18 @@ Clients route on the typed `status` discriminator."""
     status: Literal['truncated']
 
 
-# A typed, identity-bearing realtime transcript event consumed by the session.
+# Public-wire mirror of [`RealtimeTranscriptEvent`].
+#
+# The core event stream also contains
+# [`RealtimeTranscriptEvent::UserContentFinal`], an internal canonical-state
+# command that may carry inline image bytes. That variant is deliberately
+# absent here, making private user content unrepresentable on
+# [`WireLiveAdapterObservation`] by construction rather than relying on each
+# transport to remember an output filter.
+#
+# The schema retains the historical `RealtimeTranscriptEvent` name so SDK
+# consumers keep the existing generated type name while the Rust public wire
+# surface gains a distinct, safe type.
 class RealtimeTranscriptEventItemObserved(TypedDict, total=False):
     item_id: Required[str]
     previous_item_id: NotRequired[str]
@@ -3399,9 +3447,9 @@ class RealtimeTranscriptEventAssistantTranscriptFinalText(TypedDict, total=False
 
 class RealtimeTranscriptEventAssistantTurnCompleted(TypedDict, total=False):
     response_id: Required[str]
-    stop_reason: Required[Any]
+    stop_reason: Required[Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']]
     type: Required[Literal['assistant_turn_completed']]
-    usage: Required[Any]
+    usage: Required[dict[str, Any]]
 
 class RealtimeTranscriptEventAssistantTurnInterrupted(TypedDict, total=False):
     response_id: Required[str]
@@ -3482,6 +3530,54 @@ class WireLiveConfigRejectionReasonNonRealtimeResolution(TypedDict, total=False)
 class WireLiveConfigRejectionReasonImageInputNotImplemented(TypedDict, total=False):
     kind: Required[Literal['image_input_not_implemented']]
 
+class WireLiveConfigRejectionReasonImageInputUnsupportedMime(TypedDict, total=False):
+    kind: Required[Literal['image_input_unsupported_mime']]
+    mime_type: Required[str]
+
+class WireLiveConfigRejectionReasonImageInputContentMismatch(TypedDict, total=False):
+    kind: Required[Literal['image_input_content_mismatch']]
+    mime_type: Required[str]
+
+class WireLiveConfigRejectionReasonImageInputInvalidBase64(TypedDict, total=False):
+    kind: Required[Literal['image_input_invalid_base64']]
+
+class WireLiveConfigRejectionReasonImageInputTooLarge(TypedDict, total=False):
+    actual_bytes: Required[int]
+    kind: Required[Literal['image_input_too_large']]
+    max_bytes: Required[int]
+
+class WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid(TypedDict, total=False):
+    actual_bytes: Required[int]
+    kind: Required[Literal['image_input_idempotency_key_invalid']]
+    max_bytes: Required[int]
+
+class WireLiveConfigRejectionReasonImageInputIdempotencyConflict(TypedDict, total=False):
+    kind: Required[Literal['image_input_idempotency_conflict']]
+
+class WireLiveConfigRejectionReasonImageInputHistoryBudgetExceeded(TypedDict, total=False):
+    kind: Required[Literal['image_input_history_budget_exceeded']]
+    max_decoded_bytes: Required[int]
+
+class WireLiveConfigRejectionReasonImageInputRequiresCommit(TypedDict, total=False):
+    kind: Required[Literal['image_input_requires_commit']]
+
+class WireLiveConfigRejectionReasonInputTooLarge(TypedDict, total=False):
+    actual_bytes: Required[int]
+    kind: Required[Literal['input_too_large']]
+    max_bytes: Required[int]
+
+class WireLiveConfigRejectionReasonInputBackpressured(TypedDict, total=False):
+    kind: Required[Literal['input_backpressured']]
+    max_pending_bytes: Required[int]
+
+class WireLiveConfigRejectionReasonImageInputBackpressured(TypedDict, total=False):
+    kind: Required[Literal['image_input_backpressured']]
+    max_pending_bytes: Required[int]
+
+class WireLiveConfigRejectionReasonImageInputTransportUnsupported(TypedDict, total=False):
+    kind: Required[Literal['image_input_transport_unsupported']]
+    transport: Required[str]
+
 class WireLiveConfigRejectionReasonVideoFrameInputNotImplemented(TypedDict, total=False):
     kind: Required[Literal['video_frame_input_not_implemented']]
 
@@ -3502,6 +3598,9 @@ class WireLiveConfigRejectionReasonRefreshAudioConfigMismatch(TypedDict, total=F
     detail: Required[str]
     kind: Required[Literal['refresh_audio_config_mismatch']]
 
+class WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen(TypedDict, total=False):
+    kind: Required[Literal['refresh_transcript_rewrite_requires_reopen']]
+
 class WireLiveConfigRejectionReasonAudioInputFormatMismatch(TypedDict, total=False):
     actual_channels: Required[int]
     actual_sample_rate_hz: Required[int]
@@ -3517,7 +3616,7 @@ class WireLiveConfigRejectionReasonUnknown(TypedDict, total=False):
     debug: Required[str]
     kind: Required[Literal['unknown']]
 
-WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap | WireLiveConfigRejectionReasonNonRealtimeResolution | WireLiveConfigRejectionReasonImageInputNotImplemented | WireLiveConfigRejectionReasonVideoFrameInputNotImplemented | WireLiveConfigRejectionReasonUnsupportedInputChunkVariant | WireLiveConfigRejectionReasonRefreshModelSwap | WireLiveConfigRejectionReasonRefreshProviderSwap | WireLiveConfigRejectionReasonRefreshAudioConfigMismatch | WireLiveConfigRejectionReasonAudioInputFormatMismatch | WireLiveConfigRejectionReasonOther | WireLiveConfigRejectionReasonUnknown
+WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap | WireLiveConfigRejectionReasonNonRealtimeResolution | WireLiveConfigRejectionReasonImageInputNotImplemented | WireLiveConfigRejectionReasonImageInputUnsupportedMime | WireLiveConfigRejectionReasonImageInputContentMismatch | WireLiveConfigRejectionReasonImageInputInvalidBase64 | WireLiveConfigRejectionReasonImageInputTooLarge | WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid | WireLiveConfigRejectionReasonImageInputIdempotencyConflict | WireLiveConfigRejectionReasonImageInputHistoryBudgetExceeded | WireLiveConfigRejectionReasonImageInputRequiresCommit | WireLiveConfigRejectionReasonInputTooLarge | WireLiveConfigRejectionReasonInputBackpressured | WireLiveConfigRejectionReasonImageInputBackpressured | WireLiveConfigRejectionReasonImageInputTransportUnsupported | WireLiveConfigRejectionReasonVideoFrameInputNotImplemented | WireLiveConfigRejectionReasonUnsupportedInputChunkVariant | WireLiveConfigRejectionReasonRefreshModelSwap | WireLiveConfigRejectionReasonRefreshProviderSwap | WireLiveConfigRejectionReasonRefreshAudioConfigMismatch | WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen | WireLiveConfigRejectionReasonAudioInputFormatMismatch | WireLiveConfigRejectionReasonOther | WireLiveConfigRejectionReasonUnknown
 
 # Wire mirror of [`meerkat_core::live_adapter::LiveAdapterErrorCode`].
 #
@@ -3572,15 +3671,14 @@ WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeConnectionFailed | WireLiveAd
 # makes every variant visible to schema codegen and produces a discriminated
 # TypeScript union / typed Python `TypedDict` union.
 #
-# Serde shape mirrors the core enum exactly: internally-tagged on
-# `observation` (snake_case). Round-trip with the core type is byte-
-# identical (see `wire_live_adapter_observation_byte_compatible_with_core`).
+# Serde shape mirrors the public subset of the core enum: internally-tagged
+# on `observation` (snake_case). Round-trip with public core variants is
+# byte-identical (see `wire_live_adapter_observation_byte_compatible_with_core`).
 #
 # Field types reference other wire mirrors where they exist
 # ([`WireStopReason`], [`WireUsage`], [`WireLiveAdapterStatus`],
-# [`WireLiveAdapterErrorCode`]) and the canonical
-# [`RealtimeTranscriptEvent`] (which already derives `JsonSchema` and is
-# auto-promoted by the SDK codegen `Realtime*` allowlist rule).
+# [`WireLiveAdapterErrorCode`]) and the public-safe
+# [`WireRealtimeTranscriptEvent`].
 #
 # Audio data is base64-encoded on the wire (matches the core
 # [`LiveAdapterObservation::AssistantAudioChunk`] base64 mode); the wire
@@ -3645,6 +3743,14 @@ class WireLiveAdapterObservationRealtimeTranscript(TypedDict, total=False):
     event: Required[RealtimeTranscriptEvent]
     observation: Required[Literal['realtime_transcript']]
 
+class WireLiveAdapterObservationUserContentCommitted(TypedDict, total=False):
+    content_index: Required[int]
+    idempotency_key: Required[str]
+    item_id: Required[str]
+    media_type: Required[str]
+    observation: Required[Literal['user_content_committed']]
+    previous_item_id: NotRequired[str]
+
 class WireLiveAdapterObservationToolCallRequested(TypedDict, total=False):
     arguments: Required[Any]
     observation: Required[Literal['tool_call_requested']]
@@ -3679,7 +3785,7 @@ class WireLiveAdapterObservationUnknown(TypedDict, total=False):
     debug: Required[str]
     observation: Required[Literal['unknown']]
 
-WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown
+WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationUserContentCommitted | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown
 
 @dataclass
 class RuntimeAcceptResult:
@@ -4550,6 +4656,7 @@ class RealtimeInputChunkVideoChunk(TypedDict, total=False):
 
 class RealtimeInputChunkImageChunk(TypedDict, total=False):
     data: Required[str]
+    idempotency_key: Required[str]
     mime_type: Required[str]
     kind: Required[Literal['image_chunk']]
 
@@ -4579,6 +4686,7 @@ class LiveInputChunkWireText(TypedDict, total=False):
 
 class LiveInputChunkWireImage(TypedDict, total=False):
     data: Required[str]
+    idempotency_key: Required[str]
     kind: Required[Literal['image']]
     mime: Required[str]
 
@@ -4894,7 +5002,14 @@ class BridgeCommandDeclareMemberOutboundTaint(TypedDict, total=False):
     supervisor: Required[BridgePeerSpec]
     taint: NotRequired[SenderContentTaint]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint
+class BridgeCommandObserveSupervisorRotation(TypedDict, total=False):
+    command: Required[Literal['observe_supervisor_rotation']]
+    observer: Required[BridgePeerSpec]
+    observer_epoch: Required[int]
+    operation_id: Required[Any]
+    protocol_version: Required[BridgeProtocolVersion]
+
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandObserveSupervisorRotation
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -4992,12 +5107,15 @@ class BridgeReplyDestroy(TypedDict, total=False):
     inputs_abandoned: Required[int]
     result: Required[Literal['destroy']]
 
+class BridgeReplySupervisorRotation(TypedDict, total=False):
+    result: Required[Literal['supervisor_rotation']]
+
 class BridgeReplyRejected(TypedDict, total=False):
     cause: Required[BridgeRejectionCause]
     reason: Required[str]
     result: Required[Literal['rejected']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplyRejected
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotation | BridgeReplyRejected
 
 # Comms/session-stream RPC contract for ContentBlock.
 class ContentBlockText(TypedDict, total=False):

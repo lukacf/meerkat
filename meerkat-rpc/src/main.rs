@@ -52,7 +52,8 @@ struct Cli {
     allow_remote: bool,
     /// Start a live WebSocket listener on this address.
     ///
-    /// Exposes the `/live/ws` endpoint for live audio/text channels.
+    /// Exposes the `/live/ws` endpoint for live audio/text channels with
+    /// model-gated image input.
     /// Example: --live-ws 127.0.0.1:4900
     #[arg(long)]
     live_ws: Option<String>,

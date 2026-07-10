@@ -545,6 +545,20 @@ tests and WASM/browser-embedded paths. The mob store is realm-scoped in the
 runtime-backed surfaces, so a process restart can recover mob state, members,
 events, flow snapshots, and work records.
 
+## Supervisor Rotation
+
+`mob/rotate_supervisor` is a synchronous-looking view over a durable
+operation. The mob records a stable operation ID and the complete target
+authority before sending the one-way handoff to any member. Each member fences
+the old epoch, advances the handoff independently, and exposes a durable
+pending, completed, or rejected receipt for that operation ID.
+
+A caller timeout means only that the terminal receipt was not observed before
+the deadline. It does not cancel or roll back the member operation; a retry
+uses the persisted operation ID and resumes observation. See
+[Delivery, Interaction, and Durable Operations](/architecture/delivery-interaction-operations)
+for the protocol boundary and recovery semantics.
+
 ## External Members
 
 Most members are normal session-backed agents. External members are advanced:
@@ -574,9 +588,10 @@ runtime, such as another host, sandbox, or service process.
 
 ## Live Channels
 
-Live audio is per session. To use live audio with a mob member, give that
-member a realtime-capable model such as `gpt-realtime-2`, spawn the member, then
-open a live channel against the member's session through the `live/*` surface.
+Live channels are per session. To use live audio/text or model-gated image input
+with a mob member, give that member a realtime-capable model such as
+`gpt-realtime-2`, spawn the member, then open a live channel against the
+member's session through the `live/*` surface.
 
 See [Live channels](/guides/realtime).
 

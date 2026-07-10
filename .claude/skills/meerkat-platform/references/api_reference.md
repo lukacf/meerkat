@@ -282,7 +282,7 @@ CAS writes:
 
 ## JSON-RPC (`rkat-rpc`)
 
-Start the server (stdio is default; `--tcp <addr>` exposes the same protocol over TCP; `--live-ws <addr>` enables the live audio WebSocket listener):
+Start the server (stdio is default; `--tcp <addr>` exposes the same protocol over TCP; `--live-ws <addr>` enables the live-channel WebSocket listener):
 
 ```bash
 rkat-rpc --realm team-alpha
@@ -320,17 +320,17 @@ rkat blob get <BLOB-ID> --output meerkat.png
 
 ### Live channels (caller-initiated)
 
-- `live/open` — open a live audio/text channel on a session
+- `live/open` — open a live audio/text channel with model-gated image input
 - `live/status` — get the status of a live channel
 - `live/close` — close a live channel
-- `live/send_input` — send an input chunk (audio/text) to a live channel
+- `live/send_input` — send an audio, text, or model-supported image chunk to a live channel
 - `live/commit_input` — commit pending input on a live channel (turn boundary)
 - `live/interrupt` — interrupt the assistant turn on a live channel (barge-in)
 - `live/truncate` — truncate assistant output at a client-tracked playback cursor
 - `live/refresh` — apply mutable session config (instructions/tools/audio) to an open live channel
 
-Set `model: "gpt-realtime-2"` on `session/create` and call `live/open` to open a live channel; capability is gated on `ModelCapabilities.realtime`.
-The `live/*` methods require `rkat-rpc --live-ws <addr>` so the server can return a WebSocket transport bootstrap.
+Set `model: "gpt-realtime-2"` on `session/create` and call `live/open` to open a live channel; capability is gated on `ModelCapabilities.realtime`. Check the returned `capabilities.image_in` boolean before calling `live/send_input` with `{ "kind": "image", "idempotency_key": "turn-42-diagram", "mime": "image/png", "data": "<base64>" }`. Image input is staged context for the next text, audio, or explicitly committed response. `status: "sent"` is queue acceptance only; wait for `user_content_committed` with the matching key for durable success. An exact same-key replay returns the prior receipt without resending provider input; different MIME/bytes reject with `image_input_idempotency_conflict`. Commit staged text/audio before submitting an image (`image_input_requires_commit`). Canonical live image history is capped at 40 MiB decoded in aggregate; new input that would cross it rejects before provider send as `image_input_history_budget_exceeded`. Legacy/out-of-band overflow, missing blobs, and content-address mismatches fail `live/open`; reconnect never trims accepted image context.
+The `live/*` methods require at least one configured live transport: `rkat-rpc --live-ws <addr>` for WebSocket and/or the WebRTC listener flags for WebRTC.
 
 ### Auth (realm/binding model)
 
@@ -425,6 +425,12 @@ Profiles (when a profile store is present):
 ### Comms (feature-gated)
 
 - `comms/send`, `comms/peers`
+
+`comms/peers` returns `PeerDirectoryEntry` objects with canonical `peer_id`,
+display-only `name`, typed `address: { transport, endpoint }`, discovery
+`source`, `sendable_kinds`, versioned `capabilities`, and supplementary
+`meta`. Use `peer_id` as `comms/send.to`; never route by name or by rebuilding
+an address string.
 
 `comms/send` accepts an optional tri-state `content_taint` override (`{"declare": "clean"|"tainted"}` or `"undeclared"`; absent = inherit the runtime-level outbound declaration). The declaration rides inside the signed envelope; receivers read it from the typed transcript comms notice (`sender_taint`).
 

@@ -30,7 +30,7 @@ use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
-use crate::protocol::{RpcId, RpcResponse};
+use crate::protocol::{RpcId, RpcResponse, bounded_collection_limit, bounded_collection_offset};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::{RequestContext, request_action};
@@ -45,6 +45,32 @@ fn parse_provider_param(provider: &str) -> Result<Provider, String> {
             "unknown provider '{provider}' (expected anthropic, openai, gemini, or self_hosted)"
         )
     })
+}
+
+fn resolve_rpc_create_session_model(
+    config: &meerkat_core::Config,
+    model: Option<String>,
+    provider: Option<Provider>,
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+) -> Result<meerkat::CreateSessionModelResolution, meerkat::CreateSessionModelResolutionError> {
+    meerkat::resolve_create_session_model(
+        config,
+        meerkat::CreateSessionModelResolutionRequest {
+            model,
+            provider,
+            auth_binding,
+        },
+    )
+}
+
+fn create_session_model_resolution_error_code(
+    error: &meerkat::CreateSessionModelResolutionError,
+) -> i32 {
+    if error.is_configuration_fault() {
+        error::INTERNAL_ERROR
+    } else {
+        error::INVALID_PARAMS
+    }
 }
 
 /// Controls whether the first turn runs immediately on session creation.
@@ -238,30 +264,8 @@ pub async fn create_session_with_params(
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
     let model_was_explicit = params.model.is_some();
-    // When the caller does not pin a model, the runtime's configured default is
-    // resolved through the catalog-owned `resolve_create_session_default_model`
-    // ladder (provider-priority -> config.agent.model -> catalog global default)
-    // — the single owner of the create-session default-model fact. Surfaces MUST
-    // NOT re-derive their own default ladder from `config.agent.model`.
-    // Compose the realm chain so an operator default model inherited from an
-    // ancestor realm (e.g. `[agent].model` / `[models].*` in `global`) is honored
-    // instead of silently substituting the catalog default — matching the agent
-    // build path and the model registry.
-    let runtime_default_model = match runtime.effective_config().await {
-        Ok(config) => Some(meerkat::resolve_create_session_default_model(&config)),
-        Err(_) => None,
-    };
-    let model_name = match params.model.clone().or(runtime_default_model) {
-        Some(model) => model,
-        None => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                "no model specified and no default model configured for this runtime",
-            );
-        }
-    };
     let provider_was_explicit = params.provider.is_some();
+    let auth_binding_was_explicit = params.auth_binding.is_some();
     let provider = match params
         .provider
         .as_deref()
@@ -271,6 +275,29 @@ pub async fn create_session_with_params(
         Ok(provider) => provider,
         Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
     };
+    let effective_config = match runtime.effective_config().await {
+        Ok(config) => config,
+        Err(err) => return RpcResponse::error(id, err.code, err.message),
+    };
+    // Reconstruct server-owned binding provenance before the shared resolver;
+    // clients carry only realm/binding/profile atoms.
+    let auth_binding = params.auth_binding.clone().map(Into::into);
+    let model_resolution = match resolve_rpc_create_session_model(
+        &effective_config,
+        params.model.clone(),
+        provider,
+        auth_binding,
+    ) {
+        Ok(resolution) => resolution,
+        Err(err) => {
+            return RpcResponse::error(
+                id,
+                create_session_model_resolution_error_code(&err),
+                err.to_string(),
+            );
+        }
+    };
+    let model_name = model_resolution.model;
 
     // Parse output schema if provided
     let output_schema = match params.output_schema {
@@ -288,11 +315,7 @@ pub async fn create_session_with_params(
     };
 
     let mut build_config = AgentBuildConfig::new(model_name);
-    build_config.provider = if provider_was_explicit || model_was_explicit {
-        provider
-    } else {
-        None
-    };
+    build_config.provider = Some(model_resolution.provider);
     build_config.resume_override_mask.model = model_was_explicit;
     build_config.resume_override_mask.provider = provider_was_explicit;
     build_config.max_tokens = params.max_tokens;
@@ -323,11 +346,8 @@ pub async fn create_session_with_params(
     // it at build time.
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
-    build_config.resume_override_mask.auth_binding = params.auth_binding.is_some();
-    // Reconstruct the server-owned `origin` provenance as Configured; a client
-    // names {realm, binding, profile} only and cannot forge the env-default
-    // discriminant that drives is_env_default() credential-resolution authority.
-    build_config.auth_binding = params.auth_binding.map(Into::into);
+    build_config.resume_override_mask.auth_binding = auth_binding_was_explicit;
+    build_config.auth_binding = model_resolution.auth_binding;
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
@@ -625,16 +645,25 @@ pub async fn handle_list(
         None => ListSessionsParams::default(),
     };
 
+    let limit = match bounded_collection_limit(list_params.limit) {
+        Ok(limit) => limit,
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    };
+    let offset = match bounded_collection_offset(list_params.offset) {
+        Ok(offset) => offset,
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    };
     let query = SessionQuery {
         labels: list_params.labels,
-        ..Default::default()
+        limit: Some(limit),
+        offset: Some(offset),
     };
 
     let summaries = match runtime.list_sessions_rich(query).await {
         Ok(s) => s,
         Err(err) => return RpcResponse::error(id, err.code, err.message),
     };
-    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> = summaries
+    let sessions: Vec<meerkat_contracts::WireSessionSummary> = summaries
         .into_iter()
         .map(|mut ws| {
             ws.session_ref = runtime
@@ -643,15 +672,6 @@ pub async fn handle_list(
             ws
         })
         .collect();
-
-    // Apply pagination.
-    let offset = list_params.offset.unwrap_or(0);
-    if offset > 0 {
-        sessions = sessions.into_iter().skip(offset).collect();
-    }
-    if let Some(limit) = list_params.limit {
-        sessions.truncate(limit);
-    }
 
     let result = ListSessionsResult { sessions };
     RpcResponse::success(id, result)
@@ -691,9 +711,16 @@ pub async fn handle_read(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::items_after_test_module)]
+#[allow(
+    clippy::expect_used,
+    clippy::items_after_test_module,
+    clippy::unwrap_used
+)]
 mod tests {
-    use super::CreateSessionResult;
+    use super::{
+        CreateSessionResult, create_session_model_resolution_error_code,
+        resolve_rpc_create_session_model,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -786,6 +813,129 @@ mod tests {
 
         assert!(err.contains("unknown provider"));
         assert!(err.contains("provider-shaped-cache-key"));
+    }
+
+    fn inherited_gemini_binding() -> (meerkat_core::Config, meerkat_core::AuthBindingRef) {
+        let mut config = meerkat_core::Config::default();
+        let mut global = meerkat_core::RealmConfigSection::default();
+        global.backend.insert(
+            "google".to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "gemini".to_string(),
+                backend_kind: "google_code_assist".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        global.auth.insert(
+            "oauth".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "gemini".to_string(),
+                auth_method: "google_oauth".to_string(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        global.binding.insert(
+            "primary".to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "google".to_string(),
+                auth_profile: "oauth".to_string(),
+                default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        config.realm.insert("global".to_string(), global);
+        config.realm.insert(
+            "dev".to_string(),
+            meerkat_core::RealmConfigSection {
+                parent: Some(meerkat_core::RealmId::global()),
+                ..Default::default()
+            },
+        );
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm"),
+            binding: meerkat_core::BindingId::parse("primary").expect("binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        (config, binding)
+    }
+
+    #[test]
+    fn rpc_create_session_resolution_preserves_supported_config_pin() {
+        let mut config = meerkat_core::Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+        config.models.anthropic = "claude-sonnet-4-6".to_string();
+
+        let resolved = resolve_rpc_create_session_model(&config, None, None, None)
+            .expect("RPC lowers through shared resolver");
+        assert_eq!(resolved.model, "claude-opus-4-7");
+        assert_eq!(resolved.provider, meerkat_core::Provider::Anthropic);
+    }
+
+    #[test]
+    fn rpc_create_session_resolution_preserves_inherited_binding_owner() {
+        let (config, binding) = inherited_gemini_binding();
+        let resolved = resolve_rpc_create_session_model(&config, None, None, Some(binding))
+            .expect("RPC resolves inherited binding");
+
+        assert_eq!(resolved.model, "gemini-3.1-flash-lite-preview");
+        assert_eq!(resolved.provider, meerkat_core::Provider::Gemini);
+        let owner = resolved.auth_binding.expect("owner-stamped binding");
+        assert_eq!(owner.realm.as_str(), "global");
+    }
+
+    #[test]
+    fn rpc_create_session_resolution_rejects_explicit_model_binding_mismatch() {
+        let (config, binding) = inherited_gemini_binding();
+        let err = resolve_rpc_create_session_model(
+            &config,
+            Some("gpt-5.5".to_string()),
+            None,
+            Some(binding),
+        )
+        .expect_err("known model owner must match binding provider");
+
+        assert!(err.to_string().contains("registered for provider 'openai'"));
+    }
+
+    #[test]
+    fn rpc_create_session_resolution_preserves_config_fault_ownership() {
+        let config_error = meerkat::CreateSessionModelResolutionError::Config(
+            meerkat_core::ConfigError::Validation("broken model registry".to_string()),
+        );
+        assert_eq!(
+            create_session_model_resolution_error_code(&config_error),
+            crate::error::INTERNAL_ERROR
+        );
+        let binding_error =
+            meerkat::CreateSessionModelResolutionError::BindingMissingProviderDefault {
+                realm: meerkat_core::RealmId::parse("dev").expect("realm"),
+                binding: meerkat_core::BindingId::parse("primary").expect("binding"),
+                provider: meerkat_core::Provider::SelfHosted,
+            };
+        assert_eq!(
+            create_session_model_resolution_error_code(&binding_error),
+            crate::error::INTERNAL_ERROR
+        );
+
+        assert_eq!(
+            create_session_model_resolution_error_code(
+                &meerkat::CreateSessionModelResolutionError::EmptyExplicitModel,
+            ),
+            crate::error::INVALID_PARAMS
+        );
+        assert_eq!(
+            create_session_model_resolution_error_code(
+                &meerkat::CreateSessionModelResolutionError::MissingProviderDefault {
+                    provider: meerkat_core::Provider::SelfHosted,
+                },
+            ),
+            crate::error::INVALID_PARAMS
+        );
     }
 
     #[test]

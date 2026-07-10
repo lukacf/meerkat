@@ -127,6 +127,12 @@ Return payloads are JSON-shaped schedule contracts with typed top-level wrappers
 - `ScheduleOccurrencesResult`
 - `ScheduleToolsResult`
 
+`ScheduleRecord` is the canonical flattened RPC object: configuration fields
+such as `planning_horizon_days`, `created_at_utc`, and `labels` are top-level;
+there is no nested `config` or public `machine_state`. The wrappers reject a
+missing/malformed schedules, occurrences, or tools array and reject schedule
+entries missing required identity, policy, planning, or timestamp facts.
+
 ## Session runtime input helpers
 
 ### `inject_context`
@@ -219,12 +225,16 @@ Direct `MeerkatClient` helper names mirror the RPC methods:
 - `live_close(channel_id)`
 - `live_send_input_text(channel_id, text)`
 - `live_send_input_audio(channel_id, data_base64, sample_rate_hz, channels)`
-- `live_send_input_image(channel_id, mime, data_base64)`
+- `live_send_input_image(channel_id, idempotency_key, mime, data_base64)`
 - `live_send_input_video_frame(channel_id, codec, data_base64, timestamp_ms)`
 - `live_commit_input(channel_id, response_modality=None)`
 - `live_interrupt(channel_id)`
 - `live_truncate(channel_id, item_id, content_index, audio_played_ms)`
 - `live_refresh(channel_id)`
+
+`live_send_input_image` requires a caller-stable, session-scoped key. Its
+return value proves queue acceptance only; durable success is the later
+`user_content_committed` observation carrying that same key.
 
 ## Capability and error model
 

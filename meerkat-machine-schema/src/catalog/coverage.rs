@@ -542,7 +542,12 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "KickoffResolveCallbackPendingCompleted",
                             "KickoffClearStopped",
                             "KickoffClearCompleted",
-                            "RetireMember",
+                            "RetireRunningReleasing",
+                            "RetireRunningPreservingBinding",
+                            "RetireRunningNoBinding",
+                            "RetireStoppedReleasing",
+                            "RetireStoppedPreservingBinding",
+                            "RetireStoppedNoBinding",
                             "ResetMember",
                             "RespawnMember",
                             "MarkCompleted",
@@ -627,7 +632,15 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "meerkat-mob/src/runtime/actor.rs",
                     "MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects",
                     CoverageClaims::none()
-                        .transitions(&["RetireMember", "RespawnMember"])
+                        .transitions(&[
+                            "RetireRunningReleasing",
+                            "RetireRunningPreservingBinding",
+                            "RetireRunningNoBinding",
+                            "RetireStoppedReleasing",
+                            "RetireStoppedPreservingBinding",
+                            "RetireStoppedNoBinding",
+                            "RespawnMember",
+                        ])
                         .effects(&[
                             "MemberAdmissionProbed",
                             "RespawnGenerationComputed",
@@ -680,7 +693,12 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "retire-respawn-destroy",
                     "member retires, resets, respawns with a new runtime incarnation, stops/stopped, resumes, shuts down, destroys cleanly, and resets to running when reusable",
                     CoverageClaims::none().transitions(&[
-                        "RetireMember",
+                        "RetireRunningReleasing",
+                        "RetireRunningPreservingBinding",
+                        "RetireRunningNoBinding",
+                        "RetireStoppedReleasing",
+                        "RetireStoppedPreservingBinding",
+                        "RetireStoppedNoBinding",
                         "ResetMember",
                         "RespawnMember",
                         "StopRunning",
@@ -755,7 +773,15 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "membership-admission-respawn-reconcile-rebind-timeout",
                     "probe member admission duplicate or admitted, compute respawn generation, reconcile desired members to spawn retain or retire emitting member spawn required member retain required and member retire required, set and observe external member rebind capability available or unavailable, classify turn timeout disposition detached canceled or retryable, and seed orphan budget",
                     CoverageClaims::none()
-                        .transitions(&["RetireMember", "RespawnMember"])
+                        .transitions(&[
+                            "RetireRunningReleasing",
+                            "RetireRunningPreservingBinding",
+                            "RetireRunningNoBinding",
+                            "RetireStoppedReleasing",
+                            "RetireStoppedPreservingBinding",
+                            "RetireStoppedNoBinding",
+                            "RespawnMember",
+                        ])
                         .effects(&[
                             "MemberSpawnRequired",
                             "MemberRetainRequired",

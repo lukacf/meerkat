@@ -51,10 +51,12 @@ impl BridgeProtocolVersion {
     pub const V2: Self = Self(2);
     /// Protocol carrying the MobMachine peer overlay on peer wiring commands.
     pub const V3: Self = Self(3);
+    /// Protocol carrying operation-correlated, observable supervisor rotation.
+    pub const V4: Self = Self(4);
     /// Current protocol version implemented by this bridge contract.
-    pub const CURRENT: Self = Self::V3;
+    pub const CURRENT: Self = Self::V4;
     /// Default protocol version for new supervisor authority records.
-    pub const DEFAULT: Self = Self::V3;
+    pub const DEFAULT: Self = Self::V4;
     /// Protocol versions accepted by this bridge contract.
     ///
     /// V2 is retained so persisted supervisor-authority records and V2 peers
@@ -62,10 +64,10 @@ impl BridgeProtocolVersion {
     /// which now requires the MobMachine peer overlay, demands V3 — a V2 peer
     /// wiring command is rejected with a typed `UnsupportedProtocolVersion`
     /// cause rather than a raw deserialization error.
-    pub const SUPPORTED: &'static [Self] = &[Self::V2, Self::V3];
+    pub const SUPPORTED: &'static [Self] = &[Self::V2, Self::V3, Self::V4];
 
     pub const fn is_supported(self) -> bool {
-        matches!(self.0, 2 | 3)
+        matches!(self.0, 2..=4)
     }
 
     pub const fn same_protocol_as(self, other: Self) -> bool {
@@ -86,6 +88,7 @@ impl BridgeProtocolVersion {
         match raw {
             2 => Ok(Self::V2),
             3 => Ok(Self::V3),
+            4 => Ok(Self::V4),
             _ => Err(UnsupportedBridgeProtocolVersion { raw }),
         }
     }
@@ -151,7 +154,7 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   `#[serde(default, skip_serializing_if)]` so a V2 wiring payload (no
 ///   overlay) still deserializes on a V3 receiver; the receiver then rejects
 ///   it with a typed `UnsupportedProtocolVersion` cause instead of a raw
-///   serde error. New supervisor authorities default to V3.
+///   serde error. V3 supervisor authorities defaulted to this version.
 /// - `3` (additive, no bump): `DeliverMemberInput` payloads may carry
 ///   `BridgeDeliveryPayload::injected_context`. Empty is omitted, so
 ///   deliveries without injected context stay byte-identical in both
@@ -167,6 +170,13 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   rejection — no silent drop, and no receiver-side semantic fold depends
 ///   on partial understanding, so the V3-overlay-style version bump is not
 ///   demanded (pre-1.0 posture, same reasoning as `injected_context`).
+/// - `4`: supervisor rotation is an operation-correlated durable protocol.
+///   The new authority is submitted only through the closed one-way
+///   [`BridgeSupervisorDelivery`] envelope, while
+///   [`BridgeCommand::ObserveSupervisorRotation`] observes the pending or
+///   terminal receipt. This is a semantic fold rather than an additive field,
+///   so new authorities default to V4 while V2/V3 remain decodable for their
+///   pre-rotation command vocabulary.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -230,6 +240,30 @@ pub fn canonicalize_bridge_address(address: &str) -> String {
 // Command envelope
 // ---------------------------------------------------------------------------
 
+/// Closed one-way supervisor delivery envelope.
+///
+/// This marker is deliberately distinct from [`BridgeCommand`]. A member may
+/// decode a peer-message body as this type to admit supervisor-owned one-way
+/// control traffic without interpreting arbitrary user message JSON as a
+/// request/reply bridge command. Supervisor rotation submission is the only
+/// admitted one-way delivery.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "delivery", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum BridgeSupervisorDelivery {
+    SubmitSupervisorRotation(BridgeSupervisorRotationSubmit),
+}
+
+impl BridgeSupervisorDelivery {
+    /// Protocol version carried by this one-way delivery.
+    pub fn protocol_version(&self) -> BridgeProtocolVersion {
+        match self {
+            Self::SubmitSupervisorRotation(payload) => payload.protocol_version,
+        }
+    }
+}
+
 /// A typed command sent from a supervisor to a member runtime.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +282,7 @@ pub enum BridgeCommand {
     WireMember(BridgePeerWiringPayload),
     UnwireMember(BridgePeerWiringPayload),
     DeclareMemberOutboundTaint(BridgeOutboundTaintPayload),
+    ObserveSupervisorRotation(BridgeSupervisorRotationObserve),
 }
 
 impl BridgeCommand {
@@ -265,6 +300,7 @@ impl BridgeCommand {
             Self::DeliverMemberInput(payload) => payload.protocol_version,
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
             Self::DeclareMemberOutboundTaint(payload) => payload.protocol_version,
+            Self::ObserveSupervisorRotation(payload) => payload.protocol_version,
         }
     }
 }
@@ -345,6 +381,9 @@ pub enum BridgeReply {
     Delivery(BridgeDeliveryResponse),
     Retire(BridgeRetireResponse),
     Destroy(BridgeDestroyResponse),
+    /// Observation of a previously submitted supervisor-rotation operation.
+    /// Submission is one-way and never produces this reply directly.
+    SupervisorRotation(BridgeSupervisorRotationObservation),
     Rejected {
         cause: BridgeRejectionCause,
         reason: String,
@@ -672,6 +711,197 @@ pub struct BridgeSupervisorPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
     pub protocol_version: BridgeProtocolVersion,
+}
+
+/// Stable identifier for one supervisor-rotation operation.
+///
+/// The UUID is validated at every string/serde ingress boundary. Keeping the
+/// inner value private prevents callers from constructing an unchecked raw
+/// string identifier that could diverge between submission, observation, and
+/// durable receipts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct SupervisorRotationOperationId(
+    #[cfg_attr(feature = "schema", schemars(with = "String"))] uuid::Uuid,
+);
+
+impl SupervisorRotationOperationId {
+    /// Create a fresh operation identifier.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Construct an operation identifier from a typed UUID.
+    #[must_use]
+    pub const fn from_uuid(value: uuid::Uuid) -> Self {
+        Self(value)
+    }
+
+    /// Return the underlying typed UUID.
+    #[must_use]
+    pub const fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+}
+
+impl Default for SupervisorRotationOperationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for SupervisorRotationOperationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for SupervisorRotationOperationId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(value).map(Self)
+    }
+}
+
+impl From<uuid::Uuid> for SupervisorRotationOperationId {
+    fn from(value: uuid::Uuid) -> Self {
+        Self::from_uuid(value)
+    }
+}
+
+impl From<SupervisorRotationOperationId> for uuid::Uuid {
+    fn from(value: SupervisorRotationOperationId) -> Self {
+        value.0
+    }
+}
+
+/// One-way submission of a durable supervisor-rotation operation.
+///
+/// Authentication comes from the signed peer-message envelope. The payload
+/// therefore carries only the stable operation identity and requested target;
+/// it does not smuggle a second sender claim into the command body.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSupervisorRotationSubmit {
+    pub operation_id: SupervisorRotationOperationId,
+    pub target: BridgePeerSpec,
+    pub target_epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+}
+
+/// Request to observe a previously submitted supervisor rotation.
+///
+/// The observer identity and epoch are explicit proof inputs that the member
+/// validates against the authenticated request sender and its current or
+/// pending authority state.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSupervisorRotationObserve {
+    pub operation_id: SupervisorRotationOperationId,
+    pub observer: BridgePeerSpec,
+    pub observer_epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+}
+
+/// Durable phase exposed while a supervisor rotation is incomplete.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BridgeSupervisorRotationPendingPhase {
+    PreviousRevokePending,
+    NextPublishPending,
+}
+
+/// Exact target identity committed to a supervisor-rotation operation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSupervisorRotationTargetReceipt {
+    pub target: BridgePeerSpec,
+    pub target_epoch: u64,
+}
+
+/// Operation-correlated receipt used by terminal supervisor-rotation states.
+///
+/// It carries the exact target identity and epoch, rather than only a peer id,
+/// so a recovered observer can project the same durable authority without
+/// joining against mutable peer-directory state.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSupervisorRotationOperationReceipt {
+    pub operation_id: SupervisorRotationOperationId,
+    pub target: BridgeSupervisorRotationTargetReceipt,
+}
+
+/// Stable machine-readable cause for a terminally rejected rotation.
+///
+/// Consumers branch on this value. Human-readable details belong only in the
+/// sibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BridgeSupervisorRotationRejectionCause {
+    OperationConflict,
+    InvalidTarget,
+    StaleTargetEpoch,
+    SenderMismatch,
+    UnsupportedProtocolVersion,
+    Internal,
+}
+
+/// Durable receipt for a terminally rejected supervisor rotation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSupervisorRotationRejectionReceipt {
+    pub operation: BridgeSupervisorRotationOperationReceipt,
+    pub cause: BridgeSupervisorRotationRejectionCause,
+    /// Operator-facing diagnostic only; callers must not parse it.
+    pub reason: String,
+}
+
+/// Durable state of a known supervisor-rotation operation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum BridgeSupervisorRotationState {
+    Pending {
+        operation: BridgeSupervisorRotationOperationReceipt,
+        phase: BridgeSupervisorRotationPendingPhase,
+    },
+    Completed {
+        receipt: BridgeSupervisorRotationOperationReceipt,
+    },
+    Rejected {
+        receipt: BridgeSupervisorRotationRejectionReceipt,
+    },
+}
+
+/// Observation result for a supervisor-rotation operation.
+///
+/// `NotFound` is an observation outcome, never a durable rejected state: an
+/// observer may race the one-way submission before the member has committed
+/// it and can safely retry the observation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum BridgeSupervisorRotationObservation {
+    Found {
+        state: BridgeSupervisorRotationState,
+    },
+    NotFound {
+        operation_id: SupervisorRotationOperationId,
+    },
 }
 
 /// Explicit hard-cancel command payload.
@@ -1106,6 +1336,199 @@ mod tests {
         .expect("valid trusted peer descriptor")
     }
 
+    fn sample_supervisor_rotation_operation_id() -> SupervisorRotationOperationId {
+        "87de75b9-9bce-4c28-a022-7de5c9d7d480"
+            .parse()
+            .expect("valid supervisor rotation operation id")
+    }
+
+    fn sample_supervisor_rotation_target() -> BridgePeerSpec {
+        valid_trusted_peer("next-supervisor", 9, "tcp://127.0.0.1:7010").into()
+    }
+
+    fn sample_supervisor_rotation_submit() -> BridgeSupervisorRotationSubmit {
+        BridgeSupervisorRotationSubmit {
+            operation_id: sample_supervisor_rotation_operation_id(),
+            target: sample_supervisor_rotation_target(),
+            target_epoch: 43,
+            protocol_version: BridgeProtocolVersion::V4,
+        }
+    }
+
+    fn sample_supervisor_rotation_receipt() -> BridgeSupervisorRotationOperationReceipt {
+        BridgeSupervisorRotationOperationReceipt {
+            operation_id: sample_supervisor_rotation_operation_id(),
+            target: BridgeSupervisorRotationTargetReceipt {
+                target: sample_supervisor_rotation_target(),
+                target_epoch: 43,
+            },
+        }
+    }
+
+    #[test]
+    fn supervisor_rotation_operation_id_validates_uuid_at_json_ingress() {
+        let operation_id = sample_supervisor_rotation_operation_id();
+        let value = serde_json::to_value(operation_id).expect("serialize operation id");
+        assert_eq!(value, json!("87de75b9-9bce-4c28-a022-7de5c9d7d480"));
+
+        let decoded: SupervisorRotationOperationId =
+            serde_json::from_value(value).expect("decode operation id");
+        assert_eq!(decoded, operation_id);
+        assert!(
+            serde_json::from_value::<SupervisorRotationOperationId>(json!("not-a-uuid")).is_err(),
+            "an unchecked string must not cross the operation-id boundary"
+        );
+    }
+
+    #[test]
+    fn supervisor_rotation_submit_uses_closed_one_way_delivery_envelope() {
+        let delivery =
+            BridgeSupervisorDelivery::SubmitSupervisorRotation(sample_supervisor_rotation_submit());
+        assert_eq!(delivery.protocol_version(), BridgeProtocolVersion::V4);
+
+        let value = serde_json::to_value(&delivery).expect("serialize delivery");
+        assert_eq!(value["delivery"], json!("submit_supervisor_rotation"));
+        assert_eq!(
+            value["operation_id"],
+            json!("87de75b9-9bce-4c28-a022-7de5c9d7d480")
+        );
+        assert_eq!(value["target_epoch"], json!(43));
+        assert_eq!(value["protocol_version"], json!(4));
+
+        let decoded: BridgeSupervisorDelivery =
+            serde_json::from_value(value).expect("decode delivery");
+        assert_eq!(decoded, delivery);
+    }
+
+    #[test]
+    fn supervisor_rotation_delivery_does_not_admit_request_commands_or_unknown_fields() {
+        let observe = BridgeCommand::ObserveSupervisorRotation(BridgeSupervisorRotationObserve {
+            operation_id: sample_supervisor_rotation_operation_id(),
+            observer: sample_peer_spec(),
+            observer_epoch: 42,
+            protocol_version: BridgeProtocolVersion::V4,
+        });
+        let observe_value = serde_json::to_value(observe).expect("serialize observe command");
+        assert!(
+            serde_json::from_value::<BridgeSupervisorDelivery>(observe_value).is_err(),
+            "a request command must never decode as a one-way supervisor delivery"
+        );
+
+        let mut delivery_value = serde_json::to_value(
+            BridgeSupervisorDelivery::SubmitSupervisorRotation(sample_supervisor_rotation_submit()),
+        )
+        .expect("serialize delivery");
+        delivery_value
+            .as_object_mut()
+            .expect("delivery object")
+            .insert("user_content".to_string(), json!(true));
+        assert!(
+            serde_json::from_value::<BridgeSupervisorDelivery>(delivery_value).is_err(),
+            "the delivery envelope must fail closed on arbitrary user fields"
+        );
+    }
+
+    #[test]
+    fn supervisor_rotation_observe_is_v4_request_command() {
+        let command = BridgeCommand::ObserveSupervisorRotation(BridgeSupervisorRotationObserve {
+            operation_id: sample_supervisor_rotation_operation_id(),
+            observer: sample_peer_spec(),
+            observer_epoch: 42,
+            protocol_version: BridgeProtocolVersion::V4,
+        });
+        assert_eq!(command.protocol_version(), BridgeProtocolVersion::V4);
+        assert_command_round_trip(&command);
+
+        let value = serde_json::to_value(command).expect("serialize observe command");
+        assert_eq!(value["command"], json!("observe_supervisor_rotation"));
+        assert_eq!(value["observer_epoch"], json!(42));
+        assert_eq!(value["protocol_version"], json!(4));
+    }
+
+    #[test]
+    fn supervisor_rotation_pending_and_not_found_are_observation_only_outcomes() {
+        let pending = BridgeReply::SupervisorRotation(BridgeSupervisorRotationObservation::Found {
+            state: BridgeSupervisorRotationState::Pending {
+                operation: sample_supervisor_rotation_receipt(),
+                phase: BridgeSupervisorRotationPendingPhase::PreviousRevokePending,
+            },
+        });
+        let pending_value = serde_json::to_value(&pending).expect("serialize pending reply");
+        assert_eq!(pending_value["result"], json!("supervisor_rotation"));
+        assert_eq!(pending_value["outcome"], json!("found"));
+        assert_eq!(pending_value["state"]["status"], json!("pending"));
+        assert_eq!(
+            pending_value["state"]["operation"]["operation_id"],
+            json!("87de75b9-9bce-4c28-a022-7de5c9d7d480")
+        );
+        assert_eq!(
+            pending_value["state"]["phase"],
+            json!("previous_revoke_pending")
+        );
+        let pending_round_trip: BridgeReply =
+            serde_json::from_value(pending_value).expect("decode pending reply");
+        assert_eq!(pending_round_trip, pending);
+
+        let not_found =
+            BridgeReply::SupervisorRotation(BridgeSupervisorRotationObservation::NotFound {
+                operation_id: sample_supervisor_rotation_operation_id(),
+            });
+        let not_found_value = serde_json::to_value(&not_found).expect("serialize not-found reply");
+        assert_eq!(not_found_value["outcome"], json!("not_found"));
+        assert!(not_found_value.get("receipt").is_none());
+        let not_found_round_trip: BridgeReply =
+            serde_json::from_value(not_found_value).expect("decode not-found reply");
+        assert_eq!(not_found_round_trip, not_found);
+    }
+
+    #[test]
+    fn supervisor_rotation_terminal_receipts_pin_operation_and_exact_target() {
+        let completed_receipt = sample_supervisor_rotation_receipt();
+        let completed =
+            BridgeReply::SupervisorRotation(BridgeSupervisorRotationObservation::Found {
+                state: BridgeSupervisorRotationState::Completed {
+                    receipt: completed_receipt.clone(),
+                },
+            });
+        let completed_value = serde_json::to_value(&completed).expect("serialize completed reply");
+        let receipt = &completed_value["state"]["receipt"];
+        assert_eq!(
+            receipt["operation_id"],
+            json!("87de75b9-9bce-4c28-a022-7de5c9d7d480")
+        );
+        assert_eq!(receipt["target"]["target_epoch"], json!(43));
+        assert_eq!(
+            receipt["target"]["target"]["peer_id"],
+            json!(sample_supervisor_rotation_target().peer_id)
+        );
+        let completed_round_trip: BridgeReply =
+            serde_json::from_value(completed_value).expect("decode completed reply");
+        assert_eq!(completed_round_trip, completed);
+
+        let rejected =
+            BridgeReply::SupervisorRotation(BridgeSupervisorRotationObservation::Found {
+                state: BridgeSupervisorRotationState::Rejected {
+                    receipt: BridgeSupervisorRotationRejectionReceipt {
+                        operation: completed_receipt,
+                        cause: BridgeSupervisorRotationRejectionCause::OperationConflict,
+                        reason: "operation id is already bound to another target".to_string(),
+                    },
+                },
+            });
+        let rejected_value = serde_json::to_value(&rejected).expect("serialize rejected reply");
+        assert_eq!(
+            rejected_value["state"]["receipt"]["cause"],
+            json!("operation_conflict")
+        );
+        assert_eq!(
+            rejected_value["state"]["receipt"]["reason"],
+            json!("operation id is already bound to another target")
+        );
+        let rejected_round_trip: BridgeReply =
+            serde_json::from_value(rejected_value).expect("decode rejected reply");
+        assert_eq!(rejected_round_trip, rejected);
+    }
+
     // -----------------------------------------------------------------------
     // 1. BridgeCommand JSON round-trip — one subtest per variant.
     // -----------------------------------------------------------------------
@@ -1201,12 +1624,13 @@ mod tests {
 
     #[test]
     fn wire_member_v3_payload_round_trips_with_overlay() {
-        let value = serde_json::to_value(BridgeCommand::WireMember(sample_wiring_payload()))
-            .expect("serialize");
+        let mut payload = sample_wiring_payload();
+        payload.protocol_version = BridgeProtocolVersion::V3;
+        let value = serde_json::to_value(BridgeCommand::WireMember(payload)).expect("serialize");
         assert_eq!(
             value["protocol_version"],
             json!(3),
-            "V3 is the current peer wiring protocol"
+            "V3 introduced the peer overlay"
         );
         assert!(
             !value["mob_peer_overlay"].is_null(),
@@ -1603,14 +2027,18 @@ mod tests {
         );
         assert_eq!(
             supervisor_bridge_supported_protocol_versions(),
-            &[BridgeProtocolVersion::V2, BridgeProtocolVersion::V3]
+            &[
+                BridgeProtocolVersion::V2,
+                BridgeProtocolVersion::V3,
+                BridgeProtocolVersion::V4,
+            ]
         );
-        // Current/default is the latest (V3, which carries the peer overlay);
-        // V2 remains accepted for persisted authority records and pre-overlay
-        // peers.
+        // Current/default is V4 (operation-correlated supervisor rotation);
+        // V2/V3 remain accepted for persisted authority records and peers
+        // using the pre-rotation command vocabulary.
         assert_eq!(
             supervisor_bridge_current_protocol_version(),
-            BridgeProtocolVersion::V3
+            BridgeProtocolVersion::V4
         );
         assert!(supervisor_bridge_protocol_version_supported(
             BridgeProtocolVersion::V2
@@ -1635,7 +2063,11 @@ mod tests {
         );
         assert_eq!(
             capabilities.supported_protocol_versions,
-            vec![BridgeProtocolVersion::V2, BridgeProtocolVersion::V3]
+            vec![
+                BridgeProtocolVersion::V2,
+                BridgeProtocolVersion::V3,
+                BridgeProtocolVersion::V4,
+            ]
         );
     }
 
@@ -1662,7 +2094,11 @@ mod tests {
         );
         assert_eq!(
             capabilities.supported_protocol_versions,
-            vec![BridgeProtocolVersion::V2, BridgeProtocolVersion::V3]
+            vec![
+                BridgeProtocolVersion::V2,
+                BridgeProtocolVersion::V3,
+                BridgeProtocolVersion::V4,
+            ]
         );
         assert!(capabilities.deliver_member_input);
         assert!(capabilities.observe_member);
@@ -1924,7 +2360,7 @@ mod tests {
                 "capabilities": {
                     "current_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
                     "default_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-                    "supported_protocol_versions": [BridgeProtocolVersion::V2, BridgeProtocolVersion::V3],
+                    "supported_protocol_versions": [BridgeProtocolVersion::V2, BridgeProtocolVersion::V3, BridgeProtocolVersion::V4],
                     "deliver_member_input": false,
                     "observe_member": false,
                     "interrupt_member": false,

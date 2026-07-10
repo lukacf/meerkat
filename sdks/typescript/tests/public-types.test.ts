@@ -24,13 +24,27 @@ import type {
 } from "../src/index.js";
 import type {
   LiveInputChunkWire,
+  LiveSendInputErrorData,
   LiveSendInputParams,
+  RealtimeImageChunk,
+  RealtimeInputChunk,
+  RealtimeInputKind,
+  RealtimeTranscriptEvent,
+  RealtimeTranscriptEventItemObserved,
   WireAssistantBlock,
   WireLiveAdapterErrorCode,
   WireLiveAdapterObservation,
   WireLiveAdapterObservationAssistantAudioChunk,
   WireLiveAdapterObservationCommandRejected,
+  WireLiveAdapterObservationUserContentCommitted,
   WireLiveConfigRejectionReason,
+  WireLiveConfigRejectionReasonImageInputInvalidBase64,
+  WireLiveConfigRejectionReasonImageInputIdempotencyConflict,
+  WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid,
+  WireLiveConfigRejectionReasonImageInputRequiresCommit,
+  WireLiveConfigRejectionReasonInputBackpressured,
+  WireLiveConfigRejectionReasonInputTooLarge,
+  WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen,
 } from "../src/index.js";
 import type {
   MobCreateParams,
@@ -725,6 +739,7 @@ const liveTextChunk: LiveInputChunkWire = {
 };
 const liveImageChunk: LiveInputChunkWire = {
   kind: "image",
+  idempotency_key: "image-turn-1",
   mime: "image/png",
   data: "iVBORw0KGgo=",
 };
@@ -734,6 +749,20 @@ const liveVideoFrameChunk: LiveInputChunkWire = {
   data: "AQID",
   timestamp_ms: 1_234,
 };
+const realtimeImageChunk: RealtimeImageChunk = {
+  idempotency_key: "image-turn-1",
+  mime_type: "image/png",
+  data: "iVBORw0KGgo=",
+};
+const realtimeInputKind: RealtimeInputKind = "image";
+const realtimeInputChunk: RealtimeInputChunk = {
+  kind: "image_chunk",
+  idempotency_key: realtimeImageChunk.idempotency_key,
+  mime_type: realtimeImageChunk.mime_type,
+  data: realtimeImageChunk.data,
+};
+void realtimeInputKind;
+void realtimeInputChunk;
 
 const liveSendInputAudio: LiveSendInputParams = {
   channel_id: "live_1",
@@ -751,6 +780,23 @@ const liveSendInputVideoFrame: LiveSendInputParams = {
   channel_id: "live_1",
   chunk: liveVideoFrameChunk,
 };
+const liveInputTooLarge: WireLiveConfigRejectionReasonInputTooLarge = {
+  kind: "input_too_large",
+  max_bytes: 256,
+  actual_bytes: 257,
+};
+const liveInputBackpressured: WireLiveConfigRejectionReasonInputBackpressured = {
+  kind: "input_backpressured",
+  max_pending_bytes: 1024,
+};
+const liveSendInputErrorData: LiveSendInputErrorData = {
+  error_code: {
+    code: "config_rejected",
+    reason: liveInputBackpressured,
+  },
+};
+void liveInputTooLarge;
+void liveSendInputErrorData;
 
 // R5-10: chunks missing the `kind` discriminator must be rejected at compile
 // time. This proves `chunk` is no longer typed as `Record<string, unknown>`,
@@ -766,6 +812,7 @@ void liveSendInputText;
 void liveSendInputImage;
 void liveSendInputVideoFrame;
 void liveSendInputUntyped;
+void realtimeImageChunk;
 
 // FIX-SDK-OBS: `WireLiveAdapterObservation` is a discriminated union over
 // the `observation` tag. Browser/Node clients can type-narrow on each
@@ -799,6 +846,22 @@ const liveObsReady: WireLiveAdapterObservation = { observation: "ready" };
 const liveObsTurnInterrupted: WireLiveAdapterObservation = {
   observation: "turn_interrupted",
 };
+const liveObsUserContentCommitted: WireLiveAdapterObservationUserContentCommitted = {
+  observation: "user_content_committed",
+  idempotency_key: "image-turn-1",
+  item_id: "item_image",
+  content_index: 0,
+  media_type: "image/png",
+};
+const liveInvalidBase64Reason: WireLiveConfigRejectionReasonImageInputInvalidBase64 = {
+  kind: "image_input_invalid_base64",
+};
+const liveRewriteRequiresReopenReason: WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen = {
+  kind: "refresh_transcript_rewrite_requires_reopen",
+};
+
+void liveInvalidBase64Reason;
+void liveRewriteRequiresReopenReason;
 
 // Type narrowing on the discriminator: each branch sees the right
 // payload without an `as` cast.
@@ -824,6 +887,19 @@ function readRejectionCode(
   return rejected.code;
 }
 
+function readCommittedImageIdentity(
+  obs: WireLiveAdapterObservation,
+): { idempotencyKey: string; itemId: string; contentIndex: number; mediaType: string } | null {
+  if (obs.observation !== "user_content_committed") return null;
+  const committed: WireLiveAdapterObservationUserContentCommitted = obs;
+  return {
+    idempotencyKey: committed.idempotency_key,
+    itemId: committed.item_id,
+    contentIndex: committed.content_index,
+    mediaType: committed.media_type,
+  };
+}
+
 // `chunk: { foo: "bar" }` was the @ts-expect-error pattern for chunks; the
 // same constraint must hold for observations missing the discriminator.
 const liveObsUntyped: WireLiveAdapterObservation = {
@@ -835,9 +911,28 @@ void liveObsAudio;
 void liveObsCommandRejected;
 void liveObsReady;
 void liveObsTurnInterrupted;
+void liveObsUserContentCommitted;
 void liveObsUntyped;
 void readAudioIdentity;
 void readRejectionCode;
+void readCommittedImageIdentity;
+
+// The root transcript alias is the public-safe wire union. Its variants can
+// be narrowed without exposing the internal byte-bearing user-content command.
+const safeRealtimeTranscript: RealtimeTranscriptEvent = {
+  type: "item_observed",
+  item_id: "item-user-1",
+  role: "user",
+};
+const narrowedSafeRealtimeTranscript: RealtimeTranscriptEventItemObserved =
+  safeRealtimeTranscript;
+const unsafeRealtimeTranscript: RealtimeTranscriptEvent = {
+  // @ts-expect-error `user_content_final` is internal and absent from the wire union.
+  type: "user_content_final",
+  item_id: "item-private",
+};
+void narrowedSafeRealtimeTranscript;
+void unsafeRealtimeTranscript;
 
 // =============================================================================
 // R7-2 (P2) regression: `WireLiveConfigRejectionReason` lands as a typed
@@ -862,6 +957,47 @@ const reasonNonRealtime: WireLiveConfigRejectionReason = {
 };
 const reasonImageInput: WireLiveConfigRejectionReason = {
   kind: "image_input_not_implemented",
+};
+const reasonImageUnsupportedMime: WireLiveConfigRejectionReason = {
+  kind: "image_input_unsupported_mime",
+  mime_type: "image/gif",
+};
+const reasonImageContentMismatch: WireLiveConfigRejectionReason = {
+  kind: "image_input_content_mismatch",
+  mime_type: "image/png",
+};
+const reasonImageTooLarge: WireLiveConfigRejectionReason = {
+  kind: "image_input_too_large",
+  max_bytes: 20,
+  actual_bytes: 21,
+};
+const reasonInvalidImageIdempotencyKey: WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid = {
+  kind: "image_input_idempotency_key_invalid",
+  max_bytes: 128,
+  actual_bytes: 129,
+};
+const reasonImageIdempotencyConflict: WireLiveConfigRejectionReasonImageInputIdempotencyConflict = {
+  kind: "image_input_idempotency_conflict",
+};
+const reasonImageRequiresCommit: WireLiveConfigRejectionReasonImageInputRequiresCommit = {
+  kind: "image_input_requires_commit",
+};
+const reasonInputTooLarge: WireLiveConfigRejectionReason = {
+  kind: "input_too_large",
+  max_bytes: 64,
+  actual_bytes: 65,
+};
+const reasonInputBackpressured: WireLiveConfigRejectionReason = {
+  kind: "input_backpressured",
+  max_pending_bytes: 64,
+};
+const reasonImageBackpressured: WireLiveConfigRejectionReason = {
+  kind: "image_input_backpressured",
+  max_pending_bytes: 40,
+};
+const reasonImageTransportUnsupported: WireLiveConfigRejectionReason = {
+  kind: "image_input_transport_unsupported",
+  transport: "webrtc_data_channel_use_live_send_input_rpc",
 };
 const reasonVideoFrameInput: WireLiveConfigRejectionReason = {
   kind: "video_frame_input_not_implemented",
@@ -922,20 +1058,47 @@ function readRejectionDetail(reason: WireLiveConfigRejectionReason): string {
       return `${reason.from_model} -> ${reason.to_model}`;
     case "refresh_provider_swap":
       return `${reason.from_provider} -> ${reason.to_provider}`;
+    case "image_input_unsupported_mime":
+    case "image_input_content_mismatch":
+      return reason.mime_type;
+    case "image_input_too_large":
+    case "image_input_idempotency_key_invalid":
+    case "input_too_large":
+      return `${reason.actual_bytes}/${reason.max_bytes}`;
+    case "image_input_backpressured":
+    case "input_backpressured":
+      return `${reason.max_pending_bytes}`;
+    case "image_input_transport_unsupported":
+      return reason.transport;
     case "image_input_not_implemented":
+    case "image_input_invalid_base64":
+    case "image_input_idempotency_conflict":
+    case "image_input_requires_commit":
     case "video_frame_input_not_implemented":
     case "unsupported_input_chunk_variant":
+    case "refresh_transcript_rewrite_requires_reopen":
       return reason.kind;
     case "unknown":
       return reason.debug;
-    default:
-      return "exhaustive";
   }
+
+  const exhaustive: never = reason;
+  return exhaustive;
 }
 
 void reasonChannelIdentitySwap;
 void reasonNonRealtime;
 void reasonImageInput;
+void reasonImageUnsupportedMime;
+void reasonImageContentMismatch;
+void reasonImageTooLarge;
+void reasonInvalidImageIdempotencyKey;
+void reasonImageIdempotencyConflict;
+void reasonImageRequiresCommit;
+void reasonInputTooLarge;
+void reasonInputBackpressured;
+void reasonImageBackpressured;
+void reasonImageTransportUnsupported;
 void reasonVideoFrameInput;
 void reasonUnsupportedChunk;
 void reasonRefreshModelSwap;
@@ -1014,6 +1177,21 @@ const liveCommitArbitrary: LiveCommitInputModality = "speech";
 void liveCommitAudio;
 void liveCommitText;
 void liveCommitArbitrary;
+
+// Image helpers require caller-stable identity as their first image argument.
+type LiveSendInputImageArgs = Parameters<LiveChannel["sendInputImage"]>;
+const liveImageArgs: LiveSendInputImageArgs = [
+  "image-turn-1",
+  "image/png",
+  "iVBORw0KGgo=",
+];
+// @ts-expect-error image idempotency identity is required.
+const liveImageArgsWithoutIdentity: LiveSendInputImageArgs = [
+  "image/png",
+  "iVBORw0KGgo=",
+];
+void liveImageArgs;
+void liveImageArgsWithoutIdentity;
 
 // sessionId is always a string.
 const liveSessionId: string = liveChannel.sessionId;

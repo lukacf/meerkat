@@ -135,8 +135,8 @@ pub enum SupervisorBinding {
     Unbound,
     /// Supervisor authorized. The companion fields travel together:
     /// `name` + `peer_id` + `address` + `signing_public_key` derive from the
-    /// initial bind or the latest `AuthorizeSupervisor` rotation; `epoch`
-    /// monotonically increases across rotations.
+    /// initial bind, a same-authority `AuthorizeSupervisor` version advance,
+    /// or a completed durable rotation operation; `epoch` is monotonic.
     Bound {
         name: String,
         peer_id: String,
@@ -149,6 +149,67 @@ pub enum SupervisorBinding {
 pub struct CommsDrainSlot {
     handle: Option<tokio::task::JoinHandle<()>>,
     task_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+}
+
+struct SupervisorRotationTask {
+    handle: crate::tokio::task::JoinHandle<()>,
+}
+
+/// Session-owned driver slot for a durable supervisor rotation. The task is
+/// only a liveness mechanism; operation identity, phase, and terminal receipts
+/// remain generated-machine authority and survive task/process loss.
+pub(crate) struct SupervisorRotationTaskSlot {
+    task: crate::tokio::sync::Mutex<Option<SupervisorRotationTask>>,
+}
+
+impl SupervisorRotationTaskSlot {
+    pub(crate) fn new() -> Self {
+        Self {
+            task: crate::tokio::sync::Mutex::new(None),
+        }
+    }
+
+    pub(crate) async fn install(
+        &self,
+        _operation_id: String,
+        _runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        handle: crate::tokio::task::JoinHandle<()>,
+    ) -> bool {
+        let mut task = self.task.lock().await;
+        if let Some(_current) = task
+            .as_ref()
+            .filter(|current| !current.handle.is_finished())
+        {
+            // A live carrier may only be replaced by the explicit
+            // peer-ingress-runtime replacement path while that path holds the
+            // session mutation gate. An arbitrary later caller cannot prove
+            // that its runtime is newer, so last-writer-wins here would allow
+            // an old drain to ABA-replace the current carrier and mutate its
+            // stale router.
+            handle.abort();
+            let _ = handle.await;
+            return false;
+        } else if let Some(previous) = task.take() {
+            // Reap a finished task before replacing its slot.
+            let _ = previous.handle.await;
+        }
+        *task = Some(SupervisorRotationTask { handle });
+        true
+    }
+
+    pub(crate) async fn abort_and_wait(&self) {
+        if let Some(handle) = self.abort_keeping_handle().await {
+            let _ = handle.await;
+        }
+    }
+
+    /// Signal cancellation while retaining the join handle so unregister can
+    /// prove this session-scoped producer quiesced before final commit.
+    pub(crate) async fn abort_keeping_handle(&self) -> Option<crate::tokio::task::JoinHandle<()>> {
+        let task = self.task.lock().await.take()?;
+        task.handle.abort();
+        Some(task.handle)
+    }
 }
 
 impl CommsDrainSlot {
@@ -199,13 +260,6 @@ impl CommsDrainSlot {
         }
     }
 
-    pub(crate) fn abort(&mut self) {
-        self.task_runtime = None;
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-    }
-
     /// Signal cancellation on the drain task and return its `JoinHandle` so the
     /// caller can await quiescence. The two-phase unregister drain uses this to
     /// abort the drain task *and* join it before committing teardown; awaiting
@@ -217,10 +271,6 @@ impl CommsDrainSlot {
         handle.abort();
         Some(handle)
     }
-}
-
-pub fn abort_slot(slot: &mut CommsDrainSlot) {
-    slot.abort();
 }
 
 #[derive(Debug, Clone)]
@@ -251,35 +301,294 @@ impl DrainAuthorityState {
 }
 
 impl MeerkatMachine {
+    #[cfg(test)]
+    pub(crate) async fn test_authorize_direct_comms_drain_runtime(
+        &self,
+        session_id: &SessionId,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<(), String> {
+        let placeholder = crate::tokio::spawn(async {});
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "direct-drain test session is not registered".to_string())?;
+        {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AttachSessionIngress {
+                    comms_runtime_id: crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(
+                        &runtime,
+                    ),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
+                    mode: crate::meerkat_machine::dsl::DrainMode::Timed,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        entry.drain_slot.install_task(runtime, placeholder);
+        Ok(())
+    }
+
+    /// Fence startup mechanics to the peer-ingress runtime currently owned by
+    /// the generated machine and installed in the drain slot.
+    pub(crate) async fn peer_ingress_runtime_is_current(
+        &self,
+        session_id: &SessionId,
+        runtime: &Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<bool, SupervisorBindingStageError> {
+        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            return Err(SupervisorBindingStageError::SessionNotRegistered);
+        };
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let runtime_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(runtime);
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(
+            authority.state().peer_ingress_comms_runtime_id.as_ref() == Some(&runtime_id)
+                && entry.drain_slot.task_runtime_matches(runtime),
+        )
+    }
+
+    /// Install a rotation carrier only while the same session mutation gate
+    /// proves the candidate runtime is both generated-current and the runtime
+    /// mechanically installed in the comms-drain slot. A stale drain loses the
+    /// race without displacing the current carrier.
+    pub(crate) async fn install_supervisor_rotation_task_if_current(
+        &self,
+        session_id: &SessionId,
+        operation_id: String,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        handle: crate::tokio::task::JoinHandle<()>,
+    ) -> Result<bool, SupervisorBindingStageError> {
+        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            handle.abort();
+            let _ = handle.await;
+            return Err(SupervisorBindingStageError::SessionNotRegistered);
+        };
+        let slot = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+            let runtime_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&runtime);
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            let pending_operation_matches = state.supervisor_rotation_operation_id.as_deref()
+                == Some(operation_id.as_str())
+                && matches!(
+                    state.supervisor_rotation_phase,
+                    Some(
+                        crate::meerkat_machine::dsl::SupervisorRotationPhase::PreviousRevokePending
+                            | crate::meerkat_machine::dsl::SupervisorRotationPhase::NextPublishPending
+                    )
+                );
+            let is_current = state.peer_ingress_comms_runtime_id.as_ref() == Some(&runtime_id)
+                && entry.drain_slot.task_runtime_matches(&runtime)
+                && pending_operation_matches;
+            if is_current {
+                Some(Arc::clone(&entry.supervisor_rotation_task))
+            } else {
+                None
+            }
+        };
+        let Some(slot) = slot else {
+            handle.abort();
+            let _ = handle.await;
+            return Ok(false);
+        };
+        Ok(slot.install(operation_id, runtime, handle).await)
+    }
+
+    pub(crate) async fn active_supervisor_rotation(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<GeneratedSupervisorRotationReceipt>, SupervisorBindingStageError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        let Some(operation_id) = state.supervisor_rotation_operation_id.clone() else {
+            return Ok(None);
+        };
+        let (
+            Some(phase),
+            Some(previous_name),
+            Some(previous_peer_id),
+            Some(previous_address),
+            Some(previous_signing_public_key),
+            Some(previous_epoch),
+            Some(next_name),
+            Some(next_peer_id),
+            Some(next_address),
+            Some(next_signing_public_key),
+            Some(next_epoch),
+        ) = (
+            state.supervisor_rotation_phase,
+            state.supervisor_rotation_previous_name.clone(),
+            state.supervisor_rotation_previous_peer_id.clone(),
+            state.supervisor_rotation_previous_address.clone(),
+            state
+                .supervisor_rotation_previous_signing_public_key
+                .clone(),
+            state.supervisor_rotation_previous_epoch,
+            state.supervisor_rotation_next_name.clone(),
+            state.supervisor_rotation_next_peer_id.clone(),
+            state.supervisor_rotation_next_address.clone(),
+            state.supervisor_rotation_next_signing_public_key.clone(),
+            state.supervisor_rotation_next_epoch,
+        )
+        else {
+            return Err(SupervisorBindingStageError::Persistence(
+                "generated supervisor rotation state was partial".to_string(),
+            ));
+        };
+        Ok(Some(GeneratedSupervisorRotationReceipt {
+            operation_id,
+            phase,
+            rejection: state.supervisor_rotation_rejection,
+            previous: GeneratedSupervisorBinding {
+                name: previous_name,
+                peer_id: previous_peer_id,
+                address: previous_address,
+                signing_public_key: previous_signing_public_key,
+                epoch: previous_epoch,
+            },
+            next: GeneratedSupervisorBinding {
+                name: next_name,
+                peer_id: next_peer_id,
+                address: next_address,
+                signing_public_key: next_signing_public_key,
+                epoch: next_epoch,
+            },
+        }))
+    }
+
     async fn apply_supervisor_binding_input(
         &self,
         session_id: &SessionId,
         input: crate::meerkat_machine::dsl::MeerkatMachineInput,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        #[cfg(target_arch = "wasm32")]
-        let mut sessions = self
-            .sessions
-            .try_write()
-            .map_err(|_| SupervisorBindingStageError::SessionRegistryBusy)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut sessions = self.sessions.write().await;
-
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-
-        #[cfg(target_arch = "wasm32")]
-        let mut authority = entry
-            .dsl_authority
-            .try_lock()
-            .map_err(|_| SupervisorBindingStageError::SessionAuthorityBusy)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut authority = entry
-            .dsl_authority
+        let (gate, authority) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+            (
+                Arc::clone(&entry.mutation_gate),
+                Arc::clone(&entry.dsl_authority),
+            )
+        };
+        let _gate_guard = Arc::clone(&gate).lock_owned().await;
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+            if !Arc::ptr_eq(&entry.mutation_gate, &gate)
+                || !Arc::ptr_eq(&entry.dsl_authority, &authority)
+            {
+                return Err(SupervisorBindingStageError::SessionNotRegistered);
+            }
+        }
+        let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+            .map_err(SupervisorBindingStageError::Dsl)
+    }
 
+    /// Preview a supervisor-authority transition, durably replace only its
+    /// closed projection, then apply the same generated input to live state.
+    ///
+    /// The preview-before-persist ordering is intentional. Peer-ingress handles
+    /// share this DSL authority but do not take the session mutation gate; a
+    /// whole-authority snapshot restore after asynchronous store I/O could erase
+    /// their concurrent receive/dequeue bookkeeping. Supervisor mutations are
+    /// serialized by the gate, so the post-persist live input remains valid and
+    /// updates only its generated supervisor fields.
+    async fn apply_persisted_supervisor_authority_input(
+        &self,
+        session_id: &SessionId,
+        input: crate::meerkat_machine::dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
+    {
+        let (gate, driver, authority) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+            (
+                Arc::clone(&entry.mutation_gate),
+                Arc::clone(&entry.driver),
+                Arc::clone(&entry.dsl_authority),
+            )
+        };
+        let _gate_guard = Arc::clone(&gate).lock_owned().await;
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
+            if !Arc::ptr_eq(&entry.mutation_gate, &gate)
+                || !Arc::ptr_eq(&entry.driver, &driver)
+                || !Arc::ptr_eq(&entry.dsl_authority, &authority)
+            {
+                return Err(SupervisorBindingStageError::SessionNotRegistered);
+            }
+        }
+        let projected_supervisor_authority = {
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut preview =
+                crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
+                    authority.state().clone(),
+                )
+                .map_err(SupervisorBindingStageError::Dsl)?;
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut preview, input.clone())
+                .map_err(SupervisorBindingStageError::Dsl)?;
+            crate::driver::EphemeralRuntimeDriver::supervisor_authority_snapshot_from_state(
+                preview.state(),
+            )
+        };
+
+        driver
+            .lock()
+            .await
+            .persist_current_machine_lifecycle_with_supervisor_authority(
+                context,
+                projected_supervisor_authority,
+            )
+            .await
+            .map_err(|error| SupervisorBindingStageError::Persistence(error.to_string()))?;
+
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
             .map_err(SupervisorBindingStageError::Dsl)
     }
@@ -355,7 +664,10 @@ impl MeerkatMachine {
         if matches!(
             self.existing_session_runtime_state(session_id).await,
             Some(RuntimeState::Destroyed)
-        ) {
+        ) && !self
+            .has_terminal_supervisor_cleanup_authority(session_id)
+            .await
+        {
             return Err(RuntimeDriverError::Destroyed);
         }
 
@@ -371,6 +683,25 @@ impl MeerkatMachine {
 
         self.update_peer_ingress_context_inner(session_id, true, Some(comms_runtime))
             .await
+    }
+
+    pub(super) async fn has_terminal_supervisor_cleanup_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> bool {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return false;
+        };
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        state.supervisor_binding_kind == crate::meerkat_machine::dsl::SupervisorBindingKind::Bound
+            || state.supervisor_revoke_pending_peer_id.is_some()
+            || state.supervisor_revoked_peer_id.is_some()
+            || state.supervisor_rotation_phase.is_some()
     }
 
     /// Mob-owned variant of [`MeerkatMachine::maybe_spawn_comms_drain`]
@@ -648,6 +979,17 @@ impl MeerkatMachine {
             .is_some_and(|state| {
                 state.phase == crate::meerkat_machine::dsl::DrainPhase::ExitedRespawnable
             });
+        if !keep_runtime {
+            let rotation_slot = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .map(|entry| Arc::clone(&entry.supervisor_rotation_task))
+            };
+            if let Some(rotation_slot) = rotation_slot {
+                rotation_slot.abort_and_wait().await;
+            }
+        }
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
             entry.drain_slot.clear_after_exit(keep_runtime);
@@ -669,6 +1011,17 @@ impl MeerkatMachine {
             }
             None => false,
         };
+        if !keep_runtime {
+            let rotation_slot = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .map(|entry| Arc::clone(&entry.supervisor_rotation_task))
+            };
+            if let Some(rotation_slot) = rotation_slot {
+                rotation_slot.abort_and_wait().await;
+            }
+        }
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
             entry.drain_slot.clear_after_exit(keep_runtime);
@@ -924,9 +1277,8 @@ impl MeerkatMachine {
 
     /// Stage a DSL `AuthorizeSupervisor` input (Wave 3 D Row 21).
     ///
-    /// Rotates the current binding to a new supervisor + epoch. The shell
-    /// must have already verified the rotation is authorized by the
-    /// *current* supervisor before calling this method.
+    /// Advances metadata/version for the same bound peer and signing key.
+    /// Identity rotation is owned by `SubmitSupervisorRotation`.
     pub async fn stage_supervisor_authorize(
         &self,
         session_id: &SessionId,
@@ -948,6 +1300,307 @@ impl MeerkatMachine {
             },
         )
         .await
+    }
+
+    pub(crate) async fn stage_supervisor_binding_route_refresh(
+        &self,
+        session_id: &SessionId,
+        binding: GeneratedSupervisorBinding,
+        sender_peer_id: Option<String>,
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
+    {
+        self.apply_supervisor_binding_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RefreshSupervisorBindingRoute {
+                name: binding.name,
+                peer_id: binding.peer_id,
+                address: binding.address,
+                signing_public_key: binding.signing_public_key,
+                epoch: binding.epoch,
+                sender_peer_id,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn submit_supervisor_rotation(
+        &self,
+        session_id: &SessionId,
+        submission: GeneratedSupervisorRotationSubmit,
+    ) -> Result<SupervisorRotationSubmission, SupervisorBindingStageError> {
+        let transition = self
+            .apply_persisted_supervisor_authority_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::SubmitSupervisorRotation {
+                    operation_id: submission.operation_id,
+                    next_name: submission.next.name,
+                    next_peer_id: submission.next.peer_id,
+                    next_address: submission.next.address,
+                    next_signing_public_key: submission.next.signing_public_key,
+                    next_epoch: submission.next.epoch,
+                    preflight_rejection: submission.preflight_rejection,
+                    sender_peer_id: submission.sender_peer_id,
+                    sender_signing_public_key: submission.sender_signing_public_key,
+                },
+                "supervisor rotation submit",
+            )
+            .await?;
+        let resolved = transition.effects().iter().find_map(|effect| match effect {
+            crate::meerkat_machine::dsl::MeerkatMachineEffect::SupervisorRotationSubmissionResolved {
+                result,
+                rejection,
+                previous_name,
+                previous_peer_id,
+                previous_address,
+                previous_signing_public_key,
+                previous_epoch,
+                ..
+            } => Some((
+                *result,
+                *rejection,
+                previous_name.clone(),
+                previous_peer_id.clone(),
+                previous_address.clone(),
+                previous_signing_public_key.clone(),
+                *previous_epoch,
+            )),
+            _ => None,
+        });
+        let Some((result, rejection, name, peer_id, address, signing_public_key, epoch)) = resolved
+        else {
+            return Err(SupervisorBindingStageError::Persistence(
+                "generated supervisor rotation submission omitted its feedback effect".to_string(),
+            ));
+        };
+        let previous = match (name, peer_id, address, signing_public_key, epoch) {
+            (Some(name), Some(peer_id), Some(address), Some(signing_public_key), Some(epoch)) => {
+                Some(GeneratedSupervisorBinding {
+                    name,
+                    peer_id,
+                    address,
+                    signing_public_key,
+                    epoch,
+                })
+            }
+            (None, None, None, None, None) => None,
+            _ => {
+                return Err(SupervisorBindingStageError::Persistence(
+                    "generated supervisor rotation submission carried a partial previous binding"
+                        .to_string(),
+                ));
+            }
+        };
+        use crate::meerkat_machine::dsl::SupervisorRotationSubmissionResultKind as ResultKind;
+        match (result, rejection, previous) {
+            (ResultKind::New, None, Some(previous)) => {
+                Ok(SupervisorRotationSubmission::New(previous))
+            }
+            (ResultKind::ExistingPending, None, Some(previous)) => {
+                Ok(SupervisorRotationSubmission::ExistingPending(previous))
+            }
+            (ResultKind::ExistingTerminal, _, _) => {
+                Ok(SupervisorRotationSubmission::ExistingTerminal)
+            }
+            (ResultKind::Rejected, Some(rejection), _) => {
+                Ok(SupervisorRotationSubmission::Rejected(rejection))
+            }
+            (ResultKind::Conflict, Some(rejection), _) => {
+                Ok(SupervisorRotationSubmission::Conflict(rejection))
+            }
+            _ => Err(SupervisorBindingStageError::Persistence(
+                "generated supervisor rotation submission feedback was inconsistent".to_string(),
+            )),
+        }
+    }
+
+    pub async fn stage_supervisor_rotation_resume(
+        &self,
+        session_id: &SessionId,
+        operation_id: String,
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
+    {
+        self.apply_supervisor_binding_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ResumeSupervisorRotation {
+                operation_id,
+            },
+        )
+        .await
+    }
+
+    pub async fn stage_supervisor_rotation_previous_revoked(
+        &self,
+        session_id: &SessionId,
+        operation_id: String,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
+    {
+        self.apply_persisted_supervisor_authority_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorRotationPreviousRevoked {
+                operation_id,
+                peer_id,
+                epoch,
+            },
+            "supervisor rotation previous revoked",
+        )
+        .await
+    }
+
+    pub async fn stage_supervisor_rotation_next_published(
+        &self,
+        session_id: &SessionId,
+        operation_id: String,
+        peer_id: String,
+        epoch: u64,
+    ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
+    {
+        self.apply_persisted_supervisor_authority_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorRotationNextPublished {
+                operation_id,
+                peer_id,
+                epoch,
+            },
+            "supervisor rotation next published",
+        )
+        .await
+    }
+
+    pub(crate) async fn observe_supervisor_rotation(
+        &self,
+        session_id: &SessionId,
+        operation_id: String,
+        observer: &GeneratedSupervisorBinding,
+    ) -> Result<SupervisorRotationObservation, SupervisorBindingStageError> {
+        let transition = self
+            .apply_supervisor_binding_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ObserveSupervisorRotation {
+                    operation_id,
+                    observer_peer_id: Some(observer.peer_id.clone()),
+                    observer_signing_public_key: Some(observer.signing_public_key.clone()),
+                    observer_epoch: observer.epoch,
+                },
+            )
+            .await?;
+        let resolved = transition.effects().iter().find_map(|effect| match effect {
+            crate::meerkat_machine::dsl::MeerkatMachineEffect::SupervisorRotationObservationResolved {
+                operation_id,
+                status,
+                rejection,
+                previous_name,
+                previous_peer_id,
+                previous_address,
+                previous_signing_public_key,
+                previous_epoch,
+                next_name,
+                next_peer_id,
+                next_address,
+                next_signing_public_key,
+                next_epoch,
+            } => Some((
+                operation_id.clone(),
+                *status,
+                *rejection,
+                previous_name.clone(),
+                previous_peer_id.clone(),
+                previous_address.clone(),
+                previous_signing_public_key.clone(),
+                *previous_epoch,
+                next_name.clone(),
+                next_peer_id.clone(),
+                next_address.clone(),
+                next_signing_public_key.clone(),
+                *next_epoch,
+            )),
+            _ => None,
+        });
+        let Some((
+            operation_id,
+            status,
+            rejection,
+            previous_name,
+            previous_peer_id,
+            previous_address,
+            previous_signing_public_key,
+            previous_epoch,
+            next_name,
+            next_peer_id,
+            next_address,
+            next_signing_public_key,
+            next_epoch,
+        )) = resolved
+        else {
+            return Err(SupervisorBindingStageError::Persistence(
+                "generated supervisor rotation observation omitted its feedback effect".to_string(),
+            ));
+        };
+        use crate::meerkat_machine::dsl::SupervisorRotationObservationStatusKind as Status;
+        if status == Status::NotFound {
+            return Ok(SupervisorRotationObservation::NotFound);
+        }
+        let (
+            Some(previous_name),
+            Some(previous_peer_id),
+            Some(previous_address),
+            Some(previous_signing_public_key),
+            Some(previous_epoch),
+            Some(next_name),
+            Some(next_peer_id),
+            Some(next_address),
+            Some(next_signing_public_key),
+            Some(next_epoch),
+        ) = (
+            previous_name,
+            previous_peer_id,
+            previous_address,
+            previous_signing_public_key,
+            previous_epoch,
+            next_name,
+            next_peer_id,
+            next_address,
+            next_signing_public_key,
+            next_epoch,
+        )
+        else {
+            return Err(SupervisorBindingStageError::Persistence(
+                "generated supervisor rotation observation carried a partial receipt".to_string(),
+            ));
+        };
+        let phase = match status {
+            Status::PreviousRevokePending => {
+                crate::meerkat_machine::dsl::SupervisorRotationPhase::PreviousRevokePending
+            }
+            Status::NextPublishPending => {
+                crate::meerkat_machine::dsl::SupervisorRotationPhase::NextPublishPending
+            }
+            Status::Completed => crate::meerkat_machine::dsl::SupervisorRotationPhase::Completed,
+            Status::Rejected => crate::meerkat_machine::dsl::SupervisorRotationPhase::Rejected,
+            Status::NotFound => unreachable!("not-found observation returned above"),
+        };
+        Ok(SupervisorRotationObservation::Found(
+            GeneratedSupervisorRotationReceipt {
+                operation_id,
+                phase,
+                rejection,
+                previous: GeneratedSupervisorBinding {
+                    name: previous_name,
+                    peer_id: previous_peer_id,
+                    address: previous_address,
+                    signing_public_key: previous_signing_public_key,
+                    epoch: previous_epoch,
+                },
+                next: GeneratedSupervisorBinding {
+                    name: next_name,
+                    peer_id: next_peer_id,
+                    address: next_address,
+                    signing_public_key: next_signing_public_key,
+                    epoch: next_epoch,
+                },
+            },
+        ))
     }
 
     /// Stage a DSL `RequestSupervisorTrustPublish` input.
@@ -990,9 +1643,10 @@ impl MeerkatMachine {
         epoch: u64,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        self.apply_supervisor_binding_input(
+        self.apply_persisted_supervisor_authority_input(
             session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::RevokeSupervisor { peer_id, epoch },
+            "supervisor revoke begin",
         )
         .await
     }
@@ -1014,12 +1668,13 @@ impl MeerkatMachine {
         peer_id: String,
         epoch: u64,
     ) -> Result<(), SupervisorBindingStageError> {
-        self.apply_supervisor_binding_input(
+        self.apply_persisted_supervisor_authority_input(
             session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgePublished {
                 peer_id,
                 epoch,
             },
+            "supervisor trust publish commit",
         )
         .await?;
         Ok(())
@@ -1062,12 +1717,13 @@ impl MeerkatMachine {
         peer_id: String,
         epoch: u64,
     ) -> Result<(), SupervisorBindingStageError> {
-        self.apply_supervisor_binding_input(
+        self.apply_persisted_supervisor_authority_input(
             session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::SupervisorTrustEdgeRevoked {
                 peer_id,
                 epoch,
             },
+            "supervisor revoke receipt",
         )
         .await?;
         Ok(())
@@ -1118,6 +1774,9 @@ pub enum SupervisorBindingStageError {
     /// The target runtime did not expose a complete typed local endpoint for
     /// generated trust-store ownership.
     LocalEndpoint(String),
+    /// Durable supervisor-authority replacement failed; live DSL state was
+    /// restored to the pre-transition snapshot.
+    Persistence(String),
 }
 
 impl std::fmt::Display for SupervisorBindingStageError {
@@ -1134,15 +1793,18 @@ impl std::fmt::Display for SupervisorBindingStageError {
             Self::LocalEndpoint(err) => {
                 write!(f, "local endpoint unavailable for supervisor trust: {err}")
             }
+            Self::Persistence(err) => {
+                write!(f, "supervisor authority persistence failed: {err}")
+            }
         }
     }
 }
 
 impl std::error::Error for SupervisorBindingStageError {}
 
-/// Previous supervisor binding carried by generated authorize admission
-/// feedback. The shell uses it mechanically for revoke/rollback after
-/// MeerkatMachine has accepted the rotation.
+/// Complete supervisor binding carried across generated admission and
+/// rotation seams. The shell uses it mechanically and never classifies its
+/// contents outside MeerkatMachine authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GeneratedSupervisorBinding {
     pub name: String,
@@ -1150,6 +1812,39 @@ pub(crate) struct GeneratedSupervisorBinding {
     pub address: String,
     pub signing_public_key: String,
     pub epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedSupervisorRotationSubmit {
+    pub operation_id: String,
+    pub next: GeneratedSupervisorBinding,
+    pub preflight_rejection: Option<crate::meerkat_machine::dsl::SupervisorRotationRejectionKind>,
+    pub sender_peer_id: Option<String>,
+    pub sender_signing_public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedSupervisorRotationReceipt {
+    pub operation_id: String,
+    pub phase: crate::meerkat_machine::dsl::SupervisorRotationPhase,
+    pub rejection: Option<crate::meerkat_machine::dsl::SupervisorRotationRejectionKind>,
+    pub previous: GeneratedSupervisorBinding,
+    pub next: GeneratedSupervisorBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorRotationSubmission {
+    New(GeneratedSupervisorBinding),
+    ExistingPending(GeneratedSupervisorBinding),
+    ExistingTerminal,
+    Rejected(crate::meerkat_machine::dsl::SupervisorRotationRejectionKind),
+    Conflict(crate::meerkat_machine::dsl::SupervisorRotationRejectionKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorRotationObservation {
+    Found(GeneratedSupervisorRotationReceipt),
+    NotFound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1308,9 +2003,9 @@ impl MeerkatMachine {
     pub(crate) async fn resolve_supervisor_authorize_admission(
         &self,
         session_id: &SessionId,
-        supervisor_peer_id: String,
-        supervisor_epoch: u64,
+        supervisor: GeneratedSupervisorBinding,
         sender_peer_id: Option<String>,
+        sender_signing_public_key: Option<String>,
     ) -> Result<SupervisorAuthorizeAdmission, SupervisorAdmissionStageError> {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
@@ -1324,9 +2019,13 @@ impl MeerkatMachine {
             crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                 &mut *authority,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveSupervisorAuthorizeAdmission {
-                    supervisor_peer_id,
-                    supervisor_epoch,
+                    supervisor_name: supervisor.name,
+                    supervisor_peer_id: supervisor.peer_id,
+                    supervisor_address: supervisor.address,
+                    supervisor_signing_public_key: supervisor.signing_public_key,
+                    supervisor_epoch: supervisor.epoch,
                     sender_peer_id,
+                    sender_signing_public_key,
                 },
             )
             .map_err(SupervisorAdmissionStageError::Dsl)?
@@ -1425,6 +2124,7 @@ impl MeerkatMachine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SupervisorBridgeCommandAdmission {
     Accepted,
+    ResumePendingRevoke,
     Rejected(crate::meerkat_machine::dsl::SupervisorBridgeCommandRejectionKind),
 }
 
@@ -1519,6 +2219,73 @@ impl MeerkatMachine {
                     crate::meerkat_machine::dsl::SupervisorBridgeCommandAdmissionResultKind::Reject,
                     Some(rejection),
                 ) => Ok(SupervisorBridgeCommandAdmission::Rejected(rejection)),
+                _ => Err(SupervisorBridgeCommandAdmissionStageError::MalformedAdmissionEffect),
+            })
+    }
+
+    /// Resolve lifecycle-aware supervisor cleanup admission. This is the only
+    /// bridge admission surface that remains available after the runtime stops
+    /// accepting ordinary commands; the DSL owns the command/phase matrix.
+    pub(crate) async fn resolve_supervisor_cleanup_command_admission(
+        &self,
+        session_id: &SessionId,
+        command_kind: crate::meerkat_machine::dsl::SupervisorCleanupCommandKind,
+        supervisor_peer_id: String,
+        supervisor_epoch: u64,
+        sender_peer_id: Option<String>,
+    ) -> Result<
+        (
+            SupervisorBridgeCommandAdmission,
+            crate::meerkat_machine::dsl::MeerkatPhase,
+        ),
+        SupervisorBridgeCommandAdmissionStageError,
+    > {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(SupervisorBridgeCommandAdmissionStageError::SessionNotRegistered)?;
+        let (phase, effects) = {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let phase = authority.state().lifecycle_phase;
+            let effects = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveSupervisorCleanupCommandAdmission {
+                    command_kind,
+                    supervisor_peer_id,
+                    supervisor_epoch,
+                    sender_peer_id,
+                },
+            )
+            .map_err(SupervisorBridgeCommandAdmissionStageError::Dsl)?
+            .into_effects();
+            (phase, effects)
+        };
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::SupervisorBridgeCommandAdmissionResolved {
+                    result,
+                    rejection,
+                } => Some((*result, *rejection)),
+                _ => None,
+            })
+            .ok_or(SupervisorBridgeCommandAdmissionStageError::MissingAdmissionEffect)
+            .and_then(|(result, rejection)| match (result, rejection) {
+                (
+                    crate::meerkat_machine::dsl::SupervisorBridgeCommandAdmissionResultKind::Accept,
+                    None,
+                ) => Ok((SupervisorBridgeCommandAdmission::Accepted, phase)),
+                (
+                    crate::meerkat_machine::dsl::SupervisorBridgeCommandAdmissionResultKind::ResumePendingRevoke,
+                    None,
+                ) => Ok((SupervisorBridgeCommandAdmission::ResumePendingRevoke, phase)),
+                (
+                    crate::meerkat_machine::dsl::SupervisorBridgeCommandAdmissionResultKind::Reject,
+                    Some(rejection),
+                ) => Ok((SupervisorBridgeCommandAdmission::Rejected(rejection), phase)),
                 _ => Err(SupervisorBridgeCommandAdmissionStageError::MalformedAdmissionEffect),
             })
     }

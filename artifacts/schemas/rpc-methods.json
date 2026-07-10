@@ -423,7 +423,7 @@
       "result_type": "SkillListResponse"
     },
     {
-      "description": "Open a live audio/text channel for a session",
+      "description": "Open a live channel for audio, text, and model-gated image input",
       "name": "live/open",
       "params_type": "LiveOpenParams",
       "result_type": "LiveOpenResult"
@@ -441,7 +441,7 @@
       "result_type": "LiveCloseResult"
     },
     {
-      "description": "Send an input chunk (audio/text) to a live channel",
+      "description": "Send an audio, text, or model-supported image chunk to a live channel",
       "name": "live/send_input",
       "params_type": "LiveSendInputParams",
       "result_type": "LiveSendInputResult"

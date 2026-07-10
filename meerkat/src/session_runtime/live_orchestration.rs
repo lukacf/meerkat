@@ -105,6 +105,9 @@ pub fn build_live_projection_snapshot_for_runtime(
         // carry the same authoritative system instructions the open path
         // emitted (peer terminal, ops_lifecycle, etc.).
         runtime_system_context: open_config.runtime_system_context.clone(),
+        user_content_identities: open_config.user_content_identities.clone(),
+        user_content_tombstones: open_config.user_content_tombstones.clone(),
+        transcript_rewrite_generation: open_config.transcript_rewrite_generation,
     }
 }
 
@@ -473,7 +476,10 @@ mod orchestrator {
         CreateSessionRequest, InitialTurnPolicy, SessionError, SessionService,
     };
     use meerkat_core::types::{ContentInput, Message, SessionId};
-    use meerkat_core::{DeferredPromptPolicy, SessionLlmIdentity, SurfaceSessionRecoveryOverrides};
+    use meerkat_core::{
+        DeferredPromptPolicy, RealtimeOpenProjectionAdmission, SessionLlmIdentity,
+        SurfaceSessionRecoveryOverrides,
+    };
     use meerkat_live::LiveAdapterHost;
     use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
     use meerkat_runtime::{MeerkatMachine, SessionLlmReconfigureRequest, SessionServiceRuntimeExt};
@@ -762,6 +768,15 @@ mod orchestrator {
             session_id: &SessionId,
             turning_mode: meerkat_contracts::RealtimeTurningMode,
         ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+            // Acquire process-wide custody before the persistent service can
+            // hydrate blob-backed image history. The take-once slot carried on
+            // the returned config transfers this same lease through provider
+            // seed acknowledgement; no payload-bearing waiter is queued.
+            let open_projection_lease = RealtimeOpenProjectionAdmission::global()
+                .try_acquire()
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(error.to_string()))
+                })?;
             Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
             let session = match self
                 .service
@@ -779,13 +794,20 @@ mod orchestrator {
             };
             let llm_identity = self.service.live_session_llm_identity(session_id).await?;
             let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
+            let transcript_rewrite_generation = session
+                .transcript_rewrite_generation()
+                .map_err(|err| SessionError::Agent(AgentError::InternalError(err.to_string())))?;
             Ok(RealtimeSessionOpenConfig::new(
                 turning_mode,
                 llm_identity,
                 visible_tools,
                 realtime_projection_messages(&session)?,
             )
+            .with_open_projection_lease(open_projection_lease)
             .with_runtime_system_context(realtime_projection_runtime_system_context(&session)?)
+            .with_user_content_identities(session.realtime_user_content_identities())
+            .with_user_content_tombstones(session.realtime_user_content_tombstones())
+            .with_transcript_rewrite_generation(transcript_rewrite_generation)
             .with_system_prompt(
                 match realtime_projection_root_system_message(&session)? {
                     Some(Message::System(system)) => Some(system.content),
@@ -806,6 +828,52 @@ mod orchestrator {
         ) -> Result<RealtimeSessionOpenConfig, SessionError> {
             self.realtime_session_open_config(session_id, turning_mode)
                 .await
+        }
+
+        /// Build an in-place refresh projection without hydrating or replaying
+        /// canonical history. Provider refresh consumes identity/tools/prompt
+        /// only; open/reconnect remains the sole history hydration boundary.
+        pub async fn live_refresh_config_for_session(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+        ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let session = match self
+                .service
+                .export_realtime_refresh_session_snapshot(session_id)
+                .await
+            {
+                Ok(session) => session,
+                Err(SessionError::NotFound { .. }) => {
+                    Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+                    self.service
+                        .export_realtime_refresh_session_snapshot(session_id)
+                        .await?
+                }
+                Err(error) => return Err(error),
+            };
+            let llm_identity = self.service.live_session_llm_identity(session_id).await?;
+            let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
+            let transcript_rewrite_generation = session
+                .transcript_rewrite_generation()
+                .map_err(|err| SessionError::Agent(AgentError::InternalError(err.to_string())))?;
+            Ok(RealtimeSessionOpenConfig::new(
+                turning_mode,
+                llm_identity,
+                visible_tools,
+                Vec::new(),
+            )
+            .with_runtime_system_context(realtime_projection_runtime_system_context(&session)?)
+            .with_user_content_identities(session.realtime_user_content_identities())
+            .with_user_content_tombstones(session.realtime_user_content_tombstones())
+            .with_transcript_rewrite_generation(transcript_rewrite_generation)
+            .with_system_prompt(
+                match realtime_projection_root_system_message(&session)? {
+                    Some(Message::System(system)) => Some(system.content),
+                    _ => None,
+                },
+            ))
         }
 
         /// Resolve the LLM identity that a new live channel will bind to
@@ -1175,7 +1243,7 @@ mod orchestrator {
                     }
                     continue;
                 }
-                let open_config = match Box::pin(self.live_open_config_for_session(
+                let open_config = match Box::pin(self.live_refresh_config_for_session(
                     &session_id,
                     meerkat_contracts::RealtimeTurningMode::ProviderManaged,
                 ))

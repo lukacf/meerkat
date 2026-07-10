@@ -506,7 +506,7 @@ const MACHINE_SPECS = [
             "SubmitWork",
             "CancelWork",
             "CancelAllWork",
-            "RetireMember",
+            "AdmitDestroyMemberRetire",
             "ObserveRuntimeRetired",
             "ResetMember",
             "RespawnMember",

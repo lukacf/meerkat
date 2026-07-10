@@ -492,15 +492,23 @@ pub enum RealtimeSessionOpenProjectionError {
     Seed(#[from] LiveSeedProjectionError),
 }
 
-fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
+fn realtime_projection_messages_full_with_root_resolution(
+    session: &Session,
+) -> Result<(Vec<Message>, bool), SessionError> {
     let mut projected = session.messages().to_vec();
-    if let Some(root_system) = realtime_projection_root_system_message(session)? {
+    let resolved_root = realtime_projection_root_system_message(session)?;
+    let has_resolved_root = resolved_root.is_some();
+    if let Some(root_system) = resolved_root {
         match projected.first() {
             Some(Message::System(_) | Message::SystemNotice(_)) => projected[0] = root_system,
             _ => projected.insert(0, root_system),
         }
     }
-    Ok(projected)
+    Ok((projected, has_resolved_root))
+}
+
+fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
+    realtime_projection_messages_full_with_root_resolution(session).map(|(projected, _)| projected)
 }
 
 /// Project a session's complete transcript for realtime delivery. This keeps
@@ -532,7 +540,8 @@ pub fn realtime_projection_messages_with_window(
     session: &Session,
     window: LiveSeedWindow,
 ) -> Result<LiveSeedMessageProjection, LiveSeedProjectionError> {
-    let projected = realtime_projection_messages_full(session)?;
+    let (projected, has_resolved_root) =
+        realtime_projection_messages_full_with_root_resolution(session)?;
     let costs = projected
         .iter()
         .map(serialized_message_chars)
@@ -545,10 +554,7 @@ pub fn realtime_projection_messages_with_window(
         });
     }
 
-    let root_len = usize::from(matches!(
-        projected.first(),
-        Some(Message::System(_) | Message::SystemNotice(_))
-    ));
+    let root_len = usize::from(has_resolved_root);
     let root_chars = checked_message_chars(&costs, 0..root_len)?;
     if root_chars > window.max_chars() {
         return Err(LiveSeedProjectionError::RootExceedsWindow {
@@ -1756,7 +1762,9 @@ mod prompt_truth_tests {
         AssistantBlock, BlockAssistantMessage, Message, SessionId, StopReason, SystemMessage,
         UserMessage,
     };
-    use meerkat_core::{Provider, Session, SessionBuildState, SessionLlmIdentity};
+    use meerkat_core::{
+        Provider, Session, SessionBuildState, SessionLlmIdentity, SystemPromptOverride,
+    };
     use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 
     fn test_identity() -> SessionLlmIdentity {
@@ -1797,6 +1805,22 @@ mod prompt_truth_tests {
         session
     }
 
+    fn disabled_root_test_session() -> Session {
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState {
+                system_prompt: SystemPromptOverride::Disable,
+                ..Default::default()
+            })
+            .expect("test build state must serialize");
+        session.push_batch(vec![
+            Message::System(SystemMessage::new("stale disabled root")),
+            Message::User(UserMessage::text("current user turn")),
+            assistant_text("current assistant turn"),
+        ]);
+        session
+    }
+
     #[test]
     fn live_seed_window_rejects_zero() {
         assert!(matches!(
@@ -1825,6 +1849,34 @@ mod prompt_truth_tests {
 
         assert_eq!(projection.messages, full);
         assert_eq!(projection.status, LiveSeedProjectionStatus::Complete);
+    }
+
+    #[test]
+    fn live_seed_window_does_not_charge_a_disabled_stale_system_lead_as_root() {
+        let session = disabled_root_test_session();
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let tail_budget = full[1..]
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialized tail costs")
+            .into_iter()
+            .sum::<usize>();
+
+        let projection = realtime_projection_messages_with_window(
+            &session,
+            LiveSeedWindow::new(tail_budget).expect("positive window"),
+        )
+        .expect("a disabled stale lead must not cause root-too-small rejection");
+
+        assert_eq!(projection.messages, full[1..]);
+        assert_eq!(
+            projection.status,
+            LiveSeedProjectionStatus::Windowed {
+                dropped_messages: 1,
+                included_compaction_summary: false,
+            }
+        );
     }
 
     #[test]

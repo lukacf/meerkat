@@ -116,6 +116,11 @@ pub(crate) struct MobDslT2Snapshot {
     pub supervisor_pending_authority_epoch: Option<u64>,
     pub supervisor_pending_authority_protocol_version:
         Option<crate::machines::mob_machine::SupervisorProtocolVersion>,
+    pub supervisor_pending_authority_operation_id: Option<String>,
+    pub supervisor_pending_authority_member_target_names:
+        std::collections::BTreeMap<crate::machines::mob_machine::PeerId, String>,
+    pub supervisor_pending_authority_member_target_addresses:
+        std::collections::BTreeMap<crate::machines::mob_machine::PeerId, String>,
     pub supervisor_pending_authority_accepted_peer_ids:
         std::collections::BTreeSet<crate::machines::mob_machine::PeerId>,
     // Dogma row R044: machine-owned trust-install-before-terminality
@@ -160,6 +165,20 @@ pub(crate) struct MobDslT2Snapshot {
     >,
     pub member_restore_failures:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub member_restore_failure_codes:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub runtime_retire_refusal_codes:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentRuntimeId, String>,
+    pub runtime_retire_refusal_reasons:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentRuntimeId, String>,
+    pub runtime_retire_pending_sessions: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentRuntimeId,
+        crate::machines::mob_machine::SessionId,
+    >,
+    pub remote_runtime_retired_ids:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
+    pub remote_supervisor_revoked_ids:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
     // #37: machine-owned revival obligation for members whose live
     // materialization is gone while a durable snapshot remains.
     pub member_revival_pending:

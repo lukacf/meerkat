@@ -234,6 +234,115 @@ pub(crate) fn recover_authority_from_runtime_observation_id(
     Ok(authority)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SupervisorRotationRecoveryKind {
+    CurrentOperation,
+    TerminalReceipt,
+}
+
+fn recover_supervisor_rotation_receipt(
+    authority: &mut mm_dsl::MeerkatMachineAuthority,
+    rotation: &crate::store::SupervisorRotationReceipt,
+    kind: SupervisorRotationRecoveryKind,
+) -> Result<(), mm_dsl::MeerkatMachineTransitionError> {
+    let phase = match rotation.phase() {
+        crate::store::SupervisorRotationPersistencePhase::PreviousRevokePending => {
+            mm_dsl::SupervisorRotationPhase::PreviousRevokePending
+        }
+        crate::store::SupervisorRotationPersistencePhase::NextPublishPending => {
+            mm_dsl::SupervisorRotationPhase::NextPublishPending
+        }
+        crate::store::SupervisorRotationPersistencePhase::Completed => {
+            mm_dsl::SupervisorRotationPhase::Completed
+        }
+        crate::store::SupervisorRotationPersistencePhase::Rejected => {
+            mm_dsl::SupervisorRotationPhase::Rejected
+        }
+    };
+    let rejection = rotation.rejection().map(|rejection| match rejection {
+        crate::store::SupervisorRotationRejection::OperationConflict => {
+            mm_dsl::SupervisorRotationRejectionKind::OperationConflict
+        }
+        crate::store::SupervisorRotationRejection::NotBound => {
+            mm_dsl::SupervisorRotationRejectionKind::NotBound
+        }
+        crate::store::SupervisorRotationRejection::SenderMismatch => {
+            mm_dsl::SupervisorRotationRejectionKind::SenderMismatch
+        }
+        crate::store::SupervisorRotationRejection::TargetEpochNotAdvanced => {
+            mm_dsl::SupervisorRotationRejectionKind::TargetEpochNotAdvanced
+        }
+        crate::store::SupervisorRotationRejection::InvalidTarget => {
+            mm_dsl::SupervisorRotationRejectionKind::InvalidTarget
+        }
+        crate::store::SupervisorRotationRejection::UnsupportedProtocolVersion => {
+            mm_dsl::SupervisorRotationRejectionKind::UnsupportedProtocolVersion
+        }
+    });
+    let previous = rotation.previous();
+    let next = rotation.next();
+    let operation_id = rotation.operation_id().to_string();
+    let input = match kind {
+        SupervisorRotationRecoveryKind::CurrentOperation => {
+            mm_dsl::MeerkatMachineInput::RecoverSupervisorRotationOperation {
+                operation_id,
+                phase,
+                rejection,
+                previous_name: previous.name().to_owned(),
+                previous_peer_id: previous.peer_id().to_owned(),
+                previous_address: previous.address().to_owned(),
+                previous_signing_public_key: previous.signing_public_key().to_owned(),
+                previous_epoch: previous.epoch(),
+                next_name: next.name().to_owned(),
+                next_peer_id: next.peer_id().to_owned(),
+                next_address: next.address().to_owned(),
+                next_signing_public_key: next.signing_public_key().to_owned(),
+                next_epoch: next.epoch(),
+            }
+        }
+        SupervisorRotationRecoveryKind::TerminalReceipt => {
+            mm_dsl::MeerkatMachineInput::RecoverSupervisorRotationTerminalReceipt {
+                operation_id,
+                phase,
+                rejection,
+                previous_name: previous.name().to_owned(),
+                previous_peer_id: previous.peer_id().to_owned(),
+                previous_address: previous.address().to_owned(),
+                previous_signing_public_key: previous.signing_public_key().to_owned(),
+                previous_epoch: previous.epoch(),
+                next_name: next.name().to_owned(),
+                next_peer_id: next.peer_id().to_owned(),
+                next_address: next.address().to_owned(),
+                next_signing_public_key: next.signing_public_key().to_owned(),
+                next_epoch: next.epoch(),
+            }
+        }
+    };
+    mm_dsl::MeerkatMachineMutator::apply(authority, input).map(|_| ())
+}
+
+pub(crate) fn recover_supervisor_rotation_operation(
+    authority: &mut mm_dsl::MeerkatMachineAuthority,
+    rotation: &crate::store::SupervisorRotationReceipt,
+) -> Result<(), mm_dsl::MeerkatMachineTransitionError> {
+    recover_supervisor_rotation_receipt(
+        authority,
+        rotation,
+        SupervisorRotationRecoveryKind::CurrentOperation,
+    )
+}
+
+pub(crate) fn recover_supervisor_rotation_terminal_receipt(
+    authority: &mut mm_dsl::MeerkatMachineAuthority,
+    rotation: &crate::store::SupervisorRotationReceipt,
+) -> Result<(), mm_dsl::MeerkatMachineTransitionError> {
+    recover_supervisor_rotation_receipt(
+        authority,
+        rotation,
+        SupervisorRotationRecoveryKind::TerminalReceipt,
+    )
+}
+
 /// Map a persisted pre-run phase (as a [`RuntimeState`]) into the typed
 /// [`mm_dsl::PreRunPhase`] carried in the DSL state. Only `Idle`, `Attached`,
 /// and `Retired` are valid pre-run markers — any other [`RuntimeState`]

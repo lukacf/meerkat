@@ -870,7 +870,7 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         &self,
         session_id: &SessionId,
         event: &RealtimeTranscriptEvent,
-    ) -> Result<(), LiveProjectionError> {
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, LiveProjectionError> {
         // P1#2: forward provider-emitted realtime transcript events into the
         // same idempotent ordering / staging path used by deltas + truncation.
         // Without this override the host falls back to the default `Ok(())`
@@ -879,7 +879,6 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         self.runtime
             .append_realtime_transcript_event(session_id, event.clone())
             .await
-            .map(|_outcome| ())
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 }
@@ -1196,8 +1195,8 @@ mod tests {
             &self,
             _session_id: &SessionId,
             _event: &RealtimeTranscriptEvent,
-        ) -> Result<(), LiveProjectionError> {
-            Ok(())
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, LiveProjectionError> {
+            Ok(meerkat_core::RealtimeTranscriptApplyOutcome::default())
         }
     }
 

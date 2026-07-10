@@ -551,7 +551,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         methods.extend([
             RpcMethodDescriptor::typed(
                 "live/open",
-                "Open a live audio/text channel for a session",
+                "Open a live channel for audio, text, and model-gated image input",
                 "LiveOpenParams",
                 "LiveOpenResult",
             ),
@@ -569,7 +569,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::typed(
                 "live/send_input",
-                "Send an input chunk (audio/text) to a live channel",
+                "Send an audio, text, or model-supported image chunk to a live channel",
                 "LiveSendInputParams",
                 "LiveSendInputResult",
             ),

@@ -200,6 +200,7 @@ from .types import (
     PeerCorrelationId,
     PeerId,
     ScheduleListResult,
+    ScheduleOccurrenceRecord,
     ScheduleOccurrencesResult,
     ScheduleRecord,
     ScheduleToolsResult,
@@ -1580,11 +1581,13 @@ class MeerkatClient:
             RpcCreateScheduleRequest
             | RpcSchedule
         )
-        return await self._request("schedule/create", request)
+        raw = await self._request("schedule/create", request)
+        return self._parse_schedule_record(raw, "Invalid schedule/create response")
 
     async def get_schedule(self, schedule_id: str) -> ScheduleRecord:
         _rpc_signature: RpcSchedule
-        return await self._request("schedule/get", {"schedule_id": schedule_id})
+        raw = await self._request("schedule/get", {"schedule_id": schedule_id})
+        return self._parse_schedule_record(raw, "Invalid schedule/get response")
 
     async def list_schedules(
         self,
@@ -1601,26 +1604,44 @@ class MeerkatClient:
         if offset is not None:
             params["offset"] = offset
         raw = await self._request("schedule/list", params)
-        schedules = raw.get("schedules", [])
+        raw = self._require_dict(raw, "response", "Invalid schedule/list response")
         return {
-            "schedules": schedules if isinstance(schedules, list) else [],
+            "schedules": [
+                self._parse_schedule_record(
+                    self._require_dict(
+                        schedule,
+                        f"schedules[{index}]",
+                        "Invalid schedule/list response",
+                    ),
+                    f"Invalid schedule/list response schedules[{index}]",
+                )
+                for index, schedule in enumerate(
+                    self._require_present_list_field(
+                        raw, "schedules", "Invalid schedule/list response"
+                    )
+                )
+            ],
         }
 
     async def update_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
         _rpc_signature: RpcSchedule
-        return await self._request("schedule/update", request)
+        raw = await self._request("schedule/update", request)
+        return self._parse_schedule_record(raw, "Invalid schedule/update response")
 
     async def pause_schedule(self, schedule_id: str) -> ScheduleRecord:
         _rpc_signature: RpcSchedule
-        return await self._request("schedule/pause", {"schedule_id": schedule_id})
+        raw = await self._request("schedule/pause", {"schedule_id": schedule_id})
+        return self._parse_schedule_record(raw, "Invalid schedule/pause response")
 
     async def resume_schedule(self, schedule_id: str) -> ScheduleRecord:
         _rpc_signature: RpcSchedule
-        return await self._request("schedule/resume", {"schedule_id": schedule_id})
+        raw = await self._request("schedule/resume", {"schedule_id": schedule_id})
+        return self._parse_schedule_record(raw, "Invalid schedule/resume response")
 
     async def delete_schedule(self, schedule_id: str) -> ScheduleRecord:
         _rpc_signature: RpcSchedule
-        return await self._request("schedule/delete", {"schedule_id": schedule_id})
+        raw = await self._request("schedule/delete", {"schedule_id": schedule_id})
+        return self._parse_schedule_record(raw, "Invalid schedule/delete response")
 
     async def list_schedule_occurrences(
         self,
@@ -1632,16 +1653,43 @@ class MeerkatClient:
         if include_terminal is not None:
             params["include_terminal"] = include_terminal
         raw = await self._request("schedule/occurrences", params)
-        occurrences = raw.get("occurrences", [])
+        raw = self._require_dict(
+            raw, "response", "Invalid schedule/occurrences response"
+        )
         return {
-            "occurrences": occurrences if isinstance(occurrences, list) else [],
+            "occurrences": [
+                self._parse_schedule_occurrence(
+                    self._require_dict(
+                        occurrence,
+                        f"occurrences[{index}]",
+                        "Invalid schedule/occurrences response",
+                    ),
+                    f"Invalid schedule/occurrences response occurrences[{index}]",
+                )
+                for index, occurrence in enumerate(
+                    self._require_present_list_field(
+                        raw, "occurrences", "Invalid schedule/occurrences response"
+                    )
+                )
+            ],
         }
 
     async def list_schedule_tools(self) -> ScheduleToolsResult:
         _rpc_signature: RpcScheduleToolsResult
         raw = await self._request("schedule/tools", {})
-        tools = raw.get("tools", [])
-        return {"tools": tools if isinstance(tools, list) else []}
+        raw = self._require_dict(raw, "response", "Invalid schedule/tools response")
+        return {
+            "tools": [
+                self._require_dict(
+                    tool, f"tools[{index}]", "Invalid schedule/tools response"
+                )
+                for index, tool in enumerate(
+                    self._require_present_list_field(
+                        raw, "tools", "Invalid schedule/tools response"
+                    )
+                )
+            ]
+        }
 
     async def call_schedule_tool(self, request: ScheduleToolCall) -> dict[str, Any]:
         _rpc_signature: RpcScheduleToolCallParams
@@ -3342,10 +3390,10 @@ class MeerkatClient:
         self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
-    # ---- Live audio/text adapter (`live/*`) ---------------------------
+    # ---- Live multimodal adapter (`live/*`) ---------------------------
     #
-    # Typed wrappers over the `live/*` JSON-RPC surface (gated by
-    # `rkat-rpc --live-ws`). Result shapes come from `meerkat-contracts`
+    # Typed wrappers over the `live/*` JSON-RPC surface (enabled when the
+    # server configures at least one live transport). Result shapes come from `meerkat-contracts`
     # (regenerated into `meerkat/generated/types.py` as `LiveOpenResult`,
     # `LiveStatusResult`, etc.). I52 + I53.
     #
@@ -3372,7 +3420,9 @@ class MeerkatClient:
         turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
         transport: Literal["websocket", "webrtc"] | None = None,
     ) -> dict[str, Any]:
-        """Open a live audio/text channel for a session. Wraps `live/open`.
+        """Open a live audio/text channel with model-gated image input.
+
+        Wraps `live/open`.
 
         Returns a dict shaped like `meerkat.types.LiveOpenResult` with keys
         `channel_id`, `transport`, `capabilities`, and `continuity`. The
@@ -3487,18 +3537,30 @@ class MeerkatClient:
     async def live_send_input_image(
         self,
         channel_id: str,
+        idempotency_key: str,
         mime: str,
         data_base64: str,
     ) -> dict[str, Any]:
-        """Send a base64-encoded image input chunk to a live channel.
+        """Queue a base64-encoded image input chunk on a live channel.
 
         Wraps `live/send_input` with `LiveSendInputParams { channel_id,
-        chunk: LiveInputChunkWire::Image { mime, data } }`. ``mime`` is the
-        IANA MIME type (``image/png``, ``image/jpeg``, ``image/webp``, …)
-        and ``data_base64`` is the raw image bytes encoded as standard
-        base64. Adapters that do not implement image input (today: every
-        provider Meerkat ships) reject with the typed
-        ``LiveAdapterErrorCode::ConfigRejected { reason:
+        chunk: LiveInputChunkWire::Image { idempotency_key, mime, data } }`.
+        ``idempotency_key`` is a required caller-stable, session-scoped key:
+        retrying the same key with the same MIME and bytes is safe, while
+        reusing it for different content is rejected. ``mime`` is the IANA
+        MIME type; adapter support is provider-specific, and OpenAI Realtime
+        currently accepts ``image/png`` and ``image/jpeg``. ``data_base64``
+        is the raw image bytes encoded as standard base64.
+
+        A successful result only proves adapter-queue acceptance. A scoped
+        adapter/provider rejection may arrive later as ``command_rejected``;
+        persistence failure is terminal. Wait for ``user_content_committed``
+        carrying the same ``idempotency_key`` before treating the image as
+        durable context.
+
+        Check ``live_open(...)["capabilities"]["image_in"]`` before
+        sending; adapters or model bindings without image input reject with
+        the typed ``LiveAdapterErrorCode::ConfigRejected { reason:
         "image_input_not_implemented" }``.
         """
         return await self._request(
@@ -3507,6 +3569,7 @@ class MeerkatClient:
                 "channel_id": channel_id,
                 "chunk": {
                     "kind": "image",
+                    "idempotency_key": idempotency_key,
                     "mime": mime,
                     "data": data_base64,
                 },
@@ -4116,6 +4179,277 @@ class MeerkatClient:
         raise MeerkatError(
             "INVALID_RESPONSE",
             f"{context}: unknown peer_connectivity status {status!r}",
+        )
+
+    @staticmethod
+    def _require_schedule_literal(
+        raw: dict[str, Any],
+        field: str,
+        allowed: tuple[str, ...],
+        context: str,
+    ) -> str:
+        value = MeerkatClient._require_string_field(raw, field, context)
+        if value not in allowed:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: invalid {field} {value!r}",
+            )
+        return value
+
+    @staticmethod
+    def _parse_schedule_misfire_policy(
+        raw: Any, context: str
+    ) -> dict[str, Any]:
+        policy = MeerkatClient._require_dict(raw, "misfire_policy", context)
+        kind = MeerkatClient._require_schedule_literal(
+            policy, "type", ("skip", "catch_up_within"), context
+        )
+        if kind == "catch_up_within":
+            MeerkatClient._require_non_negative_integer_field(
+                policy, "window_seconds", context
+            )
+        return policy
+
+    @staticmethod
+    def _parse_schedule_labels(raw: Any, context: str) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: labels must be object"
+            )
+        labels: dict[str, str] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: labels must contain only string values",
+                )
+            labels[key] = value
+        return labels
+
+    @staticmethod
+    def _parse_schedule_string_array(
+        raw: dict[str, Any], field: str, context: str
+    ) -> list[str]:
+        # The public Rust projection uses `serde(default,
+        # skip_serializing_if = "BTreeSet::is_empty")`: omission therefore
+        # means the canonical empty set, while an explicitly present `null`
+        # (or any other non-array shape) is malformed wire data.
+        if field not in raw:
+            return []
+        values = MeerkatClient._require_list_field(raw, field, context)
+        parsed: list[str] = []
+        for index, value in enumerate(values):
+            if not isinstance(value, str) or not value:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: {field}[{index}] must be string",
+                )
+            parsed.append(value)
+        return parsed
+
+    @staticmethod
+    def _parse_schedule_record(
+        raw: Any, context: str
+    ) -> ScheduleRecord:
+        raw = MeerkatClient._require_dict(raw, "response", context)
+        phase = MeerkatClient._require_schedule_literal(
+            raw, "phase", ("active", "paused", "deleted"), context
+        )
+        overlap_policy = MeerkatClient._require_schedule_literal(
+            raw,
+            "overlap_policy",
+            ("allow_concurrent", "skip_if_running"),
+            context,
+        )
+        missing_target_policy = MeerkatClient._require_schedule_literal(
+            raw,
+            "missing_target_policy",
+            ("skip", "mark_misfired"),
+            context,
+        )
+        return cast(
+            ScheduleRecord,
+            {
+                "schedule_id": MeerkatClient._require_string_field(
+                    raw, "schedule_id", context
+                ),
+                "phase": phase,
+                "revision": MeerkatClient._require_non_negative_integer_field(
+                    raw, "revision", context
+                ),
+                "trigger": MeerkatClient._require_dict(
+                    raw.get("trigger"), "trigger", context
+                ),
+                "target": MeerkatClient._require_dict(
+                    raw.get("target"), "target", context
+                ),
+                "misfire_policy": MeerkatClient._parse_schedule_misfire_policy(
+                    raw.get("misfire_policy"), context
+                ),
+                "overlap_policy": overlap_policy,
+                "missing_target_policy": missing_target_policy,
+                "next_occurrence_ordinal": (
+                    MeerkatClient._require_non_negative_integer_field(
+                        raw, "next_occurrence_ordinal", context
+                    )
+                ),
+                "planning_horizon_days": (
+                    MeerkatClient._require_non_negative_integer_field(
+                        raw, "planning_horizon_days", context
+                    )
+                ),
+                "planning_horizon_occurrences": (
+                    MeerkatClient._require_non_negative_integer_field(
+                        raw, "planning_horizon_occurrences", context
+                    )
+                ),
+                "created_at_utc": MeerkatClient._require_string_field(
+                    raw, "created_at_utc", context
+                ),
+                "updated_at_utc": MeerkatClient._require_string_field(
+                    raw, "updated_at_utc", context
+                ),
+                "labels": (
+                    MeerkatClient._parse_schedule_labels(raw["labels"], context)
+                    if "labels" in raw
+                    else {}
+                ),
+                "superseded_ack_ids": (
+                    MeerkatClient._parse_schedule_string_array(
+                        raw, "superseded_ack_ids", context
+                    )
+                ),
+                "name": MeerkatClient._optional_string_field(
+                    raw, "name", context
+                ),
+                "description": MeerkatClient._optional_string_field(
+                    raw, "description", context
+                ),
+                "planning_cursor_utc": MeerkatClient._optional_string_field(
+                    raw, "planning_cursor_utc", context
+                ),
+                "deleted_at_utc": MeerkatClient._optional_string_field(
+                    raw, "deleted_at_utc", context
+                ),
+            },
+        )
+
+    @staticmethod
+    def _parse_schedule_occurrence(
+        raw: Any, context: str
+    ) -> ScheduleOccurrenceRecord:
+        raw = MeerkatClient._require_dict(raw, "response", context)
+        phase = MeerkatClient._require_schedule_literal(
+            raw,
+            "phase",
+            (
+                "pending",
+                "claimed",
+                "dispatching",
+                "awaiting_completion",
+                "completed",
+                "skipped",
+                "misfired",
+                "superseded",
+                "delivery_failed",
+            ),
+            context,
+        )
+        overlap_policy = MeerkatClient._require_schedule_literal(
+            raw,
+            "overlap_policy",
+            ("allow_concurrent", "skip_if_running"),
+            context,
+        )
+        missing_target_policy = MeerkatClient._require_schedule_literal(
+            raw,
+            "missing_target_policy",
+            ("skip", "mark_misfired"),
+            context,
+        )
+        superseded_by_revision = raw.get("superseded_by_revision")
+        if superseded_by_revision is not None:
+            superseded_by_revision = (
+                MeerkatClient._require_non_negative_integer_field(
+                    raw, "superseded_by_revision", context
+                )
+            )
+        return cast(
+            ScheduleOccurrenceRecord,
+            {
+                "occurrence_id": MeerkatClient._require_string_field(
+                    raw, "occurrence_id", context
+                ),
+                "schedule_id": MeerkatClient._require_string_field(
+                    raw, "schedule_id", context
+                ),
+                "schedule_revision": (
+                    MeerkatClient._require_non_negative_integer_field(
+                        raw, "schedule_revision", context
+                    )
+                ),
+                "occurrence_ordinal": (
+                    MeerkatClient._require_non_negative_integer_field(
+                        raw, "occurrence_ordinal", context
+                    )
+                ),
+                "phase": phase,
+                "due_at_utc": MeerkatClient._require_string_field(
+                    raw, "due_at_utc", context
+                ),
+                "trigger_snapshot": MeerkatClient._require_dict(
+                    raw.get("trigger_snapshot"), "trigger_snapshot", context
+                ),
+                "target_snapshot": MeerkatClient._require_dict(
+                    raw.get("target_snapshot"), "target_snapshot", context
+                ),
+                "misfire_policy": MeerkatClient._parse_schedule_misfire_policy(
+                    raw.get("misfire_policy"), context
+                ),
+                "overlap_policy": overlap_policy,
+                "missing_target_policy": missing_target_policy,
+                "attempt_count": (
+                    MeerkatClient._require_non_negative_integer_field(
+                        raw, "attempt_count", context
+                    )
+                ),
+                "created_at_utc": MeerkatClient._require_string_field(
+                    raw, "created_at_utc", context
+                ),
+                "claimed_by": MeerkatClient._optional_string_field(
+                    raw, "claimed_by", context
+                ),
+                "lease_expires_at_utc": MeerkatClient._optional_string_field(
+                    raw, "lease_expires_at_utc", context
+                ),
+                "delivery_correlation_id": (
+                    MeerkatClient._optional_string_field(
+                        raw, "delivery_correlation_id", context
+                    )
+                ),
+                "last_receipt": MeerkatClient._optional_dict_field(
+                    raw, "last_receipt", context
+                ),
+                "failure_class": MeerkatClient._optional_string_field(
+                    raw, "failure_class", context
+                ),
+                "runtime_outcome": MeerkatClient._optional_dict_field(
+                    raw, "runtime_outcome", context
+                ),
+                "failure_detail": MeerkatClient._optional_string_field(
+                    raw, "failure_detail", context
+                ),
+                "claimed_at_utc": MeerkatClient._optional_string_field(
+                    raw, "claimed_at_utc", context
+                ),
+                "dispatched_at_utc": MeerkatClient._optional_string_field(
+                    raw, "dispatched_at_utc", context
+                ),
+                "completed_at_utc": MeerkatClient._optional_string_field(
+                    raw, "completed_at_utc", context
+                ),
+                "superseded_by_revision": superseded_by_revision,
+            },
         )
 
     @staticmethod

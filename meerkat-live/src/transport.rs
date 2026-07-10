@@ -30,9 +30,15 @@
 //! - Anything else (e.g. unsolicited `Pong`): fails closed after generated
 //!   close authority accepts the channel close.
 //!
-//! Outbound frames are JSON-encoded [`LiveAdapterObservation`] values.
+//! Outbound frames are JSON-encoded, public-safe [`LiveAdapterObservation`]
+//! values. Byte-bearing canonical user-content transcript events remain
+//! internal; clients receive a redacted `user_content_committed` ordering
+//! receipt after the host has applied them.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::host::{
@@ -40,15 +46,21 @@ use crate::host::{
     LiveChannelCloseObservation, LiveChannelId, LiveChannelStatusCommitAuthority,
     LiveChannelStatusObservation, ObservationOutcome, ObservationRouting,
 };
-use crate::wire_input::live_input_chunk_from_wire;
+use crate::wire_input::{live_input_chunk_decode_rejection, live_input_chunk_from_wire};
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, close_code};
 use axum::extract::{Query, State, WebSocketUpgrade};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use meerkat_contracts::{LiveInputChunkWire, WireLiveAdapterObservation};
-use meerkat_core::live_adapter::{LiveAdapterObservation, LiveInputChunk};
+use meerkat_core::live_adapter::{
+    LiveAdapterError, LiveAdapterErrorCode, LiveAdapterObservation, LiveConfigRejectionReason,
+    LiveInputChunk,
+};
 use meerkat_core::types::SessionId;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 pub const LIVE_WS_PATH: &str = "/live/ws";
@@ -56,12 +68,431 @@ pub const LIVE_WS_PATH: &str = "/live/ws";
 /// Time-to-live for a minted but unconsumed token.
 pub const TOKEN_TTL: Duration = Duration::from_secs(60);
 
+/// Explicit direct-WebSocket aggregate message ceiling. Direct WS supports
+/// text and raw PCM audio, not inline images; 2 MiB is already more than forty
+/// seconds of negotiated mono PCM while allowing every advertised connection
+/// to reserve its full codec allocation within a bounded process pool.
+pub const LIVE_WS_MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Explicit per-frame ceiling. Valid large inputs may be sent as one frame or
+/// fragmented, so the frame and aggregate ceilings intentionally match.
+pub const LIVE_WS_MAX_FRAME_BYTES: usize = LIVE_WS_MAX_MESSAGE_BYTES;
+
+/// Maximum upgraded direct-WebSocket connections owned by one process state.
+const LIVE_WS_MAX_CONNECTIONS: usize = 32;
+
+/// Listener-level socket/header ownership. This protects the HTTP phase before
+/// the router can acquire an upgraded-WebSocket permit. It is deliberately a
+/// separate, slightly larger pool so ordinary rejected HTTP requests cannot
+/// consume the 32 full raw-message reservations.
+const LIVE_WS_MAX_HTTP_CONNECTIONS: usize = 64;
+const LIVE_WS_MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
+const LIVE_WS_HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const LIVE_WS_TOKEN_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Process-wide ingress budget. A maximum text frame can coexist with its
+/// owned wire strings and decoded payload; three raw-message equivalents bound
+/// that peak. Binary ingress requires only the received frame plus one owned
+/// `Vec`, and is charged at two equivalents below.
+const LIVE_WS_PROCESS_INGRESS_MEMORY_BUDGET_BYTES: usize = LIVE_WS_MAX_MESSAGE_BYTES * 3;
+const LIVE_WS_TEXT_MEMORY_MULTIPLIER: usize = 3;
+const LIVE_WS_BINARY_MEMORY_MULTIPLIER: usize = 2;
+const LIVE_WS_MIN_INGRESS_CHARGE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+enum LiveWsIngressKind {
+    Text,
+    Binary,
+}
+
+#[derive(Clone)]
+struct LiveWsAdmission {
+    connection_semaphore: Arc<Semaphore>,
+    raw_message_semaphore: Arc<Semaphore>,
+    ingress_memory_semaphore: Arc<Semaphore>,
+    max_connections: usize,
+    max_raw_message_bytes: usize,
+    max_ingress_bytes: usize,
+}
+
+struct LiveWsConnectionPermit {
+    _connection_permit: OwnedSemaphorePermit,
+    _raw_message_permit: OwnedSemaphorePermit,
+}
+
+struct LiveWsIngressPermit {
+    _memory_permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+struct LiveWsHttpAdmission {
+    connection_semaphore: Arc<Semaphore>,
+}
+
+impl LiveWsHttpAdmission {
+    fn production() -> Self {
+        static PROCESS_ADMISSION: OnceLock<LiveWsHttpAdmission> = OnceLock::new();
+        PROCESS_ADMISSION
+            .get_or_init(|| Self {
+                connection_semaphore: Arc::new(Semaphore::new(LIVE_WS_MAX_HTTP_CONNECTIONS)),
+            })
+            .clone()
+    }
+
+    fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.connection_semaphore)
+            .try_acquire_owned()
+            .ok()
+    }
+}
+
+/// Accepted socket wrapper that owns process-global listener capacity through
+/// an eventual HTTP upgrade and enforces a bounded header size/deadline before
+/// Hyper can wait forever on a partial request.
+struct AdmittedLiveWsIo {
+    inner: tokio::net::TcpStream,
+    _connection_permit: OwnedSemaphorePermit,
+    header_deadline: Pin<Box<tokio::time::Sleep>>,
+    header_complete: bool,
+    header_bytes: usize,
+    header_window: u32,
+}
+
+impl AdmittedLiveWsIo {
+    fn new(inner: tokio::net::TcpStream, connection_permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            inner,
+            _connection_permit: connection_permit,
+            header_deadline: Box::pin(tokio::time::sleep(LIVE_WS_HTTP_HEADER_TIMEOUT)),
+            header_complete: false,
+            header_bytes: 0,
+            header_window: 0,
+        }
+    }
+
+    fn observe_header_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        for byte in bytes {
+            self.header_bytes = self.header_bytes.saturating_add(1);
+            self.header_window = (self.header_window << 8) | u32::from(*byte);
+            if self.header_window == u32::from_be_bytes(*b"\r\n\r\n") {
+                self.header_complete = true;
+                return Ok(());
+            }
+            if self.header_bytes >= LIVE_WS_MAX_HTTP_HEADER_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "live WebSocket HTTP header exceeds bounded size",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AsyncRead for AdmittedLiveWsIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.header_complete {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        if self.header_deadline.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "live WebSocket HTTP header deadline exceeded",
+            )));
+        }
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Bound each pre-header read so Hyper never receives an unbounded
+        // attacker-controlled chunk before this wrapper can enforce the cap.
+        let mut scratch = [0_u8; 4096];
+        let max_read = scratch.len().min(buf.remaining()).min(
+            LIVE_WS_MAX_HTTP_HEADER_BYTES
+                .saturating_sub(self.header_bytes)
+                .saturating_add(1),
+        );
+        let mut scratch_buf = ReadBuf::new(&mut scratch[..max_read]);
+        match Pin::new(&mut self.inner).poll_read(cx, &mut scratch_buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                let filled = scratch_buf.filled();
+                self.observe_header_bytes(filled)?;
+                buf.put_slice(filled);
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
+impl AsyncWrite for AdmittedLiveWsIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+struct LiveWsHttpListener {
+    listener: tokio::net::TcpListener,
+    admission: LiveWsHttpAdmission,
+}
+
+impl LiveWsHttpListener {
+    fn new(listener: tokio::net::TcpListener) -> Self {
+        Self {
+            listener,
+            admission: LiveWsHttpAdmission::production(),
+        }
+    }
+}
+
+impl axum::serve::Listener for LiveWsHttpListener {
+    type Io = AdmittedLiveWsIo;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.listener.accept().await {
+                Ok((stream, address)) => {
+                    let Some(permit) = self.admission.try_acquire() else {
+                        tracing::warn!(%address, "rejecting live HTTP socket at process limit");
+                        drop(stream);
+                        continue;
+                    };
+                    return (AdmittedLiveWsIo::new(stream, permit), address);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "live WebSocket listener accept failed");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LiveWsAdmissionError {
+    #[error("live WebSocket connection admission is saturated (maximum {max_connections})")]
+    ConnectionBackpressured { max_connections: usize },
+    #[error(
+        "live WebSocket ingress is backpressured: requested {requested_bytes} bytes from a {max_ingress_bytes}-byte budget"
+    )]
+    IngressBackpressured {
+        max_ingress_bytes: usize,
+        requested_bytes: usize,
+    },
+    #[error(
+        "live WebSocket ingress charge {requested_bytes} bytes exceeds the {max_ingress_bytes}-byte budget"
+    )]
+    IngressTooLarge {
+        max_ingress_bytes: usize,
+        requested_bytes: usize,
+    },
+    #[error("live WebSocket admission is closed")]
+    Closed,
+}
+
+impl LiveWsAdmission {
+    fn production() -> Self {
+        static PROCESS_ADMISSION: OnceLock<LiveWsAdmission> = OnceLock::new();
+        PROCESS_ADMISSION
+            .get_or_init(|| {
+                Self::new(
+                    LIVE_WS_MAX_CONNECTIONS,
+                    LIVE_WS_PROCESS_INGRESS_MEMORY_BUDGET_BYTES,
+                )
+            })
+            .clone()
+    }
+
+    fn new(max_connections: usize, max_ingress_bytes: usize) -> Self {
+        let max_raw_message_bytes = max_connections.saturating_mul(LIVE_WS_MAX_MESSAGE_BYTES);
+        Self {
+            connection_semaphore: Arc::new(Semaphore::new(max_connections)),
+            raw_message_semaphore: Arc::new(Semaphore::new(max_raw_message_bytes)),
+            ingress_memory_semaphore: Arc::new(Semaphore::new(max_ingress_bytes)),
+            max_connections,
+            max_raw_message_bytes,
+            max_ingress_bytes,
+        }
+    }
+
+    fn try_admit_connection(
+        &self,
+        max_message_bytes: usize,
+    ) -> Result<LiveWsConnectionPermit, LiveWsAdmissionError> {
+        let connection_permit = Arc::clone(&self.connection_semaphore)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::NoPermits => {
+                    LiveWsAdmissionError::ConnectionBackpressured {
+                        max_connections: self.max_connections,
+                    }
+                }
+                tokio::sync::TryAcquireError::Closed => LiveWsAdmissionError::Closed,
+            })?;
+        if max_message_bytes > self.max_raw_message_bytes {
+            return Err(LiveWsAdmissionError::IngressTooLarge {
+                max_ingress_bytes: self.max_raw_message_bytes,
+                requested_bytes: max_message_bytes,
+            });
+        }
+        let permits = u32::try_from(max_message_bytes).map_err(|_| {
+            LiveWsAdmissionError::IngressTooLarge {
+                max_ingress_bytes: self.max_raw_message_bytes,
+                requested_bytes: max_message_bytes,
+            }
+        })?;
+        let raw_message_permit = Arc::clone(&self.raw_message_semaphore)
+            .try_acquire_many_owned(permits)
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::NoPermits => {
+                    LiveWsAdmissionError::ConnectionBackpressured {
+                        max_connections: self.max_connections,
+                    }
+                }
+                tokio::sync::TryAcquireError::Closed => LiveWsAdmissionError::Closed,
+            })?;
+        Ok(LiveWsConnectionPermit {
+            _connection_permit: connection_permit,
+            _raw_message_permit: raw_message_permit,
+        })
+    }
+
+    fn try_admit_ingress(
+        &self,
+        kind: LiveWsIngressKind,
+        message_bytes: usize,
+    ) -> Result<LiveWsIngressPermit, LiveWsAdmissionError> {
+        let requested_bytes = live_ws_ingress_memory_charge_bytes(kind, message_bytes);
+        if requested_bytes > self.max_ingress_bytes {
+            return Err(LiveWsAdmissionError::IngressTooLarge {
+                max_ingress_bytes: self.max_ingress_bytes,
+                requested_bytes,
+            });
+        }
+        let permits =
+            u32::try_from(requested_bytes).map_err(|_| LiveWsAdmissionError::IngressTooLarge {
+                max_ingress_bytes: self.max_ingress_bytes,
+                requested_bytes,
+            })?;
+        match Arc::clone(&self.ingress_memory_semaphore).try_acquire_many_owned(permits) {
+            Ok(memory_permit) => Ok(LiveWsIngressPermit {
+                _memory_permit: memory_permit,
+            }),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                Err(LiveWsAdmissionError::IngressBackpressured {
+                    max_ingress_bytes: self.max_ingress_bytes,
+                    requested_bytes,
+                })
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => Err(LiveWsAdmissionError::Closed),
+        }
+    }
+}
+
+fn live_ws_ingress_memory_charge_bytes(kind: LiveWsIngressKind, message_bytes: usize) -> usize {
+    let multiplier = match kind {
+        LiveWsIngressKind::Text => LIVE_WS_TEXT_MEMORY_MULTIPLIER,
+        LiveWsIngressKind::Binary => LIVE_WS_BINARY_MEMORY_MULTIPLIER,
+    };
+    message_bytes
+        .max(LIVE_WS_MIN_INGRESS_CHARGE_BYTES)
+        .saturating_mul(multiplier)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveWsTransportLimits {
+    max_message_bytes: usize,
+    max_frame_bytes: usize,
+}
+
+impl Default for LiveWsTransportLimits {
+    fn default() -> Self {
+        Self {
+            max_message_bytes: LIVE_WS_MAX_MESSAGE_BYTES,
+            max_frame_bytes: LIVE_WS_MAX_FRAME_BYTES,
+        }
+    }
+}
+
 /// Typed WS error frame sent to clients on transport-level failures.
 #[derive(Debug, serde::Serialize)]
 struct WsErrorFrame {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+}
+
+pub(crate) fn scoped_command_rejection_from_host_error(
+    error: &LiveAdapterHostError,
+) -> Option<LiveAdapterObservation> {
+    let LiveAdapterHostError::AdapterError(LiveAdapterError::ProviderError {
+        code: code @ LiveAdapterErrorCode::ConfigRejected { .. },
+        message,
+    }) = error
+    else {
+        return None;
+    };
+    Some(LiveAdapterObservation::CommandRejected {
+        code: code.clone(),
+        message: message.clone(),
+    })
+}
+
+async fn send_ws_ingress_rejection(
+    socket: &mut WebSocket,
+    admission: &LiveWsAdmission,
+    error: &LiveWsAdmissionError,
+) -> bool {
+    let reason = LiveConfigRejectionReason::InputBackpressured {
+        max_pending_bytes: u64::try_from(admission.max_ingress_bytes).unwrap_or(u64::MAX),
+    };
+    let observation = LiveAdapterObservation::CommandRejected {
+        code: LiveAdapterErrorCode::ConfigRejected { reason },
+        message: error.to_string(),
+    };
+    match serde_json::to_string(&WireLiveAdapterObservation::from(observation)) {
+        Ok(json) => socket.send(WsMessage::Text(json.into())).await.is_ok(),
+        Err(_) => false,
+    }
+}
+
+fn direct_websocket_image_rejection() -> LiveAdapterObservation {
+    LiveAdapterObservation::CommandRejected {
+        code: LiveAdapterErrorCode::ConfigRejected {
+            reason: LiveConfigRejectionReason::ImageInputTransportUnsupported {
+                transport: "direct_websocket_use_live_send_input_rpc".to_string(),
+            },
+        },
+        message: "Direct WebSocket image frames are unsupported; send the image with JSON-RPC live/send_input and wait for user_content_committed before dependent input".to_string(),
+    }
 }
 
 /// Negotiated binary frame format for the WS upgrade query string.
@@ -331,6 +762,11 @@ pub struct LiveWsState {
     status_feedback: Arc<dyn LiveChannelStatusFeedback>,
     token_authority: Arc<dyn LiveWsTokenAuthority>,
     token_ttl: Duration,
+    /// Shared across every production state, router, listener, and connection
+    /// through the process singleton. Tests may inject narrower isolated or
+    /// explicitly shared capacities without weakening production defaults.
+    admission: LiveWsAdmission,
+    transport_limits: LiveWsTransportLimits,
 }
 
 impl LiveWsState {
@@ -377,7 +813,40 @@ impl LiveWsState {
             status_feedback,
             token_authority,
             token_ttl,
+            admission: LiveWsAdmission::production(),
+            transport_limits: LiveWsTransportLimits::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_test_transport_admission(
+        mut self,
+        max_connections: usize,
+        max_ingress_bytes: usize,
+        max_message_bytes: usize,
+        max_frame_bytes: usize,
+    ) -> Self {
+        self.admission = LiveWsAdmission::new(max_connections, max_ingress_bytes);
+        self.transport_limits = LiveWsTransportLimits {
+            max_message_bytes,
+            max_frame_bytes,
+        };
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_shared_transport_admission(
+        mut self,
+        admission: LiveWsAdmission,
+        max_message_bytes: usize,
+        max_frame_bytes: usize,
+    ) -> Self {
+        self.admission = admission;
+        self.transport_limits = LiveWsTransportLimits {
+            max_message_bytes,
+            max_frame_bytes,
+        };
+        self
     }
 
     pub fn host(&self) -> &Arc<LiveAdapterHost> {
@@ -536,9 +1005,16 @@ impl LiveWsState {
         expected_channel: &LiveChannelId,
     ) -> Result<LiveWsTokenAdmission, String> {
         let observed_at_ms = live_ws_now_ms()?;
-        self.token_authority
-            .resolve_live_ws_token_admission(expected_channel, token, observed_at_ms)
-            .await
+        tokio::time::timeout(
+            LIVE_WS_TOKEN_ADMISSION_TIMEOUT,
+            self.token_authority.resolve_live_ws_token_admission(
+                expected_channel,
+                token,
+                observed_at_ms,
+            ),
+        )
+        .await
+        .map_err(|_| "live WebSocket token admission deadline exceeded".to_string())?
     }
 }
 
@@ -577,14 +1053,27 @@ pub struct WsConnectParams {
 pub fn live_ws_router(state: Arc<LiveWsState>) -> Router {
     Router::new()
         .route(LIVE_WS_PATH, get(ws_upgrade))
+        .layer(axum::middleware::map_response(close_non_upgraded_http))
         .with_state(state)
+}
+
+async fn close_non_upgraded_http(
+    mut response: axum::response::Response,
+) -> axum::response::Response {
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        response.headers_mut().insert(
+            axum::http::header::CONNECTION,
+            axum::http::HeaderValue::from_static("close"),
+        );
+    }
+    response
 }
 
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
     Query(params): Query<WsConnectParams>,
     State(state): State<Arc<LiveWsState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let WsConnectParams {
         token,
         channel,
@@ -596,9 +1085,37 @@ async fn ws_upgrade(
     // remain usable) but binary frames will be rejected by the handler with a
     // close frame, surfacing the misconfiguration cleanly.
     let expected_channel = LiveChannelId::new(channel);
-    ws.on_upgrade(move |socket| {
-        handle_live_socket(socket, token, expected_channel, binary_format, state)
-    })
+    let limits = state.transport_limits;
+    // Reserve one complete raw codec message before upgrade. Tungstenite may
+    // allocate while assembling fragments, before the application receives a
+    // `Message`; per-upgrade custody is therefore the first truthful owner.
+    let connection_permit = match state
+        .admission
+        .try_admit_connection(limits.max_message_bytes)
+    {
+        Ok(permit) => permit,
+        Err(error) => {
+            tracing::warn!(error = %error, "rejecting live WebSocket upgrade at process connection limit");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "live WebSocket connection admission is saturated",
+            )
+                .into_response();
+        }
+    };
+    ws.max_message_size(limits.max_message_bytes)
+        .max_frame_size(limits.max_frame_bytes)
+        .on_upgrade(move |socket| {
+            handle_live_socket(
+                socket,
+                token,
+                expected_channel,
+                binary_format,
+                state,
+                connection_permit,
+            )
+        })
+        .into_response()
 }
 
 async fn close_with(socket: &mut WebSocket, code: u16, reason: &str) {
@@ -618,12 +1135,36 @@ fn observation_requires_generated_close(observation: &LiveAdapterObservation) ->
     }
 }
 
+/// Decide whether an adapter observation is safe and meaningful on a public
+/// live transport.
+///
+/// `RealtimeTranscriptEvent::UserContentFinal` is an internal canonical-state
+/// command and may contain inline image bytes. The host must apply it, but WS
+/// and WebRTC clients receive only the host-synthesized
+/// `ObservationOutcome::UserContentCommitted` receipt. Raw adapter receipts
+/// are filtered because provider acknowledgement is not durable commit
+/// authority. Receipt visibility is therefore an acknowledgement that
+/// canonical persistence has completed. WebRTC
+/// clients can therefore use it as the required barrier before sending RTP
+/// audio that depends on the image context.
+pub(crate) fn should_publish_observation(observation: &LiveAdapterObservation) -> bool {
+    !matches!(
+        observation,
+        LiveAdapterObservation::Error { .. }
+            | LiveAdapterObservation::UserContentCommitted { .. }
+            | LiveAdapterObservation::RealtimeTranscript {
+                event: meerkat_core::RealtimeTranscriptEvent::UserContentFinal { .. }
+            }
+    )
+}
+
 async fn handle_live_socket(
     mut socket: WebSocket,
     token: String,
     expected_channel: LiveChannelId,
     binary_format: Option<BinaryFormat>,
     state: Arc<LiveWsState>,
+    _connection_permit: LiveWsConnectionPermit,
 ) {
     let admission = match state
         .resolve_token_admission(&token, &expected_channel)
@@ -691,16 +1232,66 @@ async fn handle_live_socket(
             client_msg = socket.recv() => {
                 match client_msg {
                     Some(Ok(WsMessage::Text(text))) => {
+                        // The WebSocket codec has already bounded the one raw
+                        // message allocation. Reserve the conservative process
+                        // peak before serde can allocate owned wire strings or
+                        // base64 decode can allocate the payload. Admission is
+                        // non-blocking; saturation is a scoped command rejection
+                        // and this socket remains available for retry.
+                        let _ingress_permit =
+                            match state.admission.try_admit_ingress(
+                                LiveWsIngressKind::Text,
+                                text.len(),
+                            ) {
+                                Ok(permit) => permit,
+                                Err(error) => {
+                                    if !send_ws_ingress_rejection(
+                                        &mut socket,
+                                        &state.admission,
+                                        &error,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            };
                         // D243: deserialize the wire-contract `LiveInputChunkWire`
                         // and run the shared `live_input_chunk_from_wire`
                         // conversion owner (`crate::wire_input`) that the RPC
-                        // `live/send_input` path also uses, so the direct WS path
-                        // runs identical wire validation. A malformed envelope OR
-                        // malformed base64 fails closed uniformly.
+                        // `live/send_input` path also uses for text/audio. Inline
+                        // images are rejected at this transport boundary and must
+                        // use JSON-RPC; malformed supported envelopes fail closed.
                         let chunk = match serde_json::from_str::<LiveInputChunkWire>(text.as_str()) {
+                            Ok(wire @ LiveInputChunkWire::Image { .. }) => {
+                                let observation = direct_websocket_image_rejection();
+                                if let Ok(json) = serde_json::to_string(
+                                    &WireLiveAdapterObservation::from(observation),
+                                ) {
+                                    let _ = socket.send(WsMessage::Text(json.into())).await;
+                                }
+                                drop(wire);
+                                continue;
+                            }
                             Ok(wire) => match live_input_chunk_from_wire(wire) {
                                 Ok(chunk) => Some(chunk),
                                 Err(convert_err) => {
+                                    if let Some(code) =
+                                        live_input_chunk_decode_rejection(&convert_err)
+                                    {
+                                        let observation =
+                                            LiveAdapterObservation::CommandRejected {
+                                                code,
+                                                message: convert_err.to_string(),
+                                            };
+                                        if let Ok(json) = serde_json::to_string(
+                                            &WireLiveAdapterObservation::from(observation),
+                                        ) {
+                                            let _ = socket.send(WsMessage::Text(json.into())).await;
+                                        }
+                                        continue;
+                                    }
                                     tracing::warn!(
                                         channel = %channel_id,
                                         error = %convert_err,
@@ -722,6 +1313,16 @@ async fn handle_live_socket(
                             Some(chunk) => {
                                 if let Err(err) = state.host.send_input(&channel_id, chunk).await {
                                     tracing::warn!(channel = %channel_id, error = %err, "send_input failed");
+                                    if let Some(observation) =
+                                        scoped_command_rejection_from_host_error(&err)
+                                    {
+                                        if let Ok(json) = serde_json::to_string(
+                                            &WireLiveAdapterObservation::from(observation),
+                                        ) {
+                                            let _ = socket.send(WsMessage::Text(json.into())).await;
+                                        }
+                                        continue;
+                                    }
                                     // D153: populate the typed `reason` with the
                                     // host error's stable class so clients route
                                     // on the code, not the prose `error`.
@@ -753,6 +1354,28 @@ async fn handle_live_socket(
                             close_feedback_recorded = true;
                             break;
                         };
+                        // Reserve the raw-frame + owned-Vec peak before
+                        // `to_vec` copies any bytes. Like text admission, this
+                        // uses `try_acquire` and keeps the peer alive on pressure.
+                        let _ingress_permit =
+                            match state.admission.try_admit_ingress(
+                                LiveWsIngressKind::Binary,
+                                data.len(),
+                            ) {
+                                Ok(permit) => permit,
+                                Err(error) => {
+                                    if !send_ws_ingress_rejection(
+                                        &mut socket,
+                                        &state.admission,
+                                        &error,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            };
                         let chunk = LiveInputChunk::Audio {
                             data: data.to_vec(),
                             sample_rate_hz: fmt.sample_rate_hz(),
@@ -760,6 +1383,16 @@ async fn handle_live_socket(
                         };
                         if let Err(err) = state.host.send_input(&channel_id, chunk).await {
                             tracing::warn!(channel = %channel_id, error = %err, "binary send_input failed");
+                            if let Some(observation) =
+                                scoped_command_rejection_from_host_error(&err)
+                            {
+                                if let Ok(json) = serde_json::to_string(
+                                    &WireLiveAdapterObservation::from(observation),
+                                ) {
+                                    let _ = socket.send(WsMessage::Text(json.into())).await;
+                                }
+                                continue;
+                            }
                             // D153: populate the typed `reason` with the host
                             // error's stable class (see text-frame path above).
                             let err_json = serde_json::to_string(&WsErrorFrame {
@@ -814,10 +1447,8 @@ async fn handle_live_socket(
                         // `wire_live_adapter_observation_byte_compatible_with_core_for_audio_chunk`
                         // / `_command_rejected` in
                         // `meerkat-contracts/src/wire/live.rs`.
-                        let wire_obs = WireLiveAdapterObservation::from(obs.clone());
                         let close_observation = observation_requires_generated_close(&obs);
-                        let publish_observation =
-                            !matches!(&obs, &LiveAdapterObservation::Error { .. });
+                        let publish_observation = should_publish_observation(&obs);
 
                         if close_observation {
                             if !state.close_channel_with_generated_feedback(&channel_id).await {
@@ -836,12 +1467,35 @@ async fn handle_live_socket(
                         // terminal observation. Public WS frames are sent after
                         // this point so terminality is not observable before the
                         // machine-owned close fact is accepted.
-                        let outcome = state.host.apply_observation(&channel_id, &obs).await;
+                        let outcome = match state.host.apply_observation(&channel_id, &obs).await {
+                            Ok(outcome) => outcome,
+                            Err(err) => {
+                                tracing::warn!(
+                                    channel = %channel_id,
+                                    error = %err,
+                                    "apply_observation failed; closing channel before public observation"
+                                );
+                                break;
+                            }
+                        };
 
                         let send_ok = if publish_observation {
-                            match serde_json::to_string(&wire_obs) {
+                            // Convert only public observations. Besides
+                            // preventing serialization, this avoids cloning
+                            // inline image bytes from the internal canonical
+                            // user-content event into a wire value at all.
+                            match serde_json::to_string(&WireLiveAdapterObservation::from(
+                                obs.clone(),
+                            )) {
                                 Ok(json) => socket.send(WsMessage::Text(json.into())).await.is_ok(),
-                                Err(_) => true,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        channel = %channel_id,
+                                        error = %error,
+                                        "public live observation serialization failed; closing"
+                                    );
+                                    false
+                                }
                             }
                         } else {
                             true
@@ -852,7 +1506,21 @@ async fn handle_live_socket(
                         }
 
                         match outcome {
-                            Ok(ObservationOutcome::Terminal { code }) => {
+                            ObservationOutcome::UserContentCommitted { observation } => {
+                                let send_ok = match serde_json::to_string(
+                                    &WireLiveAdapterObservation::from(observation),
+                                ) {
+                                    Ok(json) => socket
+                                        .send(WsMessage::Text(json.into()))
+                                        .await
+                                        .is_ok(),
+                                    Err(_) => false,
+                                };
+                                if !send_ok {
+                                    break;
+                                }
+                            }
+                            ObservationOutcome::Terminal { code } => {
                                 tracing::info!(
                                     channel = %channel_id,
                                     ?code,
@@ -869,7 +1537,7 @@ async fn handle_live_socket(
                             // input shape. Logged at info level so the
                             // operator can see scoped failures without
                             // an alarm.
-                            Ok(ObservationOutcome::CommandRejected { code, message }) => {
+                            ObservationOutcome::CommandRejected { code, message } => {
                                 tracing::info!(
                                     channel = %channel_id,
                                     ?code,
@@ -877,15 +1545,7 @@ async fn handle_live_socket(
                                     "live command rejected; channel remains open"
                                 );
                             }
-                            Ok(_) => {}
-                            Err(err) => {
-                                tracing::warn!(
-                                    channel = %channel_id,
-                                    error = %err,
-                                    "apply_observation failed; closing channel"
-                                );
-                                break;
-                            }
+                            _ => {}
                         }
                         if close_observation {
                             break;
@@ -912,7 +1572,7 @@ pub async fn serve_live_ws_listener(
     state: Arc<LiveWsState>,
 ) -> Result<(), std::io::Error> {
     let app = live_ws_router(state);
-    axum::serve(listener, app).await
+    axum::serve(LiveWsHttpListener::new(listener), app).await
 }
 
 // TODO(wire-handlers): `mint_token` now returns `LiveTokenString` (URL-safe
@@ -933,6 +1593,40 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn raw_user_content_event_and_adapter_receipt_are_filtered() {
+        use meerkat_core::types::{ContentBlock, ImageData};
+
+        let internal = LiveAdapterObservation::RealtimeTranscript {
+            event: meerkat_core::RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: "image-request-1".into(),
+                item_id: "item_image".into(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: ImageData::Inline {
+                        data: "sensitive-base64-payload".into(),
+                    },
+                }],
+            },
+        };
+        let receipt = LiveAdapterObservation::UserContentCommitted {
+            idempotency_key: "image-request-1".into(),
+            item_id: "item_image".into(),
+            previous_item_id: None,
+            content_index: 0,
+            media_type: "image/png".into(),
+        };
+
+        assert!(!should_publish_observation(&internal));
+        assert!(!should_publish_observation(&receipt));
+        let public_json = serde_json::to_string(&WireLiveAdapterObservation::from(receipt))
+            .expect("receipt should serialize");
+        assert!(public_json.contains("user_content_committed"));
+        assert!(!public_json.contains("sensitive-base64-payload"));
+    }
 
     type IssuedLiveWsToken = (SessionId, LiveChannelId, LiveTokenString, u64, u64);
 
@@ -1019,6 +1713,7 @@ mod tests {
 
     #[derive(Default)]
     struct TerminalRecordingProjectionSink {
+        reject_user_transcript: std::sync::atomic::AtomicBool,
         terminal_errors: StdMutex<
             Vec<(
                 SessionId,
@@ -1036,6 +1731,11 @@ mod tests {
             _text: &str,
             _identity: LiveTranscriptIdentity<'_>,
         ) -> Result<(), LiveProjectionError> {
+            if self.reject_user_transcript.load(Ordering::SeqCst) {
+                return Err(LiveProjectionError::Rejected(
+                    "scripted canonical projection rejection".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -1137,8 +1837,8 @@ mod tests {
             &self,
             _session_id: &SessionId,
             _event: &meerkat_core::RealtimeTranscriptEvent,
-        ) -> Result<(), LiveProjectionError> {
-            Ok(())
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, LiveProjectionError> {
+            Ok(meerkat_core::RealtimeTranscriptApplyOutcome::default())
         }
     }
 
@@ -1330,6 +2030,172 @@ mod tests {
         }
     }
 
+    struct BlockingInputAdapter {
+        started: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+        completed: Arc<Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for BlockingInputAdapter {
+        async fn send_command(
+            &self,
+            command: meerkat_core::live_adapter::LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            if matches!(
+                command,
+                meerkat_core::live_adapter::LiveAdapterCommand::SendInput { .. }
+            ) {
+                self.started.add_permits(1);
+                let permit = self
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|_| meerkat_core::live_adapter::LiveAdapterError::Closed)?;
+                permit.forget();
+                self.completed.add_permits(1);
+            }
+            Ok(())
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            std::future::pending().await
+        }
+
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    struct CountingInputAdapter {
+        send_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for CountingInputAdapter {
+        async fn send_command(
+            &self,
+            command: meerkat_core::live_adapter::LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            if matches!(
+                command,
+                meerkat_core::live_adapter::LiveAdapterCommand::SendInput { .. }
+            ) {
+                self.send_count.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            std::future::pending().await
+        }
+
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    async fn open_ready_test_channel(
+        host: &Arc<LiveAdapterHost>,
+        adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter>,
+    ) -> (SessionId, LiveChannelId) {
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .expect("test channel should open");
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("test adapter should attach");
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready,
+        )
+        .await
+        .expect("test channel should become ready");
+        (session_id, channel_id)
+    }
+
+    struct RejectFirstInputAdapter {
+        send_count: Arc<std::sync::atomic::AtomicUsize>,
+        ready_emitted: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for RejectFirstInputAdapter {
+        async fn send_command(
+            &self,
+            command: meerkat_core::live_adapter::LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            if matches!(
+                command,
+                meerkat_core::live_adapter::LiveAdapterCommand::SendInput { .. }
+            ) {
+                let index = self
+                    .send_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if index == 0 {
+                    let reason = meerkat_core::live_adapter::LiveConfigRejectionReason::ImageInputUnsupportedMime {
+                        mime_type: "image/gif".to_string(),
+                    };
+                    return Err(
+                        meerkat_core::live_adapter::LiveAdapterError::ProviderError {
+                            code:
+                                meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected {
+                                    reason: reason.clone(),
+                                },
+                            message: reason.to_string(),
+                        },
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            if !self
+                .ready_emitted
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(Some(
+                    meerkat_core::live_adapter::LiveAdapterObservation::Ready,
+                ));
+            }
+            std::future::pending().await
+        }
+
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+    }
+
     /// Single-shot adapter that emits one scripted observation then returns
     /// `Ok(None)` to terminate the pump. Used by the wave-3 regression tests
     /// to drive the WS pump's `Terminal` short-circuit branch.
@@ -1377,6 +2243,571 @@ mod tests {
         async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_never_publishes_observation_when_canonical_apply_fails() {
+        use futures::StreamExt as _;
+        use meerkat_core::live_adapter::LiveAdapterObservation;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let sink = Arc::new(TerminalRecordingProjectionSink::default());
+        sink.reject_user_transcript.store(true, Ordering::SeqCst);
+        let sink_for_host: Arc<dyn LiveProjectionSink> = sink;
+        let host = Arc::new(LiveAdapterHost::new(sink_for_host));
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        host.attach_adapter(
+            &channel_id,
+            Arc::new(ScriptedAdapter::new(
+                LiveAdapterObservation::UserTranscriptFinal {
+                    provider_item_id: Some("provider-user-1".to_string()),
+                    previous_item_id: None,
+                    content_index: Some(0),
+                    text: "must-not-publish".to_string(),
+                },
+            )),
+        )
+        .await
+        .unwrap();
+
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_state = Arc::clone(&state);
+        let server_handle =
+            tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token={token}&channel={channel_id}");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (_write, mut read) = ws_stream.split();
+        let mut saw_uncommitted = false;
+        let disconnected = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(message) = read.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if text.contains("must-not-publish") {
+                            saw_uncommitted = true;
+                        }
+                    }
+                    Ok(Message::Close(_)) | Err(_) => return true,
+                    Ok(_) => {}
+                }
+            }
+            true
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            disconnected,
+            "canonical apply failure must disconnect the WS"
+        );
+        assert!(
+            !saw_uncommitted,
+            "provider observation must not publish when canonical apply failed"
+        );
+        server_handle.abort();
+    }
+
+    #[test]
+    fn production_websocket_admission_is_process_shared_across_states() {
+        let first = LiveWsAdmission::production();
+        let second = LiveWsAdmission::production();
+        assert!(Arc::ptr_eq(
+            &first.connection_semaphore,
+            &second.connection_semaphore
+        ));
+        assert!(Arc::ptr_eq(
+            &first.raw_message_semaphore,
+            &second.raw_message_semaphore
+        ));
+        assert!(Arc::ptr_eq(
+            &first.ingress_memory_semaphore,
+            &second.ingress_memory_semaphore
+        ));
+    }
+
+    #[test]
+    fn all_advertised_websocket_connections_reserve_a_full_raw_message() {
+        let admission = LiveWsAdmission::new(
+            LIVE_WS_MAX_CONNECTIONS,
+            LIVE_WS_PROCESS_INGRESS_MEMORY_BUDGET_BYTES,
+        );
+        let mut permits = Vec::new();
+        for _ in 0..LIVE_WS_MAX_CONNECTIONS {
+            permits.push(
+                admission
+                    .try_admit_connection(LIVE_WS_MAX_MESSAGE_BYTES)
+                    .expect("every advertised connection must fit a full raw codec message"),
+            );
+        }
+        assert_eq!(admission.raw_message_semaphore.available_permits(), 0);
+        assert!(matches!(
+            admission.try_admit_connection(LIVE_WS_MAX_MESSAGE_BYTES),
+            Err(LiveWsAdmissionError::ConnectionBackpressured { .. })
+        ));
+        drop(permits);
+        assert_eq!(
+            admission.raw_message_semaphore.available_permits(),
+            LIVE_WS_MAX_CONNECTIONS * LIVE_WS_MAX_MESSAGE_BYTES
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_token_authority_releases_connection_and_raw_message_admission() {
+        let admission = LiveWsAdmission::new(1, LIVE_WS_PROCESS_INGRESS_MEMORY_BUDGET_BYTES);
+        let connection_permit = admission
+            .try_admit_connection(LIVE_WS_MAX_MESSAGE_BYTES)
+            .expect("first upgraded connection admission");
+
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = LiveChannelId::new("stalled_token_authority");
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let authority_guard = authority.admissions.lock().await;
+        let state = Arc::new(
+            test_state_with_authority(host, authority.clone())
+                .with_test_shared_transport_admission(
+                    admission.clone(),
+                    LIVE_WS_MAX_MESSAGE_BYTES,
+                    LIVE_WS_MAX_FRAME_BYTES,
+                ),
+        );
+
+        let task = tokio::spawn(async move {
+            let _connection_permit = connection_permit;
+            state
+                .resolve_token_admission("blocked-token", &channel_id)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(admission.connection_semaphore.available_permits(), 0);
+        assert_eq!(admission.raw_message_semaphore.available_permits(), 0);
+
+        tokio::time::advance(LIVE_WS_TOKEN_ADMISSION_TIMEOUT + Duration::from_millis(1)).await;
+        let error = task
+            .await
+            .expect("stalled authority task must finish at its deadline")
+            .expect_err("stalled authority must fail closed");
+        assert!(error.contains("deadline exceeded"));
+        assert_eq!(admission.connection_semaphore.available_permits(), 1);
+        assert_eq!(
+            admission.raw_message_semaphore.available_permits(),
+            LIVE_WS_MAX_MESSAGE_BYTES
+        );
+        drop(authority_guard);
+    }
+
+    #[tokio::test]
+    async fn listener_header_scanner_handles_split_terminator_and_rejects_oversize() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connect = tokio::spawn(tokio::net::TcpStream::connect(address));
+        let (accepted, _) = listener.accept().await.unwrap();
+        let _client = connect.await.unwrap().unwrap();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.try_acquire_owned().unwrap();
+        let mut io = AdmittedLiveWsIo::new(accepted, permit);
+
+        io.observe_header_bytes(b"GET /live/ws HTTP/1.1\r\nHost: test\r\n\r")
+            .unwrap();
+        assert!(!io.header_complete);
+        io.observe_header_bytes(b"\nbody").unwrap();
+        assert!(io.header_complete);
+
+        io.header_complete = false;
+        io.header_bytes = 0;
+        io.header_window = 0;
+        let oversized = vec![b'x'; LIVE_WS_MAX_HTTP_HEADER_BYTES];
+        let error = io
+            .observe_header_bytes(&oversized)
+            .expect_err("unterminated oversized header must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn websocket_ingress_charge_bounds_text_decode_and_binary_copy_peaks() {
+        assert_eq!(
+            live_ws_ingress_memory_charge_bytes(LiveWsIngressKind::Text, 1),
+            LIVE_WS_MIN_INGRESS_CHARGE_BYTES * LIVE_WS_TEXT_MEMORY_MULTIPLIER
+        );
+        assert_eq!(
+            live_ws_ingress_memory_charge_bytes(LiveWsIngressKind::Binary, 1),
+            LIVE_WS_MIN_INGRESS_CHARGE_BYTES * LIVE_WS_BINARY_MEMORY_MULTIPLIER
+        );
+        assert_eq!(
+            live_ws_ingress_memory_charge_bytes(LiveWsIngressKind::Text, 100_000),
+            100_000 * LIVE_WS_TEXT_MEMORY_MULTIPLIER
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_connection_admission_is_shared_across_routers_and_releases_on_close() {
+        use futures::SinkExt as _;
+        use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
+
+        let shared_admission = LiveWsAdmission::new(1, LIVE_WS_MIN_INGRESS_CHARGE_BYTES * 3);
+
+        let first_host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let (first_session, first_channel) =
+            open_ready_test_channel(&first_host, Arc::new(IdleAdapter)).await;
+        let first_authority = ScriptedLiveWsTokenAuthority::admitting(first_channel.clone());
+        let first_state = Arc::new(
+            test_state_with_authority(first_host, first_authority)
+                .with_test_shared_transport_admission(
+                    shared_admission.clone(),
+                    LIVE_WS_MAX_MESSAGE_BYTES,
+                    LIVE_WS_MAX_FRAME_BYTES,
+                ),
+        );
+        let first_token = first_state
+            .mint_token(&first_session, first_channel.clone())
+            .await
+            .unwrap();
+
+        let second_host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let (second_session, second_channel) =
+            open_ready_test_channel(&second_host, Arc::new(IdleAdapter)).await;
+        let second_authority = ScriptedLiveWsTokenAuthority::admitting(second_channel.clone());
+        let second_state = Arc::new(
+            test_state_with_authority(second_host, second_authority)
+                .with_test_shared_transport_admission(
+                    shared_admission.clone(),
+                    LIVE_WS_MAX_MESSAGE_BYTES,
+                    LIVE_WS_MAX_FRAME_BYTES,
+                ),
+        );
+        let second_token = second_state
+            .mint_token(&second_session, second_channel.clone())
+            .await
+            .unwrap();
+
+        let first_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_addr = first_listener.local_addr().unwrap();
+        let first_server_state = Arc::clone(&first_state);
+        let first_server = tokio::spawn(async move {
+            serve_live_ws_listener(first_listener, first_server_state).await
+        });
+        let second_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_addr = second_listener.local_addr().unwrap();
+        let second_server_state = Arc::clone(&second_state);
+        let second_server = tokio::spawn(async move {
+            serve_live_ws_listener(second_listener, second_server_state).await
+        });
+
+        let first_url =
+            format!("ws://{first_addr}{LIVE_WS_PATH}?token={first_token}&channel={first_channel}");
+        let (mut first_socket, _) = tokio_tungstenite::connect_async(&first_url).await.unwrap();
+        assert_eq!(shared_admission.connection_semaphore.available_permits(), 0);
+
+        let second_url = format!(
+            "ws://{second_addr}{LIVE_WS_PATH}?token={second_token}&channel={second_channel}"
+        );
+        let rejection = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio_tungstenite::connect_async(&second_url),
+        )
+        .await
+        .expect("saturated router must reject without parking")
+        .expect_err("second router must share the connection ceiling");
+        assert!(matches!(
+            rejection,
+            TungsteniteError::Http(response)
+                if response.status() == StatusCode::SERVICE_UNAVAILABLE
+        ));
+
+        first_socket.send(Message::Close(None)).await.unwrap();
+        drop(first_socket);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while shared_admission.connection_semaphore.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closing one router's socket must release the process permit");
+
+        // Connection rejection happens before token authority, so the same
+        // second token remains usable once unrelated load releases.
+        let (mut second_socket, _) = tokio_tungstenite::connect_async(&second_url).await.unwrap();
+        second_socket.send(Message::Close(None)).await.unwrap();
+
+        first_server.abort();
+        second_server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_ingress_backpressure_is_scoped_cross_connection_and_retryable() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use meerkat_contracts::{WireLiveAdapterErrorCode, WireLiveConfigRejectionReason};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let completed = Arc::new(Semaphore::new(0));
+        let (first_session, first_channel) = open_ready_test_channel(
+            &host,
+            Arc::new(BlockingInputAdapter {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                completed: Arc::clone(&completed),
+            }),
+        )
+        .await;
+        let second_send_count = Arc::new(AtomicUsize::new(0));
+        let (second_session, second_channel) = open_ready_test_channel(
+            &host,
+            Arc::new(CountingInputAdapter {
+                send_count: Arc::clone(&second_send_count),
+            }),
+        )
+        .await;
+        let authority = ScriptedLiveWsTokenAuthority::new([
+            generated_admission(first_channel.clone()),
+            generated_admission(second_channel.clone()),
+        ]);
+        let frame = serde_json::json!({"kind": "text", "text": "hello"}).to_string();
+        let ingress_capacity =
+            live_ws_ingress_memory_charge_bytes(LiveWsIngressKind::Text, frame.len());
+        let state = Arc::new(
+            test_state_with_authority(host, authority).with_test_transport_admission(
+                2,
+                ingress_capacity,
+                LIVE_WS_MAX_MESSAGE_BYTES,
+                LIVE_WS_MAX_FRAME_BYTES,
+            ),
+        );
+        let first_token = state
+            .mint_token(&first_session, first_channel.clone())
+            .await
+            .unwrap();
+        let second_token = state
+            .mint_token(&second_session, second_channel.clone())
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_state = Arc::clone(&state);
+        let server =
+            tokio::spawn(async move { serve_live_ws_listener(listener, server_state).await });
+
+        let first_url =
+            format!("ws://{addr}{LIVE_WS_PATH}?token={first_token}&channel={first_channel}");
+        let (first_socket, _) = tokio_tungstenite::connect_async(&first_url).await.unwrap();
+        let (mut first_write, _first_read) = first_socket.split();
+        first_write
+            .send(Message::Text(frame.clone().into()))
+            .await
+            .unwrap();
+        let first_started = tokio::time::timeout(Duration::from_secs(2), started.acquire())
+            .await
+            .expect("first send_input should start")
+            .expect("started semaphore should remain open");
+        first_started.forget();
+        assert_eq!(
+            state.admission.ingress_memory_semaphore.available_permits(),
+            0
+        );
+
+        let second_url =
+            format!("ws://{addr}{LIVE_WS_PATH}?token={second_token}&channel={second_channel}");
+        let (second_socket, _) = tokio_tungstenite::connect_async(&second_url).await.unwrap();
+        let (mut second_write, mut second_read) = second_socket.split();
+        second_write
+            .send(Message::Text(frame.clone().into()))
+            .await
+            .unwrap();
+        let rejection = tokio::time::timeout(Duration::from_secs(2), second_read.next())
+            .await
+            .expect("backpressure response must not park")
+            .expect("socket should remain open")
+            .expect("backpressure frame should be valid");
+        let Message::Text(rejection) = rejection else {
+            panic!("expected typed text rejection");
+        };
+        let observation: WireLiveAdapterObservation =
+            serde_json::from_str(rejection.as_str()).expect("typed rejection should deserialize");
+        assert!(matches!(
+            observation,
+            WireLiveAdapterObservation::CommandRejected {
+                code: WireLiveAdapterErrorCode::ConfigRejected {
+                    reason: WireLiveConfigRejectionReason::InputBackpressured {
+                        max_pending_bytes,
+                    },
+                },
+                ..
+            } if max_pending_bytes == u64::try_from(ingress_capacity).unwrap()
+        ));
+        assert_eq!(second_send_count.load(Ordering::SeqCst), 0);
+
+        release.add_permits(1);
+        let first_completed = tokio::time::timeout(Duration::from_secs(2), completed.acquire())
+            .await
+            .expect("first send_input should complete")
+            .expect("completed semaphore should remain open");
+        first_completed.forget();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.admission.ingress_memory_semaphore.available_permits() != ingress_capacity {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ingress admission should release after host.send_input returns");
+
+        second_write
+            .send(Message::Text(frame.into()))
+            .await
+            .expect("the backpressured socket must survive for retry");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while second_send_count.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retry should reach the second adapter after release");
+
+        first_write.send(Message::Close(None)).await.unwrap();
+        second_write.send(Message::Close(None)).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_image_is_transport_rejected_and_socket_survives_retry() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use meerkat_contracts::{WireLiveAdapterErrorCode, WireLiveConfigRejectionReason};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let (session_id, channel_id) = open_ready_test_channel(
+            &host,
+            Arc::new(CountingInputAdapter {
+                send_count: Arc::clone(&send_count),
+            }),
+        )
+        .await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_state = Arc::clone(&state);
+        let server =
+            tokio::spawn(async move { serve_live_ws_listener(listener, server_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token={token}&channel={channel_id}");
+        let (socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut write, mut read) = socket.split();
+        write
+            .send(Message::Text(
+                r#"{"kind":"image","idempotency_key":"bad-base64-1","mime":"image/png","data":"@@@"}"#
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let rejection = tokio::time::timeout(Duration::from_secs(2), read.next())
+            .await
+            .expect("direct WebSocket image should reject promptly")
+            .expect("socket must remain connected")
+            .expect("rejection frame should be valid");
+        let Message::Text(rejection) = rejection else {
+            panic!("expected typed text rejection");
+        };
+        let rejection: WireLiveAdapterObservation =
+            serde_json::from_str(rejection.as_str()).expect("typed rejection should deserialize");
+        assert!(matches!(
+            rejection,
+            WireLiveAdapterObservation::CommandRejected {
+                code: WireLiveAdapterErrorCode::ConfigRejected {
+                    reason: WireLiveConfigRejectionReason::ImageInputTransportUnsupported {
+                        ref transport,
+                    },
+                },
+                ..
+            } if transport == "direct_websocket_use_live_send_input_rpc"
+        ));
+        assert_eq!(send_count.load(Ordering::SeqCst), 0);
+
+        write
+            .send(Message::Text(
+                r#"{"kind":"text","text":"retry on same socket"}"#.into(),
+            ))
+            .await
+            .expect("socket must remain writable after scoped rejection");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while send_count.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("valid retry should reach adapter on the same socket");
+        assert_eq!(
+            state.host().channel_status(&channel_id).await.unwrap(),
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        );
+
+        write.send(Message::Close(None)).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_explicit_frame_limit_closes_oversized_peer_and_releases_connection() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let (session_id, channel_id) = open_ready_test_channel(&host, Arc::new(IdleAdapter)).await;
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state =
+            Arc::new(
+                test_state_with_authority(Arc::clone(&host), authority)
+                    .with_test_transport_admission(1, 1024 * 1024, 128, 128),
+            );
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_state = Arc::clone(&state);
+        let server =
+            tokio::spawn(async move { serve_live_ws_listener(listener, server_state).await });
+
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token={token}&channel={channel_id}");
+        let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        socket
+            .send(Message::Text("x".repeat(256).into()))
+            .await
+            .unwrap();
+        let termination = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("oversized frame must terminate the peer promptly");
+        assert!(
+            termination.is_none()
+                || matches!(termination, Some(Ok(Message::Close(_))) | Some(Err(_))),
+            "oversized frame must not be delivered as an application message"
+        );
+        drop(socket);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.admission.connection_semaphore.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("oversized peer teardown must release connection admission");
+
+        server.abort();
     }
 
     #[tokio::test]
@@ -1718,6 +3149,121 @@ mod tests {
             "R5-9: WS must NOT close after a CommandRejected observation"
         );
 
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_surfaces_immediate_adapter_rejection_and_accepts_next_command() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let session_id = meerkat_core::types::SessionId::new();
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(session_id.clone())
+            .await
+            .unwrap();
+        let send_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        host.attach_adapter(
+            &channel_id,
+            Arc::new(RejectFirstInputAdapter {
+                send_count: Arc::clone(&send_count),
+                ready_emitted: std::sync::atomic::AtomicBool::new(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let authority = ScriptedLiveWsTokenAuthority::admitting(channel_id.clone());
+        let state = Arc::new(test_state_with_authority(host, authority));
+        let token = state
+            .mint_token(&session_id, channel_id.clone())
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ws_state = Arc::clone(&state);
+        let server_handle =
+            tokio::spawn(async move { serve_live_ws_listener(listener, ws_state).await });
+        let url = format!("ws://{addr}{LIVE_WS_PATH}?token={token}&channel={channel_id}");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut write, mut read) = ws_stream.split();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match read.next().await {
+                    Some(Ok(Message::Text(text)))
+                        if matches!(
+                            serde_json::from_str::<WireLiveAdapterObservation>(&text),
+                            Ok(WireLiveAdapterObservation::Ready)
+                        ) =>
+                    {
+                        break;
+                    }
+                    Some(Ok(_)) => continue,
+                    other => panic!("expected adapter ready before input, got {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("adapter must become ready");
+
+        write
+            .send(Message::Text(
+                r#"{"kind":"text","text":"adapter rejects first command"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let observation = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match read.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        let observation: WireLiveAdapterObservation =
+                            serde_json::from_str(&text).expect("typed wire observation");
+                        if matches!(
+                            observation,
+                            WireLiveAdapterObservation::CommandRejected { .. }
+                        ) {
+                            break observation;
+                        }
+                    }
+                    other => panic!("expected command rejection without disconnect, got {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("immediate adapter rejection must be delivered");
+        assert!(matches!(
+            observation,
+            WireLiveAdapterObservation::CommandRejected {
+                code: meerkat_contracts::WireLiveAdapterErrorCode::ConfigRejected {
+                    reason: meerkat_contracts::WireLiveConfigRejectionReason::ImageInputUnsupportedMime {
+                        ref mime_type
+                    }
+                },
+                ..
+            } if mime_type == "image/gif"
+        ));
+
+        write
+            .send(Message::Text(
+                r#"{"kind":"text","text":"channel still alive"}"#.into(),
+            ))
+            .await
+            .expect("the socket must remain writable after scoped rejection");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while send_count.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the adapter must receive the next command on the same channel");
+        assert_eq!(
+            state.host().channel_status(&channel_id).await.unwrap(),
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        );
+
+        let _ = write.send(Message::Close(None)).await;
         server_handle.abort();
     }
 

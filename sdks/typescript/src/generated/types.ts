@@ -800,18 +800,25 @@ export interface RuntimeHostInfo {
 }
 
 export interface Schedule {
-  config: Record<string, unknown>;
+  created_at_utc: string;
+  deleted_at_utc?: string;
+  description?: string;
+  labels?: Record<string, string>;
   misfire_policy: Record<string, unknown>;
   missing_target_policy: "skip" | "mark_misfired";
+  name?: string;
   next_occurrence_ordinal: number;
   overlap_policy: "allow_concurrent" | "skip_if_running";
   phase: "active" | "paused" | "deleted";
   planning_cursor_utc?: string;
+  planning_horizon_days: number;
+  planning_horizon_occurrences: number;
   revision: number;
   schedule_id: string;
-  superseded_ack_ids: string[];
+  superseded_ack_ids?: string[];
   target: Record<string, unknown>;
   trigger: Record<string, unknown>;
+  updated_at_utc: string;
 }
 
 export interface ScheduleToolCallParams {
@@ -2346,7 +2353,7 @@ export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" 
 
 export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
 
-export type RealtimeInputKind = "text" | "audio" | "video";
+export type RealtimeInputKind = "text" | "audio" | "video" | "image";
 
 export type RealtimeOutputKind = "text" | "audio" | "video";
 
@@ -2369,7 +2376,14 @@ export interface RealtimeInputChunkVideoChunk {
   kind: "video_chunk";
 }
 
-export type RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk;
+export interface RealtimeInputChunkImageChunk {
+  data: string;
+  idempotency_key: string;
+  mime_type: string;
+  kind: "image_chunk";
+}
+
+export type RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk | RealtimeInputChunkImageChunk;
 
 export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
 
@@ -2532,7 +2546,15 @@ export interface BridgeCommandDeclareMemberOutboundTaint {
   taint?: SenderContentTaint;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint;
+export interface BridgeCommandObserveSupervisorRotation {
+  command: "observe_supervisor_rotation";
+  observer: BridgePeerSpec;
+  observer_epoch: number;
+  operation_id: unknown;
+  protocol_version: BridgeProtocolVersion;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandObserveSupervisorRotation;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -2621,13 +2643,17 @@ export interface BridgeReplyDestroy {
   result: "destroy";
 }
 
+export interface BridgeReplySupervisorRotation {
+  result: "supervisor_rotation";
+}
+
 export interface BridgeReplyRejected {
   cause: BridgeRejectionCause;
   reason: string;
   result: "rejected";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplyRejected;
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotation | BridgeReplyRejected;
 
 export interface ContentBlockText {
   text: string;
@@ -2828,6 +2854,12 @@ export interface RealtimeVideoChunk {
   mime_type: string;
 }
 
+export interface RealtimeImageChunk {
+  data: string;
+  idempotency_key: string;
+  mime_type: string;
+}
+
 export interface LiveOpenParams {
   session_id: string;
   transport?: "websocket" | "webrtc";
@@ -2921,6 +2953,10 @@ export interface LiveSendInputParams {
   chunk: LiveInputChunkWire;
 }
 
+export interface LiveSendInputErrorData {
+  error_code: WireLiveAdapterErrorCode;
+}
+
 export interface LiveTruncateParams {
   audio_played_ms: number;
   channel_id: string;
@@ -2998,6 +3034,7 @@ export interface LiveInputChunkWireText {
 
 export interface LiveInputChunkWireImage {
   data: string;
+  idempotency_key: string;
   kind: "image";
   mime: string;
 }
@@ -3071,9 +3108,9 @@ export interface RealtimeTranscriptEventAssistantTranscriptFinalText {
 
 export interface RealtimeTranscriptEventAssistantTurnCompleted {
   response_id: string;
-  stop_reason: unknown;
+  stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
   type: "assistant_turn_completed";
-  usage: unknown;
+  usage: Record<string, unknown>;
 }
 
 export interface RealtimeTranscriptEventAssistantTurnInterrupted {
@@ -3159,6 +3196,66 @@ export interface WireLiveConfigRejectionReasonImageInputNotImplemented {
   kind: "image_input_not_implemented";
 }
 
+export interface WireLiveConfigRejectionReasonImageInputUnsupportedMime {
+  kind: "image_input_unsupported_mime";
+  mime_type: string;
+}
+
+export interface WireLiveConfigRejectionReasonImageInputContentMismatch {
+  kind: "image_input_content_mismatch";
+  mime_type: string;
+}
+
+export interface WireLiveConfigRejectionReasonImageInputInvalidBase64 {
+  kind: "image_input_invalid_base64";
+}
+
+export interface WireLiveConfigRejectionReasonImageInputTooLarge {
+  actual_bytes: number;
+  kind: "image_input_too_large";
+  max_bytes: number;
+}
+
+export interface WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid {
+  actual_bytes: number;
+  kind: "image_input_idempotency_key_invalid";
+  max_bytes: number;
+}
+
+export interface WireLiveConfigRejectionReasonImageInputIdempotencyConflict {
+  kind: "image_input_idempotency_conflict";
+}
+
+export interface WireLiveConfigRejectionReasonImageInputHistoryBudgetExceeded {
+  kind: "image_input_history_budget_exceeded";
+  max_decoded_bytes: number;
+}
+
+export interface WireLiveConfigRejectionReasonImageInputRequiresCommit {
+  kind: "image_input_requires_commit";
+}
+
+export interface WireLiveConfigRejectionReasonInputTooLarge {
+  actual_bytes: number;
+  kind: "input_too_large";
+  max_bytes: number;
+}
+
+export interface WireLiveConfigRejectionReasonInputBackpressured {
+  kind: "input_backpressured";
+  max_pending_bytes: number;
+}
+
+export interface WireLiveConfigRejectionReasonImageInputBackpressured {
+  kind: "image_input_backpressured";
+  max_pending_bytes: number;
+}
+
+export interface WireLiveConfigRejectionReasonImageInputTransportUnsupported {
+  kind: "image_input_transport_unsupported";
+  transport: string;
+}
+
 export interface WireLiveConfigRejectionReasonVideoFrameInputNotImplemented {
   kind: "video_frame_input_not_implemented";
 }
@@ -3184,6 +3281,10 @@ export interface WireLiveConfigRejectionReasonRefreshAudioConfigMismatch {
   kind: "refresh_audio_config_mismatch";
 }
 
+export interface WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen {
+  kind: "refresh_transcript_rewrite_requires_reopen";
+}
+
 export interface WireLiveConfigRejectionReasonAudioInputFormatMismatch {
   actual_channels: number;
   actual_sample_rate_hz: number;
@@ -3202,7 +3303,7 @@ export interface WireLiveConfigRejectionReasonUnknown {
   kind: "unknown";
 }
 
-export type WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap | WireLiveConfigRejectionReasonNonRealtimeResolution | WireLiveConfigRejectionReasonImageInputNotImplemented | WireLiveConfigRejectionReasonVideoFrameInputNotImplemented | WireLiveConfigRejectionReasonUnsupportedInputChunkVariant | WireLiveConfigRejectionReasonRefreshModelSwap | WireLiveConfigRejectionReasonRefreshProviderSwap | WireLiveConfigRejectionReasonRefreshAudioConfigMismatch | WireLiveConfigRejectionReasonAudioInputFormatMismatch | WireLiveConfigRejectionReasonOther | WireLiveConfigRejectionReasonUnknown;
+export type WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap | WireLiveConfigRejectionReasonNonRealtimeResolution | WireLiveConfigRejectionReasonImageInputNotImplemented | WireLiveConfigRejectionReasonImageInputUnsupportedMime | WireLiveConfigRejectionReasonImageInputContentMismatch | WireLiveConfigRejectionReasonImageInputInvalidBase64 | WireLiveConfigRejectionReasonImageInputTooLarge | WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid | WireLiveConfigRejectionReasonImageInputIdempotencyConflict | WireLiveConfigRejectionReasonImageInputHistoryBudgetExceeded | WireLiveConfigRejectionReasonImageInputRequiresCommit | WireLiveConfigRejectionReasonInputTooLarge | WireLiveConfigRejectionReasonInputBackpressured | WireLiveConfigRejectionReasonImageInputBackpressured | WireLiveConfigRejectionReasonImageInputTransportUnsupported | WireLiveConfigRejectionReasonVideoFrameInputNotImplemented | WireLiveConfigRejectionReasonUnsupportedInputChunkVariant | WireLiveConfigRejectionReasonRefreshModelSwap | WireLiveConfigRejectionReasonRefreshProviderSwap | WireLiveConfigRejectionReasonRefreshAudioConfigMismatch | WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen | WireLiveConfigRejectionReasonAudioInputFormatMismatch | WireLiveConfigRejectionReasonOther | WireLiveConfigRejectionReasonUnknown;
 
 export interface WireLiveAdapterErrorCodeConnectionFailed {
   code: "connection_failed";
@@ -3308,6 +3409,15 @@ export interface WireLiveAdapterObservationRealtimeTranscript {
   observation: "realtime_transcript";
 }
 
+export interface WireLiveAdapterObservationUserContentCommitted {
+  content_index: number;
+  idempotency_key: string;
+  item_id: string;
+  media_type: string;
+  observation: "user_content_committed";
+  previous_item_id?: string;
+}
+
 export interface WireLiveAdapterObservationToolCallRequested {
   arguments: unknown;
   observation: "tool_call_requested";
@@ -3349,7 +3459,7 @@ export interface WireLiveAdapterObservationUnknown {
   observation: "unknown";
 }
 
-export type WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown;
+export type WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationUserContentCommitted | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown;
 
 export interface RuntimeAcceptResult {
   existing_id?: string;

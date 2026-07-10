@@ -171,6 +171,32 @@ impl ProviderInput {
     }
 }
 
+fn resolve_mcp_create_session_model(
+    config: &Config,
+    model: Option<String>,
+    provider: Option<ProviderInput>,
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+) -> Result<meerkat::CreateSessionModelResolution, meerkat::CreateSessionModelResolutionError> {
+    meerkat::resolve_create_session_model(
+        config,
+        meerkat::CreateSessionModelResolutionRequest {
+            model,
+            provider: provider.map(ProviderInput::to_provider),
+            auth_binding,
+        },
+    )
+}
+
+fn create_session_model_resolution_error_to_tool_error(
+    error: meerkat::CreateSessionModelResolutionError,
+) -> ToolCallError {
+    if error.is_configuration_fault() {
+        ToolCallError::internal(error.to_string())
+    } else {
+        ToolCallError::invalid_params(error.to_string())
+    }
+}
+
 /// Input schema for meerkat_run tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatRunInput {
@@ -3338,11 +3364,14 @@ async fn handle_meerkat_run(
         .map_err(|e| {
             ToolCallError::internal(format!("Failed to compose realm config chain: {e}"))
         })?;
-    let model = input
-        .model
-        .as_ref()
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_else(|| meerkat::resolve_create_session_default_model(&config));
+    let model_resolution = resolve_mcp_create_session_model(
+        &config,
+        input.model.as_ref().map(|model| model.as_str().to_string()),
+        input.provider,
+        input.auth_binding.clone().map(Into::into),
+    )
+    .map_err(create_session_model_resolution_error_to_tool_error)?;
+    let model = model_resolution.model.clone();
 
     // Build callback tools supplied by the MCP client. The per-session live
     // MCP router is created after runtime bindings are prepared so its surface
@@ -3466,13 +3495,12 @@ async fn handle_meerkat_run(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let create_provider = input.provider.map(ProviderInput::to_provider);
     let mut build = SessionBuildOptions {
         tool_access_policy: None,
         custom_models: std::collections::BTreeMap::new(),
         image_generation_provider: None,
         auto_compact_threshold_override: None,
-        provider: create_provider,
+        provider: Some(model_resolution.provider),
         override_comms: Default::default(),
         self_hosted_server_id: None,
         output_schema,
@@ -3508,10 +3536,7 @@ async fn handle_meerkat_run(
         instance_id: state.instance_id.clone(),
         backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
-        auth_binding: input
-            .auth_binding
-            .clone()
-            .map(meerkat_core::AuthBindingRef::from),
+        auth_binding: model_resolution.auth_binding,
         mob_member_binding: None,
         keep_alive,
         checkpointer: None,
@@ -3523,7 +3548,9 @@ async fn handle_meerkat_run(
         initial_tool_filter: None,
         shell_env: input.shell_env.clone(),
         resume_override_mask: ResumeOverrideMask {
-            provider: input.provider.is_some() || input.model.is_some(),
+            model: input.model.is_some(),
+            provider: input.provider.is_some(),
+            auth_binding: input.auth_binding.is_some(),
             max_tokens: input.max_tokens.is_some(),
             structured_output_retries: input.structured_output_retries.is_some(),
             provider_params: input.provider_params.is_some(),
@@ -4600,6 +4627,137 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::{Duration, timeout};
+
+    fn mcp_inherited_gemini_binding() -> (Config, meerkat_core::AuthBindingRef) {
+        let mut config = Config::default();
+        let mut global = meerkat_core::RealmConfigSection::default();
+        global.backend.insert(
+            "google".to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "gemini".to_string(),
+                backend_kind: "google_code_assist".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        global.auth.insert(
+            "oauth".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "gemini".to_string(),
+                auth_method: "google_oauth".to_string(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        global.binding.insert(
+            "primary".to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "google".to_string(),
+                auth_profile: "oauth".to_string(),
+                default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        config.realm.insert("global".to_string(), global);
+        config.realm.insert(
+            "dev".to_string(),
+            meerkat_core::RealmConfigSection {
+                parent: Some(meerkat_core::RealmId::global()),
+                ..Default::default()
+            },
+        );
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm"),
+            binding: meerkat_core::BindingId::parse("primary").expect("binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        (config, binding)
+    }
+
+    #[test]
+    fn mcp_create_session_resolution_preserves_supported_config_pin() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+        config.models.anthropic = "claude-sonnet-4-6".to_string();
+
+        let resolved = resolve_mcp_create_session_model(&config, None, None, None)
+            .expect("MCP lowers through shared resolver");
+        assert_eq!(resolved.model, "claude-opus-4-7");
+        assert_eq!(resolved.provider, Provider::Anthropic);
+    }
+
+    #[test]
+    fn mcp_create_session_resolution_preserves_inherited_binding_owner() {
+        let (config, binding) = mcp_inherited_gemini_binding();
+        let resolved = resolve_mcp_create_session_model(&config, None, None, Some(binding))
+            .expect("MCP resolves inherited binding");
+
+        assert_eq!(resolved.model, "gemini-3.1-flash-lite-preview");
+        assert_eq!(resolved.provider, Provider::Gemini);
+        assert_eq!(
+            resolved
+                .auth_binding
+                .expect("owner-stamped binding")
+                .realm
+                .as_str(),
+            "global"
+        );
+    }
+
+    #[test]
+    fn mcp_create_session_resolution_rejects_explicit_model_binding_mismatch() {
+        let (config, binding) = mcp_inherited_gemini_binding();
+        let err = resolve_mcp_create_session_model(
+            &config,
+            Some("gpt-5.5".to_string()),
+            None,
+            Some(binding),
+        )
+        .expect_err("known model owner must match binding provider");
+
+        assert!(err.to_string().contains("registered for provider 'openai'"));
+    }
+
+    #[test]
+    fn mcp_create_session_resolution_preserves_config_fault_ownership() {
+        let config_error = meerkat::CreateSessionModelResolutionError::Config(
+            meerkat_core::ConfigError::Validation("broken model registry".to_string()),
+        );
+        assert_eq!(
+            create_session_model_resolution_error_to_tool_error(config_error).code,
+            -32603
+        );
+        let binding_error =
+            meerkat::CreateSessionModelResolutionError::BindingMissingProviderDefault {
+                realm: meerkat_core::RealmId::parse("dev").expect("realm"),
+                binding: meerkat_core::BindingId::parse("primary").expect("binding"),
+                provider: meerkat_core::Provider::SelfHosted,
+            };
+        assert_eq!(
+            create_session_model_resolution_error_to_tool_error(binding_error).code,
+            -32603
+        );
+
+        assert_eq!(
+            create_session_model_resolution_error_to_tool_error(
+                meerkat::CreateSessionModelResolutionError::EmptyExplicitModel,
+            )
+            .code,
+            -32602
+        );
+        assert_eq!(
+            create_session_model_resolution_error_to_tool_error(
+                meerkat::CreateSessionModelResolutionError::MissingProviderDefault {
+                    provider: meerkat_core::Provider::SelfHosted,
+                },
+            )
+            .code,
+            -32602
+        );
+    }
 
     struct RuntimeTerminationFixtureExecutor;
 

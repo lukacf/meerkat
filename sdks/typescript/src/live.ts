@@ -160,8 +160,9 @@ export class LiveChannel {
    *
    * Does NOT replay canonical history. Refresh enqueues a single
    * `session.update` carrying the latest projection snapshot's mutable
-   * config fields. Identity changes (model/provider swaps) require
-   * close + reopen.
+   * config fields. Identity changes (model/provider swaps) and canonical
+   * transcript or user-content-registry rewrites cannot be hot-applied;
+   * `refresh_transcript_rewrite_requires_reopen` requires close + reopen.
    */
   async refresh(): Promise<LiveRefreshResult> {
     return this.client.liveRefresh(this.requireChannelParams());
@@ -202,10 +203,23 @@ export class LiveChannel {
   }
 
   /**
-   * Send a base64-encoded image input chunk to the live channel.
+   * Queue a base64-encoded image input chunk on the live channel.
+   *
+   * The idempotency key is required, caller-stable, and session-scoped.
+   * Resolving this promise proves queue acceptance only; wait for a matching
+   * `user_content_committed` observation before depending on durable context.
    */
-  async sendInputImage(mime: string, dataBase64: string): Promise<void> {
-    await this.sendInput({ kind: "image", mime, data: dataBase64 });
+  async sendInputImage(
+    idempotencyKey: string,
+    mime: string,
+    dataBase64: string,
+  ): Promise<void> {
+    await this.sendInput({
+      kind: "image",
+      idempotency_key: idempotencyKey,
+      mime,
+      data: dataBase64,
+    });
   }
 
   /**

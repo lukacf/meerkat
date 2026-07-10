@@ -35,6 +35,7 @@ indexmap = "2"
 tokio = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
+sha2 = { workspace = true, optional = true }
 oai-rt-rs = { workspace = true, optional = true }
 # Pinned to the tokio-tungstenite major used by oai-rt-rs so the typed
 # `tungstenite::Error` discriminants can be matched when classifying
@@ -56,7 +57,7 @@ axum = { workspace = true }
 [features]
 default = ["oauth"]
 oauth = ["meerkat-auth-core/oauth"]
-realtime = ["dep:oai-rt-rs", "dep:tokio-tungstenite"]
+realtime = ["dep:oai-rt-rs", "dep:sha2", "dep:tokio-tungstenite"]
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "base64", "indexmap", "tempfile"]

@@ -1,6 +1,6 @@
 [package]
 name = "meerkat-live"
-description = "Live audio/text transport for Meerkat — composable WebSocket bridge between clients and LiveAdapterHost"
+description = "Live multimodal transport for Meerkat — composable WebSocket bridge between clients and LiveAdapterHost"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

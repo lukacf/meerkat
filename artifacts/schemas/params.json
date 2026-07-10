@@ -576,12 +576,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -611,7 +611,8 @@
           "supported_protocol_versions": {
             "default": [
               2,
-              3
+              3,
+              4
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -1039,6 +1040,38 @@
               "command",
               "supervisor",
               "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Request to observe a previously submitted supervisor rotation.\n\nThe observer identity and epoch are explicit proof inputs that the member\nvalidates against the authenticated request sender and its current or\npending authority state.",
+            "properties": {
+              "command": {
+                "const": "observe_supervisor_rotation",
+                "type": "string"
+              },
+              "observer": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "observer_epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/SupervisorRotationOperationId"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              }
+            },
+            "required": [
+              "command",
+              "operation_id",
+              "observer",
+              "observer_epoch",
               "protocol_version"
             ],
             "type": "object"
@@ -1535,6 +1568,53 @@
             "type": "object"
           },
           {
+            "description": "Observation of a previously submitted supervisor-rotation operation.\nSubmission is one-way and never produces this reply directly.",
+            "oneOf": [
+              {
+                "properties": {
+                  "outcome": {
+                    "const": "found",
+                    "type": "string"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/BridgeSupervisorRotationState"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "state"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "operation_id": {
+                    "$ref": "#/$defs/SupervisorRotationOperationId"
+                  },
+                  "outcome": {
+                    "const": "not_found",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "operation_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "result": {
+                "const": "supervisor_rotation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "type": "object"
+          },
+          {
             "additionalProperties": false,
             "properties": {
               "cause": {
@@ -1556,6 +1636,144 @@
             "type": "object"
           }
         ]
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/$defs/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationPendingPhase": {
+        "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+        "enum": [
+          "previous_revoke_pending",
+          "next_publish_pending"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionReceipt": {
+        "additionalProperties": false,
+        "description": "Durable receipt for a terminally rejected supervisor rotation.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/BridgeSupervisorRotationRejectionCause"
+          },
+          "operation": {
+            "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+          },
+          "reason": {
+            "description": "Operator-facing diagnostic only; callers must not parse it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationState": {
+        "description": "Durable state of a known supervisor-rotation operation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "phase": {
+                "$ref": "#/$defs/BridgeSupervisorRotationPendingPhase"
+              },
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "operation",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationOperationReceipt"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/BridgeSupervisorRotationRejectionReceipt"
+              },
+              "status": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
       },
       "CommsChecksumTokenParams": {
         "additionalProperties": false,
@@ -1984,6 +2202,10 @@
       },
       "SourceUuid": {
         "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
         "type": "string"
       }
     },

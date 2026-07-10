@@ -141,11 +141,13 @@ fn retire_input(identity_name: &str, bridge_sid: &str) -> MobMachineInput {
     }
 }
 
-fn archived_signal(identity_name: &str) -> MobMachineSignal {
+fn archived_signal(identity_name: &str, bridge_sid: &str) -> MobMachineSignal {
     MobMachineSignal::ObserveMemberRetirementArchived {
         agent_identity: identity(identity_name),
         agent_runtime_id: runtime_id(identity_name, 1),
         fence_token: FenceToken(1),
+        generation: Generation(1),
+        session_id: Some(session_id(bridge_sid)),
     }
 }
 
@@ -153,6 +155,26 @@ fn kickoff_quiesced(identity_name: &str) -> MobMachineInput {
     MobMachineInput::KickoffQuiesced {
         member_id: identity(identity_name),
     }
+}
+
+fn close_session_ingress_detach(
+    authority: &mut MobMachineAuthority,
+    transition: &meerkat_mob::machines::mob_machine::MobMachineTransition,
+) {
+    let mut obligations =
+        meerkat_mob::generated::protocol_mob_destroying_session_ingress::extract_obligations(
+            transition,
+        );
+    assert_eq!(
+        obligations.len(),
+        1,
+        "releasing retirement must mint exactly one correlated detach obligation"
+    );
+    meerkat_mob::generated::protocol_mob_destroying_session_ingress::submit_session_ingress_detached_for_mob_destroy(
+        authority,
+        obligations.pop().expect("one detach obligation"),
+    )
+    .expect("generated ingress-detach acknowledgement must close its obligation");
 }
 
 fn kickoff_in_flight(authority: &MobMachineAuthority, identity_name: &str) -> bool {
@@ -229,10 +251,11 @@ fn retirement_archival_is_gated_on_kickoff_quiesce_closure() {
     let mut authority = MobMachineAuthority::new();
     spawn_member(&mut authority, "alpha", "bridge-a");
     mark_kickoff_starting(&mut authority, "alpha");
-    MobMachineMutator::apply(&mut authority, retire_input("alpha", "bridge-a"))
+    let retire = MobMachineMutator::apply(&mut authority, retire_input("alpha", "bridge-a"))
         .expect("retire accepted");
+    close_session_ingress_detach(&mut authority, &retire);
 
-    let blocked = authority.apply_signal(archived_signal("alpha"));
+    let blocked = authority.apply_signal(archived_signal("alpha", "bridge-a"));
     assert!(
         blocked.is_err(),
         "retirement archival must be rejected while the kickoff waiter obligation is open",
@@ -258,8 +281,71 @@ fn retirement_archival_is_gated_on_kickoff_quiesce_closure() {
     );
 
     authority
-        .apply_signal(archived_signal("alpha"))
+        .apply_signal(archived_signal("alpha", "bridge-a"))
         .expect("retirement archival must commit once the kickoff obligation closed");
+}
+
+#[test]
+fn stopped_retirement_accepts_runtime_success_before_archive_completion() {
+    let mut authority = MobMachineAuthority::new();
+    spawn_member(&mut authority, "alpha", "bridge-a");
+    MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("mob stop accepted");
+    let retire = MobMachineMutator::apply(&mut authority, retire_input("alpha", "bridge-a"))
+        .expect("stopped retirement accepted");
+    close_session_ingress_detach(&mut authority, &retire);
+    MobMachineMutator::apply(&mut authority, kickoff_quiesced("alpha"))
+        .expect("idle kickoff quiesce accepted");
+
+    let retired = authority
+        .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+            agent_runtime_id: runtime_id("alpha", 1),
+            fence_token: FenceToken(1),
+        })
+        .expect("stopped runtime retirement success must close in the stopped phase");
+    assert_eq!(
+        retired.to_phase,
+        meerkat_mob::machines::mob_machine::MobPhase::Stopped
+    );
+    assert!(
+        authority
+            .state()
+            .member_state_markers
+            .contains_key(&runtime_id("alpha", 1)),
+        "runtime success must retain Retiring until durable archive completion"
+    );
+    assert!(
+        !authority
+            .state()
+            .live_runtime_ids
+            .contains(&runtime_id("alpha", 1))
+    );
+    authority
+        .apply_signal(archived_signal("alpha", "bridge-a"))
+        .expect("stopped archive completion accepted after runtime success");
+}
+
+#[test]
+fn runtime_destroyed_cannot_bypass_pending_session_ingress_detach() {
+    let mut authority = MobMachineAuthority::new();
+    spawn_member(&mut authority, "alpha", "bridge-a");
+    let retire = MobMachineMutator::apply(&mut authority, retire_input("alpha", "bridge-a"))
+        .expect("retirement accepted");
+    assert!(
+        authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeDestroyed {
+                agent_runtime_id: runtime_id("alpha", 1),
+                fence_token: FenceToken(1),
+            })
+            .is_err(),
+        "runtime destruction must not launder the independent detach obligation"
+    );
+    close_session_ingress_detach(&mut authority, &retire);
+    authority
+        .apply_signal(MobMachineSignal::ObserveRuntimeDestroyed {
+            agent_runtime_id: runtime_id("alpha", 1),
+            fence_token: FenceToken(1),
+        })
+        .expect("runtime destruction may commit after the detach proof closes");
 }
 
 #[test]
@@ -522,9 +608,11 @@ fn admit_destroy_member_retire_emits_kickoff_quiesce_request() {
 
     let transition = authority
         .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
+            mob_id: MobId("test-mob".to_string()),
             agent_identity: identity("alpha"),
             agent_runtime_id: runtime_id("alpha", 1),
             fence_token: FenceToken(1),
+            generation: Generation(1),
             session_id: Some(session_id("bridge-a")),
         })
         .expect("destroy member retire admission accepted");
@@ -532,6 +620,91 @@ fn admit_destroy_member_retire_emits_kickoff_quiesce_request() {
         has_kickoff_quiesce_request(&transition, "alpha"),
         "destroy-retire admission must open the kickoff-waiter drain obligation",
     );
+    assert_eq!(
+        meerkat_mob::generated::protocol_mob_destroying_session_ingress::extract_obligations(
+            &transition,
+        )
+        .len(),
+        1,
+        "fresh session-bound destroy must mint one correlated detach obligation",
+    );
+}
+
+#[test]
+fn destroy_member_archive_retry_reemits_exact_journal_authority() {
+    let mut authority = MobMachineAuthority::new();
+    spawn_member(&mut authority, "alpha", "bridge-a");
+    authority
+        .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
+        .expect("destroy admission accepted");
+    let retire = authority
+        .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
+            mob_id: MobId("test-mob".to_string()),
+            agent_identity: identity("alpha"),
+            agent_runtime_id: runtime_id("alpha", 1),
+            fence_token: FenceToken(1),
+            generation: Generation(1),
+            session_id: Some(session_id("bridge-a")),
+        })
+        .expect("destroy member retire admission accepted");
+    close_session_ingress_detach(&mut authority, &retire);
+    authority
+        .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+            agent_runtime_id: runtime_id("alpha", 1),
+            fence_token: FenceToken(1),
+        })
+        .expect("runtime retirement success accepted");
+
+    let first = authority
+        .apply_signal(MobMachineSignal::ObserveDestroyMemberRetirementArchived {
+            agent_identity: identity("alpha"),
+            agent_runtime_id: runtime_id("alpha", 1),
+            fence_token: FenceToken(1),
+            generation: Generation(1),
+            session_id: Some(session_id("bridge-a")),
+        })
+        .expect("first destroy archive completion accepted");
+    assert!(first.effects().iter().any(|effect| matches!(
+        effect,
+        MobMachineEffect::AppendLifecycleJournal {
+            kind: meerkat_mob::machines::mob_machine::MobLifecycleJournalKind::MemberRetired,
+            session_id: Some(session),
+            ..
+        } if session == &session_id("bridge-a")
+    )));
+
+    authority
+        .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
+            mob_id: MobId("test-mob".to_string()),
+            agent_identity: identity("alpha"),
+            agent_runtime_id: runtime_id("alpha", 1),
+            fence_token: FenceToken(1),
+            generation: Generation(1),
+            session_id: None,
+        })
+        .expect("destroy retry admission must accept the exact already-archived machine shape");
+
+    let retry = authority
+        .apply_signal(MobMachineSignal::ObserveDestroyMemberRetirementArchived {
+            agent_identity: identity("alpha"),
+            agent_runtime_id: runtime_id("alpha", 1),
+            fence_token: FenceToken(1),
+            generation: Generation(1),
+            session_id: None,
+        })
+        .expect("post-commit destroy archive retry must be machine-authorized");
+    assert!(retry.effects().iter().any(|effect| matches!(
+        effect,
+        MobMachineEffect::AppendLifecycleJournal {
+            kind: meerkat_mob::machines::mob_machine::MobLifecycleJournalKind::MemberRetired,
+            agent_identity: Some(agent_identity),
+            agent_runtime_id: Some(agent_runtime_id),
+            generation: Some(Generation(1)),
+            session_id: None,
+            ..
+        } if agent_identity == &identity("alpha")
+            && agent_runtime_id == &runtime_id("alpha", 1)
+    )));
 }
 
 // ---------------------------------------------------------------------------

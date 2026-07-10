@@ -10,9 +10,12 @@ use meerkat_machine_codegen::{
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    dsl_session_document_machine as session_document_machine,
     dsl_work_attention_lifecycle_machine as work_attention_machine,
 };
-use meerkat_machine_schema::catalog::workgraph_attention_bundle_composition;
+use meerkat_machine_schema::catalog::{
+    meerkat_mob_seam_composition, workgraph_attention_bundle_composition,
+};
 use meerkat_machine_schema::{NamedTypeBinding, RustTypeAtom};
 
 fn tool_filter_override_line(rendered: &str) -> &str {
@@ -380,6 +383,86 @@ fn machine_semantic_model_binds_expected_revision_to_current_revision() {
         !rendered.contains(r"\E expected_revision \in 0..2"),
         "expected_revision must not use the generic numeric sample domain:\n{rendered}"
     );
+}
+
+#[test]
+fn session_document_restore_next_specializes_guard_forced_validation_facts() {
+    let rendered = render_machine_semantic_model(&session_document_machine())
+        .expect("render SessionDocument semantic model");
+    let restore_next = rendered
+        .lines()
+        .find(|line| {
+            line.contains("AuthorizeRestoreRealtimeTranscriptState(")
+                && line.contains(r"\E item_count")
+        })
+        .expect("SessionDocument restore transition in Next");
+
+    assert_eq!(
+        restore_next.matches(r"\E ").count(),
+        3,
+        "only the three numeric count facts should remain existential; guard-forced booleans must not create a 2^N TLC cross-product:\n{restore_next}"
+    );
+    assert_eq!(
+        restore_next.matches("TRUE").count(),
+        24,
+        "every restore-validation boolean is a positive guard conjunct and should lower to its forced literal:\n{restore_next}"
+    );
+    assert!(
+        !restore_next.contains(r"\in BOOLEAN"),
+        "guard-forced restore facts must not retain full boolean domains:\n{restore_next}"
+    );
+
+    let append_new = rendered
+        .lines()
+        .find(|line| {
+            line.contains("ResolveSystemContextAppendNew(")
+                && line.contains(r"\E trimmed_text_byte_count")
+        })
+        .expect("non-literal helper-driven transition in Next");
+    assert!(
+        append_new.contains(r"\E idempotency_key_present \in BOOLEAN"),
+        "booleans used under helper/disjunctive logic must retain their complete domain:\n{append_new}"
+    );
+}
+
+#[test]
+fn composition_next_specializes_forced_literals_and_keeps_unproven_booleans() {
+    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition())
+        .expect("render Meerkat/Mob composition semantic model");
+    let forced = rendered
+        .lines()
+        .find(|line| {
+            line.contains("meerkat_RequestFiniteSwitchTurnApprovalUnavailableIdle(")
+                && line.contains(r"\E arg_request_id")
+        })
+        .expect("composition transition with forced true/false facts");
+    assert!(
+        forced.contains(", TRUE, FALSE, arg_approval_denied,"),
+        "composition lowering must substitute both guard-forced literals:\n{forced}"
+    );
+    assert!(
+        !forced.contains(r"\E arg_requires_approval \in BOOLEAN")
+            && !forced.contains(r"\E arg_approval_available \in BOOLEAN"),
+        "forced composition facts must not retain existential boolean domains:\n{forced}"
+    );
+
+    let unproven = rendered
+        .lines()
+        .find(|line| {
+            line.contains("meerkat_RequestFiniteSwitchTurnScopedConflictIdle(")
+                && line.contains(r"\E arg_request_id")
+        })
+        .expect("composition transition with non-literal approval logic");
+    for binding in [
+        "arg_requires_approval",
+        "arg_approval_available",
+        "arg_approval_denied",
+    ] {
+        assert!(
+            unproven.contains(&format!(r"\E {binding} \in BOOLEAN")),
+            "unproven composition fact `{binding}` must retain its complete domain:\n{unproven}"
+        );
+    }
 }
 
 #[test]

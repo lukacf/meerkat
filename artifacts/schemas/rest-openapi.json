@@ -310,12 +310,12 @@
         "properties": {
           "current_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version implemented by the responding member runtime."
           },
           "default_protocol_version": {
             "$ref": "#/components/schemas/BridgeProtocolVersion",
-            "default": 3,
+            "default": 4,
             "description": "Protocol version new supervisors should use for fresh authority records."
           },
           "deliver_member_input": {
@@ -345,7 +345,8 @@
           "supported_protocol_versions": {
             "default": [
               2,
-              3
+              3,
+              4
             ],
             "description": "Protocol versions accepted by the responding member runtime.",
             "items": {
@@ -773,6 +774,38 @@
               "command",
               "supervisor",
               "epoch",
+              "protocol_version"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Request to observe a previously submitted supervisor rotation.\n\nThe observer identity and epoch are explicit proof inputs that the member\nvalidates against the authenticated request sender and its current or\npending authority state.",
+            "properties": {
+              "command": {
+                "const": "observe_supervisor_rotation",
+                "type": "string"
+              },
+              "observer": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              },
+              "observer_epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation_id": {
+                "$ref": "#/components/schemas/SupervisorRotationOperationId"
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              }
+            },
+            "required": [
+              "command",
+              "operation_id",
+              "observer",
+              "observer_epoch",
               "protocol_version"
             ],
             "type": "object"
@@ -1272,6 +1305,53 @@
             "type": "object"
           },
           {
+            "description": "Observation of a previously submitted supervisor-rotation operation.\nSubmission is one-way and never produces this reply directly.",
+            "oneOf": [
+              {
+                "properties": {
+                  "outcome": {
+                    "const": "found",
+                    "type": "string"
+                  },
+                  "state": {
+                    "$ref": "#/components/schemas/BridgeSupervisorRotationState"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "state"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "operation_id": {
+                    "$ref": "#/components/schemas/SupervisorRotationOperationId"
+                  },
+                  "outcome": {
+                    "const": "not_found",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "operation_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "result": {
+                "const": "supervisor_rotation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "type": "object"
+          },
+          {
             "additionalProperties": false,
             "properties": {
               "cause": {
@@ -1294,6 +1374,144 @@
           }
         ],
         "title": "BridgeReply"
+      },
+      "BridgeSupervisorRotationOperationReceipt": {
+        "additionalProperties": false,
+        "description": "Operation-correlated receipt used by terminal supervisor-rotation states.\n\nIt carries the exact target identity and epoch, rather than only a peer id,\nso a recovered observer can project the same durable authority without\njoining against mutable peer-directory state.",
+        "properties": {
+          "operation_id": {
+            "$ref": "#/components/schemas/SupervisorRotationOperationId"
+          },
+          "target": {
+            "$ref": "#/components/schemas/BridgeSupervisorRotationTargetReceipt"
+          }
+        },
+        "required": [
+          "operation_id",
+          "target"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationPendingPhase": {
+        "description": "Durable phase exposed while a supervisor rotation is incomplete.",
+        "enum": [
+          "previous_revoke_pending",
+          "next_publish_pending"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionCause": {
+        "description": "Stable machine-readable cause for a terminally rejected rotation.\n\nConsumers branch on this value. Human-readable details belong only in the\nsibling `reason` field of [`BridgeSupervisorRotationRejectionReceipt`].",
+        "enum": [
+          "operation_conflict",
+          "invalid_target",
+          "stale_target_epoch",
+          "sender_mismatch",
+          "unsupported_protocol_version",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "BridgeSupervisorRotationRejectionReceipt": {
+        "additionalProperties": false,
+        "description": "Durable receipt for a terminally rejected supervisor rotation.",
+        "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/BridgeSupervisorRotationRejectionCause"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/BridgeSupervisorRotationOperationReceipt"
+          },
+          "reason": {
+            "description": "Operator-facing diagnostic only; callers must not parse it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "cause",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BridgeSupervisorRotationState": {
+        "description": "Durable state of a known supervisor-rotation operation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "$ref": "#/components/schemas/BridgeSupervisorRotationOperationReceipt"
+              },
+              "phase": {
+                "$ref": "#/components/schemas/BridgeSupervisorRotationPendingPhase"
+              },
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "operation",
+              "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/components/schemas/BridgeSupervisorRotationOperationReceipt"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "receipt": {
+                "$ref": "#/components/schemas/BridgeSupervisorRotationRejectionReceipt"
+              },
+              "status": {
+                "const": "rejected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "receipt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BridgeSupervisorRotationTargetReceipt": {
+        "additionalProperties": false,
+        "description": "Exact target identity committed to a supervisor-rotation operation.",
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/BridgePeerSpec"
+          },
+          "target_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "target",
+          "target_epoch"
+        ],
+        "type": "object"
       },
       "BudgetLimits": {
         "description": "Resource limits for an agent run",
@@ -6428,73 +6646,7 @@
         "type": "object"
       },
       "Schedule": {
-        "properties": {
-          "config": {
-            "$ref": "#/components/schemas/ScheduleConfig"
-          },
-          "misfire_policy": {
-            "$ref": "#/components/schemas/MisfirePolicy"
-          },
-          "missing_target_policy": {
-            "$ref": "#/components/schemas/MissingTargetPolicy"
-          },
-          "next_occurrence_ordinal": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "overlap_policy": {
-            "$ref": "#/components/schemas/OverlapPolicy"
-          },
-          "phase": {
-            "$ref": "#/components/schemas/SchedulePhase"
-          },
-          "planning_cursor_utc": {
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "schedule_id": {
-            "$ref": "#/components/schemas/ScheduleId"
-          },
-          "superseded_ack_ids": {
-            "items": {
-              "$ref": "#/components/schemas/OccurrenceId"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "target": {
-            "$ref": "#/components/schemas/TargetBinding"
-          },
-          "trigger": {
-            "$ref": "#/components/schemas/TriggerSpec"
-          }
-        },
-        "required": [
-          "schedule_id",
-          "phase",
-          "revision",
-          "trigger",
-          "target",
-          "misfire_policy",
-          "overlap_policy",
-          "missing_target_policy",
-          "next_occurrence_ordinal",
-          "superseded_ack_ids",
-          "config"
-        ],
-        "title": "Schedule",
-        "type": "object"
-      },
-      "ScheduleConfig": {
+        "description": "Canonical public projection returned by every `schedule/*` RPC method.\n\nThe durable schedule domain object has a custom persistence serializer\nwhich includes generated machine authority state. That persistence shape\nmust not double as the public contract. This projection deliberately keeps\nthe existing flattened schedule configuration while excluding the private\nmachine state, and it is the single source for both production responses\nand generated SDK schemas.",
         "properties": {
           "created_at_utc": {
             "format": "date-time",
@@ -6519,7 +6671,31 @@
             },
             "type": "object"
           },
+          "misfire_policy": {
+            "$ref": "#/components/schemas/MisfirePolicy"
+          },
+          "missing_target_policy": {
+            "$ref": "#/components/schemas/MissingTargetPolicy"
+          },
           "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_occurrence_ordinal": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overlap_policy": {
+            "$ref": "#/components/schemas/OverlapPolicy"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/SchedulePhase"
+          },
+          "planning_cursor_utc": {
+            "format": "date-time",
             "type": [
               "string",
               "null"
@@ -6535,17 +6711,48 @@
             "minimum": 0,
             "type": "integer"
           },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schedule_id": {
+            "$ref": "#/components/schemas/ScheduleId"
+          },
+          "superseded_ack_ids": {
+            "items": {
+              "$ref": "#/components/schemas/OccurrenceId"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSpec"
+          },
           "updated_at_utc": {
             "format": "date-time",
             "type": "string"
           }
         },
         "required": [
+          "schedule_id",
+          "phase",
+          "revision",
+          "trigger",
+          "target",
+          "misfire_policy",
+          "overlap_policy",
+          "missing_target_policy",
+          "next_occurrence_ordinal",
           "planning_horizon_days",
           "planning_horizon_occurrences",
           "created_at_utc",
           "updated_at_utc"
         ],
+        "title": "Schedule",
         "type": "object"
       },
       "ScheduleId": {
@@ -7564,6 +7771,10 @@
           "key"
         ],
         "type": "object"
+      },
+      "SupervisorRotationOperationId": {
+        "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
+        "type": "string"
       },
       "SystemNoticeBlock": {
         "description": "Typed runtime-authored transcript metadata.\n\nThese blocks are the durable contract for comms, tool/MCP state, auth,\nbackground work, and other runtime facts. They are never user-authored text.",

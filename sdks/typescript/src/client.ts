@@ -1422,9 +1422,15 @@ export class MeerkatClient {
     if (_options?.limit !== undefined) params.limit = _options.limit;
     if (_options?.offset !== undefined) params.offset = _options.offset;
     const result = await this.request("schedule/list", params);
-    const schedules = Array.isArray(result.schedules)
-      ? (result.schedules as Array<Record<string, unknown>>)
-      : [];
+    const data = MeerkatClient.requireRecord(
+      result,
+      "response",
+      "Invalid schedule/list response",
+    );
+    const schedules = MeerkatClient.requireRecordArray(
+      data.schedules,
+      "Invalid schedule/list response: schedules",
+    );
     return schedules.map((schedule) => MeerkatClient.parseSchedule(schedule));
   }
 
@@ -1465,20 +1471,30 @@ export class MeerkatClient {
       params.include_terminal = options.includeTerminal;
     }
     const result = await this.request("schedule/occurrences", params);
-    const occurrences = Array.isArray(result.occurrences)
-      ? (result.occurrences as Array<Record<string, unknown>>).map(
-          (occurrence) => MeerkatClient.parseScheduleOccurrence(occurrence),
-        )
-      : [];
+    const data = MeerkatClient.requireRecord(
+      result,
+      "response",
+      "Invalid schedule/occurrences response",
+    );
+    const occurrences = MeerkatClient.requireRecordArray(
+      data.occurrences,
+      "Invalid schedule/occurrences response: occurrences",
+    ).map((occurrence) => MeerkatClient.parseScheduleOccurrence(occurrence));
     return { occurrences };
   }
 
   async listScheduleTools(): Promise<ScheduleToolsResult> {
     type _RpcSignature = [RpcScheduleToolsResult];
     const result = await this.request("schedule/tools", {});
-    const tools = Array.isArray(result.tools)
-      ? (result.tools as Array<Record<string, unknown>>)
-      : [];
+    const data = MeerkatClient.requireRecord(
+      result,
+      "response",
+      "Invalid schedule/tools response",
+    );
+    const tools = MeerkatClient.requireRecordArray(
+      data.tools,
+      "Invalid schedule/tools response: tools",
+    );
     return { tools };
   }
 
@@ -2935,10 +2951,10 @@ export class MeerkatClient {
     });
   }
 
-  // -- Live audio/text adapter (`live/*`) ---------------------------------
+  // -- Live multimodal adapter (`live/*`) ---------------------------------
   //
-  // Typed wrappers over the `live/*` JSON-RPC surface (gated by
-  // `rkat-rpc --live-ws`). Result types come from `meerkat-contracts`
+  // Typed wrappers over the `live/*` JSON-RPC surface (enabled when the
+  // server configures at least one live transport). Result types come from `meerkat-contracts`
   // schemas regenerated into `./generated/types.ts`. See I52/I53.
 
   async liveOpen(params: LiveOpenParams): Promise<LiveOpenResult> {
@@ -2976,22 +2992,34 @@ export class MeerkatClient {
 
   /**
    * T11: typed helper to build an image `LiveInputChunkWire` and send it
-   * via `live/send_input`. `mime` is the IANA MIME type
-   * (`image/png`, `image/jpeg`, `image/webp`, …); `dataBase64` is the
-   * raw image bytes encoded as standard base64. Adapters that do not
-   * implement image input reject with
+   * via `live/send_input`. `idempotencyKey` is required, caller-stable, and
+   * session-scoped. Replaying the same key with the same MIME and bytes is
+   * safe; reusing it for different content is rejected. `mime` is the IANA
+   * MIME type. Adapter support is provider-specific; OpenAI Realtime currently
+   * accepts `image/png` and `image/jpeg`. `dataBase64` is the raw image bytes
+   * encoded as standard base64. Promise resolution proves queue acceptance,
+   * not durable commit; wait for `user_content_committed` carrying the same
+   * key. Check `image_in` in the
+   * `live/open` capabilities before sending. Adapters or model bindings that
+   * do not implement image input reject with
    * `LiveAdapterErrorCode::ConfigRejected { reason:
    * "image_input_not_implemented" }`.
    */
   async liveSendInputImage(
     channelId: string,
+    idempotencyKey: string,
     mime: string,
     dataBase64: string,
   ): Promise<void> {
     type _RpcSignature = [RpcLiveSendInputResult];
     await this.request("live/send_input", {
       channel_id: channelId,
-      chunk: { kind: "image", mime, data: dataBase64 },
+      chunk: {
+        kind: "image",
+        idempotency_key: idempotencyKey,
+        mime,
+        data: dataBase64,
+      },
     });
   }
 
@@ -3048,9 +3076,11 @@ export class MeerkatClient {
    * config fields. History seeding is owned by `live/open`; refresh is
    * config-only by design.
    *
-   * **Identity changes require close + reopen.** Refresh validates that
-   * `model_id` and `provider_id` match the channel's currently-open
-   * identity and rejects swaps with a typed adapter-level error.
+   * **Identity/history changes require close + reopen.** Refresh validates
+   * that `model_id`, `provider_id`, the canonical transcript rewrite
+   * generation, and the user-content identity/tombstone registry still match
+   * the open channel. Identity swaps and history rewrites reject with typed
+   * adapter-level errors instead of mutating provider history in place.
    *
    * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying the
    * generated-authority `status` discriminator (today: `"queued"`). This SDK
@@ -4188,115 +4218,257 @@ export class MeerkatClient {
     throw new MeerkatError("INVALID_RESPONSE", `${context}: missing contract_version`);
   }
 
-  static parseSchedule(data: Record<string, unknown>): Schedule {
-    const labelsRaw =
-      data.labels && typeof data.labels === "object"
-        ? (data.labels as Record<string, unknown>)
-        : {};
+  private static requireScheduleLiteral(
+    data: Record<string, unknown>,
+    field: string,
+    allowed: readonly string[],
+    context: string,
+  ): string {
+    const value = MeerkatClient.requireStringField(data, field, context);
+    if (!allowed.includes(value)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: invalid ${field} ${JSON.stringify(value)}`,
+      );
+    }
+    return value;
+  }
+
+  private static parseScheduleMisfirePolicy(
+    raw: unknown,
+    context: string,
+  ): Record<string, unknown> {
+    const policy = MeerkatClient.requireRecord(raw, "misfire_policy", context);
+    const kind = MeerkatClient.requireScheduleLiteral(
+      policy,
+      "type",
+      ["skip", "catch_up_within"],
+      context,
+    );
+    if (kind === "catch_up_within") {
+      MeerkatClient.requireNonNegativeIntegerField(policy, "window_seconds", context);
+    }
+    return policy;
+  }
+
+  private static parseScheduleLabels(
+    data: Record<string, unknown>,
+    context: string,
+  ): Readonly<Record<string, string>> {
+    if (!Object.prototype.hasOwnProperty.call(data, "labels")) {
+      return {};
+    }
+    const labels = MeerkatClient.requireRecord(data.labels, "labels", context);
+    return Object.fromEntries(
+      Object.entries(labels).map(([key, value]) => {
+        if (typeof value !== "string") {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: labels.${key} must be string`,
+          );
+        }
+        return [key, value];
+      }),
+    );
+  }
+
+  private static optionalScheduleRecordField(
+    data: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): Record<string, unknown> | undefined {
+    if (data[field] == null) {
+      return undefined;
+    }
+    return MeerkatClient.requireRecord(data[field], field, context);
+  }
+
+  private static optionalScheduleIntegerField(
+    data: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): number | undefined {
+    if (data[field] == null) {
+      return undefined;
+    }
+    return MeerkatClient.requireNonNegativeIntegerField(data, field, context);
+  }
+
+  static parseSchedule(raw: unknown): Schedule {
+    const context = "Invalid schedule response";
+    const data = MeerkatClient.requireRecord(raw, "response", context);
     return {
-      scheduleId: String(data.schedule_id ?? ""),
-      phase: String(data.phase ?? ""),
-      revision:
-        typeof data.revision === "object" && data.revision !== null
-          ? Number((data.revision as Record<string, unknown>)["0"] ?? 0)
-          : Number(data.revision ?? 0),
-      name: data.name != null ? String(data.name) : undefined,
-      description: data.description != null ? String(data.description) : undefined,
-      trigger:
-        data.trigger && typeof data.trigger === "object"
-          ? (data.trigger as Record<string, unknown>)
-          : {},
-      target:
-        data.target && typeof data.target === "object"
-          ? (data.target as Record<string, unknown>)
-          : {},
-      misfirePolicy:
-        data.misfire_policy != null
-          ? (data.misfire_policy as Record<string, unknown> | string)
-          : undefined,
-      overlapPolicy: data.overlap_policy != null ? String(data.overlap_policy) : undefined,
-      missingTargetPolicy:
-        data.missing_target_policy != null ? String(data.missing_target_policy) : undefined,
-      planningHorizonDays:
-        data.planning_horizon_days != null ? Number(data.planning_horizon_days) : undefined,
-      planningHorizonOccurrences:
-        data.planning_horizon_occurrences != null
-          ? Number(data.planning_horizon_occurrences)
-          : undefined,
-      nextOccurrenceOrdinal:
-        typeof data.next_occurrence_ordinal === "object"
-          ? Number((data.next_occurrence_ordinal as Record<string, unknown>)["0"] ?? 0)
-          : data.next_occurrence_ordinal != null
-            ? Number(data.next_occurrence_ordinal)
-            : undefined,
-      planningCursorUtc:
-        data.planning_cursor_utc != null ? String(data.planning_cursor_utc) : undefined,
-      createdAtUtc: data.created_at_utc != null ? String(data.created_at_utc) : undefined,
-      updatedAtUtc: data.updated_at_utc != null ? String(data.updated_at_utc) : undefined,
-      deletedAtUtc: data.deleted_at_utc != null ? String(data.deleted_at_utc) : undefined,
-      labels: Object.fromEntries(
-        Object.entries(labelsRaw).map(([key, value]) => [key, String(value)]),
+      scheduleId: MeerkatClient.requireStringField(data, "schedule_id", context),
+      phase: MeerkatClient.requireScheduleLiteral(
+        data,
+        "phase",
+        ["active", "paused", "deleted"],
+        context,
+      ) as Schedule["phase"],
+      revision: MeerkatClient.requireNonNegativeIntegerField(data, "revision", context),
+      name: MeerkatClient.optionalStringField(data, "name", context),
+      description: MeerkatClient.optionalStringField(data, "description", context),
+      trigger: MeerkatClient.requireRecord(data.trigger, "trigger", context),
+      target: MeerkatClient.requireRecord(data.target, "target", context),
+      misfirePolicy: MeerkatClient.parseScheduleMisfirePolicy(
+        data.misfire_policy,
+        context,
+      ),
+      overlapPolicy: MeerkatClient.requireScheduleLiteral(
+        data,
+        "overlap_policy",
+        ["allow_concurrent", "skip_if_running"],
+        context,
+      ) as Schedule["overlapPolicy"],
+      missingTargetPolicy: MeerkatClient.requireScheduleLiteral(
+        data,
+        "missing_target_policy",
+        ["skip", "mark_misfired"],
+        context,
+      ) as Schedule["missingTargetPolicy"],
+      planningHorizonDays: MeerkatClient.requireNonNegativeIntegerField(
+        data,
+        "planning_horizon_days",
+        context,
+      ),
+      planningHorizonOccurrences: MeerkatClient.requireNonNegativeIntegerField(
+        data,
+        "planning_horizon_occurrences",
+        context,
+      ),
+      nextOccurrenceOrdinal: MeerkatClient.requireNonNegativeIntegerField(
+        data,
+        "next_occurrence_ordinal",
+        context,
+      ),
+      planningCursorUtc: MeerkatClient.optionalStringField(
+        data,
+        "planning_cursor_utc",
+        context,
+      ),
+      createdAtUtc: MeerkatClient.requireStringField(data, "created_at_utc", context),
+      updatedAtUtc: MeerkatClient.requireStringField(data, "updated_at_utc", context),
+      deletedAtUtc: MeerkatClient.optionalStringField(data, "deleted_at_utc", context),
+      labels: MeerkatClient.parseScheduleLabels(data, context),
+      supersededAckIds: MeerkatClient.parseStringArray(
+        data.superseded_ack_ids,
+        `${context}: superseded_ack_ids`,
       ),
     };
   }
 
-  static parseScheduleOccurrence(data: Record<string, unknown>): ScheduleOccurrencesResult["occurrences"][number] {
+  static parseScheduleOccurrence(raw: unknown): ScheduleOccurrencesResult["occurrences"][number] {
+    const context = "Invalid schedule occurrence response";
+    const data = MeerkatClient.requireRecord(raw, "response", context);
     return {
-      occurrenceId: String(data.occurrence_id ?? ""),
-      scheduleId: String(data.schedule_id ?? ""),
-      scheduleRevision:
-        typeof data.schedule_revision === "object" && data.schedule_revision !== null
-          ? Number((data.schedule_revision as Record<string, unknown>)["0"] ?? 0)
-          : Number(data.schedule_revision ?? 0),
-      occurrenceOrdinal:
-        typeof data.occurrence_ordinal === "object" && data.occurrence_ordinal !== null
-          ? Number((data.occurrence_ordinal as Record<string, unknown>)["0"] ?? 0)
-          : Number(data.occurrence_ordinal ?? 0),
-      phase: String(data.phase ?? ""),
-      dueAtUtc: String(data.due_at_utc ?? ""),
-      triggerSnapshot:
-        data.trigger_snapshot && typeof data.trigger_snapshot === "object"
-          ? (data.trigger_snapshot as Record<string, unknown>)
-          : {},
-      targetSnapshot:
-        data.target_snapshot && typeof data.target_snapshot === "object"
-          ? (data.target_snapshot as Record<string, unknown>)
-          : {},
-      misfirePolicy:
-        data.misfire_policy != null
-          ? (data.misfire_policy as Record<string, unknown> | string)
-          : undefined,
-      overlapPolicy: data.overlap_policy != null ? String(data.overlap_policy) : undefined,
-      missingTargetPolicy:
-        data.missing_target_policy != null ? String(data.missing_target_policy) : undefined,
-      claimedBy: data.claimed_by != null ? String(data.claimed_by) : undefined,
-      leaseExpiresAtUtc:
-        data.lease_expires_at_utc != null ? String(data.lease_expires_at_utc) : undefined,
-      deliveryCorrelationId:
-        data.delivery_correlation_id != null ? String(data.delivery_correlation_id) : undefined,
-      lastReceipt:
-        data.last_receipt && typeof data.last_receipt === "object"
-          ? (data.last_receipt as Record<string, unknown>)
-          : undefined,
-      failureClass: data.failure_class != null ? String(data.failure_class) : undefined,
-      failureDetail: data.failure_detail != null ? String(data.failure_detail) : undefined,
-      attemptCount: data.attempt_count != null ? Number(data.attempt_count) : undefined,
-      createdAtUtc: data.created_at_utc != null ? String(data.created_at_utc) : undefined,
-      claimedAtUtc: data.claimed_at_utc != null ? String(data.claimed_at_utc) : undefined,
-      dispatchedAtUtc:
-        data.dispatched_at_utc != null ? String(data.dispatched_at_utc) : undefined,
-      completedAtUtc: data.completed_at_utc != null ? String(data.completed_at_utc) : undefined,
-      supersededByRevision:
-        typeof data.superseded_by_revision === "object" && data.superseded_by_revision !== null
-          ? Number((data.superseded_by_revision as Record<string, unknown>)["0"] ?? 0)
-          : data.superseded_by_revision != null
-            ? Number(data.superseded_by_revision)
-            : undefined,
+      occurrenceId: MeerkatClient.requireStringField(data, "occurrence_id", context),
+      scheduleId: MeerkatClient.requireStringField(data, "schedule_id", context),
+      scheduleRevision: MeerkatClient.requireNonNegativeIntegerField(
+        data,
+        "schedule_revision",
+        context,
+      ),
+      occurrenceOrdinal: MeerkatClient.requireNonNegativeIntegerField(
+        data,
+        "occurrence_ordinal",
+        context,
+      ),
+      phase: MeerkatClient.requireScheduleLiteral(
+        data,
+        "phase",
+        [
+          "pending",
+          "claimed",
+          "dispatching",
+          "awaiting_completion",
+          "completed",
+          "skipped",
+          "misfired",
+          "superseded",
+          "delivery_failed",
+        ],
+        context,
+      ) as ScheduleOccurrencesResult["occurrences"][number]["phase"],
+      dueAtUtc: MeerkatClient.requireStringField(data, "due_at_utc", context),
+      triggerSnapshot: MeerkatClient.requireRecord(
+        data.trigger_snapshot,
+        "trigger_snapshot",
+        context,
+      ),
+      targetSnapshot: MeerkatClient.requireRecord(
+        data.target_snapshot,
+        "target_snapshot",
+        context,
+      ),
+      misfirePolicy: MeerkatClient.parseScheduleMisfirePolicy(
+        data.misfire_policy,
+        context,
+      ),
+      overlapPolicy: MeerkatClient.requireScheduleLiteral(
+        data,
+        "overlap_policy",
+        ["allow_concurrent", "skip_if_running"],
+        context,
+      ) as ScheduleOccurrencesResult["occurrences"][number]["overlapPolicy"],
+      missingTargetPolicy: MeerkatClient.requireScheduleLiteral(
+        data,
+        "missing_target_policy",
+        ["skip", "mark_misfired"],
+        context,
+      ) as ScheduleOccurrencesResult["occurrences"][number]["missingTargetPolicy"],
+      claimedBy: MeerkatClient.optionalStringField(data, "claimed_by", context),
+      leaseExpiresAtUtc: MeerkatClient.optionalStringField(
+        data,
+        "lease_expires_at_utc",
+        context,
+      ),
+      deliveryCorrelationId: MeerkatClient.optionalStringField(
+        data,
+        "delivery_correlation_id",
+        context,
+      ),
+      lastReceipt: MeerkatClient.optionalScheduleRecordField(
+        data,
+        "last_receipt",
+        context,
+      ),
+      failureClass: MeerkatClient.optionalStringField(data, "failure_class", context),
+      runtimeOutcome: MeerkatClient.optionalScheduleRecordField(
+        data,
+        "runtime_outcome",
+        context,
+      ),
+      failureDetail: MeerkatClient.optionalStringField(data, "failure_detail", context),
+      attemptCount: MeerkatClient.requireNonNegativeIntegerField(
+        data,
+        "attempt_count",
+        context,
+      ),
+      createdAtUtc: MeerkatClient.requireStringField(data, "created_at_utc", context),
+      claimedAtUtc: MeerkatClient.optionalStringField(data, "claimed_at_utc", context),
+      dispatchedAtUtc: MeerkatClient.optionalStringField(
+        data,
+        "dispatched_at_utc",
+        context,
+      ),
+      completedAtUtc: MeerkatClient.optionalStringField(
+        data,
+        "completed_at_utc",
+        context,
+      ),
+      supersededByRevision: MeerkatClient.optionalScheduleIntegerField(
+        data,
+        "superseded_by_revision",
+        context,
+      ),
     };
   }
 
   private static parseStringArray(value: unknown, context: string): string[] {
-    if (value == null) {
+    // The Rust wire field is omitted when its canonical set is empty. Only
+    // absence defaults to []; an explicit null is not a valid JSON array and
+    // must fail closed like every other malformed present field.
+    if (value === undefined) {
       return [];
     }
     return MeerkatClient.requireStringArray(value, context);

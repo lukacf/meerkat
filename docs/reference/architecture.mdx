@@ -150,11 +150,13 @@ Host apps use typed `mob/*` JSON-RPC methods, REST helper endpoints, MCP
 
 ## Live Channels
 
-Live audio/text is exposed through JSON-RPC `live/*` methods. Start `rkat-rpc`
-with `--live-ws <addr>` when a channel needs WebSocket transport bootstrap.
+Live audio/text with model-gated image input is exposed through JSON-RPC
+`live/*` methods. Start `rkat-rpc` with `--live-ws <addr>` when a channel
+needs WebSocket transport bootstrap.
 
 `ModelCapabilities.realtime` gates `live/open`. The current catalog realtime row
-is OpenAI `gpt-realtime-2`.
+is OpenAI `gpt-realtime-2`; its vision capability projects to
+`LiveOpenResult.capabilities.image_in`.
 
 ## Reading Order
 

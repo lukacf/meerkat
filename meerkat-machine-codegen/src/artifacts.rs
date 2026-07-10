@@ -41,12 +41,12 @@ const TLC_SAFE_RUST_U64_MAX_VALUE: u64 = 2_147_483_647;
 
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
-    CompositionStateLimits, CompositionWitness, CoverageAnchor, CoverageSchemaTarget, EntryInput,
-    EnumSchema, Expr, FeedbackFieldSource, FeedbackInputRef, Guard, HelperSchema,
-    MachineCoverageManifest, MachineSchema, Quantifier, Route, RouteBindingSource, RouteDelivery,
-    RouteTarget, RouteTargetKind, SchedulerRule, TransitionSchema, TypePathEnumPayloadAtom,
-    TypePathEnumStructuralVariant, TypePathStructField, TypePathStructFieldAtom, TypeRef, Update,
-    VariantSchema, canonical_machine_schemas,
+    CompositionStateLimits, CompositionWitness, CoverageAnchor, CoverageSchemaTarget,
+    DriverRefusalFieldSource, EntryInput, EnumSchema, Expr, FeedbackFieldSource, FeedbackInputRef,
+    Guard, HelperSchema, MachineCoverageManifest, MachineSchema, Quantifier, Route,
+    RouteBindingSource, RouteDelivery, RouteTarget, RouteTargetKind, SchedulerRule,
+    TransitionSchema, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypePathStructField,
+    TypePathStructFieldAtom, TypeRef, Update, VariantSchema, canonical_machine_schemas,
 };
 
 /// Fail-closed error for composition/machine TLA model generation.
@@ -204,6 +204,96 @@ fn transition_trigger_variant<'a>(
             schema.signals.variant_named(variant.as_str()).ok()
         }
     }
+}
+
+/// Boolean input literals that every enabled instance of `transition` must
+/// carry.
+///
+/// Machine `Next` is an existential disjunction over input domains. Naively
+/// enumerating a large set of boolean validation facts creates a `2^N`
+/// cross-product even when the transition guard immediately requires each fact
+/// to be one literal. Replacing those existential bindings with the forced
+/// literals preserves the exact action relation: assignments carrying the
+/// opposite value cannot satisfy the existing conjunctive guard and therefore
+/// cannot produce a successor state.
+///
+/// Keep the analysis deliberately conservative. Only a whole conjunct that is
+/// structurally a binding, its negation, or a binding/literal equality is
+/// specialized. Values mentioned under disjunctions, helper calls, or other
+/// expressions retain their complete domains. Contradictory requirements also
+/// fall back to full enumeration so codegen never guesses about an
+/// unsatisfiable guard.
+fn transition_forced_bool_literals(
+    transition: &TransitionSchema,
+    binding_types: &BTreeMap<String, TypeRef>,
+) -> BTreeMap<String, bool> {
+    let mut requirements = BTreeMap::<String, Option<bool>>::new();
+    for guard in &transition.guards {
+        collect_conjunctive_bool_requirements(&guard.expr, &mut requirements);
+    }
+    requirements
+        .into_iter()
+        .filter_map(|(binding, required)| {
+            if matches!(binding_types.get(&binding), Some(TypeRef::Bool)) {
+                required.map(|value| (binding, value))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn collect_conjunctive_bool_requirements(
+    expr: &Expr,
+    requirements: &mut BTreeMap<String, Option<bool>>,
+) {
+    if let Expr::And(items) = expr {
+        for item in items {
+            collect_conjunctive_bool_requirements(item, requirements);
+        }
+        return;
+    }
+
+    let requirement = match expr {
+        Expr::Binding(binding) => Some((binding.as_str(), true)),
+        Expr::Not(inner) => match inner.as_ref() {
+            Expr::Binding(binding) => Some((binding.as_str(), false)),
+            _ => None,
+        },
+        Expr::Eq(left, right) => bool_binding_literal_equality(left, right, false),
+        Expr::Neq(left, right) => bool_binding_literal_equality(left, right, true),
+        _ => None,
+    };
+    let Some((binding, value)) = requirement else {
+        return;
+    };
+
+    match requirements.get(binding).copied() {
+        None => {
+            requirements.insert(binding.to_owned(), Some(value));
+        }
+        Some(Some(existing)) if existing != value => {
+            requirements.insert(binding.to_owned(), None);
+        }
+        Some(_) => {}
+    }
+}
+
+fn bool_binding_literal_equality<'a>(
+    left: &'a Expr,
+    right: &'a Expr,
+    negate: bool,
+) -> Option<(&'a str, bool)> {
+    let (binding, value) = match (left, right) {
+        (Expr::Binding(binding), Expr::Bool(value))
+        | (Expr::Bool(value), Expr::Binding(binding)) => (binding.as_str(), *value),
+        _ => return None,
+    };
+    Some((binding, if negate { !value } else { value }))
+}
+
+fn tla_bool_literal(value: bool) -> &'static str {
+    if value { "TRUE" } else { "FALSE" }
 }
 
 fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
@@ -963,6 +1053,18 @@ pub fn render_composition_contract_markdown(
                     dispatch.target_instance,
                     dispatch.input_variant,
                     dispatch.target_kind
+                );
+            }
+        }
+        if !driver.refusal_closures.is_empty() {
+            pushln!(&mut out, "  - consumer-refusal closures:");
+            for closure in &driver.refusal_closures {
+                pushln!(
+                    &mut out,
+                    "    - `{}` refusal → `{}::{}`",
+                    closure.dispatch_route,
+                    closure.feedback_instance,
+                    closure.feedback_input
                 );
             }
         }
@@ -1766,6 +1868,15 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
             }
         }
     }
+    for closure in &driver.refusal_closures {
+        input_variants.insert(closure.feedback_input.as_str());
+        for binding in &closure.field_bindings {
+            fields.insert(binding.input_field.as_str());
+            if let DriverRefusalFieldSource::EffectField(source_field) = &binding.source {
+                fields.insert(source_field.as_str());
+            }
+        }
+    }
 
     let mut out = String::new();
     pushln!(
@@ -1833,6 +1944,36 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
     pushln!(&mut out, "    pub instance_id: MachineInstanceId,");
     pushln!(&mut out, "    pub variant: SignalVariantId,");
     pushln!(&mut out, "    pub bindings: Vec<(FieldId, FieldId)>,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated source for one consumer-refusal feedback field."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub enum GeneratedRefusalFieldSource {{");
+    pushln!(&mut out, "    EffectField(FieldId),");
+    pushln!(&mut out, "    ConsumerErrorCode,");
+    pushln!(&mut out, "    ConsumerErrorMessage,");
+    pushln!(&mut out, "}}");
+    out.push('\n');
+
+    pushln!(
+        &mut out,
+        "/// Generated feedback closure for a consumer-refused dispatch."
+    );
+    pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
+    pushln!(&mut out, "pub struct TypedDispatchRefusalClosure {{");
+    pushln!(&mut out, "    pub route_id: RouteId,");
+    pushln!(&mut out, "    pub producer_instance: MachineInstanceId,");
+    pushln!(&mut out, "    pub effect_variant: EffectVariantId,");
+    pushln!(&mut out, "    pub feedback_instance: MachineInstanceId,");
+    pushln!(&mut out, "    pub feedback_input: InputVariantId,");
+    pushln!(
+        &mut out,
+        "    pub field_bindings: Vec<(GeneratedRefusalFieldSource, FieldId)>,"
+    );
     pushln!(&mut out, "}}");
     out.push('\n');
 
@@ -2022,6 +2163,101 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
         pushln!(&mut out, "}}");
         out.push('\n');
     }
+
+    for closure in &driver.refusal_closures {
+        let route = schema
+            .routes
+            .iter()
+            .find(|route| route.name == closure.dispatch_route)?;
+        let closure_fn = format!(
+            "refusal_closure_{}",
+            to_snake_case_local(closure.dispatch_route.as_str())
+        );
+        pushln!(
+            &mut out,
+            "/// Generated consumer-refusal closure for route `{}`.",
+            closure.dispatch_route
+        );
+        pushln!(
+            &mut out,
+            "pub fn {closure_fn}() -> TypedDispatchRefusalClosure {{"
+        );
+        pushln!(&mut out, "    TypedDispatchRefusalClosure {{");
+        pushln!(
+            &mut out,
+            "        route_id: RouteId::parse(\"{}\").expect(\"route slug\"),",
+            closure.dispatch_route
+        );
+        pushln!(
+            &mut out,
+            "        producer_instance: MachineInstanceId::parse(\"{}\").expect(\"producer instance slug\"),",
+            route.from_machine
+        );
+        pushln!(
+            &mut out,
+            "        effect_variant: EffectVariantId::parse(\"{}\").expect(\"effect variant slug\"),",
+            route.effect_variant
+        );
+        pushln!(
+            &mut out,
+            "        feedback_instance: MachineInstanceId::parse(\"{}\").expect(\"feedback instance slug\"),",
+            closure.feedback_instance
+        );
+        pushln!(
+            &mut out,
+            "        feedback_input: InputVariantId::parse(\"{}\").expect(\"feedback input slug\"),",
+            closure.feedback_input
+        );
+        pushln!(&mut out, "        field_bindings: vec![");
+        for binding in &closure.field_bindings {
+            let source = match &binding.source {
+                DriverRefusalFieldSource::EffectField(field) => format!(
+                    "GeneratedRefusalFieldSource::EffectField(FieldId::parse(\"{}\").expect(\"effect field slug\"))",
+                    field
+                ),
+                DriverRefusalFieldSource::ConsumerErrorCode => {
+                    "GeneratedRefusalFieldSource::ConsumerErrorCode".to_owned()
+                }
+                DriverRefusalFieldSource::ConsumerErrorMessage => {
+                    "GeneratedRefusalFieldSource::ConsumerErrorMessage".to_owned()
+                }
+            };
+            pushln!(
+                &mut out,
+                "            ({source}, FieldId::parse(\"{}\").expect(\"feedback field slug\")),",
+                binding.input_field
+            );
+        }
+        pushln!(&mut out, "        ],");
+        pushln!(&mut out, "    }}");
+        pushln!(&mut out, "}}");
+        out.push('\n');
+    }
+
+    pushln!(
+        &mut out,
+        "/// Resolve a generated route to its consumer-refusal feedback closure."
+    );
+    pushln!(
+        &mut out,
+        "pub fn refusal_closure_for_route(route_id: &RouteId) -> Option<TypedDispatchRefusalClosure> {{"
+    );
+    for closure in &driver.refusal_closures {
+        let closure_fn = format!(
+            "refusal_closure_{}",
+            to_snake_case_local(closure.dispatch_route.as_str())
+        );
+        pushln!(
+            &mut out,
+            "    if route_id == &RouteId::parse(\"{}\").expect(\"route slug\") {{",
+            closure.dispatch_route
+        );
+        pushln!(&mut out, "        return Some({closure_fn}());");
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "    None");
+    pushln!(&mut out, "}}");
+    out.push('\n');
 
     for route in schema
         .routes
@@ -4432,6 +4668,39 @@ mod tests {
     };
 
     #[test]
+    fn conjunctive_bool_specialization_is_literal_only_and_conservative() {
+        let expr = Expr::And(vec![
+            Expr::Binding("required_true".to_owned()),
+            Expr::Not(Box::new(Expr::Binding("required_false".to_owned()))),
+            Expr::Eq(
+                Box::new(Expr::Binding("equal_true".to_owned())),
+                Box::new(Expr::Bool(true)),
+            ),
+            Expr::Neq(
+                Box::new(Expr::Bool(true)),
+                Box::new(Expr::Binding("not_equal_true".to_owned())),
+            ),
+            Expr::Or(vec![
+                Expr::Binding("under_disjunction".to_owned()),
+                Expr::Binding("alternative".to_owned()),
+            ]),
+            Expr::Binding("conflicting".to_owned()),
+            Expr::Not(Box::new(Expr::Binding("conflicting".to_owned()))),
+        ]);
+        let mut requirements = BTreeMap::new();
+
+        collect_conjunctive_bool_requirements(&expr, &mut requirements);
+
+        assert_eq!(requirements.get("required_true"), Some(&Some(true)));
+        assert_eq!(requirements.get("required_false"), Some(&Some(false)));
+        assert_eq!(requirements.get("equal_true"), Some(&Some(true)));
+        assert_eq!(requirements.get("not_equal_true"), Some(&Some(false)));
+        assert!(!requirements.contains_key("under_disjunction"));
+        assert!(!requirements.contains_key("alternative"));
+        assert_eq!(requirements.get("conflicting"), Some(&None));
+    }
+
+    #[test]
     #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     fn composition_semantic_model_fails_closed_on_undeclared_route_source_machine() {
         let mut schema = meerkat_mob_seam_composition();
@@ -5399,8 +5668,12 @@ impl<'a> CompositionTlaCompiler<'a> {
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
+            let forced_bool_literals = transition_forced_bool_literals(transition, &binding_types);
             let mut prefix = String::new();
             for binding in transition.on.bindings() {
+                if forced_bool_literals.contains_key(binding.as_str()) {
+                    continue;
+                }
                 let local = format!("arg_{}", tla_ident(binding.as_str()));
                 let Some(ty) = binding_types.get(binding.as_str()) else {
                     return self.machine_transition_name(instance_id, transition);
@@ -5412,7 +5685,12 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .on
                 .bindings()
                 .iter()
-                .map(|binding| format!("arg_{}", tla_ident(binding.as_str())))
+                .map(|binding| {
+                    forced_bool_literals
+                        .get(binding.as_str())
+                        .map(|value| tla_bool_literal(*value).to_owned())
+                        .unwrap_or_else(|| format!("arg_{}", tla_ident(binding.as_str())))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -7826,6 +8104,8 @@ impl<'a> MachineTlaCompiler<'a> {
                 transition.name.as_str().to_owned()
             } else {
                 let binding_types = self.binding_type_map(transition);
+                let forced_bool_literals =
+                    transition_forced_bool_literals(transition, &binding_types);
                 let binding_env = transition
                     .on
                     .bindings()
@@ -7839,6 +8119,9 @@ impl<'a> MachineTlaCompiler<'a> {
                     .collect::<BTreeMap<_, _>>();
                 let mut prefix = String::new();
                 for binding in transition.on.bindings() {
+                    if forced_bool_literals.contains_key(binding.as_str()) {
+                        continue;
+                    }
                     let Some(ty) = binding_types.get(binding.as_str()) else {
                         return Ok(String::new());
                     };
@@ -7854,10 +8137,15 @@ impl<'a> MachineTlaCompiler<'a> {
                     .bindings()
                     .iter()
                     .map(|binding| {
-                        binding_env
+                        forced_bool_literals
                             .get(binding.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| binding.as_str().to_owned())
+                            .map(|value| tla_bool_literal(*value).to_owned())
+                            .unwrap_or_else(|| {
+                                binding_env
+                                    .get(binding.as_str())
+                                    .cloned()
+                                    .unwrap_or_else(|| binding.as_str().to_owned())
+                            })
                     })
                     .collect::<Vec<_>>()
                     .join(", ");

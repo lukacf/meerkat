@@ -1137,7 +1137,11 @@ mod tests {
         store
             .commit_machine_lifecycle(
                 &rid,
-                MachineLifecycleCommit::new_with_binding(RuntimeState::Retired, binding.clone()),
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Retired,
+                    binding.clone(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
                 &[],
             )
             .await

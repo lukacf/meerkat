@@ -495,6 +495,30 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveRuntimeBindingRefusal,
+        reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveRuntimeIngressRefusal,
+        reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveRuntimeRetireRefusal,
+        reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RetryRuntimeRetire,
+        reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordRemoteMemberRuntimeRetired,
+        reason: MobMachineRuntimeInternalReason::RetireIdempotencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordRemoteMemberSupervisorRevoked,
+        reason: MobMachineRuntimeInternalReason::RetireIdempotencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::ResolveCancelAllWorkRejection,
         reason: MobMachineRuntimeInternalReason::RuntimeRejectionFeedback,
     },
@@ -687,15 +711,43 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeRetiringMemberTrustCleanupObserved,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CleanupRetiringMemberWiring,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RestoreRetiringMemberWiring,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AuthorizeExternalPeerReciprocalTrust,
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
-        input: MobMachineCatalogInput::ProvisionSupervisorAuthority,
+        input: MobMachineCatalogInput::CleanupRetiringExternalPeer,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RestoreRetiringExternalPeer,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CleanupRetiringExternalPeerObservedAbsent,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RestoreRetiringExternalPeerObservedAbsent,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdmitSupervisorRotation,
         reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
-        input: MobMachineCatalogInput::ClearSupervisorPendingRotation,
+        input: MobMachineCatalogInput::ProvisionSupervisorAuthority,
         reason: MobMachineRuntimeInternalReason::SupervisorAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {

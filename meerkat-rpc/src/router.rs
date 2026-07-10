@@ -26,13 +26,15 @@ use meerkat_core::types::SessionId;
 #[cfg(feature = "mob")]
 use meerkat_core::{AgentToolDispatcher, DynamicToolComposite};
 use meerkat_runtime::SessionServiceRuntimeExt as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error;
 use crate::handlers;
 use crate::handlers::RpcResponseExt;
-use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
+use crate::protocol::{
+    RpcNotification, RpcRequest, RpcResponse, bounded_collection_limit, bounded_collection_offset,
+};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::{ToolsRegisterParams, ToolsRegisterResult};
@@ -165,6 +167,38 @@ enum StreamEmitStatus {
     ReceiverGone,
 }
 
+#[derive(Serialize)]
+struct SessionEventNotificationParams<'a> {
+    session_id: String,
+    event: &'a EventEnvelope<AgentEvent>,
+}
+
+#[derive(Serialize)]
+struct SessionStreamEventNotificationParams<'a> {
+    stream_id: String,
+    sequence: u64,
+    session_id: String,
+    event: &'a EventEnvelope<AgentEvent>,
+}
+
+#[derive(Serialize)]
+struct ScopedSessionStreamEventNotificationParams<'a> {
+    stream_id: String,
+    sequence: u64,
+    session_id: String,
+    event: &'a EventEnvelope<AgentEvent>,
+    scope_id: &'a str,
+    scope_path: &'a [meerkat_core::event::StreamScopeFrame],
+}
+
+#[cfg(feature = "mob")]
+#[derive(Serialize)]
+struct MobStreamEventNotificationParams<'a> {
+    stream_id: String,
+    sequence: u64,
+    event: &'a serde_json::Value,
+}
+
 impl NotificationSink {
     /// Create a new notification sink backed by the given channel sender.
     pub fn new(tx: mpsc::Sender<RpcNotification>) -> Self {
@@ -180,11 +214,17 @@ impl NotificationSink {
 
     /// Emit an agent event as a JSON-RPC notification.
     pub async fn emit_event(&self, session_id: &SessionId, event: &EventEnvelope<AgentEvent>) {
-        let params = serde_json::json!({
-            "session_id": session_id.to_string(),
-            "event": event,
-        });
-        let notification = RpcNotification::new("session/event", params);
+        let params = SessionEventNotificationParams {
+            session_id: session_id.to_string(),
+            event,
+        };
+        let notification = match RpcNotification::try_new("session/event", &params) {
+            Ok(notification) => notification,
+            Err(error) => {
+                tracing::warn!(error = %error, "dropping session event at outbound RPC admission");
+                return;
+            }
+        };
         // Best-effort: drop if the channel is full or the receiver is gone.
         // Must not block — the runtime executor's event forwarder calls this,
         // and blocking here backpressures through the session task into the
@@ -205,13 +245,19 @@ impl NotificationSink {
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
     ) -> StreamEmitStatus {
-        let params = serde_json::json!({
-            "stream_id": stream_id.as_string(),
-            "sequence": sequence,
-            "session_id": session_id.to_string(),
-            "event": event,
-        });
-        let notification = RpcNotification::new("session/stream_event", params);
+        let params = SessionStreamEventNotificationParams {
+            stream_id: stream_id.as_string(),
+            sequence,
+            session_id: session_id.to_string(),
+            event,
+        };
+        let notification = match RpcNotification::try_new("session/stream_event", &params) {
+            Ok(notification) => notification,
+            Err(error) => {
+                tracing::warn!(error = %error, "dropping session stream event at outbound RPC admission");
+                return StreamEmitStatus::Overflow;
+            }
+        };
         match self.tx.try_send(notification) {
             Ok(()) => StreamEmitStatus::Delivered,
             Err(TrySendError::Full(_)) => StreamEmitStatus::Overflow,
@@ -229,15 +275,21 @@ impl NotificationSink {
         scope_id: &str,
         scope_path: &[meerkat_core::event::StreamScopeFrame],
     ) {
-        let params = serde_json::json!({
-            "stream_id": stream_id.as_string(),
-            "sequence": sequence,
-            "session_id": session_id.to_string(),
-            "event": event,
-            "scope_id": scope_id,
-            "scope_path": scope_path,
-        });
-        let notification = RpcNotification::new("session/stream_event", params);
+        let params = ScopedSessionStreamEventNotificationParams {
+            stream_id: stream_id.as_string(),
+            sequence,
+            session_id: session_id.to_string(),
+            event,
+            scope_id,
+            scope_path,
+        };
+        let notification = match RpcNotification::try_new("session/stream_event", &params) {
+            Ok(notification) => notification,
+            Err(error) => {
+                tracing::warn!(error = %error, "dropping scoped session stream event at outbound RPC admission");
+                return;
+            }
+        };
         let _ = self.tx.send(notification).await;
     }
 
@@ -265,7 +317,13 @@ impl NotificationSink {
             }
             (None, None) => {}
         }
-        let notification = RpcNotification::new("session/stream_end", params);
+        let notification = match RpcNotification::try_new("session/stream_end", &params) {
+            Ok(notification) => notification,
+            Err(error) => {
+                tracing::warn!(error = %error, "dropping session stream terminal at outbound RPC admission");
+                return;
+            }
+        };
         let _ = self.tx.send(notification).await;
     }
 
@@ -280,12 +338,18 @@ impl NotificationSink {
         sequence: u64,
         event: &serde_json::Value,
     ) -> StreamEmitStatus {
-        let params = serde_json::json!({
-            "stream_id": stream_id.as_string(),
-            "sequence": sequence,
-            "event": event,
-        });
-        let notification = RpcNotification::new("mob/stream_event", params);
+        let params = MobStreamEventNotificationParams {
+            stream_id: stream_id.as_string(),
+            sequence,
+            event,
+        };
+        let notification = match RpcNotification::try_new("mob/stream_event", &params) {
+            Ok(notification) => notification,
+            Err(error) => {
+                tracing::warn!(error = %error, "dropping mob stream event at outbound RPC admission");
+                return StreamEmitStatus::Overflow;
+            }
+        };
         match self.tx.try_send(notification) {
             Ok(()) => StreamEmitStatus::Delivered,
             Err(TrySendError::Full(_)) => StreamEmitStatus::Overflow,
@@ -316,7 +380,13 @@ impl NotificationSink {
             }
             (None, None) => {}
         }
-        let notification = RpcNotification::new("mob/stream_end", params);
+        let notification = match RpcNotification::try_new("mob/stream_end", &params) {
+            Ok(notification) => notification,
+            Err(error) => {
+                tracing::warn!(error = %error, "dropping mob stream terminal at outbound RPC admission");
+                return;
+            }
+        };
         let _ = self.tx.send(notification).await;
     }
 }
@@ -1148,12 +1218,7 @@ impl MethodRouter {
             .runtime
             .authoritative_session_archived(session_id)
             .await
-            .map_err(|error| RpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: None,
-                result: None,
-                error: Some(error),
-            })?;
+            .map_err(|error| RpcResponse::from_error(None, error))?;
         if archived && !self.runtime.pending_session_exists(session_id).await {
             self.runtime_adapter.unregister_session(session_id).await;
             return Err(RpcResponse::error(
@@ -2234,9 +2299,17 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
+        let offset = match bounded_collection_offset(params.offset) {
+            Ok(offset) => offset,
+            Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+        };
+        let limit = match bounded_collection_limit(params.limit) {
+            Ok(limit) => limit,
+            Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+        };
         let query = SessionHistoryQuery {
-            offset: params.offset.unwrap_or(0),
-            limit: params.limit,
+            offset,
+            limit: Some(limit),
         };
 
         match self.resolve_session_owner(&session_id).await {
@@ -3649,6 +3722,14 @@ mod tests {
     use serde_json::value::RawValue;
 
     use crate::protocol::RpcId;
+
+    macro_rules! notification_params {
+        ($notification:expr) => {
+            $notification
+                .params_value()
+                .expect("notification params must be valid JSON")
+        };
+    }
 
     /// K17 regression: mob session-service failures must keep their typed
     /// identity on the wire. Only `NotFound` may map to `SESSION_NOT_FOUND`;
@@ -5099,13 +5180,13 @@ mod tests {
                 if notif.method != "session/event" {
                     continue;
                 }
-                if notif.params["event"]["payload"]["type"] != "run_started" {
+                if notification_params!(notif)["event"]["payload"]["type"] != "run_started" {
                     continue;
                 }
                 // K3: `run_started` carries the typed `RunInput`; a
                 // content-bearing run exposes its content under
                 // `input.content`.
-                break notif.params["event"]["payload"]["input"]["content"]
+                break notification_params!(notif)["event"]["payload"]["input"]["content"]
                     .as_str()
                     .expect("run_started content input")
                     .to_string();
@@ -5377,9 +5458,12 @@ mod tests {
         })
         .await
         .expect("session explicit-close notification");
-        assert_eq!(notification.params["stream_id"], stream_id);
-        assert_eq!(notification.params["session_id"], session_id);
-        assert_eq!(notification.params["outcome"], "explicit_close");
+        assert_eq!(notification_params!(notification)["stream_id"], stream_id);
+        assert_eq!(notification_params!(notification)["session_id"], session_id);
+        assert_eq!(
+            notification_params!(notification)["outcome"],
+            "explicit_close"
+        );
     }
 
     #[tokio::test]
@@ -5429,7 +5513,10 @@ mod tests {
         })
         .await
         .expect("explicit-close notification");
-        assert_eq!(notification.params["outcome"], "explicit_close");
+        assert_eq!(
+            notification_params!(notification)["outcome"],
+            "explicit_close"
+        );
 
         let close_again_resp = router
             .dispatch(make_request(
@@ -5571,8 +5658,9 @@ mod tests {
             loop {
                 let notif = notif_rx.recv().await.expect("notification");
                 if notif.method == "session/stream_event"
-                    && notif.params["stream_id"].as_str() == Some(stream_id.as_str())
-                    && notif.params["event"]["payload"]["type"].as_str() == Some("run_started")
+                    && notification_params!(notif)["stream_id"].as_str() == Some(stream_id.as_str())
+                    && notification_params!(notif)["event"]["payload"]["type"].as_str()
+                        == Some("run_started")
                 {
                     break notif;
                 }
@@ -5582,7 +5670,7 @@ mod tests {
         .expect("pending session stream should receive first-turn events");
 
         assert_eq!(
-            notification.params["session_id"].as_str(),
+            notification_params!(notification)["session_id"].as_str(),
             Some(session_id.as_str())
         );
     }
@@ -5754,8 +5842,7 @@ mod tests {
         async fn attach_external_session(
             &self,
             _target: &meerkat_client::realtime_session::RealtimeExternalSessionTarget,
-            _identity: &meerkat_core::SessionLlmIdentity,
-            _turning_mode: meerkat_contracts::RealtimeTurningMode,
+            _open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
         ) -> Result<
             Box<dyn meerkat_client::realtime_session::RealtimeSession>,
             meerkat_client::LlmError,
@@ -7026,15 +7113,15 @@ mod tests {
                 loop {
                     let notif = notif_rx.recv().await.expect("notification");
                     if notif.method == "mob/stream_event"
-                        && notif.params["stream_id"] == stream_id
-                        && notif.params["event"]["payload"]["type"].as_str()
+                        && notification_params!(notif)["stream_id"] == stream_id
+                        && notification_params!(notif)["event"]["payload"]["type"].as_str()
                             == Some("run_completed")
                     {
                         break (Some(notif), None);
                     }
                     if notif.method == "session/stream_event"
-                        && notif.params["stream_id"] == session_stream_id
-                        && notif.params["event"]["payload"]["type"].as_str()
+                        && notification_params!(notif)["stream_id"] == session_stream_id
+                        && notification_params!(notif)["event"]["payload"]["type"].as_str()
                             == Some("run_completed")
                     {
                         break (None, Some(notif));
@@ -7452,9 +7539,12 @@ mod tests {
                 .expect("terminal notification");
         terminal.await.expect("terminal send join");
         assert_eq!(terminal_notification.method, "session/stream_end");
-        assert_eq!(terminal_notification.params["outcome"], "terminal_error");
         assert_eq!(
-            terminal_notification.params["error"]["code"],
+            notification_params!(terminal_notification)["outcome"],
+            "terminal_error"
+        );
+        assert_eq!(
+            notification_params!(terminal_notification)["error"]["code"],
             "stream_queue_overflow"
         );
     }
@@ -7564,10 +7654,13 @@ mod tests {
         })
         .await
         .expect("session stream end notification");
-        assert_eq!(notification.params["stream_id"], stream_id);
-        assert_eq!(notification.params["outcome"], "terminal_error");
+        assert_eq!(notification_params!(notification)["stream_id"], stream_id);
         assert_eq!(
-            notification.params["error"]["code"],
+            notification_params!(notification)["outcome"],
+            "terminal_error"
+        );
+        assert_eq!(
+            notification_params!(notification)["error"]["code"],
             "stream_queue_overflow"
         );
     }
@@ -7627,9 +7720,12 @@ mod tests {
                 .expect("terminal notification");
         terminal.await.expect("terminal send join");
         assert_eq!(terminal_notification.method, "mob/stream_end");
-        assert_eq!(terminal_notification.params["outcome"], "terminal_error");
         assert_eq!(
-            terminal_notification.params["error"]["code"],
+            notification_params!(terminal_notification)["outcome"],
+            "terminal_error"
+        );
+        assert_eq!(
+            notification_params!(terminal_notification)["error"]["code"],
             "stream_queue_overflow"
         );
     }
@@ -8027,9 +8123,9 @@ mod tests {
         .await
         .expect("session stream end notification");
         assert_eq!(notification.method, "session/stream_end");
-        assert_eq!(notification.params["stream_id"], stream_id);
-        assert_eq!(notification.params["ended"], true);
-        assert_eq!(notification.params["outcome"], "remote_end");
+        assert_eq!(notification_params!(notification)["stream_id"], stream_id);
+        assert_eq!(notification_params!(notification)["ended"], true);
+        assert_eq!(notification_params!(notification)["outcome"], "remote_end");
     }
 
     #[cfg(feature = "mob")]
@@ -8090,8 +8186,11 @@ mod tests {
         })
         .await
         .expect("mob explicit-close notification");
-        assert_eq!(notification.params["stream_id"], stream_id);
-        assert_eq!(notification.params["outcome"], "explicit_close");
+        assert_eq!(notification_params!(notification)["stream_id"], stream_id);
+        assert_eq!(
+            notification_params!(notification)["outcome"],
+            "explicit_close"
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -9648,12 +9747,13 @@ mod tests {
             Err(_) => {}
             Ok(None) => {}
             Ok(Some(notif)) => {
-                let event_type = notif.params["event"]["payload"]["type"].as_str();
+                let params = notification_params!(notif);
+                let event_type = params["event"]["payload"]["type"].as_str();
                 assert!(
                     !(notif.method == "session/event"
                         && event_type == Some("run_started")
-                        && notif.params["session_id"].as_str() == Some(session_id.as_str())
-                        && notif.params["event"]["payload"]["prompt"]
+                        && params["session_id"].as_str() == Some(session_id.as_str())
+                        && params["event"]["payload"]["prompt"]
                             .as_str()
                             .is_some_and(|prompt| prompt.contains(injected_text))),
                     "archived session must not emit a later run_started that replays dropped staged context"
@@ -9756,8 +9856,9 @@ mod tests {
         // All notifications should be session/event
         for notif in &notifications {
             assert_eq!(notif.method, "session/event");
-            assert!(notif.params["session_id"].is_string());
-            assert!(notif.params["event"].is_object());
+            let params = notification_params!(notif);
+            assert!(params["session_id"].is_string());
+            assert!(params["event"].is_object());
         }
     }
 

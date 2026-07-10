@@ -16,6 +16,35 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 
+#[cfg(test)]
+static FAIL_NEXT_BRIDGE_TRUST_ADD_RECONCILE_FOR_PEER: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+static FAIL_NEXT_BRIDGE_TRUST_REMOVE_RECONCILE_FOR_PEER: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+static FAIL_NEXT_FIXED_PORT_ROTATION_REBUILD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn fail_next_bridge_trust_add_reconcile_for_test(peer_id: &str) {
+    if let Ok(mut target) = FAIL_NEXT_BRIDGE_TRUST_ADD_RECONCILE_FOR_PEER.lock() {
+        *target = Some(peer_id.to_string());
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_bridge_trust_remove_reconcile_for_test(peer_id: &str) {
+    if let Ok(mut target) = FAIL_NEXT_BRIDGE_TRUST_REMOVE_RECONCILE_FOR_PEER.lock() {
+        *target = Some(peer_id.to_string());
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_fixed_port_rotation_rebuild_for_test() {
+    FAIL_NEXT_FIXED_PORT_ROTATION_REBUILD.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Outcome of installing recipient trust ahead of a routed bridge send
 /// (see [`MobSupervisorBridge::trust_recipient`]).
 ///
@@ -317,6 +346,14 @@ impl MobSupervisorBridge {
             None => {
                 #[cfg(not(target_arch = "wasm32"))]
                 runtime_guard.stop_listeners_for_rebind().await;
+                #[cfg(test)]
+                if FAIL_NEXT_FIXED_PORT_ROTATION_REBUILD
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    return Err(MobError::Internal(
+                        "fault-injected fixed-port supervisor bridge rebuild failure".to_string(),
+                    ));
+                }
                 Self::build_runtime(
                     &self.participant_name,
                     &prepared.authority,
@@ -413,13 +450,7 @@ impl MobSupervisorBridge {
             ))
         })?;
         let endpoint = mm_dsl::PeerEndpoint::from(&recipient);
-        if dsl
-            .snapshot_state()
-            .direct_peer_endpoints
-            .contains(&endpoint)
-        {
-            return Ok(RecipientTrustInstall::AlreadyTrusted);
-        }
+        let reconciled_endpoint = endpoint.clone();
         let transition = dsl
             .apply_input_with_transition(
                 mm_dsl::MeerkatMachineInput::AddDirectPeerEndpoint { endpoint },
@@ -449,13 +480,28 @@ impl MobSupervisorBridge {
                 ));
             }
         };
+        #[cfg(test)]
+        if let Ok(mut target) = FAIL_NEXT_BRIDGE_TRUST_ADD_RECONCILE_FOR_PEER.lock()
+            && target.as_deref() == Some(recipient.peer_id.to_string().as_str())
+        {
+            target.take();
+            return Err(MobError::Internal(
+                "fault-injected supervisor bridge trust-add reconciliation failure".to_string(),
+            ));
+        }
         let comms_runtime: Arc<dyn CoreCommsRuntime> = runtime.clone();
         let reconciler =
             meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler::new(comms_runtime);
         reconciler
             .reconcile(&obligation)
             .await
-            .map(|_report| RecipientTrustInstall::NewlyInstalled)
+            .map(|report| {
+                if report.added.contains(&reconciled_endpoint) {
+                    RecipientTrustInstall::NewlyInstalled
+                } else {
+                    RecipientTrustInstall::AlreadyTrusted
+                }
+            })
             .map_err(|error| {
                 MobError::Internal(format!(
                     "supervisor bridge generated trust reconciliation failed: {error}"
@@ -466,21 +512,16 @@ impl MobSupervisorBridge {
     /// Fail-closed rollback mirror of [`Self::apply_bridge_trust`]. Drives the
     /// generated `RemoveDirectPeerEndpoint` transition and reconciles the
     /// resulting removal obligation against the live comms runtime so the DSL
-    /// authority and the comms trust set never diverge. No-ops if the recipient
-    /// is not currently a trusted direct peer endpoint.
+    /// authority and the comms trust set never diverge. The generated machine
+    /// has an explicit repair arm when the declarative endpoint is already
+    /// absent; always applying the input is what lets a retry heal the window
+    /// where the prior DSL mutation committed but live reconciliation failed.
     async fn remove_bridge_trust(
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
         recipient: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
         let endpoint = mm_dsl::PeerEndpoint::from(&recipient);
-        if !dsl
-            .snapshot_state()
-            .direct_peer_endpoints
-            .contains(&endpoint)
-        {
-            return Ok(());
-        }
         let transition = dsl
             .apply_input_with_transition(
                 mm_dsl::MeerkatMachineInput::RemoveDirectPeerEndpoint { endpoint },
@@ -511,6 +552,15 @@ impl MobSupervisorBridge {
                 ));
             }
         };
+        #[cfg(test)]
+        if let Ok(mut target) = FAIL_NEXT_BRIDGE_TRUST_REMOVE_RECONCILE_FOR_PEER.lock()
+            && target.as_deref() == Some(recipient.peer_id.to_string().as_str())
+        {
+            target.take();
+            return Err(MobError::Internal(
+                "fault-injected supervisor bridge trust-remove reconciliation failure".to_string(),
+            ));
+        }
         let comms_runtime: Arc<dyn CoreCommsRuntime> = runtime.clone();
         let reconciler =
             meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler::new(comms_runtime);
@@ -669,6 +719,97 @@ impl MobSupervisorBridge {
             timeout,
         )
         .await
+    }
+
+    /// Submit a closed supervisor delivery as a genuine one-way peer message.
+    ///
+    /// The send receipt proves only that comms accepted/delivered the envelope;
+    /// it is never interpreted as rotation completion. Durable completion is
+    /// observed separately through `ObserveSupervisorRotation` as the target
+    /// authority.
+    pub(crate) async fn send_supervisor_delivery(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+        delivery: &super::bridge_protocol::BridgeSupervisorDelivery,
+    ) -> Result<(), MobError> {
+        let _request_guard = self.request_lock.lock().await;
+        let runtime = self.runtime().await;
+        Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await
+    }
+
+    async fn send_supervisor_delivery_with_runtime(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        recipient: &TrustedPeerDescriptor,
+        delivery: &super::bridge_protocol::BridgeSupervisorDelivery,
+    ) -> Result<(), MobError> {
+        let body = serde_json::to_string(delivery).map_err(|error| {
+            MobError::Internal(format!("serialize supervisor delivery: {error}"))
+        })?;
+        let receipt = runtime
+            .send(CommsCommand::PeerMessage {
+                to: PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone()),
+                body,
+                blocks: None,
+                content_taint: None,
+                handling_mode: HandlingMode::Queue,
+            })
+            .await?;
+        match receipt {
+            SendReceipt::PeerMessageSent { .. } => Ok(()),
+            _ => Err(MobError::Internal(
+                "unexpected receipt for one-way supervisor delivery".to_string(),
+            )),
+        }
+    }
+
+    /// Send a one-way delivery under a specific durable supervisor authority.
+    /// Used only to adopt an operation id onto a legacy member that already
+    /// committed the exact target authority before operation-correlated
+    /// rotation existed.
+    pub(crate) async fn send_supervisor_delivery_as_authority(
+        &self,
+        authority: &SupervisorAuthorityRecord,
+        recipient: &TrustedPeerDescriptor,
+        delivery: &super::bridge_protocol::BridgeSupervisorDelivery,
+    ) -> Result<(), MobError> {
+        let _request_guard = self.request_lock.lock().await;
+        if Self::has_fixed_supervisor_bind_port(&self.endpoint_config)? {
+            let previous_authority = self.authority().await;
+            let restore_after_send = previous_authority != *authority;
+            if restore_after_send {
+                self.replace_runtime_authority_locked(authority.clone(), false)
+                    .await?;
+            }
+            let send_result = async {
+                let runtime = self.runtime().await;
+                let dsl = self.dsl.read().await.clone();
+                let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+                Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await
+            }
+            .await;
+            if restore_after_send
+                && let Err(restore_error) = self
+                    .replace_runtime_authority_locked(previous_authority, false)
+                    .await
+            {
+                return match send_result {
+                    Ok(()) => Err(restore_error),
+                    Err(send_error) => Err(MobError::Internal(format!(
+                        "alternate-authority supervisor delivery failed: {send_error}; additionally failed to restore supervisor bridge authority: {restore_error}"
+                    ))),
+                };
+            }
+            return send_result;
+        }
+        let probe_participant_name = format!(
+            "{}/pending-supervisor-delivery/{}",
+            self.participant_name,
+            uuid::Uuid::new_v4()
+        );
+        let (runtime, dsl) =
+            Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config).await?;
+        let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+        Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await
     }
 
     pub(crate) async fn send_bridge_command_as_authority(
@@ -1230,6 +1371,179 @@ mod tests {
             handle.outbound_state(corr_id),
             None,
             "generated timeout transition should clean up pending supervisor request truth"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_rotation_submission_is_a_one_way_typed_peer_message() {
+        let suffix = uuid::Uuid::new_v4();
+        let authority = SupervisorAuthorityRecord::generate(
+            super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        let bridge = MobSupervisorBridge::new(
+            &crate::MobId::from(format!("mob/rotation-delivery-{suffix}")),
+            authority,
+            None,
+        )
+        .await
+        .expect("supervisor bridge should build");
+        let recipient_name = format!("rotation-delivery-recipient-{suffix}");
+        let recipient_authority = SupervisorAuthorityRecord::generate(
+            super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        let (recipient_runtime, recipient_dsl) = MobSupervisorBridge::build_runtime(
+            &recipient_name,
+            &recipient_authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("recipient runtime should build");
+        let recipient = TrustedPeerDescriptor::unsigned_with_pubkey(
+            recipient_name,
+            recipient_runtime.public_key().to_peer_id().to_string(),
+            *recipient_runtime.public_key().as_bytes(),
+            recipient_runtime.advertised_address(),
+        )
+        .expect("recipient descriptor");
+        bridge
+            .trust_recipient(&recipient)
+            .await
+            .expect("sender trusts recipient");
+        let sender = bridge
+            .supervisor_spec_for_recipient(&recipient)
+            .await
+            .expect("sender descriptor");
+        MobSupervisorBridge::apply_bridge_trust(&recipient_runtime, &recipient_dsl, sender.clone())
+            .await
+            .expect("recipient trusts sender");
+
+        let operation_id = super::super::bridge_protocol::SupervisorRotationOperationId::new();
+        let delivery =
+            super::super::bridge_protocol::BridgeSupervisorDelivery::SubmitSupervisorRotation(
+                super::super::bridge_protocol::BridgeSupervisorRotationSubmit {
+                    operation_id,
+                    target: sender.into(),
+                    target_epoch: 1,
+                    protocol_version:
+                        super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                },
+            );
+        bridge
+            .send_supervisor_delivery(&recipient, &delivery)
+            .await
+            .expect("one-way delivery should send");
+
+        let candidates = recipient_runtime.drain_peer_input_candidates().await;
+        let candidate = candidates
+            .into_iter()
+            .next()
+            .expect("recipient should receive one delivery");
+        let InteractionContent::Message { body, .. } = candidate.interaction.content else {
+            panic!("rotation submission must not create request/response authority");
+        };
+        let decoded: super::super::bridge_protocol::BridgeSupervisorDelivery =
+            serde_json::from_str(&body).expect("typed delivery body");
+        assert_eq!(decoded, delivery);
+    }
+
+    #[tokio::test]
+    async fn bridge_trust_reconcile_repair_heals_committed_dsl_windows() {
+        let suffix = uuid::Uuid::new_v4();
+        let authority = SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let (runtime, dsl) = MobSupervisorBridge::build_runtime(
+            &format!("mob/__mob_supervisor__/trust-repair-{suffix}"),
+            &authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("supervisor runtime should build");
+        let recipient_name = format!("trust-repair-recipient-{suffix}");
+        let recipient_authority = SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let (recipient_runtime, _recipient_dsl) = MobSupervisorBridge::build_runtime(
+            &recipient_name,
+            &recipient_authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("recipient runtime should build");
+        let recipient = TrustedPeerDescriptor::unsigned_with_pubkey(
+            recipient_name,
+            recipient_runtime.public_key().to_peer_id().to_string(),
+            *recipient_runtime.public_key().as_bytes(),
+            recipient_runtime.advertised_address(),
+        )
+        .expect("valid recipient descriptor");
+
+        fail_next_bridge_trust_add_reconcile_for_test(&recipient.peer_id.to_string());
+        MobSupervisorBridge::apply_bridge_trust(&runtime, &dsl, recipient.clone())
+            .await
+            .expect_err("fault after AddDirectPeerEndpoint must surface");
+        assert!(
+            dsl.snapshot_state()
+                .direct_peer_endpoints
+                .contains(&mm_dsl::PeerEndpoint::from(&recipient)),
+            "the fault must exercise DSL-committed/live-unreconciled add state"
+        );
+        assert_eq!(
+            MobSupervisorBridge::apply_bridge_trust(&runtime, &dsl, recipient.clone())
+                .await
+                .expect("RepairAddDirectPeerEndpoint must reconcile live trust"),
+            RecipientTrustInstall::NewlyInstalled
+        );
+
+        let add_probe = runtime
+            .send(CommsCommand::PeerRequest {
+                to: PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone()),
+                intent: super::super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT.to_string(),
+                params: serde_json::json!({"probe": "trust-added"}),
+                blocks: None,
+                content_taint: None,
+                handling_mode: HandlingMode::Queue,
+                stream: InputStreamMode::None,
+            })
+            .await;
+        assert!(
+            matches!(add_probe, Ok(SendReceipt::PeerRequestSent { .. })),
+            "repair-add must install the live router row, got {add_probe:?}"
+        );
+
+        fail_next_bridge_trust_remove_reconcile_for_test(&recipient.peer_id.to_string());
+        MobSupervisorBridge::remove_bridge_trust(&runtime, &dsl, recipient.clone())
+            .await
+            .expect_err("fault after RemoveDirectPeerEndpoint must surface");
+        assert!(
+            !dsl.snapshot_state()
+                .direct_peer_endpoints
+                .contains(&mm_dsl::PeerEndpoint::from(&recipient)),
+            "the fault must exercise DSL-committed/live-unreconciled remove state"
+        );
+        MobSupervisorBridge::remove_bridge_trust(&runtime, &dsl, recipient.clone())
+            .await
+            .expect("RepairRemoveDirectPeerEndpoint must remove stranded live trust");
+
+        let send_result = runtime
+            .send(CommsCommand::PeerRequest {
+                to: PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone()),
+                intent: super::super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT.to_string(),
+                params: serde_json::json!({"probe": "trust-removed"}),
+                blocks: None,
+                content_taint: None,
+                handling_mode: HandlingMode::Queue,
+                stream: InputStreamMode::None,
+            })
+            .await;
+        assert!(
+            matches!(
+                send_result,
+                Err(meerkat_core::comms::SendError::PeerNotFound(_))
+            ),
+            "repair-remove must remove the live router row, got {send_result:?}"
         );
     }
 

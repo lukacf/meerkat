@@ -297,8 +297,7 @@ impl RealtimeSessionFactory for RealtimeMockSessionFactory {
     async fn attach_external_session(
         &self,
         _target: &RealtimeExternalSessionTarget,
-        _identity: &meerkat_core::SessionLlmIdentity,
-        _turning_mode: RealtimeTurningMode,
+        _open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
         Err(LlmError::InvalidRequest {
             message: "RealtimeMockSessionFactory does not support external attach".to_string(),
@@ -485,10 +484,13 @@ mod tests {
             provider_params: None,
             auth_binding: None,
         };
-        match factory
-            .attach_external_session(&target, &identity, RealtimeTurningMode::ProviderManaged)
-            .await
-        {
+        let open_config = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ProviderManaged,
+            identity,
+            Vec::new(),
+            Vec::new(),
+        );
+        match factory.attach_external_session(&target, &open_config).await {
             Ok(_) => panic!("expected InvalidRequest, got a session"),
             Err(err) => assert!(matches!(err, LlmError::InvalidRequest { .. })),
         }

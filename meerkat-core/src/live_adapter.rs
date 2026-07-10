@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::image_generation::ToolCallId;
 use crate::provider::Provider;
-use crate::realtime_transcript::RealtimeTranscriptEvent;
+use crate::realtime_transcript::{
+    RealtimeTranscriptEvent, RealtimeUserContentIdentity, RealtimeUserContentTombstone,
+};
 use crate::session::PendingSystemContextAppend;
 use crate::types::{ContentBlock, Message, SessionId, StopReason, ToolDef, ToolName, Usage};
 
@@ -327,6 +329,22 @@ pub enum LiveAdapterObservation {
     RealtimeTranscript {
         event: RealtimeTranscriptEvent,
     },
+    /// Redacted public receipt for committed user content.
+    ///
+    /// The host emits this only after the byte-bearing
+    /// [`RealtimeTranscriptEvent`] has been reduced and durably persisted.
+    /// Public transports forward only this identity/media-type fact. In particular,
+    /// WebRTC clients must observe `user_content_committed` before sending or
+    /// relying on independently transported RTP audio that depends on image
+    /// context.
+    UserContentCommitted {
+        idempotency_key: String,
+        item_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_item_id: Option<String>,
+        content_index: u32,
+        media_type: String,
+    },
     /// #270: the provider-native call id and tool name are parsed into typed
     /// newtypes at the provider boundary (`event_to_observation`) so the raw
     /// provider string is never the identity owner past this seam. Downstream
@@ -512,6 +530,44 @@ pub enum LiveConfigRejectionReason {
     /// Adapter rejected a `LiveInputChunk::Image` because the bound
     /// provider does not support image input on its realtime surface.
     ImageInputNotImplemented,
+    /// The image declared a media type this provider's realtime surface does
+    /// not accept. `mime_type` is the caller value after provider-owned
+    /// canonicalization where available.
+    ImageInputUnsupportedMime { mime_type: String },
+    /// The encoded bytes do not match the declared supported image media
+    /// type. This is a scoped input rejection; the live channel remains
+    /// healthy and the caller may retry with a correct payload.
+    ImageInputContentMismatch { mime_type: String },
+    /// The image payload is not valid base64 and was rejected before provider
+    /// or durable-blob admission.
+    ImageInputInvalidBase64,
+    /// The decoded image exceeds Meerkat's product safety ceiling before it
+    /// can enter the count-bounded live adapter queue.
+    ImageInputTooLarge { max_bytes: u64, actual_bytes: u64 },
+    /// The required caller-stable image identity is empty or too large.
+    ImageInputIdempotencyKeyInvalid { max_bytes: u64, actual_bytes: u64 },
+    /// The caller reused an image identity for a different MIME/payload.
+    ImageInputIdempotencyConflict,
+    /// Accepting this image would make the full canonical user-image history
+    /// exceed the non-lossy reconnect projection ceiling. The caller must
+    /// explicitly rewrite/compact history before retrying; this is not
+    /// transient queue backpressure.
+    ImageInputHistoryBudgetExceeded { max_decoded_bytes: u64 },
+    /// Explicit-commit text is staged but not canonical yet; commit it before
+    /// adding an image so the image cannot depend on an orphan predecessor.
+    ImageInputRequiresCommit,
+    /// A non-image live input exceeds the shared per-command memory ceiling.
+    InputTooLarge { max_bytes: u64, actual_bytes: u64 },
+    /// The adapter's aggregate live-input memory window is full. This is a
+    /// scoped retry signal; the channel remains healthy.
+    InputBackpressured { max_pending_bytes: u64 },
+    /// The provider adapter's bounded pending-image window is full. This is a
+    /// scoped backpressure signal: wait for `user_content_committed`, then
+    /// retry on the same channel.
+    ImageInputBackpressured { max_pending_bytes: u64 },
+    /// The selected transport cannot carry image frames directly even though
+    /// the channel accepts them through another live surface.
+    ImageInputTransportUnsupported { transport: String },
     /// Adapter rejected a `LiveInputChunk::VideoFrame` because the bound
     /// provider does not support video-frame input on its realtime
     /// surface.
@@ -539,6 +595,11 @@ pub enum LiveConfigRejectionReason {
     /// is fixed to pcm/24kHz mono). `detail` carries the offending
     /// rate/channel projection for logs.
     RefreshAudioConfigMismatch { detail: String },
+    /// Adapter-side `Refresh` rejected because the canonical transcript
+    /// revision or durable user-content registry changed. The already-seeded
+    /// provider conversation cannot delete/rewrite old items in place; close
+    /// and reopen from the new canonical projection.
+    RefreshTranscriptRewriteRequiresReopen,
     /// R6-4 (P2): adapter rejected a `SendInput { LiveInputChunk::Audio }`
     /// chunk whose declared `sample_rate_hz` / `channels` diverge from
     /// the bound provider session's fixed audio format (e.g. OpenAI
@@ -593,6 +654,51 @@ impl std::fmt::Display for LiveConfigRejectionReason {
                 write!(f, "non_realtime_resolution: {detail}")
             }
             Self::ImageInputNotImplemented => f.write_str("image_input_not_implemented"),
+            Self::ImageInputUnsupportedMime { mime_type } => {
+                write!(f, "image_input_unsupported_mime: {mime_type}")
+            }
+            Self::ImageInputContentMismatch { mime_type } => {
+                write!(f, "image_input_content_mismatch: {mime_type}")
+            }
+            Self::ImageInputInvalidBase64 => f.write_str("image_input_invalid_base64"),
+            Self::ImageInputTooLarge {
+                max_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "image_input_too_large: decoded bytes={actual_bytes}, maximum={max_bytes}"
+            ),
+            Self::ImageInputIdempotencyKeyInvalid {
+                max_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "image_input_idempotency_key_invalid: key bytes={actual_bytes}, maximum={max_bytes}"
+            ),
+            Self::ImageInputIdempotencyConflict => f.write_str("image_input_idempotency_conflict"),
+            Self::ImageInputHistoryBudgetExceeded { max_decoded_bytes } => write!(
+                f,
+                "image_input_history_budget_exceeded: canonical decoded image history maximum={max_decoded_bytes}"
+            ),
+            Self::ImageInputRequiresCommit => f.write_str("image_input_requires_commit"),
+            Self::InputTooLarge {
+                max_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "input_too_large: payload bytes={actual_bytes}, maximum={max_bytes}"
+            ),
+            Self::InputBackpressured { max_pending_bytes } => write!(
+                f,
+                "input_backpressured: pending input budget is {max_pending_bytes} bytes"
+            ),
+            Self::ImageInputBackpressured { max_pending_bytes } => write!(
+                f,
+                "image_input_backpressured: pending image budget is {max_pending_bytes} bytes"
+            ),
+            Self::ImageInputTransportUnsupported { transport } => {
+                write!(f, "image_input_transport_unsupported: {transport}")
+            }
             Self::VideoFrameInputNotImplemented => f.write_str("video_frame_input_not_implemented"),
             Self::UnsupportedInputChunkVariant => f.write_str("unsupported_input_chunk_variant"),
             Self::RefreshModelSwap {
@@ -613,6 +719,9 @@ impl std::fmt::Display for LiveConfigRejectionReason {
             Self::RefreshAudioConfigMismatch { detail } => {
                 write!(f, "live adapter refresh: audio config mismatch ({detail})")
             }
+            Self::RefreshTranscriptRewriteRequiresReopen => f.write_str(
+                "live adapter refresh: canonical transcript rewrite requires close + reopen",
+            ),
             Self::AudioInputFormatMismatch {
                 expected_sample_rate_hz,
                 expected_channels,
@@ -681,6 +790,18 @@ pub struct LiveProjectionSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
     pub runtime_system_context: Vec<PendingSystemContextAppend>,
+    /// Durable committed user-content bindings used for exact retry replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_content_identities: Vec<RealtimeUserContentIdentity>,
+    /// Durable removed-key conflicts used to reject stale retries before a
+    /// provider receives input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_content_tombstones: Vec<RealtimeUserContentTombstone>,
+    /// Canonical transcript revision at projection time. A changed revision
+    /// cannot be hot-applied to a provider conversation that already contains
+    /// the old causal history.
+    #[serde(default)]
+    pub transcript_rewrite_generation: u64,
 }
 
 /// Audio format configuration for the live session.
@@ -701,13 +822,48 @@ pub struct LiveAudioConfig {
 /// provider. Meerkat already decided this input is admitted; the adapter
 /// just delivers it.
 ///
-/// T11: image and video-frame variants are typed at this seam so future
-/// provider support (gpt-realtime-2 image input, Gemini Live video input)
-/// flows through `live/send_input` without a wire reshape. Adapters that do
-/// not yet support a variant must reject the command with
+/// T11: image and video-frame variants are typed at this seam so OpenAI
+/// Realtime image input and future provider modalities flow through
+/// `live/send_input` without a wire reshape. Adapters that do not support a
+/// variant must reject the command with
 /// [`LiveAdapterErrorCode::ConfigRejected`] carrying a typed `reason`
 /// (`"image_input_not_implemented"` / `"video_frame_input_not_implemented"`)
 /// rather than collapsing onto a free-form provider error string.
+///
+/// The image limit is a Meerkat ingress safety policy, intentionally separate
+/// from any provider's potentially larger request limit. Adapters may impose a
+/// smaller provider-specific limit, but no public live transport may admit a
+/// larger decoded image into its command queue.
+pub const MAX_LIVE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+/// Maximum padded base64 length for [`MAX_LIVE_IMAGE_BYTES`] decoded bytes.
+pub const MAX_LIVE_IMAGE_BASE64_BYTES: usize = MAX_LIVE_IMAGE_BYTES.div_ceil(3) * 4;
+
+/// Maximum image MIME declaration length at shared live ingress.
+pub const MAX_LIVE_IMAGE_MIME_BYTES: usize = 255;
+
+/// Maximum caller-stable identity for one live image submission.
+pub const MAX_LIVE_IMAGE_IDEMPOTENCY_KEY_BYTES: usize = 128;
+
+/// Validate the public image idempotency identity consistently at wire,
+/// provider-direct, reducer, and restore boundaries.
+#[must_use]
+pub fn live_image_idempotency_key_is_valid(idempotency_key: &str) -> bool {
+    !idempotency_key.is_empty()
+        && idempotency_key.len() <= MAX_LIVE_IMAGE_IDEMPOTENCY_KEY_BYTES
+        && idempotency_key.trim() == idempotency_key
+        && !idempotency_key.chars().any(char::is_control)
+}
+
+/// Maximum in-memory payload for any single live input command. Public
+/// transports may impose a smaller format-specific limit.
+pub const MAX_LIVE_INPUT_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Conservative accounting floor for queued or provider-pending live inputs.
+/// It bounds object/count overhead even for tiny frames whose byte payload is
+/// close to zero.
+pub const MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES: usize = 1024 * 1024;
+
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -723,13 +879,16 @@ pub enum LiveInputChunk {
     Text {
         text: String,
     },
-    /// Image input (e.g. future `gpt-realtime-2` image support). `mime` is
-    /// the IANA MIME type of the encoded bytes (`image/png`, `image/jpeg`,
-    /// `image/webp`, …); `data` is the raw encoded bytes — base64-encoded
+    /// Still-image input for vision-capable realtime models. `mime` is
+    /// the IANA MIME type of the encoded bytes. Provider adapters apply their
+    /// own allowlist (OpenAI Realtime currently accepts `image/png` and
+    /// `image/jpeg`); `data` is the raw encoded bytes — base64-encoded
     /// on the wire (mirrors the [`Self::Audio`] / `AssistantAudioChunk`
     /// pattern) but a plain `Vec<u8>` in Rust so adapters never see the
     /// b64 wrapper.
     Image {
+        /// Caller-stable, session-scoped idempotency identity.
+        idempotency_key: String,
         mime: String,
         #[serde(with = "base64_bytes")]
         #[cfg_attr(feature = "schema", schemars(with = "String"))]
@@ -803,8 +962,8 @@ pub struct LiveChannelCapabilities {
     pub text_in: bool,
     /// Adapter emits display text via `AssistantTextDelta` observations.
     pub text_out: bool,
-    /// Adapter accepts image input via `live/send_input` (e.g. future
-    /// `gpt-realtime-2` image support). Today: `false` for OpenAI realtime.
+    /// Adapter accepts image input via `live/send_input`. OpenAI advertises
+    /// this for vision-capable realtime bindings such as `gpt-realtime-2`.
     pub image_in: bool,
     /// Adapter accepts video-frame input via `live/send_input` (e.g.
     /// Gemini Live). Today: `false` for OpenAI realtime.
@@ -1170,6 +1329,9 @@ mod tests {
                 provider_id: Provider::OpenAI,
                 audio_config: None,
                 runtime_system_context: vec![],
+                user_content_identities: vec![],
+                user_content_tombstones: vec![],
+                transcript_rewrite_generation: 0,
             },
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -1204,6 +1366,9 @@ mod tests {
                 accepted_at: SystemTime::UNIX_EPOCH,
                 peer_response_terminal: None,
             }],
+            user_content_identities: vec![],
+            user_content_tombstones: vec![],
+            transcript_rewrite_generation: 0,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains("runtime_system_context"));
@@ -1520,6 +1685,28 @@ mod tests {
     }
 
     #[test]
+    fn user_content_committed_receipt_round_trips_without_content() {
+        let obs = LiveAdapterObservation::UserContentCommitted {
+            idempotency_key: "image-request-1".into(),
+            item_id: "item_image".into(),
+            previous_item_id: Some("item_previous".into()),
+            content_index: 1,
+            media_type: "image/png".into(),
+        };
+        let json = serde_json::to_value(&obs).unwrap();
+        assert_eq!(json["observation"], "user_content_committed");
+        assert_eq!(json["idempotency_key"], "image-request-1");
+        assert_eq!(json["item_id"], "item_image");
+        assert_eq!(json["previous_item_id"], "item_previous");
+        assert_eq!(json["content_index"], 1);
+        assert_eq!(json["media_type"], "image/png");
+        assert!(json.get("content").is_none());
+        assert!(json.get("data").is_none());
+        let deser: LiveAdapterObservation = serde_json::from_value(json).unwrap();
+        assert_eq!(obs, deser);
+    }
+
+    #[test]
     fn assistant_transcript_truncated_round_trips_all_shapes() {
         let both = LiveAdapterObservation::AssistantTranscriptTruncated {
             provider_item_id: Some("item_abc".into()),
@@ -1721,6 +1908,9 @@ mod tests {
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: vec![],
+            user_content_identities: vec![],
+            user_content_tombstones: vec![],
+            transcript_rewrite_generation: 0,
         };
         assert_eq!(s1.snapshot_version, 1);
         let s2 = LiveProjectionSnapshot {
@@ -1814,6 +2004,7 @@ mod tests {
     fn live_input_image_round_trips_with_base64_bytes() {
         let bytes = vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let chunk = LiveInputChunk::Image {
+            idempotency_key: "image-request-1".to_string(),
             mime: "image/png".to_string(),
             data: bytes.clone(),
         };
@@ -1833,7 +2024,12 @@ mod tests {
         assert!(json.contains("\"mime\":\"image/png\""));
         let deser: LiveInputChunk = serde_json::from_str(&json).unwrap();
         match deser {
-            LiveInputChunk::Image { mime, data } => {
+            LiveInputChunk::Image {
+                idempotency_key,
+                mime,
+                data,
+            } => {
+                assert_eq!(idempotency_key, "image-request-1");
                 assert_eq!(mime, "image/png");
                 assert_eq!(data, bytes);
             }

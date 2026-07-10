@@ -166,6 +166,48 @@ pub enum RealtimeTranscriptMaterializeDecision {
     MaterializeAssistant,
 }
 
+/// Machine-owned disposition for a caller-stable non-text user-input
+/// identity. The shell supplies only raw registry/materialization facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentIdentityDisposition {
+    #[default]
+    RejectInvalidIdentity,
+    RejectUnmaterializedPredecessor,
+    RejectConflict,
+    AlreadyCommitted,
+    CommitNew,
+}
+
+/// Machine-owned one-slot admission decision for a durable pending image-blob
+/// anchor. The shell supplies only occupancy/exact-match observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentBlobStageDisposition {
+    #[default]
+    RejectOccupied,
+    StageNew,
+    ReuseExact,
+}
+
+/// Machine-owned recovery decision for the durable pending image-blob slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentBlobRecoveryDisposition {
+    #[default]
+    NoPending,
+    RetryExact,
+    CommitVerifiedBeforeCurrent,
+    ClearInvalidBeforeCurrent,
+}
+
+/// Machine-owned legality decision for clearing the pending slot after a
+/// reducer commit (or an exact already-committed replay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeUserContentBlobFinalizeDisposition {
+    #[default]
+    RejectMismatch,
+    NoPending,
+    ClearCommitted,
+}
+
 // ---------------------------------------------------------------------------
 // Durable-config region typed vocabulary (folded from the retired
 // SessionDurableConfigAuthorityMachine).
@@ -381,6 +423,22 @@ pub enum SessionArchiveDisposition {
     AlreadyArchived,
 }
 
+/// Typed observation of the runtime half of a session archive.
+///
+/// The session-document snapshot and the runtime snapshot are independent
+/// durable facts. In particular, a durable session document does not prove
+/// that the runtime needs retirement, while a runtime session snapshot can
+/// require retirement even when no lifecycle row has been written yet.
+/// `QuiescentTerminal` covers the generated `Retired` and `Destroyed`
+/// terminals, neither of which requires another Retire command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SessionArchiveRuntimeObservation {
+    #[default]
+    Absent,
+    RetirementRequired,
+    QuiescentTerminal,
+}
+
 // ---------------------------------------------------------------------------
 // Transcript-edit region (folded from the meerkat-session persistent.rs
 // `persist_transcript_fork` / `persist_transcript_rewrite` commit paths under
@@ -530,6 +588,34 @@ machine! {
                 segment_empty: bool,
                 segment_matches: bool,
             },
+            ResolveRealtimeUserContentFinal {
+                content_present: bool,
+                segment_empty: bool,
+                segment_matches: bool,
+            },
+            ResolveRealtimeUserContentIdentity {
+                identity_fields_valid: bool,
+                key_tombstoned: bool,
+                predecessor_materialized: bool,
+                existing_identity_present: bool,
+                existing_payload_matches: bool,
+                target_item_id_available: bool,
+                reducer_commit_proof_required: bool,
+                reducer_commit_proof_present: bool,
+            },
+            ResolveRealtimeUserContentBlobStage {
+                pending_present: bool,
+                pending_matches_request: bool,
+            },
+            ResolveRealtimeUserContentBlobRecovery {
+                pending_present: bool,
+                request_matches_pending: bool,
+                pending_blob_valid: bool,
+            },
+            ResolveRealtimeUserContentBlobFinalize {
+                pending_present: bool,
+                pending_matches_committed: bool,
+            },
             ResolveRealtimeAssistantDelta {
                 response_id_valid: bool,
                 response_discarded: bool,
@@ -576,7 +662,19 @@ machine! {
                 first_seen_unique_count: u64,
                 every_item_has_order_entry: bool,
                 every_order_entry_has_item: bool,
+                all_materialized_predecessor_references_exist: bool,
+                no_self_predecessor_references: bool,
+                causal_graph_acyclic: bool,
+                all_materialized_items_have_materialized_ancestry: bool,
                 all_identity_fields_valid: bool,
+                all_user_content_identity_keys_match: bool,
+                all_user_content_identity_fields_valid: bool,
+                all_user_content_identity_item_ids_unique: bool,
+                all_user_content_identities_reference_materialized_user_items: bool,
+                all_user_content_tombstones_valid: bool,
+                user_content_identities_and_tombstones_disjoint: bool,
+                pending_user_content_blob_fields_valid: bool,
+                pending_user_content_blob_uncommitted: bool,
                 all_delta_ids_valid: bool,
                 all_completion_response_ids_valid: bool,
                 all_discarded_response_ids_valid: bool,
@@ -788,8 +886,8 @@ machine! {
             ArchiveSessionDocument {
                 session_id: SessionId,
                 runtime_backed: bool,
-                durable_snapshot_present: bool,
-                runtime_session_registered: bool,
+                durable_document_present: bool,
+                runtime_observation: Enum<SessionArchiveRuntimeObservation>,
             },
         }
 
@@ -854,6 +952,18 @@ machine! {
             RealtimeMaterializeCandidateResolved {
                 decision: Enum<RealtimeTranscriptMaterializeDecision>,
                 consume_usage: bool,
+            },
+            RealtimeUserContentIdentityResolved {
+                disposition: Enum<RealtimeUserContentIdentityDisposition>,
+            },
+            RealtimeUserContentBlobStageResolved {
+                disposition: Enum<RealtimeUserContentBlobStageDisposition>,
+            },
+            RealtimeUserContentBlobRecoveryResolved {
+                disposition: Enum<RealtimeUserContentBlobRecoveryDisposition>,
+            },
+            RealtimeUserContentBlobFinalizeResolved {
+                disposition: Enum<RealtimeUserContentBlobFinalizeDisposition>,
             },
             RealtimeTranscriptSnapshotRestoreAuthorized,
 
@@ -1147,16 +1257,17 @@ machine! {
         }
 
         // Lifecycle-terminal realization helper: the runtime is retired iff
-        // the archive is runtime-backed AND the session is actually known to
-        // the runtime side (a durable snapshot exists or the runtime has the
-        // session registered). A runtime-backed archive of a session the
-        // runtime has never seen must not spuriously register-then-retire it.
+        // the archive is runtime-backed AND the typed runtime observation says
+        // retirement work remains. The durable session-document snapshot is
+        // intentionally not consulted here: it authorizes the document write,
+        // but cannot prove runtime presence or override a quiescent terminal.
         helper archive_should_retire_runtime(
             runtime_backed: bool,
-            durable_snapshot_present: bool,
-            runtime_session_registered: bool
+            runtime_observation: Enum<SessionArchiveRuntimeObservation>
         ) -> bool {
-            runtime_backed && (durable_snapshot_present || runtime_session_registered)
+            runtime_backed
+                && runtime_observation
+                    == SessionArchiveRuntimeObservation::RetirementRequired
         }
 
         disposition SessionFirstTurnPhaseResolved => local seam NoOwnerRealization,
@@ -1172,6 +1283,10 @@ machine! {
         disposition SystemContextPersistAppendAdmissionResolved => local seam NoOwnerRealization,
         disposition RealtimeTranscriptEventResolved => local seam NoOwnerRealization,
         disposition RealtimeMaterializeCandidateResolved => local seam NoOwnerRealization,
+        disposition RealtimeUserContentIdentityResolved => local seam NoOwnerRealization,
+        disposition RealtimeUserContentBlobStageResolved => local seam NoOwnerRealization,
+        disposition RealtimeUserContentBlobRecoveryResolved => local seam NoOwnerRealization,
+        disposition RealtimeUserContentBlobFinalizeResolved => local seam NoOwnerRealization,
         disposition RealtimeTranscriptSnapshotRestoreAuthorized => local seam NoOwnerRealization,
         disposition SessionMetadataPersistAuthorized => local seam NoOwnerRealization,
         disposition SessionBuildStatePersistAuthorized => local seam NoOwnerRealization,
@@ -1939,6 +2054,324 @@ machine! {
             }
         }
 
+        // Caller-stable identity admission is a separate generated decision
+        // from content-segment materialization. The shell computes only raw
+        // validation/registry/predecessor observations and mirrors this
+        // disposition onto its durable committed-only identity registry.
+        transition ResolveRealtimeUserContentIdentityInvalid {
+            on input ResolveRealtimeUserContentIdentity { identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (identity_fields_valid == false
+                    || (key_tombstoned == false
+                        && predecessor_materialized
+                        && existing_identity_present == false
+                        && target_item_id_available
+                        && reducer_commit_proof_required
+                        && reducer_commit_proof_present == false))
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentIdentityResolved {
+                disposition: RealtimeUserContentIdentityDisposition::RejectInvalidIdentity
+            }
+        }
+
+        transition ResolveRealtimeUserContentIdentityUnmaterializedPredecessor {
+            on input ResolveRealtimeUserContentIdentity { identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && identity_fields_valid
+                && key_tombstoned == false
+                && predecessor_materialized == false
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentIdentityResolved {
+                disposition: RealtimeUserContentIdentityDisposition::RejectUnmaterializedPredecessor
+            }
+        }
+
+        transition ResolveRealtimeUserContentIdentityConflict {
+            on input ResolveRealtimeUserContentIdentity { identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && identity_fields_valid
+                && (key_tombstoned
+                    || (predecessor_materialized
+                        && ((existing_identity_present && existing_payload_matches == false)
+                            || (existing_identity_present == false && target_item_id_available == false))))
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentIdentityResolved {
+                disposition: RealtimeUserContentIdentityDisposition::RejectConflict
+            }
+        }
+
+        transition ResolveRealtimeUserContentIdentityReplay {
+            on input ResolveRealtimeUserContentIdentity { identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && identity_fields_valid
+                && key_tombstoned == false
+                && predecessor_materialized
+                && existing_identity_present
+                && existing_payload_matches
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentIdentityResolved {
+                disposition: RealtimeUserContentIdentityDisposition::AlreadyCommitted
+            }
+        }
+
+        transition ResolveRealtimeUserContentIdentityCommitNew {
+            on input ResolveRealtimeUserContentIdentity { identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && identity_fields_valid
+                && key_tombstoned == false
+                && predecessor_materialized
+                && existing_identity_present == false
+                && target_item_id_available
+                && (reducer_commit_proof_required == false || reducer_commit_proof_present)
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentIdentityResolved {
+                disposition: RealtimeUserContentIdentityDisposition::CommitNew
+            }
+        }
+
+        // The durable blob staging slot is bounded to one anchor per session.
+        // The shell exposes only occupancy/equality observations; this machine
+        // owns whether a caller may create, reuse, reject, recover, or clear it.
+        transition ResolveRealtimeUserContentBlobStageNew {
+            on input ResolveRealtimeUserContentBlobStage { pending_present, pending_matches_request }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present == false
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobStageResolved {
+                disposition: RealtimeUserContentBlobStageDisposition::StageNew
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobStageReuseExact {
+            on input ResolveRealtimeUserContentBlobStage { pending_present, pending_matches_request }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present
+                && pending_matches_request
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobStageResolved {
+                disposition: RealtimeUserContentBlobStageDisposition::ReuseExact
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobStageRejectOccupied {
+            on input ResolveRealtimeUserContentBlobStage { pending_present, pending_matches_request }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present
+                && pending_matches_request == false
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobStageResolved {
+                disposition: RealtimeUserContentBlobStageDisposition::RejectOccupied
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobRecoveryNone {
+            on input ResolveRealtimeUserContentBlobRecovery { pending_present, request_matches_pending, pending_blob_valid }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present == false
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobRecoveryResolved {
+                disposition: RealtimeUserContentBlobRecoveryDisposition::NoPending
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobRecoveryExact {
+            on input ResolveRealtimeUserContentBlobRecovery { pending_present, request_matches_pending, pending_blob_valid }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present
+                && request_matches_pending
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobRecoveryResolved {
+                disposition: RealtimeUserContentBlobRecoveryDisposition::RetryExact
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobRecoveryCommitVerified {
+            on input ResolveRealtimeUserContentBlobRecovery { pending_present, request_matches_pending, pending_blob_valid }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present
+                && request_matches_pending == false
+                && pending_blob_valid
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobRecoveryResolved {
+                disposition: RealtimeUserContentBlobRecoveryDisposition::CommitVerifiedBeforeCurrent
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobRecoveryClearInvalid {
+            on input ResolveRealtimeUserContentBlobRecovery { pending_present, request_matches_pending, pending_blob_valid }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present
+                && request_matches_pending == false
+                && pending_blob_valid == false
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobRecoveryResolved {
+                disposition: RealtimeUserContentBlobRecoveryDisposition::ClearInvalidBeforeCurrent
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobFinalizeNone {
+            on input ResolveRealtimeUserContentBlobFinalize { pending_present, pending_matches_committed }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present == false
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobFinalizeResolved {
+                disposition: RealtimeUserContentBlobFinalizeDisposition::NoPending
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobFinalizeClearCommitted {
+            on input ResolveRealtimeUserContentBlobFinalize { pending_present, pending_matches_committed }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present
+                && pending_matches_committed
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobFinalizeResolved {
+                disposition: RealtimeUserContentBlobFinalizeDisposition::ClearCommitted
+            }
+        }
+
+        transition ResolveRealtimeUserContentBlobFinalizeRejectMismatch {
+            on input ResolveRealtimeUserContentBlobFinalize { pending_present, pending_matches_committed }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && pending_present
+                && pending_matches_committed == false
+            }
+            update {}
+            to Ready
+            emit RealtimeUserContentBlobFinalizeResolved {
+                disposition: RealtimeUserContentBlobFinalizeDisposition::RejectMismatch
+            }
+        }
+
+        // Multimodal user content follows the same generated action-vector
+        // contract as a finalized transcript segment, but it is a distinct
+        // typed input so the shell never launders image presence through a
+        // synthetic text placeholder. `write_user_segment` means "write the
+        // typed user segment" for both inputs; the shell mirrors it into the
+        // text or block map selected by the event variant.
+        transition ResolveRealtimeUserContentFinalEmpty {
+            on input ResolveRealtimeUserContentFinal { content_present, segment_empty, segment_matches }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && content_present == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: true,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeUserContentFinalStore {
+            on input ResolveRealtimeUserContentFinal { content_present, segment_empty, segment_matches }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && content_present
+                && segment_empty
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: true,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: true,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
+        transition ResolveRealtimeUserContentFinalReplayOrConflict {
+            on input ResolveRealtimeUserContentFinal { content_present, segment_empty, segment_matches }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && content_present
+                && segment_empty == false
+            }
+            update {}
+            to Ready
+            emit RealtimeTranscriptEventResolved {
+                observe_item: true,
+                observe_skipped: false,
+                write_user_segment: false,
+                append_assistant_segment: false,
+                replace_assistant_segment: false,
+                promote_lane: false,
+                mark_item_ready: true,
+                record_delta_id: false,
+                remove_completion: false,
+                record_completion: false,
+                discard_response: false,
+                discard_response_by_lane: false,
+                mark_response_ready: false,
+                materialize_ready_items: true
+            }
+        }
+
         transition ResolveRealtimeAssistantDeltaInvalidOrDuplicate {
             on input ResolveRealtimeAssistantDelta {
                 response_id_valid,
@@ -2635,7 +3068,19 @@ machine! {
                 first_seen_unique_count,
                 every_item_has_order_entry,
                 every_order_entry_has_item,
+                all_materialized_predecessor_references_exist,
+                no_self_predecessor_references,
+                causal_graph_acyclic,
+                all_materialized_items_have_materialized_ancestry,
                 all_identity_fields_valid,
+                all_user_content_identity_keys_match,
+                all_user_content_identity_fields_valid,
+                all_user_content_identity_item_ids_unique,
+                all_user_content_identities_reference_materialized_user_items,
+                all_user_content_tombstones_valid,
+                user_content_identities_and_tombstones_disjoint,
+                pending_user_content_blob_fields_valid,
+                pending_user_content_blob_uncommitted,
                 all_delta_ids_valid,
                 all_completion_response_ids_valid,
                 all_discarded_response_ids_valid,
@@ -2652,7 +3097,19 @@ machine! {
                 && first_seen_count == first_seen_unique_count
                 && every_item_has_order_entry
                 && every_order_entry_has_item
+                && all_materialized_predecessor_references_exist
+                && no_self_predecessor_references
+                && causal_graph_acyclic
+                && all_materialized_items_have_materialized_ancestry
                 && all_identity_fields_valid
+                && all_user_content_identity_keys_match
+                && all_user_content_identity_fields_valid
+                && all_user_content_identity_item_ids_unique
+                && all_user_content_identities_reference_materialized_user_items
+                && all_user_content_tombstones_valid
+                && user_content_identities_and_tombstones_disjoint
+                && pending_user_content_blob_fields_valid
+                && pending_user_content_blob_uncommitted
                 && all_delta_ids_valid
                 && all_completion_response_ids_valid
                 && all_discarded_response_ids_valid
@@ -3320,8 +3777,8 @@ machine! {
             on input ArchiveSessionDocument {
                 session_id,
                 runtime_backed,
-                durable_snapshot_present,
-                runtime_session_registered
+                durable_document_present,
+                runtime_observation
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -3335,11 +3792,10 @@ machine! {
             to Ready
             emit SessionArchiveResolved {
                 disposition: SessionArchiveDisposition::Archive,
-                write_document: durable_snapshot_present,
+                write_document: durable_document_present,
                 retire_runtime: archive_should_retire_runtime(
                     runtime_backed,
-                    durable_snapshot_present,
-                    runtime_session_registered)
+                    runtime_observation)
             }
         }
 
@@ -3351,15 +3807,17 @@ machine! {
             on input ArchiveSessionDocument {
                 session_id,
                 runtime_backed,
-                durable_snapshot_present,
-                runtime_session_registered
+                durable_document_present,
+                runtime_observation
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
                     == SessionDocumentLifecycle::Archived
             }
-            guard "runtime_quiescent" { runtime_session_registered == false }
+            guard "runtime_quiescent" {
+                runtime_observation != SessionArchiveRuntimeObservation::RetirementRequired
+            }
             update {}
             to Ready
             emit SessionArchiveResolved {
@@ -3381,15 +3839,17 @@ machine! {
             on input ArchiveSessionDocument {
                 session_id,
                 runtime_backed,
-                durable_snapshot_present,
-                runtime_session_registered
+                durable_document_present,
+                runtime_observation
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
                     == SessionDocumentLifecycle::Archived
             }
-            guard "runtime_residue" { runtime_session_registered == true }
+            guard "runtime_residue" {
+                runtime_observation == SessionArchiveRuntimeObservation::RetirementRequired
+            }
             update {}
             to Ready
             emit SessionArchiveResolved {

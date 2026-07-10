@@ -1660,30 +1660,32 @@ fn emit_supervisor_trust_freshness_authority(out: &mut String) -> Result<()> {
         "        let guard = authority.lock().map_err(|_| \"generated supervisor trust freshness authority was poisoned\".to_string())?;"
     )?;
     writeln!(out, "        let state = guard.state();")?;
+    let pending_prefix = "supervisor_publish_pending";
     writeln!(
         out,
-        "        if state.supervisor_publish_pending_peer_id.as_deref() == Some(expected_peer_id)"
+        "        let pending_matches = state.{pending_prefix}_peer_id.as_deref() == Some(expected_peer_id)"
     )?;
     writeln!(
         out,
-        "            && state.supervisor_publish_pending_name.as_deref() == Some(expected_name)"
+        "            && state.{pending_prefix}_name.as_deref() == Some(expected_name)"
     )?;
     writeln!(
         out,
-        "            && state.supervisor_publish_pending_address.as_deref() == Some(expected_address)"
+        "            && state.{pending_prefix}_address.as_deref() == Some(expected_address)"
     )?;
     writeln!(
         out,
-        "            && state.supervisor_publish_pending_signing_public_key.as_deref() == expected_signing_public_key"
+        "            && state.{pending_prefix}_signing_public_key.as_deref() == expected_signing_public_key"
     )?;
     writeln!(
         out,
-        "            && state.supervisor_publish_pending_epoch == Some(expected_epoch)"
+        "            && state.{pending_prefix}_epoch == Some(expected_epoch)"
     )?;
     writeln!(
         out,
-        "            && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref()"
+        "            && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref();"
     )?;
+    writeln!(out, "        if pending_matches")?;
     writeln!(out, "        {{")?;
     writeln!(out, "            Ok(())")?;
     writeln!(out, "        }} else {{")?;
@@ -1774,7 +1776,7 @@ fn emit_comms_trust_authority_source_impl(
         )?;
     }
     if is_supervisor_trust_protocol(protocol.name.as_str()) {
-        if protocol.name.as_str() == "supervisor_trust_publish" {
+        if matches!(protocol.name.as_str(), "supervisor_trust_publish") {
             writeln!(
                 out,
                 "        self.supervisor_trust_freshness_authority.validate_pending_publish("
@@ -1898,11 +1900,13 @@ fn emit_comms_trust_grant_return(out: &mut String, protocol: &EffectHandoffProto
     writeln!(out, "        match operation {{")?;
     for operation in &trust_authority.allowed_operations {
         let operation_variant = operation.core_variant();
-        let source_kind = trust_authority.source_kind.core_variant();
-        let row_owner_kind = trust_authority
+        let declared_source_kind = trust_authority.source_kind.core_variant();
+        let declared_row_owner_kind = trust_authority
             .row_owner_kind
             .unwrap_or(trust_authority.source_kind)
             .core_variant();
+        let source_kind = declared_source_kind;
+        let row_owner_kind = declared_row_owner_kind;
         let target_peer_expr = comms_trust_target_peer_expr(protocol)?;
         let Some(target_peer_expr) = target_peer_expr else {
             bail!(
@@ -4613,6 +4617,10 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "RealtimeTranscriptLaneKind",
         "RealtimeTranscriptStopReasonKind",
         "RealtimeTranscriptMaterializeDecision",
+        "RealtimeUserContentIdentityDisposition",
+        "RealtimeUserContentBlobStageDisposition",
+        "RealtimeUserContentBlobRecoveryDisposition",
+        "RealtimeUserContentBlobFinalizeDisposition",
         "TranscriptEditKind",
         "SessionSystemPromptSource",
         "ObservedSessionTailKind",
@@ -4626,6 +4634,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "RuntimeProjectionRollbackDisposition",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
+        "SessionArchiveRuntimeObservation",
     ] {
         emit_session_document_named_string_enum(&mut out, machine, enum_name)?;
     }
@@ -4706,6 +4715,10 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "RealtimeTranscriptLaneKind" => Ok("Display"),
         "RealtimeTranscriptStopReasonKind" => Ok("Other"),
         "RealtimeTranscriptMaterializeDecision" => Ok("Wait"),
+        "RealtimeUserContentIdentityDisposition" => Ok("RejectInvalidIdentity"),
+        "RealtimeUserContentBlobStageDisposition" => Ok("RejectOccupied"),
+        "RealtimeUserContentBlobRecoveryDisposition" => Ok("NoPending"),
+        "RealtimeUserContentBlobFinalizeDisposition" => Ok("RejectMismatch"),
         "TranscriptEditKind" => Ok("Fork"),
         "SessionSystemPromptSource" => Ok("DirectMutation"),
         "ObservedSessionTailKind" => Ok("Empty"),
@@ -4719,6 +4732,7 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "RuntimeProjectionRollbackDisposition" => Ok("RejectDivergent"),
         "SessionDocumentLifecycle" => Ok("Active"),
         "SessionArchiveDisposition" => Ok("Archive"),
+        "SessionArchiveRuntimeObservation" => Ok("Absent"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
     }
 }
@@ -5526,11 +5540,16 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "RealtimeTranscriptLaneKind"
             | "RealtimeTranscriptStopReasonKind"
             | "RealtimeTranscriptMaterializeDecision"
+            | "RealtimeUserContentIdentityDisposition"
+            | "RealtimeUserContentBlobStageDisposition"
+            | "RealtimeUserContentBlobRecoveryDisposition"
+            | "RealtimeUserContentBlobFinalizeDisposition"
             | "ObservedSessionTailKind"
             | "PendingContinuationDisposition"
             | "PendingContinuationPublicTerminal"
             | "SessionDocumentLifecycle"
             | "SessionArchiveDisposition"
+            | "SessionArchiveRuntimeObservation"
     )
 }
 
@@ -5570,6 +5589,10 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResolveRealtimeItemObserved",
         "ResolveRealtimeItemSkipped",
         "ResolveRealtimeUserTranscriptFinal",
+        "ResolveRealtimeUserContentIdentity",
+        "ResolveRealtimeUserContentBlobStage",
+        "ResolveRealtimeUserContentBlobRecovery",
+        "ResolveRealtimeUserContentBlobFinalize",
         "ResolveRealtimeAssistantDelta",
         "ResolveRealtimeAssistantTextReplacement",
         "ResolveRealtimeAssistantTurnCompleted",
@@ -5603,6 +5626,10 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SystemContextSnapshotRestoreAuthorized",
         "RealtimeTranscriptEventResolved",
         "RealtimeMaterializeCandidateResolved",
+        "RealtimeUserContentIdentityResolved",
+        "RealtimeUserContentBlobStageResolved",
+        "RealtimeUserContentBlobRecoveryResolved",
+        "RealtimeUserContentBlobFinalizeResolved",
         "RealtimeTranscriptSnapshotRestoreAuthorized",
         "SessionMetadataPersistAuthorized",
         "SessionBuildStatePersistAuthorized",
@@ -5630,6 +5657,10 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RealtimeTranscriptLaneKind",
         "RealtimeTranscriptStopReasonKind",
         "RealtimeTranscriptMaterializeDecision",
+        "RealtimeUserContentIdentityDisposition",
+        "RealtimeUserContentBlobStageDisposition",
+        "RealtimeUserContentBlobRecoveryDisposition",
+        "RealtimeUserContentBlobFinalizeDisposition",
         "TranscriptEditKind",
         "SessionSystemPromptSource",
         "ObservedSessionTailKind",
@@ -5643,6 +5674,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RuntimeProjectionRollbackDisposition",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
+        "SessionArchiveRuntimeObservation",
     ] {
         let binding = machine
             .named_types

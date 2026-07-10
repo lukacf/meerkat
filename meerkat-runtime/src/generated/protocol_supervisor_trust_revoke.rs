@@ -84,7 +84,8 @@ impl SupervisorTrustFreshnessAuthority {
             "generated supervisor trust freshness authority was poisoned".to_string()
         })?;
         let state = guard.state();
-        if state.supervisor_publish_pending_peer_id.as_deref() == Some(expected_peer_id)
+        let pending_matches = state.supervisor_publish_pending_peer_id.as_deref()
+            == Some(expected_peer_id)
             && state.supervisor_publish_pending_name.as_deref() == Some(expected_name)
             && state.supervisor_publish_pending_address.as_deref() == Some(expected_address)
             && state
@@ -92,8 +93,8 @@ impl SupervisorTrustFreshnessAuthority {
                 .as_deref()
                 == expected_signing_public_key
             && state.supervisor_publish_pending_epoch == Some(expected_epoch)
-            && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref()
-        {
+            && state.local_endpoint.as_ref() == expected_local_endpoint.as_ref();
+        if pending_matches {
             Ok(())
         } else {
             Err(format!(

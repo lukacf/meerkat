@@ -3709,6 +3709,7 @@ pub enum MobPeerOverlayCommandKind {
 pub enum SupervisorBridgeCommandAdmissionResultKind {
     #[default]
     Accept,
+    ResumePendingRevoke,
     Reject,
 }
 
@@ -3719,6 +3720,18 @@ pub enum SupervisorBridgeCommandRejectionKind {
     NotBound,
     StaleSupervisor,
     SenderMismatch,
+    CommandNotAllowed,
+}
+
+/// Closed supervisor cleanup command class. These commands retain narrowly
+/// modeled access after ordinary runtime work has closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorCleanupCommandKind {
+    #[default]
+    Retire,
+    Observe,
+    Destroy,
+    Revoke,
 }
 
 /// Generated admission result for `BindMember`, before bootstrap transport
@@ -3737,6 +3750,7 @@ pub enum SupervisorBindRejectionKind {
     #[default]
     AlreadyBound,
     SenderMismatch,
+    RevocationPending,
 }
 
 /// Generated material-admission verdict for `BindMember`. Owns the
@@ -3776,6 +3790,46 @@ pub enum SupervisorAuthorizeAdmissionResultKind {
     Reject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationPhase {
+    #[default]
+    PreviousRevokePending,
+    NextPublishPending,
+    Completed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationSubmissionResultKind {
+    #[default]
+    New,
+    ExistingPending,
+    ExistingTerminal,
+    Rejected,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationObservationStatusKind {
+    #[default]
+    NotFound,
+    PreviousRevokePending,
+    NextPublishPending,
+    Completed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SupervisorRotationRejectionKind {
+    #[default]
+    OperationConflict,
+    NotBound,
+    SenderMismatch,
+    TargetEpochNotAdvanced,
+    InvalidTarget,
+    UnsupportedProtocolVersion,
+}
+
 /// Generated public rejection class for `AuthorizeSupervisor` admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SupervisorAuthorizeRejectionKind {
@@ -3783,6 +3837,7 @@ pub enum SupervisorAuthorizeRejectionKind {
     NotBound,
     StaleSupervisor,
     SenderMismatch,
+    RotationNotAllowed,
 }
 
 // Track-B (R5): declarative peer endpoint descriptor for the runtime

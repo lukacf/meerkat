@@ -31,7 +31,9 @@ use crate::run::{
 use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meerkat_contracts::wire::supervisor_bridge::{BridgeBootstrapToken, BridgeProtocolVersion};
+use meerkat_contracts::wire::supervisor_bridge::{
+    BridgeBootstrapToken, BridgePeerSpec, BridgeProtocolVersion, SupervisorRotationOperationId,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -164,6 +166,10 @@ pub struct SupervisorAuthorityRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SupervisorPendingRotationRecord {
+    /// Stable mob-wide operation id reused for every member submission and
+    /// every retry of this attempted authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<SupervisorRotationOperationId>,
     /// Raw secret bytes for reconstructing the attempted supervisor keypair.
     pub secret_key: [u8; 32],
     /// Canonical peer id string for the attempted supervisor public key.
@@ -175,6 +181,13 @@ pub struct SupervisorPendingRotationRecord {
     /// Remote peer ids that already accepted this attempted authority.
     #[serde(default)]
     pub accepted_peer_ids: Vec<String>,
+    /// Exact per-member target specs committed before the first submission.
+    ///
+    /// The supervisor bridge address may be ephemeral. Retries must use these
+    /// durable specs rather than recomputing a target that can no longer match
+    /// the member-owned operation receipt.
+    #[serde(default)]
+    pub member_targets: std::collections::BTreeMap<String, BridgePeerSpec>,
 }
 
 impl SupervisorAuthorityRecord {
@@ -221,6 +234,9 @@ impl SupervisorAuthorityRecord {
             signing_key: self.dsl_signing_key(),
             epoch: self.epoch,
             protocol_version: self.dsl_protocol_version(),
+            pending_operation_id: pending
+                .and_then(|pending| pending.operation_id)
+                .map(|operation_id| operation_id.to_string()),
             pending_peer_id: pending.map(SupervisorPendingRotationRecord::dsl_peer_id),
             pending_signing_key: pending.map(SupervisorPendingRotationRecord::dsl_signing_key),
             pending_epoch: pending.map(|pending| pending.epoch),
@@ -228,6 +244,12 @@ impl SupervisorAuthorityRecord {
                 .map(SupervisorPendingRotationRecord::dsl_protocol_version),
             pending_accepted_peer_ids: pending
                 .map(SupervisorPendingRotationRecord::dsl_accepted_peer_ids)
+                .unwrap_or_default(),
+            pending_member_target_names: pending
+                .map(SupervisorPendingRotationRecord::dsl_member_target_names)
+                .unwrap_or_default(),
+            pending_member_target_addresses: pending
+                .map(SupervisorPendingRotationRecord::dsl_member_target_addresses)
                 .unwrap_or_default(),
         }
     }
@@ -241,40 +263,48 @@ impl SupervisorAuthorityRecord {
         }
     }
 
-    pub fn dsl_clear_pending_rotation_input(&self) -> mob_dsl::MobMachineInput {
-        mob_dsl::MobMachineInput::ClearSupervisorPendingRotation {
-            current_peer_id: self.dsl_peer_id(),
-            current_epoch: self.epoch,
-            protocol_version: self.dsl_protocol_version(),
-        }
-    }
-
     pub fn dsl_record_pending_rotation_input(
         &self,
         pending: &SupervisorPendingRotationRecord,
+        active_peer_ids: &std::collections::BTreeSet<String>,
     ) -> mob_dsl::MobMachineInput {
         mob_dsl::MobMachineInput::RecordSupervisorPendingRotation {
             current_peer_id: self.dsl_peer_id(),
             current_epoch: self.epoch,
+            current_protocol_version: self.dsl_protocol_version(),
+            operation_id: pending
+                .operation_id
+                .map(|operation_id| operation_id.to_string())
+                .unwrap_or_default(),
             pending_peer_id: pending.dsl_peer_id(),
             pending_signing_key: pending.dsl_signing_key(),
             pending_epoch: pending.epoch,
-            protocol_version: pending.dsl_protocol_version(),
+            pending_protocol_version: pending.dsl_protocol_version(),
             accepted_peer_ids: pending.dsl_accepted_peer_ids(),
+            active_peer_ids: active_peer_ids
+                .iter()
+                .cloned()
+                .map(mob_dsl::PeerId::from)
+                .collect(),
+            member_target_names: pending.dsl_member_target_names(),
+            member_target_addresses: pending.dsl_member_target_addresses(),
         }
     }
 
     pub fn dsl_commit_rotation_input(
         &self,
+        operation_id: &str,
         next: &SupervisorAuthorityRecord,
     ) -> mob_dsl::MobMachineInput {
         mob_dsl::MobMachineInput::CommitSupervisorRotation {
             current_peer_id: self.dsl_peer_id(),
             current_epoch: self.epoch,
+            current_protocol_version: self.dsl_protocol_version(),
+            operation_id: operation_id.to_string(),
             next_peer_id: next.dsl_peer_id(),
             next_signing_key: next.dsl_signing_key(),
             next_epoch: next.epoch,
-            protocol_version: next.dsl_protocol_version(),
+            next_protocol_version: next.dsl_protocol_version(),
         }
     }
 
@@ -294,6 +324,9 @@ impl SupervisorAuthorityRecord {
             signing_key: self.dsl_signing_key(),
             epoch: self.epoch,
             protocol_version: self.dsl_protocol_version(),
+            pending_operation_id: pending
+                .and_then(|pending| pending.operation_id)
+                .map(|operation_id| operation_id.to_string()),
             pending_peer_id: pending.map(SupervisorPendingRotationRecord::dsl_peer_id),
             pending_signing_key: pending.map(SupervisorPendingRotationRecord::dsl_signing_key),
             pending_epoch: pending.map(|pending| pending.epoch),
@@ -301,6 +334,12 @@ impl SupervisorAuthorityRecord {
                 .map(SupervisorPendingRotationRecord::dsl_protocol_version),
             pending_accepted_peer_ids: pending
                 .map(SupervisorPendingRotationRecord::dsl_accepted_peer_ids)
+                .unwrap_or_default(),
+            pending_member_target_names: pending
+                .map(SupervisorPendingRotationRecord::dsl_member_target_names)
+                .unwrap_or_default(),
+            pending_member_target_addresses: pending
+                .map(SupervisorPendingRotationRecord::dsl_member_target_addresses)
                 .unwrap_or_default(),
         }
     }
@@ -315,14 +354,18 @@ impl SupervisorAuthorityRecord {
 impl SupervisorPendingRotationRecord {
     pub fn from_authority(
         authority: &SupervisorAuthorityRecord,
+        operation_id: SupervisorRotationOperationId,
         accepted_peer_ids: Vec<String>,
+        member_targets: std::collections::BTreeMap<String, BridgePeerSpec>,
     ) -> Self {
         Self {
+            operation_id: Some(operation_id),
             secret_key: authority.secret_key,
             public_peer_id: authority.public_peer_id.clone(),
             epoch: authority.epoch,
             protocol_version: authority.protocol_version,
             accepted_peer_ids,
+            member_targets,
         }
     }
 
@@ -362,20 +405,41 @@ impl SupervisorPendingRotationRecord {
             .collect()
     }
 
+    pub fn dsl_member_target_names(&self) -> std::collections::BTreeMap<mob_dsl::PeerId, String> {
+        self.member_targets
+            .iter()
+            .map(|(member_peer_id, target)| {
+                (
+                    mob_dsl::PeerId::from(member_peer_id.clone()),
+                    target.name.clone(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn dsl_member_target_addresses(
+        &self,
+    ) -> std::collections::BTreeMap<mob_dsl::PeerId, String> {
+        self.member_targets
+            .iter()
+            .map(|(member_peer_id, target)| {
+                (
+                    mob_dsl::PeerId::from(member_peer_id.clone()),
+                    target.address.clone(),
+                )
+            })
+            .collect()
+    }
+
     pub fn same_attempted_authority(&self, other: &Self) -> bool {
-        self.secret_key == other.secret_key
+        self.operation_id == other.operation_id
+            && self.secret_key == other.secret_key
             && self.public_peer_id == other.public_peer_id
             && self.epoch == other.epoch
             && self
                 .protocol_version
                 .same_protocol_as(other.protocol_version)
-    }
-
-    pub fn remove_accepted_peer_ids(&mut self, peer_ids: &[String]) -> bool {
-        let original_len = self.accepted_peer_ids.len();
-        self.accepted_peer_ids
-            .retain(|peer_id| !peer_ids.iter().any(|candidate| candidate == peer_id));
-        self.accepted_peer_ids.len() != original_len
+            && self.member_targets == other.member_targets
     }
 }
 
@@ -389,7 +453,10 @@ pub struct SupervisorAuthorityPersistenceAuthority {
     pending_signing_key: Option<mob_dsl::PeerSigningKey>,
     pending_epoch: Option<u64>,
     pending_protocol_version: Option<BridgeProtocolVersion>,
+    pending_operation_id: Option<String>,
     pending_accepted_peer_ids: std::collections::BTreeSet<mob_dsl::PeerId>,
+    pending_member_target_names: std::collections::BTreeMap<mob_dsl::PeerId, String>,
+    pending_member_target_addresses: std::collections::BTreeMap<mob_dsl::PeerId, String>,
 }
 
 fn dsl_bridge_protocol_version_matches(
@@ -431,32 +498,41 @@ impl SupervisorAuthorityPersistenceAuthority {
             signing_key,
             epoch,
             effect_protocol,
+            pending_operation_id,
             pending_peer_id,
             pending_signing_key,
             pending_epoch,
             effect_pending_protocol,
             pending_accepted_peer_ids,
+            pending_member_target_names,
+            pending_member_target_addresses,
         )) = transition.effects().iter().find_map(|effect| match effect {
             mob_dsl::MobMachineEffect::PersistSupervisorAuthority {
                 peer_id,
                 signing_key,
                 epoch,
                 protocol_version,
+                pending_operation_id,
                 pending_peer_id,
                 pending_signing_key,
                 pending_epoch,
                 pending_protocol_version,
                 pending_accepted_peer_ids,
+                pending_member_target_names,
+                pending_member_target_addresses,
             } => Some((
                 peer_id.clone(),
                 *signing_key,
                 *epoch,
                 protocol_version.clone(),
+                pending_operation_id.clone(),
                 pending_peer_id.clone(),
                 *pending_signing_key,
                 *pending_epoch,
                 pending_protocol_version.clone(),
                 pending_accepted_peer_ids.clone(),
+                pending_member_target_names.clone(),
+                pending_member_target_addresses.clone(),
             )),
             _ => None,
         })
@@ -486,7 +562,10 @@ impl SupervisorAuthorityPersistenceAuthority {
             pending_signing_key,
             pending_epoch,
             pending_protocol_version: pending.map(|pending| pending.protocol_version),
+            pending_operation_id,
             pending_accepted_peer_ids,
+            pending_member_target_names,
+            pending_member_target_addresses,
         };
         effect.verify_record(record)?;
         Ok(effect)
@@ -498,9 +577,30 @@ impl SupervisorAuthorityPersistenceAuthority {
         let pending_signing_key = pending.map(SupervisorPendingRotationRecord::dsl_signing_key);
         let pending_epoch = pending.map(|pending| pending.epoch);
         let pending_protocol_version = pending.map(|pending| pending.protocol_version);
+        let pending_operation_id = pending
+            .and_then(|pending| pending.operation_id)
+            .map(|operation_id| operation_id.to_string());
         let pending_accepted_peer_ids = pending
             .map(SupervisorPendingRotationRecord::dsl_accepted_peer_ids)
             .unwrap_or_default();
+        let pending_member_target_names = pending
+            .map(SupervisorPendingRotationRecord::dsl_member_target_names)
+            .unwrap_or_default();
+        let pending_member_target_addresses = pending
+            .map(SupervisorPendingRotationRecord::dsl_member_target_addresses)
+            .unwrap_or_default();
+        if let Some(pending) = pending {
+            for (member_peer_id, target) in &pending.member_targets {
+                if target.peer_id != pending.public_peer_id
+                    || target.pubkey != pending.public_signing_key()
+                {
+                    return Err(MobStoreError::Internal(format!(
+                        "supervisor rotation target for member '{member_peer_id}' does not match pending authority peer={} epoch={}",
+                        pending.public_peer_id, pending.epoch
+                    )));
+                }
+            }
+        }
         if self.peer_id == record.dsl_peer_id()
             && self.signing_key == record.dsl_signing_key()
             && self.epoch == record.epoch
@@ -514,7 +614,10 @@ impl SupervisorAuthorityPersistenceAuthority {
                 self.pending_protocol_version,
                 pending_protocol_version,
             )
+            && self.pending_operation_id == pending_operation_id
             && self.pending_accepted_peer_ids == pending_accepted_peer_ids
+            && self.pending_member_target_names == pending_member_target_names
+            && self.pending_member_target_addresses == pending_member_target_addresses
         {
             return Ok(());
         }
@@ -1646,4 +1749,154 @@ pub trait MobSpecStore: Send + Sync {
         mob_id: &MobId,
         revision: Option<u64>,
     ) -> Result<bool, MobStoreError>;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod supervisor_rotation_migration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn legacy_pending_rotation_without_operation_id_is_cas_migrated_once() {
+        let mut current = SupervisorAuthorityRecord::generate(BridgeProtocolVersion::V4);
+        let mut next = SupervisorAuthorityRecord::generate(BridgeProtocolVersion::V4);
+        next.epoch = current.epoch + 1;
+        current.pending_rotation = Some(SupervisorPendingRotationRecord::from_authority(
+            &next,
+            SupervisorRotationOperationId::new(),
+            vec![
+                "peer-already-complete".to_string(),
+                "peer-retired-before-upgrade".to_string(),
+            ],
+            std::collections::BTreeMap::new(),
+        ));
+
+        let mut legacy_json = serde_json::to_value(&current).expect("serialize authority");
+        let legacy_pending = legacy_json
+            .get_mut("pending_rotation")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("pending rotation object");
+        legacy_pending.remove("operation_id");
+        legacy_pending.remove("member_targets");
+        let recovered: SupervisorAuthorityRecord =
+            serde_json::from_value(legacy_json).expect("legacy record must deserialize");
+        assert_eq!(
+            recovered
+                .pending_rotation
+                .as_ref()
+                .and_then(|pending| pending.operation_id),
+            None
+        );
+
+        let mut authority =
+            mob_dsl::MobMachineAuthority::recover_from_state(mob_dsl::MobMachineState::default())
+                .expect("initialize authority");
+        authority
+            .apply_signal(recovered.dsl_recover_signal())
+            .expect("legacy pending target must recover without inventing an id");
+        assert_eq!(
+            authority.state().supervisor_pending_authority_operation_id,
+            None
+        );
+
+        let store = in_memory::InMemoryMobRuntimeMetadataStore::new();
+        let mob_id = MobId::from("legacy-supervisor-operation-migration");
+        store
+            .seed_legacy_supervisor_authority(&mob_id, recovered.clone())
+            .await;
+
+        let operation_id = SupervisorRotationOperationId::new();
+        let mut migrated = recovered.clone();
+        let pending = migrated
+            .pending_rotation
+            .as_mut()
+            .expect("pending rotation remains present");
+        pending.operation_id = Some(operation_id);
+        pending
+            .accepted_peer_ids
+            .retain(|peer_id| peer_id == "peer-already-complete");
+        let pending_peer_id = pending.public_peer_id.clone();
+        let pending_pubkey = pending.public_signing_key();
+        pending.member_targets.insert(
+            "peer-already-complete".to_string(),
+            BridgePeerSpec {
+                name: "legacy-supervisor".to_string(),
+                peer_id: pending_peer_id,
+                address: "inproc://legacy-supervisor".to_string(),
+                pubkey: pending_pubkey,
+            },
+        );
+        let pending = pending.clone();
+        let active_peer_ids = ["peer-already-complete".to_string()].into_iter().collect();
+        let mut invalid_prune = migrated.clone();
+        invalid_prune
+            .pending_rotation
+            .as_mut()
+            .expect("invalid migration pending rotation")
+            .accepted_peer_ids
+            .clear();
+        let invalid_pending = invalid_prune
+            .pending_rotation
+            .as_ref()
+            .expect("invalid migration pending rotation")
+            .clone();
+        assert!(
+            mob_dsl::MobMachineMutator::apply(
+                &mut authority,
+                invalid_prune.dsl_record_pending_rotation_input(&invalid_pending, &active_peer_ids),
+            )
+            .is_err(),
+            "migration must not let the shell prune an accepted peer that remains active"
+        );
+        let transition = mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            migrated.dsl_record_pending_rotation_input(&pending, &active_peer_ids),
+        )
+        .expect(
+            "migration must prune inactive legacy evidence and install one stable operation id",
+        );
+        let persistence_authority =
+            SupervisorAuthorityPersistenceAuthority::from_transition(&migrated, &transition)
+                .expect("migration transition must authorize the exact persisted record");
+        assert!(
+            store
+                .compare_and_put_supervisor_authority(
+                    &mob_id,
+                    &recovered,
+                    &migrated,
+                    &persistence_authority,
+                )
+                .await
+                .expect("migration CAS must succeed")
+        );
+
+        let persisted = store
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load migrated authority")
+            .expect("migrated authority remains stored");
+        assert_eq!(persisted, migrated);
+        assert_eq!(
+            persisted
+                .pending_rotation
+                .as_ref()
+                .map(|pending| pending.accepted_peer_ids.as_slice()),
+            Some(["peer-already-complete".to_string()].as_slice())
+        );
+        assert_eq!(
+            persisted
+                .pending_rotation
+                .as_ref()
+                .and_then(|pending| pending.operation_id),
+            Some(operation_id)
+        );
+        let expected_operation_id = operation_id.to_string();
+        assert_eq!(
+            authority
+                .state()
+                .supervisor_pending_authority_operation_id
+                .as_deref(),
+            Some(expected_operation_id.as_str())
+        );
+    }
 }

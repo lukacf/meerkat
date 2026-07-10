@@ -1151,7 +1151,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MobMachineRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
-        MobError::WiringError(_) => mob_dsl::MobSpawnManyFailureObservationKind::WiringError,
+        MobError::WiringError(_) | MobError::RetirementTopologyIncomplete(_) => {
+            mob_dsl::MobSpawnManyFailureObservationKind::WiringError
+        }
         MobError::SupervisorRotationIncomplete { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SupervisorRotationIncomplete
         }
@@ -1161,6 +1163,15 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberRestoreFailed { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
         }
+        MobError::RuntimeEffectRefused { kind, .. } => match kind {
+            crate::error::RuntimeEffectKind::RuntimeBinding => {
+                mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
+            }
+            crate::error::RuntimeEffectKind::RuntimeIngress
+            | crate::error::RuntimeEffectKind::RuntimeRetire => {
+                mob_dsl::MobSpawnManyFailureObservationKind::Internal
+            }
+        },
         MobError::KickoffWaitTimedOut { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::KickoffWaitTimedOut
         }
@@ -4694,11 +4705,12 @@ impl MobHandle {
     /// The supervisor authority is a **single per-mob fact** persisted in
     /// [`SupervisorAuthorityRecord`](crate::store::SupervisorAuthorityRecord) keyed by
     /// `mob_id`. Rotation generates a fresh authority (new public peer id,
-    /// incremented epoch) and broadcasts
-    /// [`BridgeCommand::AuthorizeSupervisor`](meerkat_contracts::wire::supervisor_bridge::BridgeCommand)
-    /// to **every** remote member binding currently on the roster, then
-    /// advances the persisted local authority only after every remote binding
-    /// has confirmed the next authority.
+    /// incremented epoch), durably records one stable operation id plus every
+    /// member's exact target spec, and submits a one-way
+    /// [`BridgeSupervisorDelivery::SubmitSupervisorRotation`](meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorDelivery)
+    /// to **every** remote member binding currently on the roster. The caller
+    /// observes each member-owned operation separately and advances local
+    /// authority only after every member returns an exact completed receipt.
     ///
     /// There is no per-member scope here, and no scoping parameter is
     /// missing. Per-member [`BridgeBootstrapToken`](meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken)s
@@ -4709,22 +4721,15 @@ impl MobHandle {
     ///
     /// # Incomplete-rotation semantics
     ///
-    /// If some remote bindings accept the attempted next authority and a later
-    /// remote rejects it, the rotation fails closed: the persisted current
-    /// supervisor authority remains at the pre-rotation epoch and callers
-    /// receive [`MobError::SupervisorRotationIncomplete`]. The attempted
-    /// authority is retained as explicit pending rotation metadata when any
-    /// remote remains bound to it. A retry verifies recorded accepted peers
-    /// with the attempted authority before skipping them, then rotates the
-    /// remaining peers with the still-current supervisor before committing the
-    /// attempted authority. If a pending-accepted peer later rebinds to current
-    /// authority, that stale accepted membership is cleared so retry cannot
-    /// skip a current-bound peer. Rollback failure is reported on the typed
-    /// error rather than treated as permission to advance current local
-    /// authority. If the pending metadata write or stale-accepted clear fails
-    /// after a remote has already accepted the attempt, no local retry
-    /// authority is created; retry may only use pending authority that was
-    /// durably recorded through the MobMachine persistence effect.
+    /// A delivery failure, observation timeout, or temporarily unreachable
+    /// member leaves the durable operation pending. It never cancels the
+    /// operation, rolls a completed member back, or reconstructs trust for the
+    /// old supervisor. Exact retries reuse the persisted operation id and
+    /// per-member target specs; members that already fenced the old authority
+    /// are observed as the next authority, so an old-signed resubmission may
+    /// fail without making mutation status ambiguous. Terminal rejection and
+    /// mismatched operation/target receipts fail closed as
+    /// [`MobError::SupervisorRotationIncomplete`].
     ///
     /// # Dogma fit (B4)
     ///
@@ -4737,9 +4742,8 @@ impl MobHandle {
     /// owner") the signature already matches the data model.
     /// Regression coverage lives in `meerkat-mob/src/runtime/tests.rs`:
     /// `test_rotate_supervisor_updates_runtime_metadata`,
-    /// `test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_stale_epoch`,
-    /// `test_rotate_supervisor_bind_fallback_binds_next_authority`, and
-    /// `test_rotate_supervisor_fails_closed_when_remote_rollback_fails`.
+    /// `test_rotate_supervisor_timeout_keeps_durable_operation_and_retry_reuses_id`,
+    /// and the focused supervisor-delivery tests.
     pub async fn rotate_supervisor(&self) -> Result<SupervisorRotationReport, MobError> {
         self.send_actor_command(|reply_tx| MobCommand::RotateSupervisor { reply_tx })
             .await?

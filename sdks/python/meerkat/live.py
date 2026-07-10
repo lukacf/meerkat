@@ -146,11 +146,22 @@ class LiveChannel:
         )
 
     async def send_input_image(
-        self, mime: str, data_base64: str
+        self, idempotency_key: str, mime: str, data_base64: str
     ) -> dict[str, Any]:
-        """Send a base64-encoded image input chunk. Calls ``live/send_input``."""
+        """Stage a base64-encoded image as context for the next response.
+
+        ``idempotency_key`` is required, caller-stable, and session-scoped.
+        Retrying the same key with identical content is safe; changing the
+        MIME or bytes conflicts. Calls ``live/send_input`` and returns after
+        queue acceptance, not durable commit. Wait for a matching
+        ``user_content_committed`` observation before depending on the image.
+
+        Check ``capabilities.image_in`` from ``live/open`` before sending. An
+        image does not request a response by itself; follow it with text or
+        audio, or call ``commit_input``.
+        """
         return await self._client.live_send_input_image(
-            self._require_channel_id(), mime, data_base64
+            self._require_channel_id(), idempotency_key, mime, data_base64
         )
 
     async def send_input_video_frame(

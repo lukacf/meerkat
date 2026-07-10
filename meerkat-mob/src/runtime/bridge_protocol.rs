@@ -13,10 +13,15 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeHardCancelPayload, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
     BridgeObservationResponse, BridgeOutboundTaintPayload, BridgePeerConnectivity, BridgePeerSpec,
     BridgePeerWiringPayload, BridgeProtocolVersion, BridgeRejectionCause, BridgeRejectionReply,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
-    SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION,
-    SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_INTENT,
-    SUPERVISOR_BRIDGE_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS,
+    BridgeReply, BridgeRetireResponse, BridgeSupervisorDelivery, BridgeSupervisorPayload,
+    BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
+    BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
+    BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
+    BridgeSupervisorRotationState, BridgeSupervisorRotationSubmit,
+    BridgeSupervisorRotationTargetReceipt, SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM,
+    SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION,
+    SUPERVISOR_BRIDGE_INTENT, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+    SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS, SupervisorRotationOperationId,
     UnsupportedBridgeProtocolVersion, canonicalize_bridge_address, decode_bridge_command,
     decode_bridge_rejection_reply, decode_legacy_v1_raw_string_rejection,
     supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
@@ -99,6 +104,11 @@ impl_from_bridge_reply!(BridgeObservationResponse, Observation, "observation");
 impl_from_bridge_reply!(BridgeDeliveryResponse, Delivery, "delivery");
 impl_from_bridge_reply!(BridgeRetireResponse, Retire, "retire");
 impl_from_bridge_reply!(BridgeDestroyResponse, Destroy, "destroy");
+impl_from_bridge_reply!(
+    BridgeSupervisorRotationObservation,
+    SupervisorRotation,
+    "supervisor_rotation"
+);
 
 /// Decode a wire `Value` into the specific typed success payload `R`.
 ///
@@ -134,6 +144,7 @@ enum ExpectedBridgeReply {
     Delivery,
     Retire,
     Destroy,
+    SupervisorRotation,
     Rejected,
     Unknown,
 }
@@ -147,6 +158,7 @@ impl ExpectedBridgeReply {
             Self::Delivery => "delivery",
             Self::Retire => "retire",
             Self::Destroy => "destroy",
+            Self::SupervisorRotation => "supervisor_rotation",
             Self::Rejected => "rejected",
             Self::Unknown => "unknown",
         }
@@ -167,6 +179,7 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         BridgeCommand::ObserveMember(_) => ExpectedBridgeReply::Observation,
         BridgeCommand::RetireMember(_) => ExpectedBridgeReply::Retire,
         BridgeCommand::DestroyMember(_) => ExpectedBridgeReply::Destroy,
+        BridgeCommand::ObserveSupervisorRotation(_) => ExpectedBridgeReply::SupervisorRotation,
         _ => ExpectedBridgeReply::Unknown,
     }
 }
@@ -179,6 +192,7 @@ fn reply_kind(reply: &BridgeReply) -> ExpectedBridgeReply {
         BridgeReply::Delivery(_) => ExpectedBridgeReply::Delivery,
         BridgeReply::Retire(_) => ExpectedBridgeReply::Retire,
         BridgeReply::Destroy(_) => ExpectedBridgeReply::Destroy,
+        BridgeReply::SupervisorRotation(_) => ExpectedBridgeReply::SupervisorRotation,
         BridgeReply::Rejected { .. } => ExpectedBridgeReply::Rejected,
         _ => ExpectedBridgeReply::Unknown,
     }

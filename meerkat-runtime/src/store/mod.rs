@@ -13,7 +13,8 @@ use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::runtime_state::RuntimeState;
 
-const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 1;
+const LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 1;
+const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 2;
 
 /// Errors from RuntimeStore operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -70,6 +71,232 @@ pub struct MachineLifecycleBindingFacts {
     runtime_epoch_id: Option<String>,
 }
 
+/// Durable identity receipt for the last completed supervisor revoke.
+///
+/// This is not a live supervisor binding and carries no route address. It is
+/// only the identity/key/epoch witness needed to authorize an exact duplicate
+/// revoke response after a cold restart; the current authenticated request
+/// supplies its current route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedSupervisorReceipt {
+    peer_id: String,
+    signing_public_key: String,
+    epoch: u64,
+}
+
+/// Durable current supervisor binding used to authenticate terminal retry
+/// traffic after a cold runtime restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorBindingReceipt {
+    name: String,
+    peer_id: String,
+    address: String,
+    signing_public_key: String,
+    epoch: u64,
+}
+
+/// Durable in-flight supervisor revocation receipt.
+///
+/// This is the closed-world hand-off between generated machine authority and
+/// the concrete router mutation.  It deliberately retains the complete prior
+/// route so a cold runtime can authenticate an exact retry and re-materialize
+/// the generated remove obligation without resurrecting a live binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorRevocationPendingReceipt {
+    name: String,
+    peer_id: String,
+    address: String,
+    signing_public_key: String,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationPersistencePhase {
+    PreviousRevokePending,
+    NextPublishPending,
+    Completed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorRotationRejection {
+    OperationConflict,
+    NotBound,
+    SenderMismatch,
+    TargetEpochNotAdvanced,
+    InvalidTarget,
+    UnsupportedProtocolVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorRotationReceipt {
+    operation_id: meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId,
+    phase: SupervisorRotationPersistencePhase,
+    rejection: Option<SupervisorRotationRejection>,
+    previous: SupervisorBindingReceipt,
+    next: SupervisorBindingReceipt,
+}
+
+impl SupervisorRotationReceipt {
+    pub(crate) fn new(
+        operation_id: meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId,
+        phase: SupervisorRotationPersistencePhase,
+        rejection: Option<SupervisorRotationRejection>,
+        previous: SupervisorBindingReceipt,
+        next: SupervisorBindingReceipt,
+    ) -> Self {
+        Self {
+            operation_id,
+            phase,
+            rejection,
+            previous,
+            next,
+        }
+    }
+
+    pub fn operation_id(
+        &self,
+    ) -> meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId {
+        self.operation_id
+    }
+
+    pub fn phase(&self) -> SupervisorRotationPersistencePhase {
+        self.phase
+    }
+
+    pub fn rejection(&self) -> Option<SupervisorRotationRejection> {
+        self.rejection
+    }
+
+    pub fn previous(&self) -> &SupervisorBindingReceipt {
+        &self.previous
+    }
+
+    pub fn next(&self) -> &SupervisorBindingReceipt {
+        &self.next
+    }
+}
+
+impl SupervisorBindingReceipt {
+    pub(crate) fn new(
+        name: String,
+        peer_id: String,
+        address: String,
+        signing_public_key: String,
+        epoch: u64,
+    ) -> Self {
+        Self {
+            name,
+            peer_id,
+            address,
+            signing_public_key,
+            epoch,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn peer_id(&self) -> &str {
+        &self.peer_id
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn signing_public_key(&self) -> &str {
+        &self.signing_public_key
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl RevokedSupervisorReceipt {
+    pub(crate) fn new(peer_id: String, signing_public_key: String, epoch: u64) -> Self {
+        Self {
+            peer_id,
+            signing_public_key,
+            epoch,
+        }
+    }
+
+    pub fn peer_id(&self) -> &str {
+        &self.peer_id
+    }
+
+    pub fn signing_public_key(&self) -> &str {
+        &self.signing_public_key
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl SupervisorRevocationPendingReceipt {
+    pub(crate) fn new(
+        name: String,
+        peer_id: String,
+        address: String,
+        signing_public_key: String,
+        epoch: u64,
+    ) -> Self {
+        Self {
+            name,
+            peer_id,
+            address,
+            signing_public_key,
+            epoch,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn peer_id(&self) -> &str {
+        &self.peer_id
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn signing_public_key(&self) -> &str {
+        &self.signing_public_key
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+/// Closed durable supervisor authority state. Each variant owns one complete
+/// recovery shape; terminal rotation receipts retain their exact operation and
+/// participant descriptors for idempotent submission and later observation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SupervisorAuthoritySnapshot {
+    #[default]
+    UnboundNoReceipt,
+    Bound(SupervisorBindingReceipt),
+    RevocationPending(SupervisorRevocationPendingReceipt),
+    RotationOperation(SupervisorRotationReceipt),
+    RevokedReceipt(RevokedSupervisorReceipt),
+    WithRotationHistory {
+        current: Box<SupervisorAuthoritySnapshot>,
+        terminal_receipts: std::collections::BTreeMap<
+            meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId,
+            SupervisorRotationReceipt,
+        >,
+    },
+}
+
 impl MachineLifecycleBindingFacts {
     pub(crate) fn new(
         agent_runtime_id: Option<String>,
@@ -107,13 +334,19 @@ impl MachineLifecycleBindingFacts {
 pub struct MachineLifecycleSnapshot {
     runtime_state: RuntimeState,
     binding: MachineLifecycleBindingFacts,
+    supervisor_authority: SupervisorAuthoritySnapshot,
 }
 
 impl MachineLifecycleSnapshot {
-    pub(crate) fn new(runtime_state: RuntimeState, binding: MachineLifecycleBindingFacts) -> Self {
+    pub(crate) fn new(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+    ) -> Self {
         Self {
             runtime_state,
             binding,
+            supervisor_authority,
         }
     }
 
@@ -126,10 +359,71 @@ impl MachineLifecycleSnapshot {
     pub fn binding(&self) -> &MachineLifecycleBindingFacts {
         &self.binding
     }
+
+    pub fn supervisor_authority(&self) -> &SupervisorAuthoritySnapshot {
+        &self.supervisor_authority
+    }
+}
+
+#[allow(
+    clippy::option_option,
+    reason = "serde distinguishes missing from explicit null"
+)]
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
+#[allow(
+    clippy::option_option,
+    reason = "serde distinguishes missing from explicit null"
+)]
+fn require_present_nullable<T>(
+    value: Option<Option<T>>,
+    field: &str,
+) -> Result<Option<T>, RuntimeStoreError> {
+    value.ok_or_else(|| {
+        RuntimeStoreError::ReadFailed(format!(
+            "machine lifecycle v2 field {field} is required (explicit null is allowed)"
+        ))
+    })
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MachineLifecycleBindingFactsStoreWire {
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes missing from explicit null"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    agent_runtime_id: Option<Option<String>>,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes missing from explicit null"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    fence_token: Option<Option<u64>>,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes missing from explicit null"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    runtime_generation: Option<Option<u64>>,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes missing from explicit null"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    runtime_epoch_id: Option<Option<String>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineLifecycleBindingFactsStoreWireV1 {
     agent_runtime_id: Option<String>,
     fence_token: Option<u64>,
     runtime_generation: Option<u64>,
@@ -139,16 +433,29 @@ struct MachineLifecycleBindingFactsStoreWire {
 impl From<&MachineLifecycleBindingFacts> for MachineLifecycleBindingFactsStoreWire {
     fn from(binding: &MachineLifecycleBindingFacts) -> Self {
         Self {
-            agent_runtime_id: binding.agent_runtime_id().map(ToOwned::to_owned),
-            fence_token: binding.fence_token(),
-            runtime_generation: binding.runtime_generation(),
-            runtime_epoch_id: binding.runtime_epoch_id().map(ToOwned::to_owned),
+            agent_runtime_id: Some(binding.agent_runtime_id().map(ToOwned::to_owned)),
+            fence_token: Some(binding.fence_token()),
+            runtime_generation: Some(binding.runtime_generation()),
+            runtime_epoch_id: Some(binding.runtime_epoch_id().map(ToOwned::to_owned)),
         }
     }
 }
 
-impl From<MachineLifecycleBindingFactsStoreWire> for MachineLifecycleBindingFacts {
-    fn from(binding: MachineLifecycleBindingFactsStoreWire) -> Self {
+impl TryFrom<MachineLifecycleBindingFactsStoreWire> for MachineLifecycleBindingFacts {
+    type Error = RuntimeStoreError;
+
+    fn try_from(binding: MachineLifecycleBindingFactsStoreWire) -> Result<Self, Self::Error> {
+        Ok(Self::new(
+            require_present_nullable(binding.agent_runtime_id, "binding.agent_runtime_id")?,
+            require_present_nullable(binding.fence_token, "binding.fence_token")?,
+            require_present_nullable(binding.runtime_generation, "binding.runtime_generation")?,
+            require_present_nullable(binding.runtime_epoch_id, "binding.runtime_epoch_id")?,
+        ))
+    }
+}
+
+impl From<MachineLifecycleBindingFactsStoreWireV1> for MachineLifecycleBindingFacts {
+    fn from(binding: MachineLifecycleBindingFactsStoreWireV1) -> Self {
         Self::new(
             binding.agent_runtime_id,
             binding.fence_token,
@@ -159,10 +466,689 @@ impl From<MachineLifecycleBindingFactsStoreWire> for MachineLifecycleBindingFact
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MachineLifecycleSnapshotStoreWire {
     record_version: u16,
     runtime_state: RuntimeState,
     binding: MachineLifecycleBindingFactsStoreWire,
+    supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
+}
+
+/// Exact pre-supervisor-authority lifecycle shape. Version 1 is decoded only
+/// through this migration carrier so a missing authority on a current record
+/// cannot be confused with legacy data.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineLifecycleSnapshotStoreWireV1 {
+    record_version: u16,
+    runtime_state: RuntimeState,
+    binding: MachineLifecycleBindingFactsStoreWireV1,
+}
+
+#[derive(serde::Deserialize)]
+struct MachineLifecycleSnapshotStoreVersionProbe {
+    record_version: u16,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum SupervisorAuthoritySnapshotStoreWire {
+    #[default]
+    UnboundNoReceipt,
+    Bound {
+        binding: SupervisorBindingReceiptStoreWire,
+    },
+    RevocationPending {
+        pending: SupervisorRevocationPendingReceiptStoreWire,
+    },
+    RotationOperation {
+        rotation: SupervisorRotationReceiptStoreWire,
+    },
+    RevokedReceipt {
+        receipt: RevokedSupervisorReceiptStoreWire,
+    },
+    WithRotationHistory {
+        current: Box<SupervisorAuthoritySnapshotStoreWire>,
+        terminal_receipts: Vec<SupervisorRotationReceiptStoreWire>,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorBindingReceiptStoreWire {
+    name: String,
+    peer_id: String,
+    address: String,
+    signing_public_key: String,
+    epoch: u64,
+}
+
+impl From<&SupervisorBindingReceipt> for SupervisorBindingReceiptStoreWire {
+    fn from(receipt: &SupervisorBindingReceipt) -> Self {
+        Self {
+            name: receipt.name().to_owned(),
+            peer_id: receipt.peer_id().to_owned(),
+            address: receipt.address().to_owned(),
+            signing_public_key: receipt.signing_public_key().to_owned(),
+            epoch: receipt.epoch(),
+        }
+    }
+}
+
+impl From<SupervisorBindingReceiptStoreWire> for SupervisorBindingReceipt {
+    fn from(receipt: SupervisorBindingReceiptStoreWire) -> Self {
+        Self::new(
+            receipt.name,
+            receipt.peer_id,
+            receipt.address,
+            receipt.signing_public_key,
+            receipt.epoch,
+        )
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokedSupervisorReceiptStoreWire {
+    peer_id: String,
+    signing_public_key: String,
+    epoch: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorRevocationPendingReceiptStoreWire {
+    name: String,
+    peer_id: String,
+    address: String,
+    signing_public_key: String,
+    epoch: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorRotationReceiptStoreWire {
+    operation_id: meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId,
+    phase: SupervisorRotationPersistencePhase,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes missing from explicit null"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    rejection: Option<Option<SupervisorRotationRejection>>,
+    previous: SupervisorBindingReceiptStoreWire,
+    next: SupervisorBindingReceiptStoreWire,
+}
+
+impl From<&SupervisorRotationReceipt> for SupervisorRotationReceiptStoreWire {
+    fn from(receipt: &SupervisorRotationReceipt) -> Self {
+        Self {
+            operation_id: receipt.operation_id(),
+            phase: receipt.phase(),
+            rejection: Some(receipt.rejection()),
+            previous: receipt.previous().into(),
+            next: receipt.next().into(),
+        }
+    }
+}
+
+impl TryFrom<SupervisorRotationReceiptStoreWire> for SupervisorRotationReceipt {
+    type Error = RuntimeStoreError;
+
+    fn try_from(receipt: SupervisorRotationReceiptStoreWire) -> Result<Self, Self::Error> {
+        Ok(Self::new(
+            receipt.operation_id,
+            receipt.phase,
+            require_present_nullable(receipt.rejection, "supervisor_authority.rotation.rejection")?,
+            receipt.previous.into(),
+            receipt.next.into(),
+        ))
+    }
+}
+
+impl From<&SupervisorRevocationPendingReceipt> for SupervisorRevocationPendingReceiptStoreWire {
+    fn from(receipt: &SupervisorRevocationPendingReceipt) -> Self {
+        Self {
+            name: receipt.name().to_owned(),
+            peer_id: receipt.peer_id().to_owned(),
+            address: receipt.address().to_owned(),
+            signing_public_key: receipt.signing_public_key().to_owned(),
+            epoch: receipt.epoch(),
+        }
+    }
+}
+
+impl From<SupervisorRevocationPendingReceiptStoreWire> for SupervisorRevocationPendingReceipt {
+    fn from(receipt: SupervisorRevocationPendingReceiptStoreWire) -> Self {
+        Self::new(
+            receipt.name,
+            receipt.peer_id,
+            receipt.address,
+            receipt.signing_public_key,
+            receipt.epoch,
+        )
+    }
+}
+
+impl From<&RevokedSupervisorReceipt> for RevokedSupervisorReceiptStoreWire {
+    fn from(receipt: &RevokedSupervisorReceipt) -> Self {
+        Self {
+            peer_id: receipt.peer_id().to_owned(),
+            signing_public_key: receipt.signing_public_key().to_owned(),
+            epoch: receipt.epoch(),
+        }
+    }
+}
+
+impl From<RevokedSupervisorReceiptStoreWire> for RevokedSupervisorReceipt {
+    fn from(receipt: RevokedSupervisorReceiptStoreWire) -> Self {
+        Self::new(receipt.peer_id, receipt.signing_public_key, receipt.epoch)
+    }
+}
+
+impl From<&SupervisorAuthoritySnapshot> for SupervisorAuthoritySnapshotStoreWire {
+    fn from(snapshot: &SupervisorAuthoritySnapshot) -> Self {
+        match snapshot {
+            SupervisorAuthoritySnapshot::UnboundNoReceipt => Self::UnboundNoReceipt,
+            SupervisorAuthoritySnapshot::Bound(binding) => Self::Bound {
+                binding: binding.into(),
+            },
+            SupervisorAuthoritySnapshot::RevocationPending(pending) => Self::RevocationPending {
+                pending: pending.into(),
+            },
+            SupervisorAuthoritySnapshot::RotationOperation(rotation) => Self::RotationOperation {
+                rotation: rotation.into(),
+            },
+            SupervisorAuthoritySnapshot::RevokedReceipt(receipt) => Self::RevokedReceipt {
+                receipt: receipt.into(),
+            },
+            SupervisorAuthoritySnapshot::WithRotationHistory {
+                current,
+                terminal_receipts,
+            } => Self::WithRotationHistory {
+                current: Box::new(current.as_ref().into()),
+                terminal_receipts: terminal_receipts.values().map(Into::into).collect(),
+            },
+        }
+    }
+}
+
+fn supervisor_authority_read_error(
+    context: &str,
+    detail: impl std::fmt::Display,
+) -> RuntimeStoreError {
+    RuntimeStoreError::ReadFailed(format!("{context}: {detail}"))
+}
+
+fn validate_supervisor_descriptor(
+    name: &str,
+    peer_id: &str,
+    address: &str,
+    signing_public_key: &str,
+    context: &str,
+) -> Result<(), RuntimeStoreError> {
+    let pubkey = crate::comms_drain::decode_supervisor_signing_public_key(signing_public_key)
+        .map_err(|error| supervisor_authority_read_error(context, error))?;
+    let spec = meerkat_contracts::wire::supervisor_bridge::BridgePeerSpec {
+        name: name.to_owned(),
+        peer_id: peer_id.to_owned(),
+        address: address.to_owned(),
+        pubkey,
+    };
+    meerkat_core::comms::TrustedPeerDescriptor::try_from(&spec)
+        .map(|_| ())
+        .map_err(|error| supervisor_authority_read_error(context, error))
+}
+
+fn validate_supervisor_binding_receipt(
+    receipt: &SupervisorBindingReceipt,
+    context: &str,
+) -> Result<(), RuntimeStoreError> {
+    validate_supervisor_descriptor(
+        receipt.name(),
+        receipt.peer_id(),
+        receipt.address(),
+        receipt.signing_public_key(),
+        context,
+    )
+}
+
+fn validate_revoked_supervisor_receipt(
+    receipt: &RevokedSupervisorReceipt,
+    context: &str,
+) -> Result<(), RuntimeStoreError> {
+    let pubkey =
+        crate::comms_drain::decode_supervisor_signing_public_key(receipt.signing_public_key())
+            .map_err(|error| supervisor_authority_read_error(context, error))?;
+    if pubkey.iter().all(|byte| *byte == 0) {
+        return Err(supervisor_authority_read_error(
+            context,
+            "supervisor signing public key must be non-zero",
+        ));
+    }
+    let peer_id = meerkat_core::comms::PeerId::parse(receipt.peer_id())
+        .map_err(|error| supervisor_authority_read_error(context, error))?;
+    let derived = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+    if peer_id != derived {
+        return Err(supervisor_authority_read_error(
+            context,
+            format!("peer id {peer_id} does not match signing-key-derived id {derived}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_supervisor_rotation_receipt(
+    receipt: &SupervisorRotationReceipt,
+    terminal_history: bool,
+) -> Result<(), RuntimeStoreError> {
+    let operation_id = receipt.operation_id();
+    if operation_id.as_uuid().is_nil() {
+        return Err(supervisor_authority_read_error(
+            "supervisor rotation operation",
+            "operation id must not be the nil UUID",
+        ));
+    }
+    validate_supervisor_binding_receipt(
+        receipt.previous(),
+        &format!("supervisor rotation {operation_id} previous authority is invalid"),
+    )?;
+
+    let rejection_matches = matches!(
+        (receipt.phase(), receipt.rejection()),
+        (
+            SupervisorRotationPersistencePhase::PreviousRevokePending
+                | SupervisorRotationPersistencePhase::NextPublishPending
+                | SupervisorRotationPersistencePhase::Completed,
+            None
+        ) | (SupervisorRotationPersistencePhase::Rejected, Some(_))
+    );
+    if !rejection_matches {
+        return Err(supervisor_authority_read_error(
+            "supervisor rotation operation",
+            format!("{operation_id} has inconsistent rejection state"),
+        ));
+    }
+    if terminal_history
+        && !matches!(
+            receipt.phase(),
+            SupervisorRotationPersistencePhase::Completed
+                | SupervisorRotationPersistencePhase::Rejected
+        )
+    {
+        return Err(supervisor_authority_read_error(
+            "supervisor rotation history",
+            format!("{operation_id} is not terminal"),
+        ));
+    }
+
+    match receipt.phase() {
+        SupervisorRotationPersistencePhase::PreviousRevokePending
+        | SupervisorRotationPersistencePhase::NextPublishPending => {
+            validate_supervisor_binding_receipt(
+                receipt.next(),
+                &format!("supervisor rotation {operation_id} target is invalid"),
+            )?;
+            if receipt.next().epoch() <= receipt.previous().epoch() {
+                return Err(supervisor_authority_read_error(
+                    "supervisor rotation operation",
+                    format!(
+                        "{operation_id} target epoch {} does not advance previous epoch {}",
+                        receipt.next().epoch(),
+                        receipt.previous().epoch()
+                    ),
+                ));
+            }
+        }
+        SupervisorRotationPersistencePhase::Completed => {
+            validate_supervisor_binding_receipt(
+                receipt.next(),
+                &format!("supervisor rotation {operation_id} target is invalid"),
+            )?;
+            // A legacy member may already have the exact target installed
+            // before the operation protocol assigns an id. Its adoption
+            // receipt is Completed with an exact previous == next witness.
+            let exact_current_adoption = receipt.previous() == receipt.next();
+            if !exact_current_adoption && receipt.next().epoch() <= receipt.previous().epoch() {
+                return Err(supervisor_authority_read_error(
+                    "supervisor rotation operation",
+                    format!(
+                        "{operation_id} completed target epoch {} does not advance previous epoch {}",
+                        receipt.next().epoch(),
+                        receipt.previous().epoch()
+                    ),
+                ));
+            }
+        }
+        SupervisorRotationPersistencePhase::Rejected => {
+            let Some(rejection) = receipt.rejection() else {
+                return Err(supervisor_authority_read_error(
+                    "supervisor rotation operation",
+                    format!("{operation_id} rejected without a rejection class"),
+                ));
+            };
+            match rejection {
+                SupervisorRotationRejection::InvalidTarget
+                | SupervisorRotationRejection::UnsupportedProtocolVersion => {
+                    // These two rejection classes retain the undecodable target
+                    // fields as raw evidence. They are deliberately exempt from
+                    // target descriptor validation and epoch comparison.
+                }
+                SupervisorRotationRejection::TargetEpochNotAdvanced => {
+                    validate_supervisor_binding_receipt(
+                        receipt.next(),
+                        &format!("supervisor rotation {operation_id} rejected target is invalid"),
+                    )?;
+                    if receipt.next().epoch() > receipt.previous().epoch() {
+                        return Err(supervisor_authority_read_error(
+                            "supervisor rotation operation",
+                            format!(
+                                "{operation_id} rejected as non-advancing but target epoch {} advances previous epoch {}",
+                                receipt.next().epoch(),
+                                receipt.previous().epoch()
+                            ),
+                        ));
+                    }
+                }
+                SupervisorRotationRejection::OperationConflict
+                | SupervisorRotationRejection::NotBound
+                | SupervisorRotationRejection::SenderMismatch => {
+                    return Err(supervisor_authority_read_error(
+                        "supervisor rotation operation",
+                        format!(
+                            "{operation_id} transient rejection {rejection:?} must not be persisted as a durable receipt"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+type SupervisorEpochKeyIndex = std::collections::BTreeMap<u64, [u8; 32]>;
+
+fn record_supervisor_epoch_key(
+    epochs: &mut SupervisorEpochKeyIndex,
+    epoch: u64,
+    signing_public_key: &str,
+    context: &str,
+) -> Result<(), RuntimeStoreError> {
+    let key = crate::comms_drain::decode_supervisor_signing_public_key(signing_public_key)
+        .map_err(|error| supervisor_authority_read_error(context, error))?;
+    if let Some(existing) = epochs.get(&epoch) {
+        if existing != &key {
+            return Err(supervisor_authority_read_error(
+                context,
+                format!("epoch {epoch} is bound to conflicting supervisor signing keys"),
+            ));
+        }
+    } else {
+        epochs.insert(epoch, key);
+    }
+    Ok(())
+}
+
+fn record_supervisor_binding_epoch(
+    epochs: &mut SupervisorEpochKeyIndex,
+    receipt: &SupervisorBindingReceipt,
+    context: &str,
+) -> Result<(), RuntimeStoreError> {
+    record_supervisor_epoch_key(
+        epochs,
+        receipt.epoch(),
+        receipt.signing_public_key(),
+        context,
+    )
+}
+
+fn record_rotation_authoritative_epochs(
+    epochs: &mut SupervisorEpochKeyIndex,
+    receipt: &SupervisorRotationReceipt,
+    context: &str,
+) -> Result<(), RuntimeStoreError> {
+    record_supervisor_binding_epoch(epochs, receipt.previous(), context)?;
+    if matches!(
+        receipt.phase(),
+        SupervisorRotationPersistencePhase::PreviousRevokePending
+            | SupervisorRotationPersistencePhase::NextPublishPending
+            | SupervisorRotationPersistencePhase::Completed
+    ) {
+        record_supervisor_binding_epoch(epochs, receipt.next(), context)?;
+    }
+    Ok(())
+}
+
+fn record_current_authoritative_epochs(
+    epochs: &mut SupervisorEpochKeyIndex,
+    current: &SupervisorAuthoritySnapshot,
+) -> Result<(), RuntimeStoreError> {
+    match current {
+        SupervisorAuthoritySnapshot::UnboundNoReceipt => Ok(()),
+        SupervisorAuthoritySnapshot::Bound(binding) => {
+            record_supervisor_binding_epoch(epochs, binding, "current supervisor authority")
+        }
+        SupervisorAuthoritySnapshot::RevocationPending(pending) => record_supervisor_epoch_key(
+            epochs,
+            pending.epoch(),
+            pending.signing_public_key(),
+            "current pending supervisor revocation authority",
+        ),
+        SupervisorAuthoritySnapshot::RotationOperation(rotation) => {
+            record_rotation_authoritative_epochs(
+                epochs,
+                rotation,
+                "current supervisor rotation authority",
+            )
+        }
+        SupervisorAuthoritySnapshot::RevokedReceipt(receipt) => record_supervisor_epoch_key(
+            epochs,
+            receipt.epoch(),
+            receipt.signing_public_key(),
+            "current revoked supervisor authority",
+        ),
+        SupervisorAuthoritySnapshot::WithRotationHistory { .. } => {
+            Err(RuntimeStoreError::ReadFailed(
+                "nested supervisor rotation history is not canonical".to_string(),
+            ))
+        }
+    }
+}
+
+fn current_supervisor_epoch(current: &SupervisorAuthoritySnapshot) -> Option<u64> {
+    match current {
+        SupervisorAuthoritySnapshot::UnboundNoReceipt => None,
+        SupervisorAuthoritySnapshot::Bound(binding) => Some(binding.epoch()),
+        SupervisorAuthoritySnapshot::RevocationPending(pending) => Some(pending.epoch()),
+        SupervisorAuthoritySnapshot::RotationOperation(rotation) => Some(match rotation.phase() {
+            SupervisorRotationPersistencePhase::PreviousRevokePending
+            | SupervisorRotationPersistencePhase::Rejected => rotation.previous().epoch(),
+            SupervisorRotationPersistencePhase::NextPublishPending
+            | SupervisorRotationPersistencePhase::Completed => rotation.next().epoch(),
+        }),
+        SupervisorAuthoritySnapshot::RevokedReceipt(receipt) => Some(receipt.epoch()),
+        SupervisorAuthoritySnapshot::WithRotationHistory { .. } => None,
+    }
+}
+
+fn terminal_rotation_authority_epoch(receipt: &SupervisorRotationReceipt) -> u64 {
+    match receipt.phase() {
+        SupervisorRotationPersistencePhase::Completed => receipt.next().epoch(),
+        SupervisorRotationPersistencePhase::Rejected => receipt.previous().epoch(),
+        SupervisorRotationPersistencePhase::PreviousRevokePending
+        | SupervisorRotationPersistencePhase::NextPublishPending => receipt.previous().epoch(),
+    }
+}
+
+fn validate_supervisor_rotation_history_coherence(
+    current: &SupervisorAuthoritySnapshot,
+    terminal_receipts: &std::collections::BTreeMap<
+        meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId,
+        SupervisorRotationReceipt,
+    >,
+) -> Result<(), RuntimeStoreError> {
+    let Some(current_epoch) = current_supervisor_epoch(current) else {
+        return Err(RuntimeStoreError::ReadFailed(
+            "supervisor rotation history requires a current authority epoch".to_string(),
+        ));
+    };
+
+    let mut epochs = SupervisorEpochKeyIndex::new();
+    record_current_authoritative_epochs(&mut epochs, current)?;
+    let mut history_high_water = 0;
+    for receipt in terminal_receipts.values() {
+        record_rotation_authoritative_epochs(
+            &mut epochs,
+            receipt,
+            "supervisor rotation history authority",
+        )?;
+        history_high_water = history_high_water.max(terminal_rotation_authority_epoch(receipt));
+    }
+    if current_epoch < history_high_water {
+        return Err(RuntimeStoreError::ReadFailed(format!(
+            "current supervisor epoch {current_epoch} is below terminal rotation history high-water {history_high_water}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_supervisor_authority_snapshot(
+    snapshot: &SupervisorAuthoritySnapshot,
+) -> Result<(), RuntimeStoreError> {
+    match snapshot {
+        SupervisorAuthoritySnapshot::UnboundNoReceipt => Ok(()),
+        SupervisorAuthoritySnapshot::Bound(binding) => {
+            validate_supervisor_binding_receipt(binding, "bound supervisor is invalid")
+        }
+        SupervisorAuthoritySnapshot::RevocationPending(pending) => validate_supervisor_descriptor(
+            pending.name(),
+            pending.peer_id(),
+            pending.address(),
+            pending.signing_public_key(),
+            "pending supervisor revocation authority is invalid",
+        ),
+        SupervisorAuthoritySnapshot::RotationOperation(rotation) => {
+            validate_supervisor_rotation_receipt(rotation, false)
+        }
+        SupervisorAuthoritySnapshot::RevokedReceipt(receipt) => {
+            validate_revoked_supervisor_receipt(receipt, "revoked supervisor receipt is invalid")
+        }
+        SupervisorAuthoritySnapshot::WithRotationHistory {
+            current,
+            terminal_receipts,
+        } => {
+            if matches!(
+                current.as_ref(),
+                SupervisorAuthoritySnapshot::WithRotationHistory { .. }
+            ) {
+                return Err(RuntimeStoreError::ReadFailed(
+                    "nested supervisor rotation history is not canonical".to_string(),
+                ));
+            }
+            if terminal_receipts.is_empty() {
+                return Err(RuntimeStoreError::ReadFailed(
+                    "empty supervisor rotation history wrapper is not canonical".to_string(),
+                ));
+            }
+            validate_supervisor_authority_snapshot(current)?;
+            for (operation_id, receipt) in terminal_receipts {
+                if operation_id != &receipt.operation_id() {
+                    return Err(RuntimeStoreError::ReadFailed(format!(
+                        "supervisor rotation history key {operation_id} does not match receipt id {}",
+                        receipt.operation_id()
+                    )));
+                }
+                validate_supervisor_rotation_receipt(receipt, true)?;
+            }
+            if let SupervisorAuthoritySnapshot::RotationOperation(active) = current.as_ref()
+                && terminal_receipts.contains_key(&active.operation_id())
+            {
+                return Err(RuntimeStoreError::ReadFailed(
+                    "active supervisor rotation is duplicated in terminal history".to_string(),
+                ));
+            }
+            validate_supervisor_rotation_history_coherence(current, terminal_receipts)
+        }
+    }
+}
+
+impl TryFrom<SupervisorAuthoritySnapshotStoreWire> for SupervisorAuthoritySnapshot {
+    type Error = RuntimeStoreError;
+
+    fn try_from(snapshot: SupervisorAuthoritySnapshotStoreWire) -> Result<Self, Self::Error> {
+        match snapshot {
+            SupervisorAuthoritySnapshotStoreWire::UnboundNoReceipt => Ok(Self::UnboundNoReceipt),
+            SupervisorAuthoritySnapshotStoreWire::Bound { binding } => {
+                let binding = binding.into();
+                validate_supervisor_binding_receipt(&binding, "bound supervisor is invalid")?;
+                Ok(Self::Bound(binding))
+            }
+            SupervisorAuthoritySnapshotStoreWire::RevocationPending { pending } => {
+                let pending: SupervisorRevocationPendingReceipt = pending.into();
+                validate_supervisor_descriptor(
+                    pending.name(),
+                    pending.peer_id(),
+                    pending.address(),
+                    pending.signing_public_key(),
+                    "pending supervisor revocation authority is invalid",
+                )?;
+                Ok(Self::RevocationPending(pending))
+            }
+            SupervisorAuthoritySnapshotStoreWire::RotationOperation { rotation } => {
+                let receipt: SupervisorRotationReceipt = rotation.try_into()?;
+                validate_supervisor_rotation_receipt(&receipt, false)?;
+                Ok(Self::RotationOperation(receipt))
+            }
+            SupervisorAuthoritySnapshotStoreWire::RevokedReceipt { receipt } => {
+                let receipt = receipt.into();
+                validate_revoked_supervisor_receipt(
+                    &receipt,
+                    "revoked supervisor receipt is invalid",
+                )?;
+                Ok(Self::RevokedReceipt(receipt))
+            }
+            SupervisorAuthoritySnapshotStoreWire::WithRotationHistory {
+                current,
+                terminal_receipts,
+            } => {
+                if terminal_receipts.is_empty() {
+                    return Err(RuntimeStoreError::ReadFailed(
+                        "empty supervisor rotation history wrapper is not canonical".to_string(),
+                    ));
+                }
+                let current = Self::try_from(*current)?;
+                if matches!(current, Self::WithRotationHistory { .. }) {
+                    return Err(RuntimeStoreError::ReadFailed(
+                        "nested supervisor rotation history is not canonical".to_string(),
+                    ));
+                }
+                let mut receipts = std::collections::BTreeMap::new();
+                for wire in terminal_receipts {
+                    let receipt: SupervisorRotationReceipt = wire.try_into()?;
+                    validate_supervisor_rotation_receipt(&receipt, true)?;
+                    if receipts.insert(receipt.operation_id(), receipt).is_some() {
+                        return Err(RuntimeStoreError::ReadFailed(
+                            "supervisor rotation history contains a duplicate operation id"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let Self::RotationOperation(active) = &current
+                    && receipts.contains_key(&active.operation_id())
+                {
+                    return Err(RuntimeStoreError::ReadFailed(
+                        "active supervisor rotation is duplicated in terminal history".to_string(),
+                    ));
+                }
+                let snapshot = Self::WithRotationHistory {
+                    current: Box::new(current),
+                    terminal_receipts: receipts,
+                };
+                validate_supervisor_authority_snapshot(&snapshot)?;
+                Ok(snapshot)
+            }
+        }
+    }
 }
 
 impl From<&MachineLifecycleSnapshot> for MachineLifecycleSnapshotStoreWire {
@@ -171,6 +1157,7 @@ impl From<&MachineLifecycleSnapshot> for MachineLifecycleSnapshotStoreWire {
             record_version: MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
             runtime_state: snapshot.runtime_state(),
             binding: snapshot.binding().into(),
+            supervisor_authority: snapshot.supervisor_authority().into(),
         }
     }
 }
@@ -185,16 +1172,44 @@ impl TryFrom<MachineLifecycleSnapshotStoreWire> for MachineLifecycleSnapshot {
                 record.record_version
             )));
         }
-        Ok(Self::new(record.runtime_state, record.binding.into()))
+        Ok(Self::new(
+            record.runtime_state,
+            record.binding.try_into()?,
+            record.supervisor_authority.try_into()?,
+        ))
     }
 }
 
 fn decode_machine_lifecycle_store_record(
     bytes: &[u8],
 ) -> Result<MachineLifecycleSnapshot, RuntimeStoreError> {
-    let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWire>(bytes)
+    let version = serde_json::from_slice::<MachineLifecycleSnapshotStoreVersionProbe>(bytes)
         .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-    MachineLifecycleSnapshot::try_from(record)
+    match version.record_version {
+        LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+            let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWireV1>(bytes)
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+            if record.record_version != LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+                return Err(RuntimeStoreError::ReadFailed(format!(
+                    "unsupported machine lifecycle store record version {}",
+                    record.record_version
+                )));
+            }
+            Ok(MachineLifecycleSnapshot::new(
+                record.runtime_state,
+                record.binding.into(),
+                SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            ))
+        }
+        MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+            let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWire>(bytes)
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+            MachineLifecycleSnapshot::try_from(record)
+        }
+        unsupported => Err(RuntimeStoreError::ReadFailed(format!(
+            "unsupported machine lifecycle store record version {unsupported}"
+        ))),
+    }
 }
 
 /// Load the last persisted runtime-state projection from a generated lifecycle
@@ -242,6 +1257,8 @@ impl MachineLifecycleStoreRecord {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, RuntimeStoreError> {
+        validate_supervisor_authority_snapshot(self.snapshot.supervisor_authority())
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
         let wire = MachineLifecycleSnapshotStoreWire::from(&self.snapshot);
         serde_json::to_vec(&wire).map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
     }
@@ -261,9 +1278,10 @@ impl MachineLifecycleCommit {
     pub(crate) fn new_with_binding(
         runtime_state: RuntimeState,
         binding: MachineLifecycleBindingFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
     ) -> Self {
         Self {
-            snapshot: MachineLifecycleSnapshot::new(runtime_state, binding),
+            snapshot: MachineLifecycleSnapshot::new(runtime_state, binding, supervisor_authority),
         }
     }
 
@@ -532,3 +1550,652 @@ pub trait RuntimeStore: Send + Sync {
 pub use memory::InMemoryRuntimeStore;
 #[cfg(feature = "sqlite-store")]
 pub use sqlite::SqliteRuntimeStore;
+
+#[cfg(test)]
+mod lifecycle_record_compatibility_tests {
+    use super::*;
+
+    fn operation_id(
+        value: u128,
+    ) -> meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId {
+        meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId::from_uuid(
+            uuid::Uuid::from_u128(value),
+        )
+    }
+
+    fn binding(seed: u8, name: &str, epoch: u64) -> SupervisorBindingReceipt {
+        let pubkey = [seed; 32];
+        SupervisorBindingReceipt::new(
+            name.to_string(),
+            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey).as_str(),
+            format!("inproc://{name}"),
+            crate::comms_drain::encode_supervisor_signing_public_key(pubkey),
+            epoch,
+        )
+    }
+
+    fn rotation(
+        operation_id: meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId,
+        phase: SupervisorRotationPersistencePhase,
+        rejection: Option<SupervisorRotationRejection>,
+        previous: SupervisorBindingReceipt,
+        next: SupervisorBindingReceipt,
+    ) -> SupervisorRotationReceipt {
+        SupervisorRotationReceipt::new(operation_id, phase, rejection, previous, next)
+    }
+
+    fn snapshot(authority: SupervisorAuthoritySnapshot) -> MachineLifecycleSnapshot {
+        MachineLifecycleSnapshot::new(
+            RuntimeState::Idle,
+            MachineLifecycleBindingFacts::new(None, None, None, None),
+            authority,
+        )
+    }
+
+    fn encode_snapshot(snapshot: &MachineLifecycleSnapshot) -> Vec<u8> {
+        MachineLifecycleStoreRecord::from_snapshot(snapshot)
+            .encode()
+            .expect("encode lifecycle snapshot")
+    }
+
+    fn encode_unvalidated_snapshot(snapshot: &MachineLifecycleSnapshot) -> Vec<u8> {
+        serde_json::to_vec(&MachineLifecycleSnapshotStoreWire::from(snapshot))
+            .expect("serialize deliberately corrupt lifecycle snapshot")
+    }
+
+    fn encoded_value(snapshot: &MachineLifecycleSnapshot) -> serde_json::Value {
+        serde_json::from_slice(&encode_snapshot(snapshot)).expect("decode encoded snapshot as JSON")
+    }
+
+    fn assert_decode_fails(value: serde_json::Value) {
+        let bytes = serde_json::to_vec(&value).expect("serialize corrupt lifecycle record");
+        assert!(
+            decode_machine_lifecycle_store_record(&bytes).is_err(),
+            "corrupt lifecycle record must fail closed: {value}"
+        );
+    }
+
+    #[test]
+    fn version_one_record_without_supervisor_authority_migrates_explicitly_to_unbound() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "record_version": LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            "runtime_state": RuntimeState::Retired,
+            "binding": {
+                "agent_runtime_id": "rt:session:legacy-v1",
+                "fence_token": 19,
+                "runtime_generation": 4,
+                "runtime_epoch_id": "epoch-legacy-v1"
+            }
+        }))
+        .expect("serialize legacy v1 lifecycle record");
+
+        let decoded = decode_machine_lifecycle_store_record(&bytes)
+            .expect("valid v1 record without the additive field must decode");
+        assert_eq!(decoded.runtime_state(), RuntimeState::Retired);
+        assert_eq!(
+            decoded.supervisor_authority(),
+            &SupervisorAuthoritySnapshot::UnboundNoReceipt
+        );
+    }
+
+    #[test]
+    fn version_two_record_requires_supervisor_authority() {
+        assert_decode_fails(serde_json::json!({
+            "record_version": MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            "runtime_state": RuntimeState::Idle,
+            "binding": {
+                "agent_runtime_id": null,
+                "fence_token": null,
+                "runtime_generation": null,
+                "runtime_epoch_id": null
+            }
+        }));
+    }
+
+    #[test]
+    fn version_two_nullable_fields_require_presence_but_accept_explicit_null() {
+        let unbound = snapshot(SupervisorAuthoritySnapshot::UnboundNoReceipt);
+        let encoded = encoded_value(&unbound);
+        assert_eq!(
+            decode_machine_lifecycle_store_record(
+                &serde_json::to_vec(&encoded).expect("serialize valid v2 record")
+            )
+            .expect("explicit-null v2 binding fields must decode"),
+            unbound
+        );
+
+        for field in [
+            "agent_runtime_id",
+            "fence_token",
+            "runtime_generation",
+            "runtime_epoch_id",
+        ] {
+            let mut partial = encoded.clone();
+            partial["binding"]
+                .as_object_mut()
+                .expect("binding object")
+                .remove(field);
+            assert_decode_fails(partial);
+        }
+
+        let completed = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+            operation_id(101),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            binding(30, "required-null-previous", 4),
+            binding(31, "required-null-next", 5),
+        )));
+        let mut missing_rejection = encoded_value(&completed);
+        assert!(missing_rejection["supervisor_authority"]["rotation"]["rejection"].is_null());
+        missing_rejection["supervisor_authority"]["rotation"]
+            .as_object_mut()
+            .expect("rotation object")
+            .remove("rejection");
+        assert_decode_fails(missing_rejection);
+    }
+
+    #[test]
+    fn version_one_migration_rejects_current_authority_fields() {
+        assert_decode_fails(serde_json::json!({
+            "record_version": LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            "runtime_state": RuntimeState::Idle,
+            "binding": {
+                "agent_runtime_id": null,
+                "fence_token": null,
+                "runtime_generation": null,
+                "runtime_epoch_id": null
+            },
+            "supervisor_authority": { "kind": "unbound_no_receipt" }
+        }));
+    }
+
+    #[test]
+    fn mixed_or_unknown_supervisor_authority_fields_fail_closed() {
+        let current = binding(1, "current-supervisor", 7);
+        let mut value = encoded_value(&snapshot(SupervisorAuthoritySnapshot::Bound(current)));
+        value["supervisor_authority"]["rotation"] = serde_json::json!({});
+        assert_decode_fails(value);
+    }
+
+    #[test]
+    fn completed_rotation_operation_receipt_round_trips_for_cold_observation() {
+        let snapshot = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+            operation_id(1),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            binding(1, "previous-supervisor", 7),
+            binding(2, "next-supervisor", 8),
+        )));
+
+        let encoded = encode_snapshot(&snapshot);
+        let decoded = decode_machine_lifecycle_store_record(&encoded)
+            .expect("decode completed rotation receipt");
+
+        assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn exact_current_completed_adoption_round_trips_but_other_equal_epoch_completion_fails() {
+        let current = binding(3, "already-rotated-supervisor", 9);
+        let adoption = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+            operation_id(2),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            current.clone(),
+            current,
+        )));
+        assert_eq!(
+            decode_machine_lifecycle_store_record(&encode_snapshot(&adoption))
+                .expect("exact-current legacy adoption receipt must decode"),
+            adoption
+        );
+
+        let non_advancing = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+            operation_id(3),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            binding(3, "previous-supervisor", 9),
+            binding(4, "different-supervisor", 9),
+        )));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&non_advancing))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_rotation_descriptors_epochs_and_operation_ids_fail_closed() {
+        let invalid_previous = SupervisorBindingReceipt::new(
+            String::new(),
+            "not-a-uuid".to_string(),
+            "not-an-address".to_string(),
+            "not-a-key".to_string(),
+            1,
+        );
+        let invalid_previous_receipt =
+            snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+                operation_id(4),
+                SupervisorRotationPersistencePhase::Rejected,
+                Some(SupervisorRotationRejection::InvalidTarget),
+                invalid_previous,
+                binding(5, "raw-target", 2),
+            )));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(
+                &invalid_previous_receipt,
+            ))
+            .is_err()
+        );
+
+        let invalid_next = SupervisorBindingReceipt::new(
+            "invalid-target".to_string(),
+            "not-a-uuid".to_string(),
+            "not-an-address".to_string(),
+            "not-a-key".to_string(),
+            2,
+        );
+        let invalid_completed_target =
+            snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+                operation_id(5),
+                SupervisorRotationPersistencePhase::Completed,
+                None,
+                binding(6, "previous-supervisor", 1),
+                invalid_next,
+            )));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(
+                &invalid_completed_target,
+            ))
+            .is_err()
+        );
+
+        let mut invalid_id = encoded_value(&snapshot(
+            SupervisorAuthoritySnapshot::RotationOperation(rotation(
+                operation_id(6),
+                SupervisorRotationPersistencePhase::PreviousRevokePending,
+                None,
+                binding(7, "previous-supervisor", 1),
+                binding(8, "next-supervisor", 2),
+            )),
+        ));
+        invalid_id["supervisor_authority"]["rotation"]["operation_id"] =
+            serde_json::json!("not-a-uuid");
+        assert_decode_fails(invalid_id);
+
+        let nil_id = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+            operation_id(0),
+            SupervisorRotationPersistencePhase::PreviousRevokePending,
+            None,
+            binding(7, "previous-supervisor", 1),
+            binding(8, "next-supervisor", 2),
+        )));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&nil_id)).is_err()
+        );
+
+        let non_advancing_pending =
+            snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+                operation_id(13),
+                SupervisorRotationPersistencePhase::PreviousRevokePending,
+                None,
+                binding(7, "previous-supervisor", 4),
+                binding(8, "next-supervisor", 4),
+            )));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(
+                &non_advancing_pending,
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejected_invalid_or_unsupported_target_preserves_raw_evidence() {
+        for (id, rejection) in [
+            (7, SupervisorRotationRejection::InvalidTarget),
+            (14, SupervisorRotationRejection::UnsupportedProtocolVersion),
+        ] {
+            let raw_invalid_target = SupervisorBindingReceipt::new(
+                "".to_string(),
+                "not-a-peer-id".to_string(),
+                "not-an-address".to_string(),
+                "not-a-signing-key".to_string(),
+                0,
+            );
+            let snapshot = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+                operation_id(id),
+                SupervisorRotationPersistencePhase::Rejected,
+                Some(rejection),
+                binding(9, "retained-supervisor", 11),
+                raw_invalid_target,
+            )));
+            assert_eq!(
+                decode_machine_lifecycle_store_record(&encode_snapshot(&snapshot))
+                    .expect("rejected raw target evidence must remain durable"),
+                snapshot
+            );
+        }
+    }
+
+    #[test]
+    fn only_raw_target_rejections_are_durable_and_epoch_rejection_must_be_genuine() {
+        for (id, rejection) in [
+            (102, SupervisorRotationRejection::OperationConflict),
+            (103, SupervisorRotationRejection::NotBound),
+            (104, SupervisorRotationRejection::SenderMismatch),
+        ] {
+            let impossible = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+                operation_id(id),
+                SupervisorRotationPersistencePhase::Rejected,
+                Some(rejection),
+                binding(32, "retained-supervisor", 7),
+                binding(33, "requested-supervisor", 8),
+            )));
+            assert!(
+                MachineLifecycleStoreRecord::from_snapshot(&impossible)
+                    .encode()
+                    .is_err()
+            );
+            assert!(
+                decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&impossible))
+                    .is_err()
+            );
+        }
+
+        let advancing = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+            operation_id(105),
+            SupervisorRotationPersistencePhase::Rejected,
+            Some(SupervisorRotationRejection::TargetEpochNotAdvanced),
+            binding(34, "retained-supervisor", 9),
+            binding(35, "advancing-target", 10),
+        )));
+        assert!(
+            MachineLifecycleStoreRecord::from_snapshot(&advancing)
+                .encode()
+                .is_err()
+        );
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&advancing))
+                .is_err()
+        );
+
+        let non_advancing = snapshot(SupervisorAuthoritySnapshot::RotationOperation(rotation(
+            operation_id(106),
+            SupervisorRotationPersistencePhase::Rejected,
+            Some(SupervisorRotationRejection::TargetEpochNotAdvanced),
+            binding(36, "retained-supervisor", 11),
+            binding(37, "non-advancing-target", 11),
+        )));
+        assert_eq!(
+            decode_machine_lifecycle_store_record(&encode_snapshot(&non_advancing))
+                .expect("genuine target-epoch rejection must remain durable"),
+            non_advancing
+        );
+    }
+
+    #[test]
+    fn malformed_current_authority_variants_fail_closed() {
+        let malformed = SupervisorBindingReceipt::new(
+            String::new(),
+            "not-a-peer-id".to_string(),
+            "not-an-address".to_string(),
+            "not-a-signing-key".to_string(),
+            1,
+        );
+        let bound = snapshot(SupervisorAuthoritySnapshot::Bound(malformed.clone()));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&bound)).is_err()
+        );
+
+        let pending = snapshot(SupervisorAuthoritySnapshot::RevocationPending(
+            SupervisorRevocationPendingReceipt::new(
+                malformed.name().to_owned(),
+                malformed.peer_id().to_owned(),
+                malformed.address().to_owned(),
+                malformed.signing_public_key().to_owned(),
+                malformed.epoch(),
+            ),
+        ));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&pending)).is_err()
+        );
+
+        let revoked = snapshot(SupervisorAuthoritySnapshot::RevokedReceipt(
+            RevokedSupervisorReceipt::new(
+                malformed.peer_id().to_owned(),
+                malformed.signing_public_key().to_owned(),
+                malformed.epoch(),
+            ),
+        ));
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&revoked)).is_err()
+        );
+    }
+
+    #[test]
+    fn partial_and_nonterminal_history_records_fail_closed() {
+        let receipt = rotation(
+            operation_id(8),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            binding(10, "history-previous", 1),
+            binding(11, "history-next", 2),
+        );
+        let history = std::collections::BTreeMap::from([(receipt.operation_id(), receipt)]);
+        let snapshot = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::Bound(binding(
+                12,
+                "current-supervisor",
+                3,
+            ))),
+            terminal_receipts: history,
+        });
+
+        let mut partial = encoded_value(&snapshot);
+        partial["supervisor_authority"]["terminal_receipts"][0]
+            .as_object_mut()
+            .expect("history receipt object")
+            .remove("next");
+        assert_decode_fails(partial);
+
+        let mut nonterminal = encoded_value(&snapshot);
+        nonterminal["supervisor_authority"]["terminal_receipts"][0]["phase"] =
+            serde_json::json!("next_publish_pending");
+        assert_decode_fails(nonterminal);
+    }
+
+    #[test]
+    fn duplicate_nested_and_active_history_conflicts_fail_closed() {
+        let history_receipt = rotation(
+            operation_id(9),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            binding(13, "history-previous", 1),
+            binding(14, "history-next", 2),
+        );
+        let history = std::collections::BTreeMap::from([(
+            history_receipt.operation_id(),
+            history_receipt.clone(),
+        )]);
+        let wrapper = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::Bound(binding(
+                15,
+                "current-supervisor",
+                3,
+            ))),
+            terminal_receipts: history,
+        });
+
+        let mut duplicate = encoded_value(&wrapper);
+        let receipt = duplicate["supervisor_authority"]["terminal_receipts"][0].clone();
+        duplicate["supervisor_authority"]["terminal_receipts"]
+            .as_array_mut()
+            .expect("history receipt array")
+            .push(receipt);
+        assert_decode_fails(duplicate);
+
+        let mut nested = encoded_value(&wrapper);
+        let nested_current = nested["supervisor_authority"].clone();
+        nested["supervisor_authority"]["current"] = nested_current;
+        assert_decode_fails(nested);
+
+        let active_conflict = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::RotationOperation(
+                history_receipt.clone(),
+            )),
+            terminal_receipts: std::collections::BTreeMap::from([(
+                history_receipt.operation_id(),
+                history_receipt,
+            )]),
+        });
+        assert!(
+            MachineLifecycleStoreRecord::from_snapshot(&active_conflict)
+                .encode()
+                .is_err()
+        );
+
+        let empty_history = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::Bound(binding(
+                20,
+                "current-supervisor",
+                4,
+            ))),
+            terminal_receipts: std::collections::BTreeMap::new(),
+        });
+        assert!(
+            MachineLifecycleStoreRecord::from_snapshot(&empty_history)
+                .encode()
+                .is_err()
+        );
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&empty_history))
+                .is_err()
+        );
+
+        let mismatched_key = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::Bound(binding(
+                21,
+                "current-supervisor",
+                4,
+            ))),
+            terminal_receipts: std::collections::BTreeMap::from([(
+                operation_id(99),
+                rotation(
+                    operation_id(98),
+                    SupervisorRotationPersistencePhase::Completed,
+                    None,
+                    binding(22, "history-previous", 2),
+                    binding(23, "history-next", 3),
+                ),
+            )]),
+        });
+        assert!(
+            MachineLifecycleStoreRecord::from_snapshot(&mismatched_key)
+                .encode()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn history_current_epoch_and_same_epoch_identity_must_cohere() {
+        let previous = binding(38, "history-previous", 12);
+        let next = binding(39, "history-next", 13);
+        let completed = rotation(
+            operation_id(107),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            previous.clone(),
+            next.clone(),
+        );
+        let history =
+            std::collections::BTreeMap::from([(completed.operation_id(), completed.clone())]);
+
+        let stale_current = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::Bound(binding(
+                38,
+                "refreshed-history-previous",
+                12,
+            ))),
+            terminal_receipts: history.clone(),
+        });
+        assert!(
+            MachineLifecycleStoreRecord::from_snapshot(&stale_current)
+                .encode()
+                .is_err()
+        );
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(&stale_current))
+                .is_err()
+        );
+
+        let conflicting_current = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::Bound(binding(
+                40,
+                "conflicting-current",
+                13,
+            ))),
+            terminal_receipts: history.clone(),
+        });
+        assert!(
+            MachineLifecycleStoreRecord::from_snapshot(&conflicting_current)
+                .encode()
+                .is_err()
+        );
+        assert!(
+            decode_machine_lifecycle_store_record(&encode_unvalidated_snapshot(
+                &conflicting_current,
+            ))
+            .is_err()
+        );
+
+        let route_refreshed_current = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::Bound(binding(
+                39,
+                "route-refreshed-history-next",
+                13,
+            ))),
+            terminal_receipts: history,
+        });
+        assert_eq!(
+            decode_machine_lifecycle_store_record(&encode_snapshot(&route_refreshed_current))
+                .expect("same identity may refresh route metadata within one epoch"),
+            route_refreshed_current
+        );
+    }
+
+    #[test]
+    fn terminal_history_survives_later_rotation_and_recovery() {
+        let first = rotation(
+            operation_id(10),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            binding(16, "first-supervisor", 1),
+            binding(17, "second-supervisor", 2),
+        );
+        let rejected = rotation(
+            operation_id(11),
+            SupervisorRotationPersistencePhase::Rejected,
+            Some(SupervisorRotationRejection::TargetEpochNotAdvanced),
+            binding(17, "second-supervisor", 2),
+            binding(18, "rejected-supervisor", 2),
+        );
+        let later = rotation(
+            operation_id(12),
+            SupervisorRotationPersistencePhase::Completed,
+            None,
+            binding(17, "second-supervisor", 2),
+            binding(19, "current-supervisor", 3),
+        );
+        let snapshot = snapshot(SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(SupervisorAuthoritySnapshot::RotationOperation(later)),
+            terminal_receipts: std::collections::BTreeMap::from([
+                (first.operation_id(), first),
+                (rejected.operation_id(), rejected),
+            ]),
+        });
+
+        let decoded = decode_machine_lifecycle_store_record(&encode_snapshot(&snapshot))
+            .expect("later rotation and old terminal history must recover together");
+        assert_eq!(decoded, snapshot);
+    }
+}

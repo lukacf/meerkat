@@ -2894,6 +2894,16 @@ pub enum MobLifecycleJournalKind {
     DestroyStorageFinalizing,
     #[serde(rename = "MemberSpawned")]
     MemberSpawned,
+    #[serde(rename = "MemberRetirementStartedReleasing")]
+    MemberRetirementStartedReleasing,
+    #[serde(rename = "MemberRetirementStartedPreservingBinding")]
+    MemberRetirementStartedPreservingBinding,
+    #[serde(rename = "MemberRetirementStartedPeerOnly")]
+    MemberRetirementStartedPeerOnly,
+    #[serde(rename = "RemoteMemberRuntimeRetired")]
+    RemoteMemberRuntimeRetired,
+    #[serde(rename = "RemoteMemberSupervisorRevoked")]
+    RemoteMemberSupervisorRevoked,
     #[serde(rename = "MemberRetired")]
     MemberRetired,
     #[serde(rename = "Reset")]
@@ -2906,6 +2916,13 @@ impl MobLifecycleJournalKind {
             Self::Destroying => "Destroying",
             Self::DestroyStorageFinalizing => "DestroyStorageFinalizing",
             Self::MemberSpawned => "MemberSpawned",
+            Self::MemberRetirementStartedReleasing => "MemberRetirementStartedReleasing",
+            Self::MemberRetirementStartedPreservingBinding => {
+                "MemberRetirementStartedPreservingBinding"
+            }
+            Self::MemberRetirementStartedPeerOnly => "MemberRetirementStartedPeerOnly",
+            Self::RemoteMemberRuntimeRetired => "RemoteMemberRuntimeRetired",
+            Self::RemoteMemberSupervisorRevoked => "RemoteMemberSupervisorRevoked",
             Self::MemberRetired => "MemberRetired",
             Self::Reset => "Reset",
         }
@@ -2919,6 +2936,13 @@ impl std::convert::TryFrom<&str> for MobLifecycleJournalKind {
             "Destroying" => Ok(Self::Destroying),
             "DestroyStorageFinalizing" => Ok(Self::DestroyStorageFinalizing),
             "MemberSpawned" => Ok(Self::MemberSpawned),
+            "MemberRetirementStartedReleasing" => Ok(Self::MemberRetirementStartedReleasing),
+            "MemberRetirementStartedPreservingBinding" => {
+                Ok(Self::MemberRetirementStartedPreservingBinding)
+            }
+            "MemberRetirementStartedPeerOnly" => Ok(Self::MemberRetirementStartedPeerOnly),
+            "RemoteMemberRuntimeRetired" => Ok(Self::RemoteMemberRuntimeRetired),
+            "RemoteMemberSupervisorRevoked" => Ok(Self::RemoteMemberSupervisorRevoked),
             "MemberRetired" => Ok(Self::MemberRetired),
             "Reset" => Ok(Self::Reset),
             other => Err(format!("invalid MobLifecycleJournalKind value `{other}`")),
@@ -4809,6 +4833,12 @@ pub struct State {
     pub member_kickoff_cancelled: std::collections::BTreeSet<AgentIdentity>,
     pub member_kickoff_error: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_restore_failures: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_restore_failure_codes: std::collections::BTreeMap<AgentIdentity, String>,
+    pub runtime_retire_refusal_codes: std::collections::BTreeMap<AgentRuntimeId, String>,
+    pub runtime_retire_refusal_reasons: std::collections::BTreeMap<AgentRuntimeId, String>,
+    pub runtime_retire_pending_sessions: std::collections::BTreeMap<AgentRuntimeId, SessionId>,
+    pub remote_runtime_retired_ids: std::collections::BTreeSet<AgentRuntimeId>,
+    pub remote_supervisor_revoked_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub member_revival_pending: std::collections::BTreeSet<AgentIdentity>,
     pub spawn_exec_phase: std::collections::BTreeMap<AgentIdentity, SpawnExecPhase>,
     pub member_state_markers: std::collections::BTreeMap<AgentRuntimeId, MobMemberState>,
@@ -4823,7 +4853,12 @@ pub struct State {
     pub supervisor_pending_authority_signing_key: Option<PeerSigningKey>,
     pub supervisor_pending_authority_epoch: Option<u64>,
     pub supervisor_pending_authority_protocol_version: Option<SupervisorProtocolVersion>,
+    pub supervisor_pending_authority_operation_id: Option<String>,
     pub supervisor_pending_authority_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+    pub supervisor_pending_authority_member_target_names:
+        std::collections::BTreeMap<PeerId, String>,
+    pub supervisor_pending_authority_member_target_addresses:
+        std::collections::BTreeMap<PeerId, String>,
     pub pending_recipient_trust: std::collections::BTreeSet<PeerId>,
     pub owner_bridge_session_id: Option<SessionId>,
     pub owner_bridge_destroy_on_archive: bool,
@@ -5245,6 +5280,26 @@ pub mod inputs {
         pub edge: WiringEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CleanupRetiringMemberWiring {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreRetiringMemberWiring {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WireExternalPeer {
         pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
@@ -5291,6 +5346,18 @@ pub mod inputs {
         pub b_peer_id: PeerId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeRetiringMemberTrustCleanupObserved {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub a_peer_id: PeerId,
+        pub b_identity: AgentIdentity,
+        pub b_peer_id: PeerId,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeExternalPeerReciprocalTrust {
         pub key: ExternalPeerKey,
         pub agent_identity: AgentIdentity,
@@ -5301,6 +5368,44 @@ pub mod inputs {
         pub edge: ExternalPeerEdge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CleanupRetiringExternalPeer {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreRetiringExternalPeer {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CleanupRetiringExternalPeerObservedAbsent {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreRetiringExternalPeerObservedAbsent {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitSupervisorRotation {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ProvisionSupervisorAuthority {
         pub peer_id: PeerId,
         pub signing_key: PeerSigningKey,
@@ -5308,29 +5413,30 @@ pub mod inputs {
         pub protocol_version: SupervisorProtocolVersion,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClearSupervisorPendingRotation {
-        pub current_peer_id: PeerId,
-        pub current_epoch: u64,
-        pub protocol_version: SupervisorProtocolVersion,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordSupervisorPendingRotation {
         pub current_peer_id: PeerId,
         pub current_epoch: u64,
+        pub current_protocol_version: SupervisorProtocolVersion,
+        pub operation_id: String,
         pub pending_peer_id: PeerId,
         pub pending_signing_key: PeerSigningKey,
         pub pending_epoch: u64,
-        pub protocol_version: SupervisorProtocolVersion,
+        pub pending_protocol_version: SupervisorProtocolVersion,
         pub accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+        pub active_peer_ids: std::collections::BTreeSet<PeerId>,
+        pub member_target_names: std::collections::BTreeMap<PeerId, String>,
+        pub member_target_addresses: std::collections::BTreeMap<PeerId, String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitSupervisorRotation {
         pub current_peer_id: PeerId,
         pub current_epoch: u64,
+        pub current_protocol_version: SupervisorProtocolVersion,
+        pub operation_id: String,
         pub next_peer_id: PeerId,
         pub next_signing_key: PeerSigningKey,
         pub next_epoch: u64,
-        pub protocol_version: SupervisorProtocolVersion,
+        pub next_protocol_version: SupervisorProtocolVersion,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClearSupervisorAuthorityForDestroy {
@@ -5345,11 +5451,14 @@ pub mod inputs {
         pub signing_key: PeerSigningKey,
         pub epoch: u64,
         pub protocol_version: SupervisorProtocolVersion,
+        pub pending_operation_id: Option<String>,
         pub pending_peer_id: Option<PeerId>,
         pub pending_signing_key: Option<PeerSigningKey>,
         pub pending_epoch: Option<u64>,
         pub pending_protocol_version: Option<SupervisorProtocolVersion>,
         pub pending_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+        pub pending_member_target_names: std::collections::BTreeMap<PeerId, String>,
+        pub pending_member_target_addresses: std::collections::BTreeMap<PeerId, String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordPendingRecipientTrust {
@@ -5388,6 +5497,51 @@ pub mod inputs {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub origin: WorkOrigin,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeBindingRefusal {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub session_id: SessionId,
+        pub refusal_code: String,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeIngressRefusal {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub session_id: SessionId,
+        pub work_id: WorkId,
+        pub origin: WorkOrigin,
+        pub refusal_code: String,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRuntimeRetireRefusal {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub session_id: SessionId,
+        pub refusal_code: String,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetryRuntimeRetire {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordRemoteMemberRuntimeRetired {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordRemoteMemberSupervisorRevoked {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelWork {
@@ -5805,6 +5959,8 @@ pub enum Input {
     WireMembers(inputs::WireMembers),
     WireMembersWithTrust(inputs::WireMembersWithTrust),
     UnwireMembers(inputs::UnwireMembers),
+    CleanupRetiringMemberWiring(inputs::CleanupRetiringMemberWiring),
+    RestoreRetiringMemberWiring(inputs::RestoreRetiringMemberWiring),
     WireExternalPeer(inputs::WireExternalPeer),
     RegisterMemberPeer(inputs::RegisterMemberPeer),
     AuthorizeMemberPeerRebind(inputs::AuthorizeMemberPeerRebind),
@@ -5813,10 +5969,17 @@ pub enum Input {
     AuthorizeMemberTrustUnwiring(inputs::AuthorizeMemberTrustUnwiring),
     AuthorizeMemberTrustCleanup(inputs::AuthorizeMemberTrustCleanup),
     AuthorizeMemberTrustCleanupObserved(inputs::AuthorizeMemberTrustCleanupObserved),
+    AuthorizeRetiringMemberTrustCleanupObserved(
+        inputs::AuthorizeRetiringMemberTrustCleanupObserved,
+    ),
     AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
+    CleanupRetiringExternalPeer(inputs::CleanupRetiringExternalPeer),
+    RestoreRetiringExternalPeer(inputs::RestoreRetiringExternalPeer),
+    CleanupRetiringExternalPeerObservedAbsent(inputs::CleanupRetiringExternalPeerObservedAbsent),
+    RestoreRetiringExternalPeerObservedAbsent(inputs::RestoreRetiringExternalPeerObservedAbsent),
+    AdmitSupervisorRotation(inputs::AdmitSupervisorRotation),
     ProvisionSupervisorAuthority(inputs::ProvisionSupervisorAuthority),
-    ClearSupervisorPendingRotation(inputs::ClearSupervisorPendingRotation),
     RecordSupervisorPendingRotation(inputs::RecordSupervisorPendingRotation),
     CommitSupervisorRotation(inputs::CommitSupervisorRotation),
     ClearSupervisorAuthorityForDestroy(inputs::ClearSupervisorAuthorityForDestroy),
@@ -5830,6 +5993,12 @@ pub enum Input {
     SessionIngressDetachFailedForMobDestroy(inputs::SessionIngressDetachFailedForMobDestroy),
     SubmitWork(inputs::SubmitWork),
     ResolveSubmitWorkRejection(inputs::ResolveSubmitWorkRejection),
+    ResolveRuntimeBindingRefusal(inputs::ResolveRuntimeBindingRefusal),
+    ResolveRuntimeIngressRefusal(inputs::ResolveRuntimeIngressRefusal),
+    ResolveRuntimeRetireRefusal(inputs::ResolveRuntimeRetireRefusal),
+    RetryRuntimeRetire(inputs::RetryRuntimeRetire),
+    RecordRemoteMemberRuntimeRetired(inputs::RecordRemoteMemberRuntimeRetired),
+    RecordRemoteMemberSupervisorRevoked(inputs::RecordRemoteMemberSupervisorRevoked),
     CancelWork(inputs::CancelWork),
     CancelAllWork(inputs::CancelAllWork),
     ResolveCancelAllWorkRejection(inputs::ResolveCancelAllWorkRejection),
@@ -5961,6 +6130,8 @@ impl Input {
             Self::WireMembers(_) => InputKind::WireMembers,
             Self::WireMembersWithTrust(_) => InputKind::WireMembersWithTrust,
             Self::UnwireMembers(_) => InputKind::UnwireMembers,
+            Self::CleanupRetiringMemberWiring(_) => InputKind::CleanupRetiringMemberWiring,
+            Self::RestoreRetiringMemberWiring(_) => InputKind::RestoreRetiringMemberWiring,
             Self::WireExternalPeer(_) => InputKind::WireExternalPeer,
             Self::RegisterMemberPeer(_) => InputKind::RegisterMemberPeer,
             Self::AuthorizeMemberPeerRebind(_) => InputKind::AuthorizeMemberPeerRebind,
@@ -5971,12 +6142,23 @@ impl Input {
             Self::AuthorizeMemberTrustCleanupObserved(_) => {
                 InputKind::AuthorizeMemberTrustCleanupObserved
             }
+            Self::AuthorizeRetiringMemberTrustCleanupObserved(_) => {
+                InputKind::AuthorizeRetiringMemberTrustCleanupObserved
+            }
             Self::AuthorizeExternalPeerReciprocalTrust(_) => {
                 InputKind::AuthorizeExternalPeerReciprocalTrust
             }
             Self::UnwireExternalPeer(_) => InputKind::UnwireExternalPeer,
+            Self::CleanupRetiringExternalPeer(_) => InputKind::CleanupRetiringExternalPeer,
+            Self::RestoreRetiringExternalPeer(_) => InputKind::RestoreRetiringExternalPeer,
+            Self::CleanupRetiringExternalPeerObservedAbsent(_) => {
+                InputKind::CleanupRetiringExternalPeerObservedAbsent
+            }
+            Self::RestoreRetiringExternalPeerObservedAbsent(_) => {
+                InputKind::RestoreRetiringExternalPeerObservedAbsent
+            }
+            Self::AdmitSupervisorRotation(_) => InputKind::AdmitSupervisorRotation,
             Self::ProvisionSupervisorAuthority(_) => InputKind::ProvisionSupervisorAuthority,
-            Self::ClearSupervisorPendingRotation(_) => InputKind::ClearSupervisorPendingRotation,
             Self::RecordSupervisorPendingRotation(_) => InputKind::RecordSupervisorPendingRotation,
             Self::CommitSupervisorRotation(_) => InputKind::CommitSupervisorRotation,
             Self::ClearSupervisorAuthorityForDestroy(_) => {
@@ -5996,6 +6178,16 @@ impl Input {
             }
             Self::SubmitWork(_) => InputKind::SubmitWork,
             Self::ResolveSubmitWorkRejection(_) => InputKind::ResolveSubmitWorkRejection,
+            Self::ResolveRuntimeBindingRefusal(_) => InputKind::ResolveRuntimeBindingRefusal,
+            Self::ResolveRuntimeIngressRefusal(_) => InputKind::ResolveRuntimeIngressRefusal,
+            Self::ResolveRuntimeRetireRefusal(_) => InputKind::ResolveRuntimeRetireRefusal,
+            Self::RetryRuntimeRetire(_) => InputKind::RetryRuntimeRetire,
+            Self::RecordRemoteMemberRuntimeRetired(_) => {
+                InputKind::RecordRemoteMemberRuntimeRetired
+            }
+            Self::RecordRemoteMemberSupervisorRevoked(_) => {
+                InputKind::RecordRemoteMemberSupervisorRevoked
+            }
             Self::CancelWork(_) => InputKind::CancelWork,
             Self::CancelAllWork(_) => InputKind::CancelAllWork,
             Self::ResolveCancelAllWorkRejection(_) => InputKind::ResolveCancelAllWorkRejection,
@@ -6128,6 +6320,8 @@ pub enum InputKind {
     WireMembers,
     WireMembersWithTrust,
     UnwireMembers,
+    CleanupRetiringMemberWiring,
+    RestoreRetiringMemberWiring,
     WireExternalPeer,
     RegisterMemberPeer,
     AuthorizeMemberPeerRebind,
@@ -6136,10 +6330,15 @@ pub enum InputKind {
     AuthorizeMemberTrustUnwiring,
     AuthorizeMemberTrustCleanup,
     AuthorizeMemberTrustCleanupObserved,
+    AuthorizeRetiringMemberTrustCleanupObserved,
     AuthorizeExternalPeerReciprocalTrust,
     UnwireExternalPeer,
+    CleanupRetiringExternalPeer,
+    RestoreRetiringExternalPeer,
+    CleanupRetiringExternalPeerObservedAbsent,
+    RestoreRetiringExternalPeerObservedAbsent,
+    AdmitSupervisorRotation,
     ProvisionSupervisorAuthority,
-    ClearSupervisorPendingRotation,
     RecordSupervisorPendingRotation,
     CommitSupervisorRotation,
     ClearSupervisorAuthorityForDestroy,
@@ -6151,6 +6350,12 @@ pub enum InputKind {
     SessionIngressDetachFailedForMobDestroy,
     SubmitWork,
     ResolveSubmitWorkRejection,
+    ResolveRuntimeBindingRefusal,
+    ResolveRuntimeIngressRefusal,
+    ResolveRuntimeRetireRefusal,
+    RetryRuntimeRetire,
+    RecordRemoteMemberRuntimeRetired,
+    RecordRemoteMemberSupervisorRevoked,
     CancelWork,
     CancelAllWork,
     ResolveCancelAllWorkRejection,
@@ -6231,17 +6436,12 @@ pub mod signals {
         pub fence_token: FenceToken,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RetireMember {
-        pub agent_identity: AgentIdentity,
-        pub agent_runtime_id: AgentRuntimeId,
-        pub fence_token: FenceToken,
-        pub session_id: Option<SessionId>,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitDestroyMemberRetire {
+        pub mob_id: MobId,
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub generation: Generation,
         pub session_id: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -6254,6 +6454,15 @@ pub mod signals {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveDestroyMemberRetirementArchived {
@@ -6325,9 +6534,38 @@ pub mod signals {
         pub generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterMemberRetirementStarted {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub generation: Generation,
+        pub releasing: Option<SessionId>,
+        pub session_id: Option<SessionId>,
+        pub retiring_peer_endpoint: Option<MemberPeerEndpoint>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRemoteMemberRuntimeRetired {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRemoteMemberSupervisorRevoked {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRosterMemberRetired {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConvergeRecoveredRosterTopology {
+        pub edge: WiringEdge,
+        pub a_identity: AgentIdentity,
+        pub b_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverMemberKickoff {
@@ -6358,11 +6596,14 @@ pub mod signals {
         pub signing_key: PeerSigningKey,
         pub epoch: u64,
         pub protocol_version: SupervisorProtocolVersion,
+        pub pending_operation_id: Option<String>,
         pub pending_peer_id: Option<PeerId>,
         pub pending_signing_key: Option<PeerSigningKey>,
         pub pending_epoch: Option<u64>,
         pub pending_protocol_version: Option<SupervisorProtocolVersion>,
         pub pending_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+        pub pending_member_target_names: std::collections::BTreeMap<PeerId, String>,
+        pub pending_member_target_addresses: std::collections::BTreeMap<PeerId, String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverOwnerBridgeSession {
@@ -6446,10 +6687,12 @@ pub mod signals {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Signal {
     ObserveRuntimeReady(signals::ObserveRuntimeReady),
-    RetireMember(signals::RetireMember),
     AdmitDestroyMemberRetire(signals::AdmitDestroyMemberRetire),
     ObserveRuntimeRetired(signals::ObserveRuntimeRetired),
     ObserveMemberRetirementArchived(signals::ObserveMemberRetirementArchived),
+    ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked(
+        signals::ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked,
+    ),
     ObserveDestroyMemberRetirementArchived(signals::ObserveDestroyMemberRetirementArchived),
     ResetMember(signals::ResetMember),
     RespawnMember(signals::RespawnMember),
@@ -6459,7 +6702,11 @@ pub enum Signal {
     RecoverRosterMember(signals::RecoverRosterMember),
     RecoverMemberSessionBinding(signals::RecoverMemberSessionBinding),
     RecoverRosterMemberReset(signals::RecoverRosterMemberReset),
+    RecoverRosterMemberRetirementStarted(signals::RecoverRosterMemberRetirementStarted),
+    RecoverRemoteMemberRuntimeRetired(signals::RecoverRemoteMemberRuntimeRetired),
+    RecoverRemoteMemberSupervisorRevoked(signals::RecoverRemoteMemberSupervisorRevoked),
     RecoverRosterMemberRetired(signals::RecoverRosterMemberRetired),
+    ConvergeRecoveredRosterTopology(signals::ConvergeRecoveredRosterTopology),
     RecoverMemberKickoff(signals::RecoverMemberKickoff),
     RecoverRosterWiring(signals::RecoverRosterWiring),
     RecoverRosterUnwire(signals::RecoverRosterUnwire),
@@ -6499,10 +6746,12 @@ impl Signal {
     pub fn kind(&self) -> SignalKind {
         match self {
             Self::ObserveRuntimeReady(_) => SignalKind::ObserveRuntimeReady,
-            Self::RetireMember(_) => SignalKind::RetireMember,
             Self::AdmitDestroyMemberRetire(_) => SignalKind::AdmitDestroyMemberRetire,
             Self::ObserveRuntimeRetired(_) => SignalKind::ObserveRuntimeRetired,
             Self::ObserveMemberRetirementArchived(_) => SignalKind::ObserveMemberRetirementArchived,
+            Self::ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked(_) => {
+                SignalKind::ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked
+            }
             Self::ObserveDestroyMemberRetirementArchived(_) => {
                 SignalKind::ObserveDestroyMemberRetirementArchived
             }
@@ -6514,7 +6763,17 @@ impl Signal {
             Self::RecoverRosterMember(_) => SignalKind::RecoverRosterMember,
             Self::RecoverMemberSessionBinding(_) => SignalKind::RecoverMemberSessionBinding,
             Self::RecoverRosterMemberReset(_) => SignalKind::RecoverRosterMemberReset,
+            Self::RecoverRosterMemberRetirementStarted(_) => {
+                SignalKind::RecoverRosterMemberRetirementStarted
+            }
+            Self::RecoverRemoteMemberRuntimeRetired(_) => {
+                SignalKind::RecoverRemoteMemberRuntimeRetired
+            }
+            Self::RecoverRemoteMemberSupervisorRevoked(_) => {
+                SignalKind::RecoverRemoteMemberSupervisorRevoked
+            }
             Self::RecoverRosterMemberRetired(_) => SignalKind::RecoverRosterMemberRetired,
+            Self::ConvergeRecoveredRosterTopology(_) => SignalKind::ConvergeRecoveredRosterTopology,
             Self::RecoverMemberKickoff(_) => SignalKind::RecoverMemberKickoff,
             Self::RecoverRosterWiring(_) => SignalKind::RecoverRosterWiring,
             Self::RecoverRosterUnwire(_) => SignalKind::RecoverRosterUnwire,
@@ -6557,10 +6816,10 @@ impl Signal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignalKind {
     ObserveRuntimeReady,
-    RetireMember,
     AdmitDestroyMemberRetire,
     ObserveRuntimeRetired,
     ObserveMemberRetirementArchived,
+    ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked,
     ObserveDestroyMemberRetirementArchived,
     ResetMember,
     RespawnMember,
@@ -6570,7 +6829,11 @@ pub enum SignalKind {
     RecoverRosterMember,
     RecoverMemberSessionBinding,
     RecoverRosterMemberReset,
+    RecoverRosterMemberRetirementStarted,
+    RecoverRemoteMemberRuntimeRetired,
+    RecoverRemoteMemberSupervisorRevoked,
     RecoverRosterMemberRetired,
+    ConvergeRecoveredRosterTopology,
     RecoverMemberKickoff,
     RecoverRosterWiring,
     RecoverRosterUnwire,
@@ -6664,11 +6927,38 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeRetire {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeDestroy {
         pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeBindingRefusalClassified {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub session_id: SessionId,
+        pub refusal_code: String,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeIngressRefusalClassified {
+        pub agent_runtime_id: AgentRuntimeId,
+        pub session_id: SessionId,
+        pub work_id: WorkId,
+        pub origin: WorkOrigin,
+        pub refusal_code: String,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeRetireRefusalClassified {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub session_id: SessionId,
+        pub refusal_code: String,
+        pub reason: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PendingSpawnOperationOwnerAuthorized {
@@ -7003,11 +7293,14 @@ pub mod effects {
         pub signing_key: PeerSigningKey,
         pub epoch: u64,
         pub protocol_version: SupervisorProtocolVersion,
+        pub pending_operation_id: Option<String>,
         pub pending_peer_id: Option<PeerId>,
         pub pending_signing_key: Option<PeerSigningKey>,
         pub pending_epoch: Option<u64>,
         pub pending_protocol_version: Option<SupervisorProtocolVersion>,
         pub pending_accepted_peer_ids: std::collections::BTreeSet<PeerId>,
+        pub pending_member_target_names: std::collections::BTreeMap<PeerId, String>,
+        pub pending_member_target_addresses: std::collections::BTreeMap<PeerId, String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeleteSupervisorAuthority {
@@ -7216,6 +7509,9 @@ pub enum Effect {
     CancelAllWorkRejected(effects::CancelAllWorkRejected),
     RequestRuntimeRetire(effects::RequestRuntimeRetire),
     RequestRuntimeDestroy(effects::RequestRuntimeDestroy),
+    RuntimeBindingRefusalClassified(effects::RuntimeBindingRefusalClassified),
+    RuntimeIngressRefusalClassified(effects::RuntimeIngressRefusalClassified),
+    RuntimeRetireRefusalClassified(effects::RuntimeRetireRefusalClassified),
     PendingSpawnOperationOwnerAuthorized(effects::PendingSpawnOperationOwnerAuthorized),
     RequestSessionIngressDetachForMobDestroy(effects::RequestSessionIngressDetachForMobDestroy),
     AppendLifecycleJournal(effects::AppendLifecycleJournal),
@@ -7328,6 +7624,9 @@ pub enum EffectKind {
     CancelAllWorkRejected,
     RequestRuntimeRetire,
     RequestRuntimeDestroy,
+    RuntimeBindingRefusalClassified,
+    RuntimeIngressRefusalClassified,
+    RuntimeRetireRefusalClassified,
     PendingSpawnOperationOwnerAuthorized,
     RequestSessionIngressDetachForMobDestroy,
     AppendLifecycleJournal,
@@ -7878,8 +8177,21 @@ pub enum TransitionId {
     RecoverMemberSessionBindingReplacingRunning,
     RecoverMemberSessionBindingAlreadyCurrentRunning,
     RecoverRosterMemberResetRunning,
+    RecoverRosterMemberRetirementStartedReleasing,
+    RecoverRosterMemberRetirementStartedReleasingAlreadyApplied,
+    RecoverRosterMemberRetirementStartedPreservingBinding,
+    RecoverRosterMemberRetirementStartedPeerOnly,
+    RecoverRemoteMemberRuntimeRetiredFreshRunning,
+    RecoverRemoteMemberRuntimeRetiredFreshStopped,
+    RecoverRemoteMemberRuntimeRetiredAlreadyRecordedRunning,
+    RecoverRemoteMemberRuntimeRetiredAlreadyRecordedStopped,
+    RecoverRemoteMemberSupervisorRevokedFreshRunning,
+    RecoverRemoteMemberSupervisorRevokedFreshStopped,
+    RecoverRemoteMemberSupervisorRevokedAlreadyRecordedRunning,
+    RecoverRemoteMemberSupervisorRevokedAlreadyRecordedStopped,
     RecoverRosterMemberRetiredRunning,
     RecoverRosterMemberRetiredAlreadyAbsent,
+    RecoverRosterMemberRetiredStaleGeneration,
     RecoverMemberKickoffPending,
     RecoverMemberKickoffStarting,
     RecoverMemberKickoffCallbackPending,
@@ -8015,15 +8327,36 @@ pub enum TransitionId {
     ResolveSubmitWorkRejectionRetiringAsMemberNotFound,
     ResolveSubmitWorkRejectionNotExternallyAddressable,
     ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable,
-    RetireMember,
-    RetireMemberPeerOnly,
+    ResolveRuntimeBindingRefusalRunning,
+    ResolveRuntimeIngressRefusalRunning,
+    ResolveRuntimeRetireRefusalRunning,
+    ResolveRuntimeRetireRefusalStopped,
+    RetryRuntimeRetireRunning,
+    RetryRuntimeRetireStopped,
+    RecordRemoteMemberRuntimeRetiredFreshRunning,
+    RecordRemoteMemberRuntimeRetiredFreshStopped,
+    RecordRemoteMemberRuntimeRetiredAlreadyRecordedRunning,
+    RecordRemoteMemberRuntimeRetiredAlreadyRecordedStopped,
+    RecordRemoteMemberSupervisorRevokedFreshRunning,
+    RecordRemoteMemberSupervisorRevokedFreshStopped,
+    RecordRemoteMemberSupervisorRevokedAlreadyRecordedRunning,
+    RecordRemoteMemberSupervisorRevokedAlreadyRecordedStopped,
     AdmitDestroyMemberRetireLiveRunning,
     AdmitDestroyMemberRetireLiveStopped,
     AdmitDestroyMemberRetirePeerOnlyRunning,
     AdmitDestroyMemberRetirePeerOnlyStopped,
-    AdmitDestroyMemberRetireAlreadyRetiringRunning,
-    AdmitDestroyMemberRetireAlreadyRetiringStopped,
+    AdmitDestroyMemberRetireAlreadyRetiringSessionRunning,
+    AdmitDestroyMemberRetireAlreadyRetiringSessionStopped,
+    AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionRunning,
+    AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionStopped,
+    AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyRunning,
+    AdmitDestroyMemberRetireAlreadyRetiringPeerOnlyStopped,
+    AdmitDestroyMemberRetireAlreadyArchivedRunning,
+    AdmitDestroyMemberRetireAlreadyArchivedStopped,
     ObserveRuntimeRetired,
+    ObserveRuntimeRetiredStopped,
+    ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedRunning,
+    ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedStopped,
     ObserveMemberRetirementArchivedLive,
     ObserveMemberRetirementArchivedLiveStopped,
     ObserveMemberRetirementArchivedRetired,
@@ -8032,10 +8365,14 @@ pub enum TransitionId {
     ObserveMemberRetirementArchivedStaleRuntimeStopped,
     ObserveMemberRetirementArchivedAlreadyCleared,
     ObserveMemberRetirementArchivedAlreadyClearedStopped,
+    ObserveMemberRetirementArchivedStaleRuntimeAlreadyCleared,
+    ObserveMemberRetirementArchivedStaleRuntimeAlreadyClearedStopped,
     ObserveDestroyMemberRetirementArchivedLiveRunning,
     ObserveDestroyMemberRetirementArchivedLiveStopped,
     ObserveDestroyMemberRetirementArchivedRetiredRunning,
     ObserveDestroyMemberRetirementArchivedRetiredStopped,
+    ObserveDestroyMemberRetirementArchivedAlreadyClearedRunning,
+    ObserveDestroyMemberRetirementArchivedAlreadyClearedStopped,
     ResetMember,
     RespawnMember,
     ResolveRespawnTopologyRestoreCompleted,
@@ -8075,8 +8412,21 @@ pub enum TransitionId {
     RecoverRosterWiringAlreadyRecovered,
     RecoverRosterUnwireRunning,
     RecoverRosterUnwireAlreadyAbsent,
+    ConvergeRecoveredRosterTopologyPruneRunning,
+    ConvergeRecoveredRosterTopologyPruneStopped,
+    ConvergeRecoveredRosterTopologyPruneCompleted,
+    ConvergeRecoveredRosterTopologyRetainRunning,
+    ConvergeRecoveredRosterTopologyRetainStopped,
+    ConvergeRecoveredRosterTopologyRetainCompleted,
+    ConvergeRecoveredRosterTopologyDestroyed,
     UnwireMembersRunning,
     UnwireMembersAlreadyAbsent,
+    CleanupRetiringMemberWiringRunning,
+    CleanupRetiringMemberWiringStopped,
+    CleanupRetiringMemberWiringAlreadyAbsentRunning,
+    CleanupRetiringMemberWiringAlreadyAbsentStopped,
+    RestoreRetiringMemberWiringRunning,
+    RestoreRetiringMemberWiringStopped,
     WireExternalPeerRunning,
     WireExternalPeerAlreadyWired,
     RegisterMemberPeerRunning,
@@ -8084,8 +8434,13 @@ pub enum TransitionId {
     AuthorizeMemberPeerOverlayRunning,
     AuthorizeMemberTrustWiringRunning,
     AuthorizeMemberTrustUnwiringRunning,
+    AuthorizeMemberTrustUnwiringStopped,
     AuthorizeMemberTrustCleanupRunning,
+    AuthorizeMemberTrustCleanupStopped,
     AuthorizeMemberTrustCleanupObservedRunning,
+    AuthorizeMemberTrustCleanupObservedStopped,
+    AuthorizeRetiringMemberTrustCleanupObservedRunning,
+    AuthorizeRetiringMemberTrustCleanupObservedStopped,
     AuthorizeExternalPeerReciprocalTrustRunning,
     RecoverExternalPeerWiringRunning,
     RecoverExternalPeerWiringAlreadyRecovered,
@@ -8093,6 +8448,16 @@ pub enum TransitionId {
     RecoverExternalPeerUnwireAlreadyAbsent,
     UnwireExternalPeerRunning,
     UnwireExternalPeerAlreadyAbsent,
+    CleanupRetiringExternalPeerRunning,
+    CleanupRetiringExternalPeerStopped,
+    RestoreRetiringExternalPeerRunning,
+    RestoreRetiringExternalPeerStopped,
+    CleanupRetiringExternalPeerObservedAbsentRunning,
+    CleanupRetiringExternalPeerObservedAbsentStopped,
+    RestoreRetiringExternalPeerObservedAbsentRunning,
+    RestoreRetiringExternalPeerObservedAbsentStopped,
+    AdmitSupervisorRotationRunning,
+    AdmitSupervisorRotationStopped,
     ProvisionSupervisorAuthorityRunning,
     ProvisionSupervisorAuthorityStopped,
     ProvisionSupervisorAuthorityCompleted,
@@ -8101,9 +8466,6 @@ pub enum TransitionId {
     RecoverSupervisorAuthorityStopped,
     RecoverSupervisorAuthorityCompleted,
     RecoverSupervisorAuthorityDestroyed,
-    ClearSupervisorPendingRotationRunning,
-    ClearSupervisorPendingRotationStopped,
-    ClearSupervisorPendingRotationCompleted,
     RecordSupervisorPendingRotationRunning,
     RecordSupervisorPendingRotationStopped,
     RecordSupervisorPendingRotationCompleted,
@@ -8480,6 +8842,12 @@ pub fn initial_state() -> State {
         member_kickoff_cancelled: Default::default(),
         member_kickoff_error: Default::default(),
         member_restore_failures: Default::default(),
+        member_restore_failure_codes: Default::default(),
+        runtime_retire_refusal_codes: Default::default(),
+        runtime_retire_refusal_reasons: Default::default(),
+        runtime_retire_pending_sessions: Default::default(),
+        remote_runtime_retired_ids: Default::default(),
+        remote_supervisor_revoked_ids: Default::default(),
         member_revival_pending: Default::default(),
         spawn_exec_phase: Default::default(),
         member_state_markers: Default::default(),
@@ -8494,7 +8862,10 @@ pub fn initial_state() -> State {
         supervisor_pending_authority_signing_key: None,
         supervisor_pending_authority_epoch: None,
         supervisor_pending_authority_protocol_version: None,
+        supervisor_pending_authority_operation_id: None,
         supervisor_pending_authority_accepted_peer_ids: Default::default(),
+        supervisor_pending_authority_member_target_names: Default::default(),
+        supervisor_pending_authority_member_target_addresses: Default::default(),
         pending_recipient_trust: Default::default(),
         owner_bridge_session_id: None,
         owner_bridge_destroy_on_archive: false,

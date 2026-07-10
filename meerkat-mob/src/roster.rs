@@ -192,8 +192,25 @@ impl Roster {
                     effective_profile_override: member_spawned.effective_profile_override.clone(),
                 });
             }
-            MobEventKind::MemberRetired { agent_identity, .. } => {
-                self.remove_by_identity(agent_identity);
+            // Retirement admission is not roster terminality. Keep the spawn
+            // projection intact so a restart retains the cleanup anchor.
+            MobEventKind::MemberRetirementStarted { .. }
+            | MobEventKind::RemoteMemberRuntimeRetired { .. }
+            | MobEventKind::RemoteMemberSupervisorRevoked { .. } => {}
+            MobEventKind::MemberRetired {
+                agent_identity,
+                generation,
+                ..
+            } => {
+                // A delayed completion for an older runtime generation must
+                // never erase a newer incarnation of the same stable identity.
+                if self
+                    .entries
+                    .get(agent_identity)
+                    .is_some_and(|entry| entry.generation == *generation)
+                {
+                    self.remove_by_identity(agent_identity);
+                }
             }
             MobEventKind::MemberReset {
                 agent_identity,

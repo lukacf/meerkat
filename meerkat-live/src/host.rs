@@ -41,7 +41,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use meerkat_core::RealtimeTranscriptEvent;
 use meerkat_core::ToolCallId;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::ToolError;
@@ -50,6 +49,9 @@ use meerkat_core::live_adapter::{
     LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
 };
 use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolName, ToolResult, Usage};
+use meerkat_core::{
+    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeUserContentApplyOutcome,
+};
 use tokio::sync::Mutex;
 
 /// Opaque channel identifier for a live adapter session.
@@ -444,6 +446,9 @@ pub enum ObservationOutcome {
         code: LiveAdapterErrorCode,
         message: String,
     },
+    /// Public receipt synthesized from the reducer result only after the
+    /// projection sink has durably committed canonical user content.
+    UserContentCommitted { observation: LiveAdapterObservation },
 }
 
 /// Why a tool call observation was not dispatched. Distinguishes "no
@@ -803,7 +808,7 @@ pub trait LiveProjectionSink: Send + Sync {
         &self,
         session_id: &SessionId,
         event: &RealtimeTranscriptEvent,
-    ) -> Result<(), LiveProjectionError>;
+    ) -> Result<RealtimeTranscriptApplyOutcome, LiveProjectionError>;
 }
 
 /// Errors returned by [`LiveProjectionSink`] implementations.
@@ -1010,8 +1015,8 @@ impl LiveProjectionSink for NoOpProjectionSink {
         &self,
         _session_id: &SessionId,
         _event: &RealtimeTranscriptEvent,
-    ) -> Result<(), LiveProjectionError> {
-        Ok(())
+    ) -> Result<RealtimeTranscriptApplyOutcome, LiveProjectionError> {
+        Ok(RealtimeTranscriptApplyOutcome::default())
     }
 }
 
@@ -1362,11 +1367,12 @@ pub enum LiveAdapterHostError {
 impl LiveAdapterHostError {
     /// Stable typed reason code for this host error (D153).
     ///
-    /// Transports surface this as the `WsErrorFrame.reason` so clients route
-    /// on a typed class rather than reparsing the human-readable `error`
-    /// message. The codes are stable wire strings; adding a variant must add
-    /// its code here (the match is exhaustive over the `#[non_exhaustive]`
-    /// enum from inside the crate).
+    /// Transport-fatal errors surface this as `WsErrorFrame.reason`; scoped
+    /// adapter rejections surface their structured code through
+    /// `CommandRejected`. In both cases clients route on a typed class rather
+    /// than reparsing a human-readable message. The codes are stable wire
+    /// strings; adding a variant must add its code here (the match is
+    /// exhaustive over the `#[non_exhaustive]` enum from inside the crate).
     #[must_use]
     pub fn reason_code(&self) -> &'static str {
         match self {
@@ -1402,9 +1408,7 @@ pub enum ObservationRouting {
     /// so the session layer's idempotent ordering / staging machinery owns
     /// materialization (P1#2). Replaces the prior `Noop` fallthrough that
     /// silently dropped these structured events.
-    AppendRealtimeTranscript {
-        event: RealtimeTranscriptEvent,
-    },
+    AppendRealtimeTranscript,
     DispatchToolCall {
         provider_call_id: String,
         tool_name: String,
@@ -2196,11 +2200,75 @@ impl LiveAdapterHost {
             // typed sink seam so the session runtime's idempotent ordering /
             // staging machinery owns materialization. Mirrors the seam wave-3
             // wired up for assistant deltas.
-            (ObservationRouting::AppendRealtimeTranscript { event }, _) => {
-                self.projection_sink
-                    .append_realtime_transcript(&session_id, &event)
+            (
+                ObservationRouting::AppendRealtimeTranscript,
+                LiveAdapterObservation::RealtimeTranscript { event },
+            ) => {
+                let outcome = self
+                    .projection_sink
+                    .append_realtime_transcript(&session_id, event)
                     .await?;
-                Ok(ObservationOutcome::TranscriptAppended)
+                match outcome.user_content {
+                    Some(RealtimeUserContentApplyOutcome::Committed(identity))
+                    | Some(RealtimeUserContentApplyOutcome::AlreadyCommitted(identity)) => {
+                        Ok(ObservationOutcome::UserContentCommitted {
+                            observation: LiveAdapterObservation::UserContentCommitted {
+                                idempotency_key: identity.idempotency_key,
+                                item_id: identity.item_id,
+                                previous_item_id: identity.previous_item_id,
+                                content_index: identity.content_index,
+                                media_type: identity.media_type,
+                            },
+                        })
+                    }
+                    Some(RealtimeUserContentApplyOutcome::RejectedInvalidIdentity {
+                        idempotency_key,
+                    }) => {
+                        let code = LiveAdapterErrorCode::ConfigRejected {
+                            reason: meerkat_core::live_adapter::LiveConfigRejectionReason::ImageInputIdempotencyKeyInvalid {
+                                max_bytes: meerkat_core::live_adapter::MAX_LIVE_IMAGE_IDEMPOTENCY_KEY_BYTES as u64,
+                                actual_bytes: idempotency_key.len() as u64,
+                            },
+                        };
+                        self.projection_sink
+                            .signal_terminal_error(
+                                &session_id,
+                                code.clone(),
+                                "invalid durable image identity",
+                            )
+                            .await?;
+                        Ok(ObservationOutcome::Terminal { code })
+                    }
+                    Some(RealtimeUserContentApplyOutcome::RejectedUnmaterializedPredecessor {
+                        ..
+                    }) => {
+                        let code = LiveAdapterErrorCode::ConfigRejected {
+                            reason: meerkat_core::live_adapter::LiveConfigRejectionReason::ImageInputRequiresCommit,
+                        };
+                        self.projection_sink
+                            .signal_terminal_error(
+                                &session_id,
+                                code.clone(),
+                                "image predecessor is not canonical",
+                            )
+                            .await?;
+                        Ok(ObservationOutcome::Terminal { code })
+                    }
+                    Some(RealtimeUserContentApplyOutcome::RejectedConflict { .. }) => {
+                        let code = LiveAdapterErrorCode::ConfigRejected {
+                            reason: meerkat_core::live_adapter::LiveConfigRejectionReason::ImageInputIdempotencyConflict,
+                        };
+                        self.projection_sink
+                            .signal_terminal_error(
+                                &session_id,
+                                code.clone(),
+                                "image idempotency conflict after provider acknowledgement",
+                            )
+                            .await?;
+                        Ok(ObservationOutcome::Terminal { code })
+                    }
+                    None => Ok(ObservationOutcome::TranscriptAppended),
+                }
             }
 
             (
@@ -2834,11 +2902,13 @@ impl LiveAdapterHost {
             // ordering. Without this route, ItemObserved / ItemSkipped /
             // AssistantTurnCompleted / AssistantTurnInterrupted dropped to
             // `Noop` and bypassed canonical staging.
-            LiveAdapterObservation::RealtimeTranscript { event } => {
-                ObservationRouting::AppendRealtimeTranscript {
-                    event: event.clone(),
-                }
+            LiveAdapterObservation::RealtimeTranscript { .. } => {
+                ObservationRouting::AppendRealtimeTranscript
             }
+            // Canonical persistence is owned by the immediately preceding
+            // RealtimeTranscript event. This redacted receipt exists only as
+            // a public transport ordering barrier.
+            LiveAdapterObservation::UserContentCommitted { .. } => ObservationRouting::Noop,
             LiveAdapterObservation::ToolCallRequested {
                 provider_call_id,
                 tool_name,
@@ -3660,6 +3730,21 @@ mod tests {
     }
 
     #[test]
+    fn user_content_committed_receipt_routes_to_noop() {
+        let obs = LiveAdapterObservation::UserContentCommitted {
+            idempotency_key: "image-request-1".into(),
+            item_id: "item_image".into(),
+            previous_item_id: None,
+            content_index: 0,
+            media_type: "image/png".into(),
+        };
+        assert_eq!(
+            LiveAdapterHost::classify_observation(&obs),
+            ObservationRouting::Noop
+        );
+    }
+
+    #[test]
     fn status_changed_routes_to_status_update() {
         let obs = LiveAdapterObservation::StatusChanged {
             status: LiveAdapterStatus::Degraded {
@@ -3794,6 +3879,9 @@ mod tests {
             provider_id: meerkat_core::Provider::Other,
             audio_config: None,
             runtime_system_context: vec![],
+            user_content_identities: vec![],
+            user_content_tombstones: vec![],
+            transcript_rewrite_generation: 0,
         };
 
         let err = host
@@ -4316,9 +4404,7 @@ mod tests {
         // through variant with the event preserved.
         let routing = LiveAdapterHost::classify_observation(&obs);
         match routing {
-            ObservationRouting::AppendRealtimeTranscript { event: routed } => {
-                assert_eq!(routed, event);
-            }
+            ObservationRouting::AppendRealtimeTranscript => {}
             other => panic!("expected AppendRealtimeTranscript, got {other:?}"),
         }
 
@@ -5509,12 +5595,12 @@ mod tests {
             &self,
             session_id: &SessionId,
             event: &RealtimeTranscriptEvent,
-        ) -> Result<(), LiveProjectionError> {
+        ) -> Result<RealtimeTranscriptApplyOutcome, LiveProjectionError> {
             self.realtime_events
                 .lock()
                 .unwrap()
                 .push((session_id.clone(), event.clone()));
-            Ok(())
+            Ok(RealtimeTranscriptApplyOutcome::default())
         }
     }
 

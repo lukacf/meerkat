@@ -1,10 +1,10 @@
 ---
 title: "Live Channels"
-description: "Open live audio/text channels on sessions using realtime-capable models and the live/* RPC surface."
+description: "Open live audio/text channels with model-gated image input using realtime-capable models and the live/* RPC surface."
 icon: "microphone"
 ---
 
-Live channels in Meerkat provide low-latency audio and text streaming through the `live/*` JSON-RPC methods. To use a live channel, create a session on a realtime-capable model (for example `gpt-realtime-2`) and call `live/open` to start the channel explicitly. Channel creation, status, refresh, input, interruption, truncation, and close are all caller-initiated through the live surface.
+Live channels in Meerkat provide low-latency audio and text streaming plus model-gated still-image input through the `live/*` JSON-RPC methods. To use a live channel, create a session on a realtime-capable model (for example `gpt-realtime-2`) and call `live/open` to start the channel explicitly. Channel creation, status, refresh, input, interruption, truncation, and close are all caller-initiated through the live surface.
 
 This guide covers how to open live channels, send input, and observe channel state.
 
@@ -13,12 +13,12 @@ This guide covers how to open live channels, send input, and observe channel sta
 Use this guide when you want to:
 
 - open a live audio/text channel on a session
-- send audio or text input to a live channel
+- send audio, text, or model-supported image input to a live channel
 - understand live channel lifecycle and capabilities
 - reason about live channels in the context of the normal session model
 
 <Note>
-`ModelCapabilities.realtime` remains the capability bit that gates whether `live/open` succeeds. The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket listener required for audio transport.
+`ModelCapabilities.realtime` remains the capability bit that gates whether `live/open` succeeds. Image input is a separate per-channel capability: check `LiveOpenResult.capabilities.image_in` before sending an image. The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket listener required for audio transport.
 </Note>
 
 ## Mental model
@@ -34,23 +34,23 @@ A session has exactly one conversation history. The session's LLM client is the 
                      | session.model = "gpt-realtime-2"
                      v
         +--------------------------+
-        | Live channel (caller-    |  audio ingress/egress,
-        | initiated via live/open) |  committed into session
-        +--------------------------+  at turn boundaries
+        | Live channel (caller-    |  audio/text at turn boundaries;
+        | initiated via live/open) |  images after provider ACK +
+        +--------------------------+  durable redacted receipt
 ```
 
 Key invariants:
 
-- **One canonical history.** The session is the source of conversational truth. Audio chunks commit into the same history as non-live turns, at turn boundaries via `live/commit_input`.
+- **One canonical history.** The session is the source of conversational truth. Committed audio and text join the same history as non-live turns at turn boundaries. A provider-acknowledged image is materialized and persisted as canonical context before the channel emits its redacted `user_content_committed` receipt.
 - **Capability gates channel open.** `ModelCapabilities.realtime` is the signal that determines whether `live/open` succeeds. No channel is opened automatically.
 - **Channel lifecycle is caller-initiated.** Call `live/open` to start a channel, `live/close` to end it, and `live/send_input` / `live/commit_input` / `live/interrupt` / `live/truncate` to control flow.
-- **Refresh without close/reopen.** `live/refresh` applies mutable session config (instructions, tools, audio format) to an open channel without interrupting audio flow. Identity swaps (model/provider) require `live/close` + `live/open`.
+- **Refresh without history replay.** `live/refresh` applies mutable session config (instructions, tools, audio format) to an open channel without interrupting audio flow. Identity swaps (model/provider) and canonical transcript or user-content-registry rewrites cannot be hot-applied; they return a typed reopen-required error and require `live/close` + `live/open`.
 
 ## Realtime-capable models
 
 `ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat-models`; the `ModelCapabilities` type lives in `meerkat_core::model_profile`). Capability is catalog data, not prefix inference:
 
-- **OpenAI**: `gpt-realtime-2` — the only realtime-capable model in the current catalog.
+- **OpenAI**: `gpt-realtime-2` — the only realtime-capable model in the current catalog, with still-image input advertised as `capabilities.image_in == true`.
 - **Gemini**: reserved for future `*-live*` endpoints — no production models today.
 - **Anthropic**: no realtime-capable models today.
 - **Self-hosted**: `realtime = false` by default.
@@ -106,6 +106,15 @@ async with MeerkatClient() as client:
 
 `live/open` returns a `LiveOpenResult` containing the transport bootstrap (e.g. WebSocket URL), `WireLiveChannelCapabilities`, and `WireLiveContinuityMode`. The `--live-ws <addr>` flag must be set on `rkat-rpc` for WebSocket transport.
 
+<Note>
+The direct WebSocket input path accepts JSON text chunks and negotiated raw
+PCM audio only, with a 2 MiB aggregate and per-frame ceiling. It does not
+accept inline images. Send every image through JSON-RPC `live/send_input`;
+the JSONL control plane accepts frames up to 64 MiB (excluding the newline),
+which accommodates the documented 20 MiB decoded-image ceiling plus base64
+and envelope overhead.
+</Note>
+
 ### Configuration defaults
 
 The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime-2"` makes live channels available by default. See the [Configuration guide](/concepts/configuration).
@@ -131,7 +140,7 @@ Use `live/status` to read the current state of a live channel:
 |--------|---------|
 | `live/open` | Open a live channel on a session; returns `LiveOpenResult` with transport bootstrap and capabilities |
 | `live/status` | Read live channel status |
-| `live/send_input` | Send an input chunk (audio/text) to a live channel |
+| `live/send_input` | Send an audio, text, or model-supported image chunk to a live channel |
 | `live/commit_input` | Commit pending input on a live channel (turn boundary) |
 | `live/interrupt` | Interrupt the assistant turn on a live channel (barge-in) |
 | `live/truncate` | Truncate assistant output at a client-tracked playback cursor |
@@ -141,6 +150,146 @@ Use `live/status` to read the current state of a live channel:
 <Warning>
 The `live/*` methods are registered when at least one live transport is configured: the WebSocket listener (`rkat-rpc --live-ws <addr>`) or WebRTC (builds with the `live-webrtc` feature). When no WebSocket listener is configured, `live/open` defaults to WebRTC transport; with neither transport configured, the `live/*` methods are not registered.
 </Warning>
+
+## Sending image input
+
+Image input is turn context, not a response trigger by itself. Check the
+channel's `image_in` capability, submit the image with a caller-stable
+`idempotency_key`, wait for its durable receipt, then follow it with dependent
+text or audio. On an explicitly committed channel, `live/commit_input` can
+request a response from image-only context after that receipt arrives.
+
+<CodeGroup>
+```json JSON-RPC
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "live/send_input",
+  "params": {
+    "channel_id": "ch_01936f8a-...",
+    "chunk": {
+      "kind": "image",
+      "idempotency_key": "turn-42-diagram",
+      "mime": "image/png",
+      "data": "iVBORw0KGgo..."
+    }
+  }
+}
+```
+
+```python Python SDK
+result = await client.live_open(session.id)
+if not result["capabilities"]["image_in"]:
+    raise RuntimeError("bound realtime model does not accept image input")
+
+await client.live_send_input_image(
+    result["channel_id"],
+    "turn-42-diagram",
+    "image/png",
+    image_data_base64,
+)
+# `status: "sent"` is queue acceptance. Wait for the matching
+# `user_content_committed` observation before sending dependent input.
+# (Transport observation-loop code is omitted here.)
+await client.live_send_input_text(
+    result["channel_id"],
+    "What is the dominant color in this image?",
+)
+```
+
+```typescript TypeScript SDK
+const result = await client.liveOpen({ session_id: session.id });
+if (!result.capabilities.image_in) {
+  throw new Error("bound realtime model does not accept image input");
+}
+
+await client.liveSendInputImage(
+  result.channel_id,
+  "turn-42-diagram",
+  "image/png",
+  imageDataBase64,
+);
+// Resolution is queue acceptance only. Wait for the matching durable
+// user_content_committed observation before sending dependent input.
+// (Transport observation-loop code is omitted here.)
+```
+</CodeGroup>
+
+The key is session-scoped and must be non-empty, at most 128 UTF-8 bytes, free
+of control characters, and have no leading or trailing whitespace. Keep it
+stable until the durable receipt arrives. Retrying the same key with the same
+canonical MIME type and image bytes does not resend the image to the provider;
+it returns the already-committed identity through another receipt. Reusing the
+key for different content fails closed with
+`image_input_idempotency_conflict`.
+
+The `data` value contains the encoded image bytes as standard base64; do not
+include a `data:` URL prefix. OpenAI Realtime currently admits PNG and JPEG,
+verifies that the byte signature agrees with the declared MIME type, and
+enforces a 20 MiB decoded-image safety ceiling before provider send. Invalid
+keys, malformed base64, unsupported MIME types, content mismatches, and oversized images use the
+typed rejection reasons `image_input_idempotency_key_invalid`,
+`image_input_invalid_base64`, `image_input_unsupported_mime`,
+`image_input_content_mismatch`, and `image_input_too_large`. Before provider
+send, Meerkat also checks the canonical session's cumulative decoded image
+history. A new image that would take that history above 40 MiB is rejected as
+`image_input_history_budget_exceeded`; it is not sent or persisted. A binding
+without image support uses `image_input_not_implemented`.
+
+Do not place an image behind uncommitted text or audio. Commit that input first,
+then submit the image as the first content in the fresh sequence; otherwise the
+adapter rejects it with `image_input_requires_commit`. This keeps the durable
+predecessor identity unambiguous.
+
+### Acceptance, rejection, and durability
+
+`live/send_input` has deliberately layered outcomes:
+
+| Evidence | What it proves | Client action |
+|----------|----------------|---------------|
+| Typed JSON-RPC error with `LiveSendInputErrorData.error_code` | The request failed wire validation or queue admission; it was not accepted | Correct the request or retry after backpressure |
+| `LiveSendInputResult { status: "sent" }` (or a resolved TypeScript helper promise) | The adapter command queue accepted the command | Continue observing the live channel; do not treat the image as durable yet |
+| `command_rejected` observation | A queued command failed a scoped adapter/provider check; the channel remains usable | Route on `code.reason.kind`, correct it, and retry as appropriate |
+| `user_content_committed` observation with the matching `idempotency_key` | Provider acknowledgement was projected into canonical history and persisted | The image is durable context; dependent input may proceed |
+
+The same rejection reason can be immediate or asynchronous depending on which
+layer detects it. For example, malformed base64 or an invalid key is rejected
+before queue acceptance, while a content conflict discovered against durable
+session identity is reported after the command drains. A terminal live error
+or a missing receipt is never evidence of persistence.
+
+For a WebRTC or direct-WebSocket channel, send the image through JSON-RPC
+`live/send_input`, not the WebRTC data channel or direct WebSocket. The data
+channel's fixed message ceiling is suitable
+for control/audio coordination but not full images. An image envelope delivered
+whole and decoded within the effective 65,535-byte ceiling receives the scoped
+`image_input_transport_unsupported` rejection, and that data channel remains
+open. A larger envelope may be rejected by the browser or SCTP transport before
+Meerkat can classify it, so it cannot receive a server-side typed rejection.
+Route every image through JSON-RPC; the data channel carries the receipt
+described below.
+
+If the adapter's bounded image queue or provider-ack window is full,
+`image_input_backpressured` reports the byte ceiling without retaining another
+caller payload. Retry the same key after earlier image receipts arrive.
+
+The public transport does not echo image bytes back. After Meerkat has applied
+the image to canonical session history, it emits a redacted
+`user_content_committed` observation containing the item identity, content
+index, media type, and caller `idempotency_key`. WebRTC callers must wait for
+that receipt before sending RTP audio that depends on the image.
+
+Reopening the same session hydrates blob-backed user images and replays the
+typed images to the provider. Canonical live image history has a 40 MiB
+aggregate decoded-image ceiling (two maximum-size images); every history
+occurrence counts, including repeated references to the same blob. The live
+input gate enforces that same ceiling before accepting each new image, so a
+successfully committed live image cannot make an otherwise valid session
+unreopenable later. Existing legacy or out-of-band history above the ceiling,
+a missing blob, or bytes that do not match the durable content-addressed
+identity still fail `live/open` instead of trimming or silently changing
+visual context. Reduce canonical history explicitly or start a fresh session;
+reconnect never substitutes placeholders for accepted images.
 
 ## End-to-end example
 
@@ -161,7 +310,8 @@ async with MeerkatClient() as client:
     result = await client.live_open(session.id)
     channel_id = result["channel_id"]
     # result["transport"] contains the WebSocket URL + token
-    # result["capabilities"] describes supported input/output modalities
+    # result["capabilities"] describes supported input/output modalities,
+    # including model-gated image_in
 
     # 3. Send audio input and commit at turn boundaries.
     await client.live_send_input_audio(channel_id, audio_data, 24000, 1)
@@ -193,8 +343,8 @@ Open a live channel against the member's session after the member is spawned.
 
 - **OpenAI Realtime API only.** The shipped provider integration is OpenAI's Realtime API (`gpt-realtime-2`). Azure OpenAI (`azure_openai`) and other providers are not yet wired into the live transport layer.
 - **One live channel per session.** A session has at most one live channel at a time. For per-member live channels in mobs, open channels against individual member sessions.
-- **Idle sessions cannot host a channel.** Start a turn or spawn the member first.
-- **Identity swaps require close/reopen.** `live/refresh` applies config-only changes (instructions, tools, audio format); model or provider swaps require `live/close` + `live/open`.
+- **Deferred sessions are model-gated.** `live/open` may materialize a deferred session whose resolved model is realtime-capable; a deferred non-realtime session is rejected before channel creation.
+- **Identity/history rewrites require close/reopen.** `live/refresh` applies config-only changes (instructions, tools, audio format); model/provider swaps and canonical transcript or user-content-registry rewrites require `live/close` + `live/open`.
 
 ## See also
 

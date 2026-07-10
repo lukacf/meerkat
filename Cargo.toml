@@ -151,7 +151,7 @@ meerkat-mcp-server = { version = "0.7.26", path = "meerkat-mcp-server" }
 meerkat-cli = { version = "0.7.26", path = "meerkat-cli" }
 meerkat-rest = { version = "0.7.26", path = "meerkat-rest" }
 meerkat = { version = "0.7.26", path = "meerkat", default-features = false }
-meerkat-comms = { version = "0.7.26", path = "meerkat-comms" }
+meerkat-comms = { version = "0.7.26", path = "meerkat-comms", default-features = false }
 meerkat-hooks = { version = "0.7.26", path = "meerkat-hooks" }
 meerkat-rpc = { version = "0.7.26", path = "meerkat-rpc", default-features = false }
 meerkat-live = { version = "0.7.26", path = "meerkat-live" }

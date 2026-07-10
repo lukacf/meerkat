@@ -633,6 +633,12 @@ pub struct CompositionDriver {
     /// returns dispatched inputs that the dispatcher routes via these
     /// declarations.
     pub dispatch_routes: Vec<DriverDispatchRoute>,
+    /// Typed feedback closures for consumer refusals on selected dispatch
+    /// routes. A routed effect is not complete merely because delivery was
+    /// attempted: when the consumer rejects the input, the producer machine
+    /// must receive one of these schema-checked inputs before the shell may
+    /// discard the failed effect or classify its terminality.
+    pub refusal_closures: Vec<DriverRefusalClosure>,
 }
 
 /// A single effect the driver observes from a producer machine.
@@ -658,6 +664,43 @@ pub struct DriverDispatchRoute {
     pub target_kind: RouteTargetKind,
     /// Typed slug for the dispatched variant, sum-tagged by input/signal.
     pub input_variant: RouteVariantId,
+}
+
+/// Generated producer-feedback closure for a refused driver dispatch.
+///
+/// `dispatch_route` identifies the ordinary producer -> consumer route. The
+/// closure targets an input on that route's producer instance, carrying
+/// correlation fields from the rejected effect plus the consumer's stable
+/// error code and display detail. This is deliberately distinct from an
+/// [`EffectHandoffProtocol`]: the effect was routed to another machine actor,
+/// not realized by an owner actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverRefusalClosure {
+    pub dispatch_route: RouteId,
+    pub feedback_instance: MachineInstanceId,
+    pub feedback_input: InputVariantId,
+    pub field_bindings: Vec<DriverRefusalFieldBinding>,
+}
+
+/// Binds one refusal-feedback input field to either the rejected producer
+/// effect or typed consumer-refusal context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverRefusalFieldBinding {
+    pub input_field: FieldId,
+    pub source: DriverRefusalFieldSource,
+}
+
+/// Source of a generated refusal-feedback field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriverRefusalFieldSource {
+    /// Copy a typed correlation field from the rejected producer effect.
+    EffectField(FieldId),
+    /// Preserve the consumer surface's stable error code. The feedback input
+    /// field must be `String`.
+    ConsumerErrorCode,
+    /// Preserve the consumer's human-readable detail. The feedback input
+    /// field must be `String`.
+    ConsumerErrorMessage,
 }
 
 /// Declares how a routed effect selects its concrete target machine instance.
@@ -1039,6 +1082,32 @@ impl CompositionSchema {
                     .map(|route| route.name.as_str()),
                 "composition driver dispatch route",
             )?;
+
+            let _ = unique_names(
+                driver
+                    .refusal_closures
+                    .iter()
+                    .map(|closure| closure.dispatch_route.as_str()),
+                "composition driver refusal closure",
+            )?;
+            for closure in &driver.refusal_closures {
+                if !machine_ids.contains(closure.feedback_instance.as_str()) {
+                    return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                        composition: self.name.as_str().to_owned(),
+                        detail: format!(
+                            "refusal closure for route `{}` targets unknown feedback instance `{}`",
+                            closure.dispatch_route, closure.feedback_instance
+                        ),
+                    });
+                }
+                let _ = unique_names(
+                    closure
+                        .field_bindings
+                        .iter()
+                        .map(|binding| binding.input_field.as_str()),
+                    "composition driver refusal closure target field",
+                )?;
+            }
         }
 
         let protocol_names = self
@@ -1654,6 +1723,173 @@ impl CompositionSchema {
                             effect_variant: declared_route.effect_variant.as_str().to_owned(),
                         },
                     );
+                }
+            }
+
+            for closure in &driver.refusal_closures {
+                let Some(dispatch) = driver
+                    .dispatch_routes
+                    .iter()
+                    .find(|dispatch| dispatch.name == closure.dispatch_route)
+                else {
+                    return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                        composition: self.name.as_str().to_owned(),
+                        detail: format!(
+                            "refusal closure references undeclared driver route `{}`",
+                            closure.dispatch_route
+                        ),
+                    });
+                };
+                let declared_route = self
+                    .routes
+                    .iter()
+                    .find(|route| route.name == dispatch.name)
+                    .ok_or_else(|| CompositionSchemaError::InvalidCompositionDriverBinding {
+                        composition: self.name.as_str().to_owned(),
+                        detail: format!(
+                            "refusal closure route `{}` has no composition route",
+                            closure.dispatch_route
+                        ),
+                    })?;
+                if closure.feedback_instance != declared_route.from_machine {
+                    return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                        composition: self.name.as_str().to_owned(),
+                        detail: format!(
+                            "refusal closure for route `{}` must feed producer instance `{}`, got `{}`",
+                            closure.dispatch_route,
+                            declared_route.from_machine,
+                            closure.feedback_instance
+                        ),
+                    });
+                }
+
+                let producer_schema = schemas
+                    .iter()
+                    .find(|schema| {
+                        self.machines.iter().any(|instance| {
+                            instance.instance_id == declared_route.from_machine
+                                && instance.machine_name.as_str() == schema.machine.as_str()
+                        })
+                    })
+                    .ok_or_else(|| CompositionSchemaError::InvalidCompositionDriverBinding {
+                        composition: self.name.as_str().to_owned(),
+                        detail: format!(
+                            "refusal closure route `{}` has no producer schema",
+                            closure.dispatch_route
+                        ),
+                    })?;
+                let effect_variant = producer_schema
+                    .effects
+                    .variant_named(declared_route.effect_variant.as_str())
+                    .map_err(CompositionSchemaError::MachineSchema)?;
+                let feedback_variant = producer_schema
+                    .inputs
+                    .variant_named(closure.feedback_input.as_str())
+                    .map_err(|_| CompositionSchemaError::InvalidCompositionDriverBinding {
+                        composition: self.name.as_str().to_owned(),
+                        detail: format!(
+                            "refusal closure for route `{}` targets unknown producer input `{}`",
+                            closure.dispatch_route, closure.feedback_input
+                        ),
+                    })?;
+
+                for field in &feedback_variant.fields {
+                    if !closure
+                        .field_bindings
+                        .iter()
+                        .any(|binding| binding.input_field == field.name)
+                    {
+                        return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                            composition: self.name.as_str().to_owned(),
+                            detail: format!(
+                                "refusal closure for route `{}` does not bind feedback field `{}`",
+                                closure.dispatch_route, field.name
+                            ),
+                        });
+                    }
+                }
+
+                let mut has_error_code = false;
+                let mut has_error_message = false;
+                for binding in &closure.field_bindings {
+                    let target_field = feedback_variant
+                        .field_named(binding.input_field.as_str())
+                        .map_err(|_| {
+                        CompositionSchemaError::InvalidCompositionDriverBinding {
+                            composition: self.name.as_str().to_owned(),
+                            detail: format!(
+                                "refusal closure for route `{}` binds unknown feedback field `{}`",
+                                closure.dispatch_route, binding.input_field
+                            ),
+                        }
+                    })?;
+                    match &binding.source {
+                        DriverRefusalFieldSource::EffectField(source_field) => {
+                            let source = effect_variant
+                                .field_named(source_field.as_str())
+                                .map_err(|_| {
+                                    CompositionSchemaError::InvalidCompositionDriverBinding {
+                                        composition: self.name.as_str().to_owned(),
+                                        detail: format!(
+                                            "refusal closure for route `{}` reads unknown effect field `{}`",
+                                            closure.dispatch_route, source_field
+                                        ),
+                                    }
+                                })?;
+                            if source.ty != target_field.ty {
+                                return Err(
+                                    CompositionSchemaError::InvalidCompositionDriverBinding {
+                                        composition: self.name.as_str().to_owned(),
+                                        detail: format!(
+                                            "refusal closure for route `{}` binds effect field `{}` ({:?}) to incompatible feedback field `{}` ({:?})",
+                                            closure.dispatch_route,
+                                            source_field,
+                                            source.ty,
+                                            binding.input_field,
+                                            target_field.ty
+                                        ),
+                                    },
+                                );
+                            }
+                        }
+                        DriverRefusalFieldSource::ConsumerErrorCode => {
+                            has_error_code = true;
+                            if target_field.ty != TypeRef::String {
+                                return Err(
+                                    CompositionSchemaError::InvalidCompositionDriverBinding {
+                                        composition: self.name.as_str().to_owned(),
+                                        detail: format!(
+                                            "refusal closure for route `{}` must bind consumer error code into a String field, got `{}`",
+                                            closure.dispatch_route, binding.input_field
+                                        ),
+                                    },
+                                );
+                            }
+                        }
+                        DriverRefusalFieldSource::ConsumerErrorMessage => {
+                            has_error_message = true;
+                            if target_field.ty != TypeRef::String {
+                                return Err(
+                                    CompositionSchemaError::InvalidCompositionDriverBinding {
+                                        composition: self.name.as_str().to_owned(),
+                                        detail: format!(
+                                            "refusal closure for route `{}` must bind consumer error message into a String field, got `{}`",
+                                            closure.dispatch_route, binding.input_field
+                                        ),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                if !has_error_code || !has_error_message {
+                    return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                        composition: self.name.as_str().to_owned(),
+                        detail: format!(
+                            "refusal closure for route `{}` must preserve both consumer error code and message",
+                            closure.dispatch_route
+                        ),
+                    });
                 }
             }
         }

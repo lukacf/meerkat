@@ -160,7 +160,7 @@ meerkat-schedule  → Scheduler: cron/interval triggers, occurrence lifecycle, d
 meerkat-mob-mcp   → Expose mob tools as MCP interface + agent-facing delegation tools (MobMcpState, MobMcpDispatcher, AgentMobToolSurface)
 meerkat-workgraph → Work graph (work items, dependencies) + agent-facing workgraph tools
 meerkat-runtime   → Runtime control plane (MeerkatMachine, ops lifecycle, runtime handles) between surfaces and core
-meerkat-live      → Live audio/text WebSocket transport (LiveAdapterHost bridge, mountable axum router)
+meerkat-live      → Live multimodal WebSocket transport (LiveAdapterHost bridge, mountable axum router)
 meerkat-cli       → CLI binary (produces `rkat`)
 meerkat           → Facade crate, re-exports, AgentFactory, SDK helpers
 meerkat-web-runtime → WASM browser deployment target (wasm_bindgen exports)

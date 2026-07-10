@@ -71,6 +71,7 @@ use meerkat_runtime::{
 };
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 
+use crate::callback_dispatcher::CallbackRequestEnvelope;
 use crate::error;
 use crate::protocol::RpcError;
 #[cfg(feature = "mcp")]
@@ -1351,15 +1352,7 @@ pub struct SessionRuntime {
     mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
     /// Channel for sending callback tool requests to the RPC server loop.
     /// Wrapped in `RwLock` so it can be set after Arc wrapping (server construction).
-    #[allow(clippy::type_complexity)]
-    callback_request_tx: StdRwLock<
-        Option<
-            mpsc::Sender<(
-                crate::protocol::RpcRequest,
-                tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
-            )>,
-        >,
-    >,
+    callback_request_tx: StdRwLock<Option<mpsc::Sender<CallbackRequestEnvelope>>>,
     /// Counter for generating unique server-originated callback request IDs.
     callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
     /// Globally registered callback tool definitions (via `tools/register`).
@@ -3071,6 +3064,20 @@ impl SessionRuntime {
             .await
     }
 
+    /// Build the config-only projection used by an already-open channel.
+    /// This deliberately skips historical image hydration/replay.
+    pub async fn live_refresh_config_for_session(
+        &self,
+        session_id: &SessionId,
+        turning_mode: meerkat_contracts::RealtimeTurningMode,
+    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .live_refresh_config_for_session(session_id, turning_mode)
+            .await
+    }
+
     /// Resolve the live LLM identity before generated live-open admission records it.
     ///
     /// Phase 4 R1: thin RPC shim — delegates to
@@ -4017,12 +4024,7 @@ impl SessionRuntime {
     /// mob resume that invokes an `ExternalToolsProvider`). The server
     /// constructor that accepts a pre-created rx will reuse this channel
     /// instead of creating a new one.
-    pub fn init_callback_channel(
-        &self,
-    ) -> mpsc::Receiver<(
-        crate::protocol::RpcRequest,
-        tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
-    )> {
+    pub fn init_callback_channel(&self) -> mpsc::Receiver<CallbackRequestEnvelope> {
         let (tx, rx) = mpsc::channel(crate::NOTIFICATION_CHANNEL_CAPACITY);
         let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let registered_tools = Arc::new(StdRwLock::new(Vec::new()));
@@ -4036,10 +4038,7 @@ impl SessionRuntime {
     /// (e.g. during `RpcServer` construction).
     pub fn set_callback_channel(
         &self,
-        tx: mpsc::Sender<(
-            crate::protocol::RpcRequest,
-            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
-        )>,
+        tx: mpsc::Sender<CallbackRequestEnvelope>,
         id_counter: Arc<std::sync::atomic::AtomicU64>,
         registered_tools: Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>,
     ) {
@@ -4058,14 +4057,7 @@ impl SessionRuntime {
     }
 
     /// Get a clone of the callback request sender, if configured.
-    pub fn callback_request_tx(
-        &self,
-    ) -> Option<
-        mpsc::Sender<(
-            crate::protocol::RpcRequest,
-            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
-        )>,
-    > {
+    pub fn callback_request_tx(&self) -> Option<mpsc::Sender<CallbackRequestEnvelope>> {
         self.callback_request_tx
             .read()
             .ok()
@@ -7367,9 +7359,17 @@ impl SessionRuntime {
         query: SessionQuery,
     ) -> Result<Vec<meerkat_contracts::WireSessionSummary>, RpcError> {
         let mut result = Vec::new();
+        let pending = self.staged_sessions.list(query.labels.as_ref()).await;
+        let pending_count = pending.len();
+        let requested_offset = query.offset.unwrap_or(0);
+        let requested_limit = query.limit;
 
         // Include pending sessions as synthetic entries.
-        for (session_id, info) in self.staged_sessions.list(query.labels.as_ref()).await {
+        let pending_iter = pending
+            .into_iter()
+            .skip(requested_offset)
+            .take(requested_limit.unwrap_or(usize::MAX));
+        for (session_id, info) in pending_iter {
             result.push(meerkat_contracts::WireSessionSummary {
                 session_id,
                 session_ref: None,
@@ -7382,10 +7382,18 @@ impl SessionRuntime {
             });
         }
 
-        // Include materialized sessions from the service.
+        // Continue pagination in the materialized store after the synthetic
+        // pending prefix. Passing the remaining limit/offset into the service
+        // prevents the RPC handler from loading the entire session catalog and
+        // truncating only after allocation.
+        let service_query = SessionQuery {
+            labels: query.labels,
+            offset: Some(requested_offset.saturating_sub(pending_count)),
+            limit: requested_limit.map(|limit| limit.saturating_sub(result.len())),
+        };
         let summaries = self
             .service
-            .list(query)
+            .list(service_query)
             .await
             .map_err(session_error_to_rpc)?;
         for summary in summaries {
@@ -7561,13 +7569,13 @@ impl SessionRuntime {
                 data: None,
             })?;
         let session_id = params.scope.session_id().clone();
+        let limit = params.limit.unwrap_or(1).max(1);
         let stored = self
             .service
-            .event_log_read_from(&session_id, from_seq)
+            .event_log_read_page(&session_id, from_seq, limit.saturating_add(1))
             .await
             .map_err(session_error_to_rpc)?
             .unwrap_or_default();
-        let limit = params.limit.unwrap_or(stored.len()).max(1);
         let has_more = stored.len() > limit;
         let events = stored
             .into_iter()

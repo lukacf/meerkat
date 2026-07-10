@@ -76,7 +76,15 @@ inventory::submit! {
         scope: meerkat_capabilities::CapabilityScope::Universal,
         requires_feature: Some("comms"),
         prerequisites: &[],
-        status_resolver: None,
+        status_resolver: Some(|_| {
+            if cfg!(feature = "capability") {
+                meerkat_capabilities::CapabilityStatus::Available
+            } else {
+                meerkat_capabilities::CapabilityStatus::NotCompiled {
+                    feature: "comms".into(),
+                }
+            }
+        }),
     }
 }
 
@@ -92,6 +100,27 @@ inventory::submit! {
         extensions: &[],
     }
 }
+
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "mob-communication",
+        name: "Mob Communication",
+        description: "How to communicate with peers in a collaborative mob",
+        scope: meerkat_core::skills::SkillScope::Builtin,
+        requires_capabilities: &["comms"],
+        body: include_str!("../skills/mob-communication/SKILL.md"),
+        extensions: &[],
+    }
+}
+
+/// Link anchor for binaries that need the comms-owned embedded skill
+/// declarations without enabling the full facade `comms` tool surface.
+///
+/// Referencing this symbol is sufficient to retain this crate's inventory
+/// submissions. It deliberately carries no policy: the declarations and
+/// their bodies remain owned here.
+#[doc(hidden)]
+pub fn link_embedded_skill_registrations() {}
 
 /// Confirm keep-alive mode availability when the comms crate is compiled in.
 ///

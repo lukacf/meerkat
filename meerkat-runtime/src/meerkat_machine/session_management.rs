@@ -308,6 +308,7 @@ impl MeerkatMachine {
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
+            supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
@@ -440,6 +441,7 @@ impl MeerkatMachine {
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
+            supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
@@ -626,6 +628,7 @@ impl MeerkatMachine {
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
+            supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
@@ -1006,6 +1009,7 @@ impl MeerkatMachine {
                 RuntimeSessionEntry {
                     runtime_id,
                     mutation_gate: Arc::clone(&mutation_gate),
+                    supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
                     control_projection,
                     driver: driver.clone(),
                     ops_lifecycle: recovered_ops.clone(),
@@ -1465,6 +1469,12 @@ impl MeerkatMachine {
         };
 
         if retry_final_unregister_only {
+            // The retry helper quiesces the supervisor-rotation carrier while
+            // holding the mutation gate, then re-acquires that gate before the
+            // final unregister commit. Release the caller's gate before
+            // entering that sequence so carrier shutdown cannot deadlock on
+            // this outer guard.
+            drop(gate_guard);
             return self
                 .retry_final_unregister_after_completed_drain(
                     session_id,
@@ -1478,7 +1488,7 @@ impl MeerkatMachine {
         // interrupt handle is captured before `take_loop_join_handle` empties
         // the attachment slot, so the drain can hard-cancel an in-flight run
         // (see Phase 4).
-        let (loop_handle, loop_interrupt_handle, drain_handle) = {
+        let (loop_handle, loop_interrupt_handle, drain_handle, rotation_slot) = {
             let mut sessions = self.sessions.write().await;
             match sessions.get_mut(session_id) {
                 Some(entry) => {
@@ -1487,10 +1497,16 @@ impl MeerkatMachine {
                         entry.take_loop_join_handle(),
                         interrupt_handle,
                         entry.drain_slot.abort_keeping_handle(),
+                        Some(Arc::clone(&entry.supervisor_rotation_task)),
                     )
                 }
-                None => (None, None, None),
+                None => (None, None, None, None),
             }
+        };
+        let rotation_handle = if let Some(slot) = rotation_slot {
+            slot.abort_keeping_handle().await
+        } else {
+            None
         };
 
         // Phase 3: drop the mutation gate so the in-flight run and the runtime
@@ -1581,6 +1597,19 @@ impl MeerkatMachine {
                     tracing::warn!(
                         %session_id,
                         "comms drain task did not quiesce within the unregister drain grace window; abandoning the already-aborted drain task so teardown cannot stall"
+                    );
+                }
+            }
+        }
+        if let Some(rotation_handle) = rotation_handle {
+            match rotation_handle.await {
+                Ok(()) => {}
+                Err(join_error) if join_error.is_cancelled() => {}
+                Err(join_error) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %join_error,
+                        "supervisor rotation worker ended abnormally during unregister drain"
                     );
                 }
             }
@@ -1718,16 +1747,24 @@ impl MeerkatMachine {
             }
         }
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized removing entry");
+        let (drain_task, rotation_task) = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return Ok(());
+            };
+            entry.close_handle_teardown_gate();
+            (
+                entry.drain_slot.take_handle(),
+                Arc::clone(&entry.supervisor_rotation_task),
+            )
+        };
+        if let Some(drain_task) = drain_task {
+            drain_task.abort();
+            let _ = drain_task.await;
+        }
+        rotation_task.abort_and_wait().await;
         let entry = {
             let mut sessions = self.sessions.write().await;
-            // Abort the drain slot inline before removing the entry — the
-            // slot is now owned by the entry itself (wave-c C-H2), so the
-            // "slot keys are a subset of registered-session keys" invariant
-            // is structural rather than enforced by ordering.
-            if let Some(entry) = sessions.get_mut(session_id) {
-                entry.close_handle_teardown_gate();
-                abort_slot(&mut entry.drain_slot);
-            }
             sessions.remove(session_id)
         };
         drop(entry);
@@ -1740,6 +1777,18 @@ impl MeerkatMachine {
         session_id: &SessionId,
         driver_handle: SharedDriver,
     ) -> Result<(), RuntimeDriverError> {
+        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            return Ok(());
+        };
+        let rotation_slot = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .map(|entry| Arc::clone(&entry.supervisor_rotation_task))
+        };
+        if let Some(rotation_slot) = rotation_slot {
+            rotation_slot.abort_and_wait().await;
+        }
         let (staged, durability_authority) =
             match self.stage_unregister_session_authority(session_id).await {
                 Ok(pair) => pair,
@@ -1799,12 +1848,24 @@ impl MeerkatMachine {
             }
             return Err(err);
         }
+        let (drain_task, rotation_task) = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return Ok(());
+            };
+            entry.close_handle_teardown_gate();
+            (
+                entry.drain_slot.take_handle(),
+                Arc::clone(&entry.supervisor_rotation_task),
+            )
+        };
+        if let Some(drain_task) = drain_task {
+            drain_task.abort();
+            let _ = drain_task.await;
+        }
+        rotation_task.abort_and_wait().await;
         let entry = {
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(session_id) {
-                entry.close_handle_teardown_gate();
-                abort_slot(&mut entry.drain_slot);
-            }
             sessions.remove(session_id)
         };
         drop(entry);
@@ -1814,6 +1875,40 @@ impl MeerkatMachine {
     /// Check whether a runtime driver is already registered for a session.
     pub async fn contains_session(&self, session_id: &SessionId) -> bool {
         self.sessions.read().await.contains_key(session_id)
+    }
+
+    /// Observe whether archiving still has runtime retirement work to finish.
+    ///
+    /// A live registration is immediate residue. After a process restart the
+    /// in-memory registry is empty, so the machine-owned durable lifecycle is
+    /// also consulted: a persisted non-terminal state is unfinished retirement
+    /// residue. [`RuntimeState::Retired`] and [`RuntimeState::Destroyed`] are
+    /// both quiescent terminal outcomes; `Retire` cannot and need not run from
+    /// Destroyed. An absent lifecycle row is likewise quiescent. Store read
+    /// failures are surfaced so callers fail closed instead of misclassifying
+    /// unknown durable state as a completed archive.
+    pub async fn archive_runtime_residue_present(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        if let Some(live_state) = self
+            .existing_session_visible_runtime_state(session_id)
+            .await
+        {
+            return Ok(!matches!(
+                live_state,
+                RuntimeState::Retired | RuntimeState::Destroyed
+            ));
+        }
+        let Some(store) = self.store.as_ref() else {
+            return Ok(false);
+        };
+        let runtime_id = LogicalRuntimeId::for_session(session_id);
+        let durable_state = crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+        Ok(durable_state
+            .is_some_and(|state| !matches!(state, RuntimeState::Retired | RuntimeState::Destroyed)))
     }
 
     /// Drop an in-memory, storeless WASM session entry after generated runtime
@@ -1949,6 +2044,15 @@ impl MeerkatMachine {
                 }
             }
         }
+        let rotation_slot = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(session_id)
+                .map(|entry| Arc::clone(&entry.supervisor_rotation_task))
+        };
+        if let Some(rotation_slot) = rotation_slot {
+            rotation_slot.abort_and_wait().await;
+        }
         let (staged, _durability) = match self.stage_unregister_session_authority(session_id).await
         {
             Ok(pair) => pair,
@@ -1973,11 +2077,24 @@ impl MeerkatMachine {
             return false;
         }
 
+        let (drain_task, rotation_task) = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return false;
+            };
+            entry.close_handle_teardown_gate();
+            (
+                entry.drain_slot.take_handle(),
+                Arc::clone(&entry.supervisor_rotation_task),
+            )
+        };
+        if let Some(drain_task) = drain_task {
+            drain_task.abort();
+            let _ = drain_task.await;
+        }
+        rotation_task.abort_and_wait().await;
         let entry = {
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(session_id) {
-                abort_slot(&mut entry.drain_slot);
-            }
             sessions.remove(session_id)
         };
         let Some(entry) = entry else {

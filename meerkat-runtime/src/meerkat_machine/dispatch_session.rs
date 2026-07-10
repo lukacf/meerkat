@@ -227,6 +227,12 @@ impl MeerkatMachine {
             )
         };
         let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
+        let terminal_supervisor_cleanup_bindings = matches!(
+            self.existing_session_runtime_state(&session_id).await,
+            Some(RuntimeState::Destroyed)
+        ) && self
+            .has_terminal_supervisor_cleanup_authority(&session_id)
+            .await;
         // Stage RegisterSession unconditionally: the generated machine owns
         // the idempotence verdict (`RegisterSessionIdempotent` no-ops a
         // same-binding re-registration), the revival verdict
@@ -234,13 +240,24 @@ impl MeerkatMachine {
         // Idle), and the Destroyed rejection (RegisterSession is not declared
         // from Destroyed). No shell probe of the authority state precedes the
         // staging.
+        let registration_input = if terminal_supervisor_cleanup_bindings {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareTerminalSupervisorCleanupBindings {
+                session_id: dsl_session_id,
+            }
+        } else {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: dsl_session_id,
+            }
+        };
         match self
             .stage_session_dsl_transition(
                 &session_id,
-                crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-                    session_id: dsl_session_id,
+                registration_input,
+                if terminal_supervisor_cleanup_bindings {
+                    "PrepareTerminalSupervisorCleanupBindings"
+                } else {
+                    "RegisterSession"
                 },
-                "RegisterSession",
             )
             .await
         {
@@ -279,7 +296,12 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings prepared generated registration"
         );
-        if preparation == SessionBindingPreparation::AuthoritativeRuntimeBinding {
+        if terminal_supervisor_cleanup_bindings {
+            tracing::debug!(
+                %session_id,
+                "preserving Destroyed lifecycle while installing terminal supervisor cleanup handles"
+            );
+        } else if preparation == SessionBindingPreparation::AuthoritativeRuntimeBinding {
             let runtime_id = {
                 tracing::debug!(
                     %session_id,

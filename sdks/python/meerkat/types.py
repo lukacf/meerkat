@@ -87,9 +87,23 @@ from .generated.types import (
     LiveOpenResult as LiveOpenResult,
     LiveWebrtcAnswerParams as LiveWebrtcAnswerParams,
     LiveWebrtcAnswerResult as LiveWebrtcAnswerResult,
+    LiveSendInputErrorData as LiveSendInputErrorData,
     LiveSendInputParams as LiveSendInputParams,
     LiveStatusResult as LiveStatusResult,
     LiveTruncateParams as LiveTruncateParams,
+    # Public-safe realtime transcript union. The internal byte-bearing
+    # `user_content_final` command is deliberately absent from this schema.
+    RealtimeTranscriptEvent as RealtimeTranscriptEvent,
+    RealtimeTranscriptEventItemObserved as RealtimeTranscriptEventItemObserved,
+    RealtimeTranscriptEventItemSkipped as RealtimeTranscriptEventItemSkipped,
+    RealtimeTranscriptEventUserTranscriptFinal as RealtimeTranscriptEventUserTranscriptFinal,
+    RealtimeTranscriptEventAssistantTextDelta as RealtimeTranscriptEventAssistantTextDelta,
+    RealtimeTranscriptEventAssistantTranscriptDelta as RealtimeTranscriptEventAssistantTranscriptDelta,
+    RealtimeTranscriptEventAssistantTranscriptTruncated as RealtimeTranscriptEventAssistantTranscriptTruncated,
+    RealtimeTranscriptEventAssistantTranscriptFinalText as RealtimeTranscriptEventAssistantTranscriptFinalText,
+    RealtimeTranscriptEventAssistantTurnCompleted as RealtimeTranscriptEventAssistantTurnCompleted,
+    RealtimeTranscriptEventAssistantTurnInterrupted as RealtimeTranscriptEventAssistantTurnInterrupted,
+    RealtimeTranscriptRole as RealtimeTranscriptRole,
     # CC5/CC6: typed wire mirrors for the live `capabilities` + `continuity`
     # shapes. Re-exported alongside `LiveOpenResult` so SDK consumers can
     # reach the typed booleans (`image_in`, `video_in`, etc.) and the
@@ -116,6 +130,7 @@ from .generated.types import (
     WireLiveAdapterObservationAssistantTranscriptFinal as WireLiveAdapterObservationAssistantTranscriptFinal,
     WireLiveAdapterObservationAssistantTranscriptTruncated as WireLiveAdapterObservationAssistantTranscriptTruncated,
     WireLiveAdapterObservationRealtimeTranscript as WireLiveAdapterObservationRealtimeTranscript,
+    WireLiveAdapterObservationUserContentCommitted as WireLiveAdapterObservationUserContentCommitted,
     WireLiveAdapterObservationToolCallRequested as WireLiveAdapterObservationToolCallRequested,
     WireLiveAdapterObservationTurnInterrupted as WireLiveAdapterObservationTurnInterrupted,
     WireLiveAdapterObservationTurnCompleted as WireLiveAdapterObservationTurnCompleted,
@@ -128,11 +143,23 @@ from .generated.types import (
     WireLiveConfigRejectionReasonChannelIdentitySwap as WireLiveConfigRejectionReasonChannelIdentitySwap,
     WireLiveConfigRejectionReasonNonRealtimeResolution as WireLiveConfigRejectionReasonNonRealtimeResolution,
     WireLiveConfigRejectionReasonImageInputNotImplemented as WireLiveConfigRejectionReasonImageInputNotImplemented,
+    WireLiveConfigRejectionReasonImageInputUnsupportedMime as WireLiveConfigRejectionReasonImageInputUnsupportedMime,
+    WireLiveConfigRejectionReasonImageInputContentMismatch as WireLiveConfigRejectionReasonImageInputContentMismatch,
+    WireLiveConfigRejectionReasonImageInputInvalidBase64 as WireLiveConfigRejectionReasonImageInputInvalidBase64,
+    WireLiveConfigRejectionReasonImageInputTooLarge as WireLiveConfigRejectionReasonImageInputTooLarge,
+    WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid as WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid,
+    WireLiveConfigRejectionReasonImageInputIdempotencyConflict as WireLiveConfigRejectionReasonImageInputIdempotencyConflict,
+    WireLiveConfigRejectionReasonImageInputRequiresCommit as WireLiveConfigRejectionReasonImageInputRequiresCommit,
+    WireLiveConfigRejectionReasonInputTooLarge as WireLiveConfigRejectionReasonInputTooLarge,
+    WireLiveConfigRejectionReasonInputBackpressured as WireLiveConfigRejectionReasonInputBackpressured,
+    WireLiveConfigRejectionReasonImageInputBackpressured as WireLiveConfigRejectionReasonImageInputBackpressured,
+    WireLiveConfigRejectionReasonImageInputTransportUnsupported as WireLiveConfigRejectionReasonImageInputTransportUnsupported,
     WireLiveConfigRejectionReasonVideoFrameInputNotImplemented as WireLiveConfigRejectionReasonVideoFrameInputNotImplemented,
     WireLiveConfigRejectionReasonUnsupportedInputChunkVariant as WireLiveConfigRejectionReasonUnsupportedInputChunkVariant,
     WireLiveConfigRejectionReasonRefreshModelSwap as WireLiveConfigRejectionReasonRefreshModelSwap,
     WireLiveConfigRejectionReasonRefreshProviderSwap as WireLiveConfigRejectionReasonRefreshProviderSwap,
     WireLiveConfigRejectionReasonRefreshAudioConfigMismatch as WireLiveConfigRejectionReasonRefreshAudioConfigMismatch,
+    WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen as WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen,
     WireLiveConfigRejectionReasonAudioInputFormatMismatch as WireLiveConfigRejectionReasonAudioInputFormatMismatch,
     WireLiveConfigRejectionReasonOther as WireLiveConfigRejectionReasonOther,
     WireLiveConfigRejectionReasonUnknown as WireLiveConfigRejectionReasonUnknown,
@@ -155,6 +182,7 @@ from .generated.types import (
     WireProvider as WireProvider,
     RealtimeAudioChunk as RealtimeAudioChunk,
     RealtimeCapabilities as RealtimeCapabilities,
+    RealtimeImageChunk as RealtimeImageChunk,
     RealtimeInputChunk as RealtimeInputChunk,
     RealtimeInputKind as RealtimeInputKind,
     RealtimeOutputKind as RealtimeOutputKind,
@@ -402,27 +430,67 @@ class ExternalEventOutcome(TypedDict, total=False):
     state: dict[str, Any] | None
 
 
-class ScheduleRecord(TypedDict, total=False):
-    """Canonical schedule payload."""
+class ScheduleRecord(TypedDict):
+    """Canonical flattened schedule payload returned by ``schedule/*``."""
 
     schedule_id: str
-    phase: str
+    phase: Literal["active", "paused", "deleted"]
     revision: int
-    name: str | None
-    description: str | None
     trigger: dict[str, Any]
     target: dict[str, Any]
+    misfire_policy: dict[str, Any]
+    overlap_policy: Literal["allow_concurrent", "skip_if_running"]
+    missing_target_policy: Literal["skip", "mark_misfired"]
+    next_occurrence_ordinal: int
+    planning_horizon_days: int
+    planning_horizon_occurrences: int
+    created_at_utc: str
+    updated_at_utc: str
     labels: dict[str, str]
+    superseded_ack_ids: list[str]
+    name: NotRequired[str | None]
+    description: NotRequired[str | None]
+    planning_cursor_utc: NotRequired[str | None]
+    deleted_at_utc: NotRequired[str | None]
 
 
-class ScheduleOccurrenceRecord(TypedDict, total=False):
+class ScheduleOccurrenceRecord(TypedDict):
     """Canonical schedule occurrence payload."""
 
     occurrence_id: str
     schedule_id: str
-    phase: str
+    schedule_revision: int
+    occurrence_ordinal: int
+    phase: Literal[
+        "pending",
+        "claimed",
+        "dispatching",
+        "awaiting_completion",
+        "completed",
+        "skipped",
+        "misfired",
+        "superseded",
+        "delivery_failed",
+    ]
     due_at_utc: str
+    trigger_snapshot: dict[str, Any]
+    target_snapshot: dict[str, Any]
+    misfire_policy: dict[str, Any]
+    overlap_policy: Literal["allow_concurrent", "skip_if_running"]
+    missing_target_policy: Literal["skip", "mark_misfired"]
     attempt_count: int
+    created_at_utc: str
+    claimed_by: NotRequired[str | None]
+    lease_expires_at_utc: NotRequired[str | None]
+    delivery_correlation_id: NotRequired[str | None]
+    last_receipt: NotRequired[dict[str, Any] | None]
+    failure_class: NotRequired[str | None]
+    runtime_outcome: NotRequired[dict[str, Any] | None]
+    failure_detail: NotRequired[str | None]
+    claimed_at_utc: NotRequired[str | None]
+    dispatched_at_utc: NotRequired[str | None]
+    completed_at_utc: NotRequired[str | None]
+    superseded_by_revision: NotRequired[int | None]
 
 
 class ScheduleListResult(TypedDict):

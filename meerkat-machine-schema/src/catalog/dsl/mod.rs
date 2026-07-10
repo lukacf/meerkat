@@ -595,6 +595,33 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "MaterializeAssistant",
                 ],
             ),
+            NamedTypeBinding::string_enum(
+                "RealtimeUserContentIdentityDisposition",
+                &[
+                    "RejectInvalidIdentity",
+                    "RejectUnmaterializedPredecessor",
+                    "RejectConflict",
+                    "AlreadyCommitted",
+                    "CommitNew",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RealtimeUserContentBlobStageDisposition",
+                &["RejectOccupied", "StageNew", "ReuseExact"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RealtimeUserContentBlobRecoveryDisposition",
+                &[
+                    "NoPending",
+                    "RetryExact",
+                    "CommitVerifiedBeforeCurrent",
+                    "ClearInvalidBeforeCurrent",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RealtimeUserContentBlobFinalizeDisposition",
+                &["RejectMismatch", "NoPending", "ClearCommitted"],
+            ),
             // Durable-config region typed vocabulary (folded from the retired
             // SessionDurableConfigAuthorityMachine).
             NamedTypeBinding::string_enum(
@@ -668,6 +695,10 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "SessionArchiveDisposition",
                 &["Archive", "AlreadyArchived"],
+            ),
+            NamedTypeBinding::string_enum(
+                "SessionArchiveRuntimeObservation",
+                &["Absent", "RetirementRequired", "QuiescentTerminal"],
             ),
         ],
         Vec::new(),
@@ -1504,11 +1535,20 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("MobPeerOverlayCommandKind", &["Wire", "Unwire"]),
             NamedTypeBinding::string_enum(
                 "SupervisorBridgeCommandAdmissionResultKind",
-                &["Accept", "Reject"],
+                &["Accept", "ResumePendingRevoke", "Reject"],
             ),
             NamedTypeBinding::string_enum(
                 "SupervisorBridgeCommandRejectionKind",
-                &["NotBound", "StaleSupervisor", "SenderMismatch"],
+                &[
+                    "NotBound",
+                    "StaleSupervisor",
+                    "SenderMismatch",
+                    "CommandNotAllowed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorCleanupCommandKind",
+                &["Retire", "Observe", "Destroy", "Revoke"],
             ),
             NamedTypeBinding::string_enum(
                 "SupervisorBindAdmissionResultKind",
@@ -1516,7 +1556,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "SupervisorBindRejectionKind",
-                &["AlreadyBound", "SenderMismatch"],
+                &["AlreadyBound", "SenderMismatch", "RevocationPending"],
             ),
             NamedTypeBinding::string_enum(
                 "SupervisorBindMaterialAdmissionKind",
@@ -1537,8 +1577,53 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Proceed", "IdempotentAck", "Reject"],
             ),
             NamedTypeBinding::string_enum(
+                "SupervisorRotationPhase",
+                &[
+                    "PreviousRevokePending",
+                    "NextPublishPending",
+                    "Completed",
+                    "Rejected",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorRotationSubmissionResultKind",
+                &[
+                    "New",
+                    "ExistingPending",
+                    "ExistingTerminal",
+                    "Rejected",
+                    "Conflict",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorRotationObservationStatusKind",
+                &[
+                    "NotFound",
+                    "PreviousRevokePending",
+                    "NextPublishPending",
+                    "Completed",
+                    "Rejected",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "SupervisorRotationRejectionKind",
+                &[
+                    "OperationConflict",
+                    "NotBound",
+                    "SenderMismatch",
+                    "TargetEpochNotAdvanced",
+                    "InvalidTarget",
+                    "UnsupportedProtocolVersion",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "SupervisorAuthorizeRejectionKind",
-                &["NotBound", "StaleSupervisor", "SenderMismatch"],
+                &[
+                    "NotBound",
+                    "StaleSupervisor",
+                    "SenderMismatch",
+                    "RotationNotAllowed",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RoutingSwitchTurnPhase",
@@ -1975,6 +2060,19 @@ runtime_internal_inputs!(
         AttachMobIngress,
         AttachSessionIngress,
         AuthorizeSupervisor,
+        PrepareTerminalSupervisorCleanupBindings,
+        RecoverSupervisorBinding,
+        RecoverSupervisorRevocationPending,
+        RecoverSupervisorRotationOperation,
+        RecoverSupervisorRotationTerminalReceipt,
+        RecoverRevokedSupervisorReceipt,
+        RefreshSupervisorBindingRoute,
+        SubmitSupervisorRotation,
+        ResumeSupervisorRotation,
+        SupervisorRotationPreviousRevoked,
+        SupervisorRotationNextPublished,
+        ObserveSupervisorRotation,
+        ResolveSupervisorCleanupCommandAdmission,
         AuthorizeDeferredSessionSystemContextAppend,
         BeginUnregisterSession,
         BindSupervisor,
@@ -2620,6 +2718,11 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Destroying",
                     "DestroyStorageFinalizing",
                     "MemberSpawned",
+                    "MemberRetirementStartedReleasing",
+                    "MemberRetirementStartedPreservingBinding",
+                    "MemberRetirementStartedPeerOnly",
+                    "RemoteMemberRuntimeRetired",
+                    "RemoteMemberSupervisorRevoked",
                     "MemberRetired",
                     "Reset",
                 ],
@@ -2935,6 +3038,15 @@ runtime_internal_inputs!(
         RetireAbsent,
         ResolveCancelAllWorkRejection,
         ResolveSubmitWorkRejection,
+        // Generated composition failure closure inputs. These are emitted by
+        // the actor shell after a routed runtime consumer refusal and are not
+        // callable through the public mob command surface.
+        ResolveRuntimeBindingRefusal,
+        ResolveRuntimeIngressRefusal,
+        ResolveRuntimeRetireRefusal,
+        RetryRuntimeRetire,
+        RecordRemoteMemberRuntimeRetired,
+        RecordRemoteMemberSupervisorRevoked,
         SubscribeStructuralEvents,
         RegisterMemberPeer,
         ResolveSpawnPolicy,
@@ -2950,9 +3062,16 @@ runtime_internal_inputs!(
         AuthorizeMemberTrustUnwiring,
         AuthorizeMemberTrustCleanup,
         AuthorizeMemberTrustCleanupObserved,
+        AuthorizeRetiringMemberTrustCleanupObserved,
+        CleanupRetiringMemberWiring,
+        RestoreRetiringMemberWiring,
+        CleanupRetiringExternalPeer,
+        RestoreRetiringExternalPeer,
+        CleanupRetiringExternalPeerObservedAbsent,
+        RestoreRetiringExternalPeerObservedAbsent,
         AuthorizeExternalPeerReciprocalTrust,
+        AdmitSupervisorRotation,
         ProvisionSupervisorAuthority,
-        ClearSupervisorPendingRotation,
         RecordSupervisorPendingRotation,
         CommitSupervisorRotation,
         ClearSupervisorAuthorityForDestroy,

@@ -914,23 +914,24 @@ export interface ModelsCatalog {
 
 export interface Schedule {
   readonly scheduleId: string;
-  readonly phase: string;
+  readonly phase: "active" | "paused" | "deleted";
   readonly revision: number;
   readonly name?: string;
   readonly description?: string;
   readonly trigger: Record<string, unknown>;
   readonly target: Record<string, unknown>;
-  readonly misfirePolicy?: Record<string, unknown> | string;
-  readonly overlapPolicy?: string;
-  readonly missingTargetPolicy?: string;
-  readonly planningHorizonDays?: number;
-  readonly planningHorizonOccurrences?: number;
-  readonly nextOccurrenceOrdinal?: number;
+  readonly misfirePolicy: Record<string, unknown>;
+  readonly overlapPolicy: "allow_concurrent" | "skip_if_running";
+  readonly missingTargetPolicy: "skip" | "mark_misfired";
+  readonly planningHorizonDays: number;
+  readonly planningHorizonOccurrences: number;
+  readonly nextOccurrenceOrdinal: number;
   readonly planningCursorUtc?: string;
-  readonly createdAtUtc?: string;
-  readonly updatedAtUtc?: string;
+  readonly createdAtUtc: string;
+  readonly updatedAtUtc: string;
   readonly deletedAtUtc?: string;
   readonly labels: Readonly<Record<string, string>>;
+  readonly supersededAckIds: readonly string[];
 }
 
 export interface ScheduleOccurrence {
@@ -938,21 +939,31 @@ export interface ScheduleOccurrence {
   readonly scheduleId: string;
   readonly scheduleRevision: number;
   readonly occurrenceOrdinal: number;
-  readonly phase: string;
+  readonly phase:
+    | "pending"
+    | "claimed"
+    | "dispatching"
+    | "awaiting_completion"
+    | "completed"
+    | "skipped"
+    | "misfired"
+    | "superseded"
+    | "delivery_failed";
   readonly dueAtUtc: string;
   readonly triggerSnapshot: Record<string, unknown>;
   readonly targetSnapshot: Record<string, unknown>;
-  readonly misfirePolicy?: Record<string, unknown> | string;
-  readonly overlapPolicy?: string;
-  readonly missingTargetPolicy?: string;
+  readonly misfirePolicy: Record<string, unknown>;
+  readonly overlapPolicy: "allow_concurrent" | "skip_if_running";
+  readonly missingTargetPolicy: "skip" | "mark_misfired";
   readonly claimedBy?: string;
   readonly leaseExpiresAtUtc?: string;
   readonly deliveryCorrelationId?: string;
   readonly lastReceipt?: Record<string, unknown>;
   readonly failureClass?: string;
+  readonly runtimeOutcome?: Record<string, unknown>;
   readonly failureDetail?: string;
-  readonly attemptCount?: number;
-  readonly createdAtUtc?: string;
+  readonly attemptCount: number;
+  readonly createdAtUtc: string;
   readonly claimedAtUtc?: string;
   readonly dispatchedAtUtc?: string;
   readonly completedAtUtc?: string;

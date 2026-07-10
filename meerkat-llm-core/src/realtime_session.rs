@@ -8,8 +8,14 @@ use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeCapabilities, RealtimeInputChunk, RealtimeTurningMode,
     RealtimeVideoChunk,
 };
-use meerkat_core::{PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, ToolResult};
-use meerkat_core::{SessionLlmIdentity, StopReason, ToolDef, types::Message, types::Usage};
+use meerkat_core::{
+    PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, RealtimeUserContentIdentity,
+    RealtimeUserContentTombstone, ToolResult,
+};
+use meerkat_core::{
+    RealtimeOpenProjectionLease, RealtimeOpenProjectionLeaseSlot, SessionLlmIdentity, StopReason,
+    ToolDef, types::Message, types::Usage,
+};
 use serde_json::Value;
 
 use crate::LlmError;
@@ -223,6 +229,13 @@ pub struct RealtimeSessionOpenConfig {
     pub llm_identity: SessionLlmIdentity,
     pub visible_tools: Vec<ToolDef>,
     pub seed_messages: Vec<Message>,
+    /// Take-once process memory custody spanning canonical image hydration
+    /// through provider seed acknowledgement.
+    ///
+    /// Cloned configs share this slot. A factory consumes the lease locally;
+    /// reusing or concurrently opening from another clone must acquire fresh
+    /// custody instead of reusing the original reservation.
+    open_projection_lease: RealtimeOpenProjectionLeaseSlot,
     /// Authoritative resolved root system prompt for this realtime session.
     ///
     /// This is the canonical owner of the live session's system prompt. It is
@@ -244,6 +257,16 @@ pub struct RealtimeSessionOpenConfig {
     /// reconstruction source for runtime context. Rendered transcript markers
     /// are projections only and must not be parsed back into authority.
     pub runtime_system_context: Vec<PendingSystemContextAppend>,
+    /// Durable caller-id bindings for committed non-text user inputs. Provider
+    /// adapters rebuild this registry on reconnect before accepting retries.
+    pub user_content_identities: Vec<RealtimeUserContentIdentity>,
+    /// Durable conflict markers for caller keys whose canonical image was
+    /// removed by a same-session transcript rewrite.
+    pub user_content_tombstones: Vec<RealtimeUserContentTombstone>,
+    /// Canonical transcript revision used to detect same-session history
+    /// rewrites that cannot be applied to an already-seeded provider
+    /// conversation in place.
+    pub transcript_rewrite_generation: u64,
     /// Per-channel override for the "nudge the provider" timeout the OpenAI
     /// adapter uses while waiting for the first real delta after a turn is
     /// admitted. `None` inherits the adapter's compile-time default.
@@ -266,11 +289,33 @@ impl RealtimeSessionOpenConfig {
             llm_identity,
             visible_tools,
             seed_messages,
+            open_projection_lease: RealtimeOpenProjectionLeaseSlot::default(),
             system_prompt: None,
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
         }
+    }
+
+    /// Carry an already-acquired open-projection lease from the runtime's
+    /// pre-hydration boundary to the provider seed boundary.
+    #[must_use]
+    pub fn with_open_projection_lease(mut self, lease: RealtimeOpenProjectionLease) -> Self {
+        self.open_projection_lease = RealtimeOpenProjectionLeaseSlot::new(lease);
+        self
+    }
+
+    /// Transfer the carried lease into one factory invocation.
+    ///
+    /// The slot is shared across config clones, so exactly one caller can take
+    /// it. A caller that receives `None` must acquire a fresh lease before
+    /// materializing provider seed events.
+    #[must_use]
+    pub fn take_open_projection_lease(&self) -> Option<RealtimeOpenProjectionLease> {
+        self.open_projection_lease.take()
     }
 
     /// Builder-style typed root system prompt for provider reconstruction.
@@ -291,6 +336,33 @@ impl RealtimeSessionOpenConfig {
         runtime_system_context: Vec<PendingSystemContextAppend>,
     ) -> Self {
         self.runtime_system_context = runtime_system_context;
+        self
+    }
+
+    /// Builder-style durable user-content idempotency registry.
+    #[must_use]
+    pub fn with_user_content_identities(
+        mut self,
+        identities: Vec<RealtimeUserContentIdentity>,
+    ) -> Self {
+        self.user_content_identities = identities;
+        self
+    }
+
+    /// Builder-style durable removed-key conflict registry.
+    #[must_use]
+    pub fn with_user_content_tombstones(
+        mut self,
+        tombstones: Vec<RealtimeUserContentTombstone>,
+    ) -> Self {
+        self.user_content_tombstones = tombstones;
+        self
+    }
+
+    /// Builder-style canonical transcript revision for live rewrite guards.
+    #[must_use]
+    pub fn with_transcript_rewrite_generation(mut self, generation: u64) -> Self {
+        self.transcript_rewrite_generation = generation;
         self
     }
 
@@ -334,16 +406,15 @@ pub trait RealtimeSessionFactory: Send + Sync {
 
     /// Attach to an existing provider-managed realtime session.
     ///
-    /// `identity` is the owning Meerkat session's LLM identity. Attach is a
-    /// credential-bearing open: factories that resolve credentials per open
-    /// must resolve the attach socket under the same session `auth_binding`
-    /// as [`Self::open_session`], so the identity is required in the contract
-    /// instead of being re-derived (or silently defaulted) by the provider.
+    /// Attach consumes the same canonical open projection as a newly-created
+    /// provider session. In particular, committed user-content bindings and
+    /// removed-key tombstones must be installed before attached input is
+    /// admitted; accepting only an LLM identity here would create a bypass of
+    /// rewrite-safe idempotency admission.
     async fn attach_external_session(
         &self,
         target: &RealtimeExternalSessionTarget,
-        identity: &SessionLlmIdentity,
-        turning_mode: RealtimeTurningMode,
+        open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn RealtimeSession>, LlmError>;
 
     /// E25: Open a provider-native `LiveAdapter` directly.

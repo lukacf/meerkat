@@ -147,6 +147,19 @@ pub trait WorkGraphStore: Send + Sync {
         Err(unsupported(self.kind()))
     }
 
+    /// Return at most `limit` attention rows. Backends should push this bound
+    /// into iteration/query ownership; the default is compatibility-only for
+    /// custom stores.
+    async fn list_attention_bounded(
+        &self,
+        filter: AttentionListRequest,
+        limit: usize,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        let mut bindings = self.list_attention(filter).await?;
+        bindings.truncate(limit);
+        Ok(bindings)
+    }
+
     /// Delete TERMINAL (superseded/stopped) attention binding rows in scope.
     /// The event stream keeps the audit history; binding rows otherwise grow
     /// monotonically with reassignment churn. Returns the pruned row count.
@@ -177,10 +190,35 @@ pub trait WorkGraphStore: Send + Sync {
         namespace: &WorkNamespace,
     ) -> Result<Vec<WorkEdge>, WorkGraphError>;
 
+    /// Return at most `limit` edges in one namespace.
+    async fn list_edges_bounded(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+        limit: usize,
+    ) -> Result<Vec<WorkEdge>, WorkGraphError> {
+        let mut edges = self.list_edges(realm_id, namespace).await?;
+        edges.truncate(limit);
+        Ok(edges)
+    }
+
     async fn list_events(
         &self,
         filter: WorkGraphEventFilter,
     ) -> Result<Vec<WorkGraphEvent>, WorkGraphError>;
+
+    /// Highest sequence matching a scope without retaining the event history.
+    async fn latest_event_seq(
+        &self,
+        filter: WorkGraphEventFilter,
+    ) -> Result<Option<i64>, WorkGraphError> {
+        Ok(self
+            .list_events(filter)
+            .await?
+            .into_iter()
+            .filter_map(|event| event.seq)
+            .max())
+    }
 }
 
 #[derive(Default)]
@@ -398,20 +436,37 @@ impl WorkGraphStore for MemoryWorkGraphStore {
 
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         let guard = self.inner.read().await;
+        let compare = |left: &WorkItem, right: &WorkItem| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.id.cmp(&right.id))
+        };
+        if let Some(limit) = filter.limit {
+            let mut items = Vec::with_capacity(limit.min(1024));
+            for item in guard
+                .items
+                .values()
+                .filter(|item| item_matches_filter(item, &filter))
+            {
+                let index = items
+                    .binary_search_by(|existing| compare(existing, item))
+                    .unwrap_or_else(|index| index);
+                if index < limit {
+                    items.insert(index, item.clone());
+                    if items.len() > limit {
+                        items.pop();
+                    }
+                }
+            }
+            return Ok(items);
+        }
         let mut items = guard
             .items
             .values()
             .filter(|item| item_matches_filter(item, &filter))
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        if let Some(limit) = filter.limit {
-            items.truncate(limit);
-        }
+        items.sort_by(compare);
         Ok(items)
     }
 
@@ -658,6 +713,36 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         Ok(bindings)
     }
 
+    async fn list_attention_bounded(
+        &self,
+        filter: AttentionListRequest,
+        limit: usize,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        let guard = self.inner.read().await;
+        let compare = |left: &WorkAttentionBinding, right: &WorkAttentionBinding| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.binding_id.cmp(&right.binding_id))
+        };
+        let mut bindings = Vec::with_capacity(limit.min(1024));
+        for binding in guard
+            .attention
+            .values()
+            .filter(|binding| attention_matches_filter(binding, &filter))
+        {
+            let index = bindings
+                .binary_search_by(|existing| compare(existing, binding))
+                .unwrap_or_else(|index| index);
+            if index < limit {
+                bindings.insert(index, binding.clone());
+                if bindings.len() > limit {
+                    bindings.pop();
+                }
+            }
+        }
+        Ok(bindings)
+    }
+
     async fn prune_terminal_attention(
         &self,
         filter: AttentionPruneRequest,
@@ -738,22 +823,48 @@ impl WorkGraphStore for MemoryWorkGraphStore {
             .collect())
     }
 
+    async fn list_edges_bounded(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+        limit: usize,
+    ) -> Result<Vec<WorkEdge>, WorkGraphError> {
+        let guard = self.inner.read().await;
+        Ok(guard
+            .edges
+            .iter()
+            .filter(|edge| edge.realm_id == realm_id && edge.namespace == *namespace)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
     async fn list_events(
         &self,
         filter: WorkGraphEventFilter,
     ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
         let guard = self.inner.read().await;
-        let mut events = guard
+        let events = guard
             .events
             .iter()
             .filter(|event| event_matches_filter(event, &filter))
+            .take(filter.limit.unwrap_or(usize::MAX))
             .cloned()
             .collect::<Vec<_>>();
-        events.sort_by_key(|event| event.seq.unwrap_or_default());
-        if let Some(limit) = filter.limit {
-            events.truncate(limit);
-        }
         Ok(events)
+    }
+
+    async fn latest_event_seq(
+        &self,
+        filter: WorkGraphEventFilter,
+    ) -> Result<Option<i64>, WorkGraphError> {
+        let guard = self.inner.read().await;
+        Ok(guard
+            .events
+            .iter()
+            .filter(|event| event_matches_filter(event, &filter))
+            .filter_map(|event| event.seq)
+            .max())
     }
 }
 
@@ -1223,7 +1334,15 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         &self,
         filter: AttentionListRequest,
     ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
-        self.with_connection(|conn| list_sqlite_attention(conn, &filter))
+        self.with_connection(|conn| list_sqlite_attention(conn, &filter, None))
+    }
+
+    async fn list_attention_bounded(
+        &self,
+        filter: AttentionListRequest,
+        limit: usize,
+    ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+        self.with_connection(|conn| list_sqlite_attention(conn, &filter, Some(limit)))
     }
 
     async fn prune_terminal_attention(
@@ -1319,7 +1438,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-            let existing_edges = list_sqlite_edges(&tx, &edge.realm_id, &edge.namespace)?;
+            let existing_edges = list_sqlite_edges(&tx, &edge.realm_id, &edge.namespace, None)?;
             let existing_items = list_sqlite_items(
                 &tx,
                 &WorkItemFilter {
@@ -1343,7 +1462,16 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         realm_id: &str,
         namespace: &WorkNamespace,
     ) -> Result<Vec<WorkEdge>, WorkGraphError> {
-        self.with_connection(|conn| list_sqlite_edges(conn, realm_id, namespace))
+        self.with_connection(|conn| list_sqlite_edges(conn, realm_id, namespace, None))
+    }
+
+    async fn list_edges_bounded(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+        limit: usize,
+    ) -> Result<Vec<WorkEdge>, WorkGraphError> {
+        self.with_connection(|conn| list_sqlite_edges(conn, realm_id, namespace, Some(limit)))
     }
 
     async fn list_events(
@@ -1351,6 +1479,13 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         filter: WorkGraphEventFilter,
     ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
         self.with_connection(|conn| list_sqlite_events(conn, &filter))
+    }
+
+    async fn latest_event_seq(
+        &self,
+        filter: WorkGraphEventFilter,
+    ) -> Result<Option<i64>, WorkGraphError> {
+        self.with_connection(|conn| latest_sqlite_event_seq(conn, &filter))
     }
 }
 
@@ -1900,7 +2035,11 @@ fn select_attention(
 fn list_sqlite_attention(
     conn: &Connection,
     filter: &AttentionListRequest,
+    limit: Option<usize>,
 ) -> Result<Vec<WorkAttentionBinding>, WorkGraphError> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
     // SQL filter pushdown over the indexed query columns. Every predicate is
     // NULL-tolerant: rows written by older binaries carry NULL status /
     // target_key and must still reach the Rust-side filter, which remains the
@@ -1948,6 +2087,9 @@ fn list_sqlite_attention(
         let binding = row.map_err(|err| WorkGraphError::Store(err.to_string()))?;
         if attention_matches_filter(&binding, filter) {
             bindings.push(binding);
+            if limit.is_some_and(|limit| bindings.len() >= limit) {
+                break;
+            }
         }
     }
     Ok(bindings)
@@ -1958,7 +2100,11 @@ fn list_sqlite_edges(
     conn: &Connection,
     realm_id: &str,
     namespace: &WorkNamespace,
+    limit: Option<usize>,
 ) -> Result<Vec<WorkEdge>, WorkGraphError> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn
         .prepare(
             "SELECT edge_json FROM workgraph_edges
@@ -1974,6 +2120,9 @@ fn list_sqlite_edges(
     let mut edges = Vec::new();
     for row in rows {
         edges.push(row.map_err(|err| WorkGraphError::Store(err.to_string()))?);
+        if limit.is_some_and(|limit| edges.len() >= limit) {
+            break;
+        }
     }
     Ok(edges)
 }
@@ -2005,6 +2154,40 @@ fn list_sqlite_events(
         }
     }
     Ok(events)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn latest_sqlite_event_seq(
+    conn: &Connection,
+    filter: &WorkGraphEventFilter,
+) -> Result<Option<i64>, WorkGraphError> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(realm_id) = &filter.realm_id {
+        params.push(Box::new(realm_id.clone()));
+        clauses.push(format!("realm_id = ?{}", params.len()));
+    }
+    if !filter.all_namespaces
+        && let Some(namespace) = &filter.namespace
+    {
+        params.push(Box::new(namespace.as_str().to_string()));
+        clauses.push(format!("namespace = ?{}", params.len()));
+    }
+    if let Some(after_seq) = filter.after_seq {
+        params.push(Box::new(after_seq));
+        clauses.push(format!("seq > ?{}", params.len()));
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    conn.query_row(
+        &format!("SELECT MAX(seq) FROM workgraph_events{where_clause}"),
+        rusqlite::params_from_iter(params.iter()),
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .map_err(|error| WorkGraphError::Store(error.to_string()))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

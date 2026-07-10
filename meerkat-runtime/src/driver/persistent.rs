@@ -131,12 +131,24 @@ impl PersistentRuntimeDriver {
         Self::lifecycle_commit_for_persistence_from_inner(&self.inner)
     }
 
+    fn lifecycle_commit_for_persistence_with_supervisor_authority(
+        &self,
+        supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
+    ) -> Result<MachineLifecycleCommit, RuntimeDriverError> {
+        Ok(MachineLifecycleCommit::new_with_binding(
+            Self::runtime_state_for_persistence_from_inner(&self.inner)?,
+            self.inner.machine_lifecycle_binding_facts(),
+            supervisor_authority,
+        ))
+    }
+
     fn lifecycle_commit_for_persistence_from_inner(
         inner: &EphemeralRuntimeDriver,
     ) -> Result<MachineLifecycleCommit, RuntimeDriverError> {
         Ok(MachineLifecycleCommit::new_with_binding(
             Self::runtime_state_for_persistence_from_inner(inner)?,
             inner.machine_lifecycle_binding_facts(),
+            inner.supervisor_authority_snapshot(),
         ))
     }
 
@@ -273,6 +285,27 @@ impl PersistentRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         let input_states = self.inner.authorized_stored_input_states_snapshot()?;
         let commit = self.lifecycle_commit_for_persistence()?;
+        self.store
+            .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!("{context} lifecycle persist failed: {err}"))
+            })
+    }
+
+    /// Persist a previewed closed supervisor projection alongside the current
+    /// machine lifecycle. This lets the supervisor saga commit durable truth
+    /// before changing the shared live authority, avoiding a whole-authority
+    /// rollback across asynchronous store I/O (peer ingress may concurrently
+    /// mutate unrelated generated fields).
+    pub(crate) async fn persist_current_machine_lifecycle_with_supervisor_authority(
+        &mut self,
+        context: &str,
+        supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
+    ) -> Result<(), RuntimeDriverError> {
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
+        let commit =
+            self.lifecycle_commit_for_persistence_with_supervisor_authority(supervisor_authority)?;
         self.store
             .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
             .await

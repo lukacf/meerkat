@@ -20,14 +20,16 @@ use std::sync::Arc;
 pub(super) enum DisposalStep {
     StopHostLoop,
     NotifyPeers,
+    CleanupMachineTopology,
     ArchiveSession,
 }
 
 impl DisposalStep {
     /// The ordered sequence of policy-driven steps.
-    pub(super) const ORDERED: [DisposalStep; 3] = [
+    pub(super) const ORDERED: [DisposalStep; 4] = [
         DisposalStep::StopHostLoop,
         DisposalStep::NotifyPeers,
+        DisposalStep::CleanupMachineTopology,
         DisposalStep::ArchiveSession,
     ];
 
@@ -43,6 +45,7 @@ impl std::fmt::Display for DisposalStep {
         match self {
             Self::StopHostLoop => f.write_str("StopHostLoop"),
             Self::NotifyPeers => f.write_str("NotifyPeers"),
+            Self::CleanupMachineTopology => f.write_str("CleanupMachineTopology"),
             Self::ArchiveSession => f.write_str("ArchiveSession"),
         }
     }
@@ -61,6 +64,7 @@ pub(super) struct DisposalContext {
     pub retiring_key: Option<String>,
     pub retiring_comms: Option<Arc<dyn CoreCommsRuntime>>,
     pub retiring_spec: Option<TrustedPeerDescriptor>,
+    pub preserve_machine_topology: bool,
     pub machine_wired_peer_identities: BTreeSet<crate::ids::AgentIdentity>,
     pub trust_unwire_authority_by_peer:
         BTreeMap<crate::ids::AgentIdentity, CommsTrustMutationAuthority>,
@@ -78,8 +82,6 @@ pub(super) struct DisposalReport {
     pub skipped: Vec<(DisposalStep, MobError)>,
     /// Step where the error policy chose to abort (if any).
     pub aborted_at: Option<(DisposalStep, MobError)>,
-    /// Always true — roster removal runs unconditionally.
-    pub roster_removed: bool,
 }
 
 impl DisposalReport {
@@ -88,7 +90,6 @@ impl DisposalReport {
             completed: Vec::new(),
             skipped: Vec::new(),
             aborted_at: None,
-            roster_removed: false,
         }
     }
 
@@ -119,8 +120,13 @@ pub(super) trait ErrorPolicy: Send {
 // Concrete policies
 // ---------------------------------------------------------------------------
 
-/// Best-effort: log warn, always continue. Used for single-member retire.
+/// Best-effort for live side effects, but topology convergence stays critical.
 pub(super) struct WarnAndContinue;
+
+fn is_critical_retirement_cleanup(step: DisposalStep, error: &MobError) -> bool {
+    step == DisposalStep::CleanupMachineTopology
+        || matches!(error, MobError::RetirementTopologyIncomplete(_))
+}
 
 impl ErrorPolicy for WarnAndContinue {
     fn on_step_error(
@@ -135,12 +141,12 @@ impl ErrorPolicy for WarnAndContinue {
             error = %error,
             "retire: step failed (continuing)"
         );
-        true
+        !is_critical_retirement_cleanup(step, error)
     }
 }
 
 /// Bulk: peer-step failures are logged at debug (expected during concurrent
-/// teardown), others at warn. Always continues.
+/// teardown), others at warn. Topology convergence stays critical.
 pub(super) struct BulkBestEffort;
 
 impl ErrorPolicy for BulkBestEffort {
@@ -165,7 +171,7 @@ impl ErrorPolicy for BulkBestEffort {
                 "retire(bulk): step failed (continuing)"
             );
         }
-        true
+        !is_critical_retirement_cleanup(step, error)
     }
 }
 
@@ -219,6 +225,7 @@ mod tests {
             retiring_key: None,
             retiring_comms: None,
             retiring_spec: None,
+            preserve_machine_topology: false,
             machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
         }
@@ -229,21 +236,37 @@ mod tests {
     }
 
     #[test]
-    fn test_warn_and_continue_always_continues() {
+    fn test_warn_and_continue_keeps_topology_cleanup_critical() {
         let mut policy = WarnAndContinue;
         let ctx = test_ctx();
         for step in DisposalStep::ORDERED {
-            assert!(policy.on_step_error(step, &test_error(), &ctx));
+            assert_eq!(
+                policy.on_step_error(step, &test_error(), &ctx),
+                step != DisposalStep::CleanupMachineTopology
+            );
         }
+        assert!(!policy.on_step_error(
+            DisposalStep::NotifyPeers,
+            &MobError::RetirementTopologyIncomplete("trust removal failed".to_string()),
+            &ctx,
+        ));
     }
 
     #[test]
-    fn test_bulk_best_effort_always_continues() {
+    fn test_bulk_best_effort_keeps_topology_cleanup_critical() {
         let mut policy = BulkBestEffort;
         let ctx = test_ctx();
         for step in DisposalStep::ORDERED {
-            assert!(policy.on_step_error(step, &test_error(), &ctx));
+            assert_eq!(
+                policy.on_step_error(step, &test_error(), &ctx),
+                step != DisposalStep::CleanupMachineTopology
+            );
         }
+        assert!(!policy.on_step_error(
+            DisposalStep::NotifyPeers,
+            &MobError::RetirementTopologyIncomplete("trust removal failed".to_string()),
+            &ctx,
+        ));
     }
 
     #[test]
@@ -251,6 +274,7 @@ mod tests {
         // Verify the predicate classifies steps correctly.
         assert!(!DisposalStep::StopHostLoop.is_peer_step());
         assert!(DisposalStep::NotifyPeers.is_peer_step());
+        assert!(!DisposalStep::CleanupMachineTopology.is_peer_step());
         assert!(!DisposalStep::ArchiveSession.is_peer_step());
     }
 
@@ -302,14 +326,22 @@ mod tests {
             .iter()
             .position(|s| *s == DisposalStep::ArchiveSession)
             .unwrap();
+        let cleanup_idx = steps
+            .iter()
+            .position(|s| *s == DisposalStep::CleanupMachineTopology)
+            .unwrap();
 
         assert!(
             stop_idx < notify_idx,
             "StopHostLoop must precede NotifyPeers"
         );
         assert!(
-            notify_idx < archive_idx,
-            "NotifyPeers must precede ArchiveSession"
+            notify_idx < cleanup_idx,
+            "NotifyPeers must precede CleanupMachineTopology"
+        );
+        assert!(
+            cleanup_idx < archive_idx,
+            "CleanupMachineTopology must precede ArchiveSession"
         );
     }
 
@@ -317,6 +349,10 @@ mod tests {
     fn test_disposal_step_display() {
         assert_eq!(DisposalStep::StopHostLoop.to_string(), "StopHostLoop");
         assert_eq!(DisposalStep::NotifyPeers.to_string(), "NotifyPeers");
+        assert_eq!(
+            DisposalStep::CleanupMachineTopology.to_string(),
+            "CleanupMachineTopology"
+        );
         assert_eq!(DisposalStep::ArchiveSession.to_string(), "ArchiveSession");
     }
 }

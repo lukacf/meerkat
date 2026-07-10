@@ -11,8 +11,10 @@ use meerkat_contracts::{
 };
 use meerkat_core::realtime_transcript::{AppendRealtimeTranscript, TranscriptLane};
 use meerkat_core::{
-    Message, PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, RealtimeTranscriptRole,
-    ToolCallId, ToolDef, ToolName, ToolResult,
+    ContentBlock, ImageData, Message, PendingSystemContextAppend, Provider,
+    RealtimeOpenProjectionAdmission, RealtimeOpenProjectionLease, RealtimeTranscriptEvent,
+    RealtimeTranscriptRole, RealtimeUserContentIdentity, RealtimeUserContentTombstone, ToolCallId,
+    ToolDef, ToolName, ToolResult,
 };
 use meerkat_core::{StopReason, types::Usage};
 use meerkat_llm_core::LlmError;
@@ -23,16 +25,16 @@ use meerkat_llm_core::realtime_session::{
 use oai_rt_rs::error::{ApiErrorType, ServerError as OpenAiServerError};
 use oai_rt_rs::protocol::models::{
     AudioConfig, AudioFormat, ContentPart, ConversationMode, InputAudioConfig,
-    InputAudioTranscription, Item, Nullable, OutputAudioConfig, OutputModalities, ResponseConfig,
-    Role, SessionUpdate, SessionUpdateConfig, Tool, TurnDetection, Voice,
+    InputAudioTranscription, Item, ItemStatus, Nullable, OutputAudioConfig, OutputModalities,
+    ResponseConfig, Role, SessionUpdate, SessionUpdateConfig, Tool, TurnDetection, Voice,
 };
 use oai_rt_rs::{
     ClientEvent, Error as OpenAiLiveError, RealtimeClient, RealtimeSender, ServerEvent,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 pub use oai_rt_rs::ClientEvent as OpenAiLiveClientEvent;
 pub use oai_rt_rs::ServerEvent as OpenAiLiveServerEvent;
@@ -168,7 +170,17 @@ fn trace_client_event_json(event: &ClientEvent) -> Option<String> {
             "{{\"type\":\"input_audio_buffer.append\",\"audio_redacted\":true,\"audio_b64_len\":{}}}",
             audio.len()
         )),
-        other => serde_json::to_string(other).ok(),
+        ClientEvent::ConversationItemCreate { item, .. } => {
+            openai_realtime_image_trace_summary(item).map_or_else(
+                || trace_redacted_realtime_json(event),
+                |(image_count, image_url_chars)| {
+                    Some(format!(
+                        "{{\"type\":\"conversation.item.create\",\"image_redacted\":true,\"image_count\":{image_count},\"image_url_chars\":{image_url_chars}}}"
+                    ))
+                },
+            )
+        }
+        other => trace_redacted_realtime_json(other),
     }
 }
 
@@ -178,8 +190,204 @@ fn trace_server_event_json(event: &ServerEvent) -> Option<String> {
             "{{\"type\":\"response.output_audio.delta\",\"audio_redacted\":true,\"audio_b64_len\":{}}}",
             delta.len()
         )),
-        other => serde_json::to_string(other).ok(),
+        ServerEvent::ConversationItemCreated { item, .. }
+        | ServerEvent::ConversationItemAdded { item, .. }
+        | ServerEvent::ConversationItemDone { item, .. }
+        | ServerEvent::ConversationItemRetrieved { item, .. } => {
+            openai_realtime_image_trace_summary(item).map_or_else(
+                || trace_redacted_realtime_json(event),
+                |(image_count, image_url_chars)| {
+                    Some(format!(
+                        "{{\"type\":\"conversation.item\",\"image_redacted\":true,\"image_count\":{image_count},\"image_url_chars\":{image_url_chars}}}"
+                    ))
+                },
+            )
+        }
+        other => trace_redacted_realtime_json(other),
     }
+}
+
+fn trace_redacted_realtime_json(value: &impl serde::Serialize) -> Option<String> {
+    let mut value = serde_json::to_value(value).ok()?;
+    redact_realtime_image_values(&mut value);
+    serde_json::to_string(&value).ok()
+}
+
+fn redact_realtime_image_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if key == "image_url" {
+                    let chars = child.as_str().map_or(0, str::len);
+                    *child = serde_json::Value::String(format!(
+                        "<redacted realtime image URL: {chars} chars>"
+                    ));
+                } else {
+                    redact_realtime_image_values(child);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                redact_realtime_image_values(child);
+            }
+        }
+        serde_json::Value::String(text) if contains_realtime_image_data_uri(text) => {
+            let chars = text.len();
+            *text = format!("<redacted embedded realtime image data: {chars} chars>");
+        }
+        _ => {}
+    }
+}
+
+fn contains_realtime_image_data_uri(text: &str) -> bool {
+    fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+    }
+
+    let bytes = text.as_bytes();
+    contains_ascii_case_insensitive(bytes, b"data:image/")
+        && contains_ascii_case_insensitive(bytes, b";base64,")
+}
+
+fn redact_realtime_image_text(text: &str) -> String {
+    if contains_realtime_image_data_uri(text) {
+        format!(
+            "<redacted embedded realtime image data: {} chars>",
+            text.len()
+        )
+    } else {
+        text.to_string()
+    }
+}
+
+fn openai_realtime_image_trace_summary(item: &Item) -> Option<(usize, usize)> {
+    let Item::Message { content, .. } = item else {
+        return None;
+    };
+    let image_urls = content.iter().filter_map(|part| match part {
+        ContentPart::InputImage { image_url, .. } => Some(image_url.len()),
+        _ => None,
+    });
+    let (image_count, image_url_chars) = image_urls
+        .fold((0usize, 0usize), |(count, chars), len| {
+            (count.saturating_add(1), chars.saturating_add(len))
+        });
+    (image_count > 0).then_some((image_count, image_url_chars))
+}
+
+const OPENAI_REALTIME_PENDING_INPUT_BUDGET_BYTES: usize =
+    meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES;
+const OPENAI_REALTIME_ACK_BASE_TIMEOUT: Duration = Duration::from_secs(5);
+const OPENAI_REALTIME_ACK_MIN_BYTES_PER_SECOND: usize = 512 * 1024;
+
+fn openai_realtime_provider_ack_timeout(encoded_bytes: usize) -> Duration {
+    let transfer_seconds = encoded_bytes.div_ceil(OPENAI_REALTIME_ACK_MIN_BYTES_PER_SECOND);
+    OPENAI_REALTIME_ACK_BASE_TIMEOUT.saturating_add(Duration::from_secs(
+        u64::try_from(transfer_seconds).unwrap_or(u64::MAX),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpenAiRealtimeImageValidationError {
+    UnsupportedMime {
+        mime_type: String,
+    },
+    ContentMismatch {
+        mime_type: String,
+    },
+    TooLarge {
+        max_bytes: usize,
+        actual_bytes: usize,
+    },
+    InvalidBase64 {
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for OpenAiRealtimeImageValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedMime { mime_type } => write!(
+                f,
+                "openai realtime image MIME `{mime_type}` is unsupported; use image/png or image/jpeg"
+            ),
+            Self::ContentMismatch { mime_type } => write!(
+                f,
+                "openai realtime image bytes do not match declared MIME `{mime_type}`"
+            ),
+            Self::TooLarge {
+                max_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "openai realtime image is {actual_bytes} decoded bytes; maximum is {max_bytes}"
+            ),
+            Self::InvalidBase64 { detail } => {
+                write!(
+                    f,
+                    "openai realtime image data is not valid base64: {detail}"
+                )
+            }
+        }
+    }
+}
+
+fn validate_openai_realtime_image_bytes(
+    raw_mime_type: &str,
+    data: &[u8],
+) -> Result<String, OpenAiRealtimeImageValidationError> {
+    if raw_mime_type.len() > meerkat_core::live_adapter::MAX_LIVE_IMAGE_MIME_BYTES {
+        return Err(OpenAiRealtimeImageValidationError::UnsupportedMime {
+            mime_type: format!("<too-long:{}-bytes>", raw_mime_type.len()),
+        });
+    }
+    let mime_type = meerkat_core::image_generation::MediaType::parse(raw_mime_type)
+        .map(|mime| mime.as_str().to_string())
+        .map_err(|_| OpenAiRealtimeImageValidationError::UnsupportedMime {
+            mime_type: meerkat_core::image_generation::MediaType::canonical_str(raw_mime_type),
+        })?;
+    if data.len() > meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES {
+        return Err(OpenAiRealtimeImageValidationError::TooLarge {
+            max_bytes: meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+            actual_bytes: data.len(),
+        });
+    }
+    let signature_matches = match mime_type.as_str() {
+        "image/png" => data.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => data.starts_with(&[0xff, 0xd8, 0xff]),
+        _ => {
+            return Err(OpenAiRealtimeImageValidationError::UnsupportedMime { mime_type });
+        }
+    };
+    if !signature_matches {
+        return Err(OpenAiRealtimeImageValidationError::ContentMismatch { mime_type });
+    }
+    Ok(mime_type)
+}
+
+fn decode_and_validate_openai_realtime_image(
+    mime_type: &str,
+    data: &str,
+) -> Result<(String, usize, [u8; 32]), OpenAiRealtimeImageValidationError> {
+    if data.len() > meerkat_core::live_adapter::MAX_LIVE_IMAGE_BASE64_BYTES {
+        return Err(OpenAiRealtimeImageValidationError::TooLarge {
+            max_bytes: meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+            actual_bytes: data.len().div_ceil(4) * 3,
+        });
+    }
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|err| OpenAiRealtimeImageValidationError::InvalidBase64 {
+            detail: err.to_string(),
+        })?;
+    let canonical_mime_type = validate_openai_realtime_image_bytes(mime_type, &decoded)?;
+    use sha2::{Digest as _, Sha256};
+    let digest: [u8; 32] = Sha256::digest(&decoded).into();
+    Ok((canonical_mime_type, decoded.len(), digest))
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -395,31 +603,128 @@ fn openai_realtime_terminal_peer_response_summary(
     Some(fields.join(", "))
 }
 
+/// Measure the exact decoded user-image history that will be replayed to the
+/// realtime provider, rejecting before any provider seed event is materialized
+/// when the canonical non-lossy projection ceiling would be exceeded.
+fn openai_realtime_seed_user_image_decoded_bytes(
+    seed_messages: &[Message],
+    max_decoded_bytes: usize,
+) -> Result<usize, LlmError> {
+    let mut total = 0usize;
+    for message in seed_messages {
+        let Message::User(user) = message else {
+            continue;
+        };
+        for block in &user.content {
+            match block {
+                ContentBlock::Image {
+                    media_type,
+                    data: ImageData::Inline { data },
+                } => {
+                    let (_, decoded_bytes, _) = decode_and_validate_openai_realtime_image(
+                        media_type, data,
+                    )
+                    .map_err(|error| LlmError::InvalidConfig {
+                        message: format!(
+                            "realtime history image is not admissible for OpenAI Realtime: {error}"
+                        ),
+                    })?;
+                    let attempted = total.checked_add(decoded_bytes).ok_or_else(|| {
+                        LlmError::InvalidConfig {
+                            message: "image_input_history_budget_exceeded".to_string(),
+                        }
+                    })?;
+                    if attempted > max_decoded_bytes {
+                        return Err(LlmError::InvalidInputShape {
+                            message: "image_input_history_budget_exceeded".to_string(),
+                        });
+                    }
+                    total = attempted;
+                }
+                ContentBlock::Image {
+                    media_type,
+                    data: ImageData::Blob { blob_id },
+                } => {
+                    return Err(LlmError::InvalidConfig {
+                        message: format!(
+                            "realtime history image {blob_id} ({media_type}) was not hydrated at the projection boundary"
+                        ),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(total)
+}
+
 fn openai_realtime_history_events(
     seed_messages: &[Message],
     runtime_system_context: &[PendingSystemContextAppend],
-) -> Vec<ClientEvent> {
+) -> Result<Vec<ClientEvent>, LlmError> {
     enum ProjectionHistoryItem {
         Dialogue(Item),
         RuntimeSystem(Item),
     }
 
-    fn canonical_projection_history_item(message: &Message) -> Option<ProjectionHistoryItem> {
+    fn canonical_projection_history_item(
+        message: &Message,
+    ) -> Result<Option<ProjectionHistoryItem>, LlmError> {
         match message {
             Message::User(user) => {
-                let text = user.text_content();
-                let text = text.trim();
-                (!text.is_empty()).then(|| {
-                    ProjectionHistoryItem::Dialogue(Item::Message {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        role: Role::User,
-                        content: vec![ContentPart::InputText {
-                            text: text.to_string(),
-                        }],
-                    })
-                })
+                let mut content = Vec::new();
+                for block in &user.content {
+                    match block {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            content.push(ContentPart::InputText { text: text.clone() });
+                        }
+                        ContentBlock::Image {
+                            media_type,
+                            data: ImageData::Inline { data },
+                        } => {
+                            let (canonical_media_type, _, _) =
+                                decode_and_validate_openai_realtime_image(media_type, data)
+                                    .map_err(|error| LlmError::InvalidConfig {
+                                        message: format!(
+                                            "realtime history image is not admissible for OpenAI Realtime: {error}"
+                                        ),
+                                    })?;
+                            content.push(ContentPart::InputImage {
+                                image_url: format!("data:{canonical_media_type};base64,{data}"),
+                                detail: None,
+                            });
+                        }
+                        ContentBlock::Image {
+                            media_type,
+                            data: ImageData::Blob { blob_id },
+                        } => {
+                            return Err(LlmError::InvalidConfig {
+                                message: format!(
+                                    "realtime history image {blob_id} ({media_type}) was not hydrated at the projection boundary"
+                                ),
+                            });
+                        }
+                        other => {
+                            let text = other.text_projection();
+                            if !text.trim().is_empty() {
+                                content.push(ContentPart::InputText {
+                                    text: text.into_owned(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Ok(
+                    (!content.is_empty()).then_some(ProjectionHistoryItem::Dialogue(
+                        Item::Message {
+                            id: None,
+                            status: None,
+                            phase: None,
+                            role: Role::User,
+                            content,
+                        },
+                    )),
+                )
             }
             Message::BlockAssistant(assistant) => {
                 let text = assistant
@@ -428,7 +733,7 @@ fn openai_realtime_history_events(
                     .join("\n")
                     .trim()
                     .to_string();
-                (!text.is_empty()).then(|| {
+                Ok((!text.is_empty()).then(|| {
                     ProjectionHistoryItem::Dialogue(Item::Message {
                         id: None,
                         status: None,
@@ -436,9 +741,9 @@ fn openai_realtime_history_events(
                         role: Role::Assistant,
                         content: vec![ContentPart::OutputText { text }],
                     })
-                })
+                }))
             }
-            Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => None,
+            Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => Ok(None),
         }
     }
 
@@ -467,11 +772,13 @@ fn openai_realtime_history_events(
         })
     });
 
-    let projected = seed_messages
-        .iter()
-        .filter_map(canonical_projection_history_item)
-        .chain(runtime_items)
-        .collect::<Vec<_>>();
+    let mut projected = Vec::new();
+    for message in seed_messages {
+        if let Some(item) = canonical_projection_history_item(message)? {
+            projected.push(item);
+        }
+    }
+    projected.extend(runtime_items);
     // Dogma note:
     // reconstruction fidelity belongs to canonical Meerkat session history, not
     // to a lossy adapter-local "recent dialogue" budget. Trimming dialogue here
@@ -489,14 +796,40 @@ fn openai_realtime_history_events(
         })
         .collect::<Vec<_>>();
 
-    items
+    Ok(items
         .into_iter()
         .map(|item| ClientEvent::ConversationItemCreate {
             event_id: None,
             previous_item_id: None,
             item: Box::new(item),
         })
-        .collect()
+        .collect())
+}
+
+fn stamp_openai_realtime_seed_item_id(
+    index: usize,
+    event: &mut ClientEvent,
+) -> Result<String, LlmError> {
+    use sha2::{Digest as _, Sha256};
+
+    let ClientEvent::ConversationItemCreate { item, .. } = event else {
+        return Err(LlmError::InvalidConfig {
+            message: "realtime seed projection produced a non-item event".to_string(),
+        });
+    };
+    let bytes = serde_json::to_vec(item.as_ref()).map_err(|error| LlmError::InvalidConfig {
+        message: format!("failed to identify realtime seed item: {error}"),
+    })?;
+    let digest = Sha256::digest(bytes);
+    let digest_hex = format!("{digest:x}");
+    let id = format!("mk_seed_{index:04}_{}", &digest_hex[..12]);
+    let Item::Message { id: item_id, .. } = item.as_mut() else {
+        return Err(LlmError::InvalidConfig {
+            message: "realtime seed projection produced a non-message item".to_string(),
+        });
+    };
+    *item_id = Some(id.clone());
+    Ok(id)
 }
 
 async fn next_openai_session_event(
@@ -1083,6 +1416,25 @@ fn openai_realtime_synthetic_text_item_id() -> String {
     openai_realtime_client_event_id("mk_text")
 }
 
+fn openai_realtime_synthetic_image_item_id(
+    idempotency_key: &str,
+    content_blob_id: &meerkat_core::BlobId,
+) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+
+    let mut hasher = Sha256::new();
+    hasher.update(idempotency_key.as_bytes());
+    hasher.update([0]);
+    hasher.update(content_blob_id.as_str().as_bytes());
+    let digest = hasher.finalize();
+    let mut prefix = String::with_capacity(24);
+    for byte in digest.iter().take(12) {
+        let _ = write!(&mut prefix, "{byte:02x}");
+    }
+    format!("mk_img_{prefix}")
+}
+
 fn openai_realtime_item_transcript_identity(
     item: &Item,
 ) -> Option<(String, RealtimeTranscriptRole)> {
@@ -1234,11 +1586,13 @@ impl RealtimeResponseState {
 }
 
 fn openai_realtime_client_event_id(prefix: &str) -> String {
+    const MAX_ITEM_ID_BYTES: usize = 32;
+    let suffix_len = MAX_ITEM_ID_BYTES.saturating_sub(prefix.len().saturating_add(1));
     let suffix: String = meerkat_core::time_compat::new_uuid_v7()
         .to_string()
         .chars()
         .filter(char::is_ascii_alphanumeric)
-        .take(24)
+        .take(suffix_len)
         .collect();
     format!("{prefix}_{suffix}")
 }
@@ -1284,6 +1638,7 @@ fn trace_openai_active_response_error(
     if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_ACTIVE_RESPONSE").is_none() {
         return;
     }
+    let message = redact_realtime_image_text(message);
     eprintln!(
         "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={} output_active={response_output_active} awaiting_after_commit={} ack_without_progress={} message={message}",
         response_state.nudge_inflight(),
@@ -1332,12 +1687,19 @@ fn openai_realtime_capabilities_for(
     let caps = meerkat_models::capabilities_for(identity.provider, &identity.model);
 
     let video = caps.is_some_and(|c| c.inline_video);
+    // Still-image input follows the catalog vision fact (`gpt-realtime-2`
+    // accepts image input on the realtime surface). Input-only: image
+    // OUTPUT stays on the image-generation operation lane.
+    let image = caps.is_some_and(|c| c.vision);
 
     let mut input_kinds = vec![RealtimeInputKind::Text, RealtimeInputKind::Audio];
     let mut output_kinds = vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio];
     if video {
         input_kinds.push(RealtimeInputKind::Video);
         output_kinds.push(RealtimeOutputKind::Video);
+    }
+    if image {
+        input_kinds.push(RealtimeInputKind::Image);
     }
 
     // Map the core-side turning-mode bools into the wire `RealtimeTurningMode`
@@ -1411,8 +1773,42 @@ pub struct OpenAiRealtimeSession {
     /// like `ProviderManaged` text turns. The only semantic difference between
     /// the two modes for text input is when `response.create` fires
     /// (caller-driven vs server-driven), not whether the user turn is recorded.
-    pending_explicit_commit_text_items: Vec<AppendRealtimeTranscript>,
-    pending_events: VecDeque<RealtimeSessionEvent>,
+    pending_explicit_commit_text_items: Vec<PendingExplicitCommitTextInput>,
+    pending_explicit_commit_text_bytes: usize,
+    /// Image items written to the provider but not yet acknowledged by a
+    /// conversation-item lifecycle event. Bytes stay bounded here until the
+    /// provider supplies the authoritative predecessor identity.
+    pending_image_inputs: BTreeMap<String, PendingRealtimeImageInput>,
+    pending_image_input_bytes: usize,
+    /// Direct `RealtimeSession` callers do not enter through
+    /// `OpenAiLiveAdapter::send_command`, so they acquire image custody from
+    /// this same process-wide payload owner before decoding. Adapter callers
+    /// transfer their existing permit and never double-charge this field.
+    direct_image_payload_budget: Arc<Semaphore>,
+    /// Durable session-scoped idempotency registry, loaded from canonical
+    /// transcript metadata on open and extended only after provider ACK.
+    known_user_content_identities: BTreeMap<String, RealtimeUserContentIdentity>,
+    /// Durable conflict markers for keys removed by canonical transcript
+    /// rewrite. Checked before image decoding or provider send.
+    known_user_content_tombstones: BTreeSet<String>,
+    /// Decoded bytes of every canonical user-image occurrence already seeded
+    /// into this provider conversation. New live images may not make this
+    /// exceed the full, non-lossy reconnect projection ceiling.
+    committed_user_image_bytes: usize,
+    /// Production uses the canonical 40 MiB projection ceiling. Kept as an
+    /// instance field so focused tests can exercise boundary behavior with
+    /// tiny valid fixtures rather than allocating tens of MiB.
+    user_image_history_budget_bytes: usize,
+    /// Absolute provider-ACK deadline for the single admitted pending image.
+    pending_image_ack_deadline: Option<tokio::time::Instant>,
+    pending_image_ack_timeout: Option<Duration>,
+    pending_user_input_tail_item_id: Option<String>,
+    pending_events: VecDeque<BudgetedRealtimeSessionEvent>,
+    /// Reservation transferred with the event most recently returned by
+    /// `next_event`. The OpenAI live pump takes this immediately and moves it
+    /// into the reliable control queue; direct `RealtimeSession` consumers
+    /// release it by polling the next event, which is their completion witness.
+    outgoing_event_memory_budget: Option<OwnedSemaphorePermit>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
     item_response: BTreeMap<String, String>,
@@ -1420,6 +1816,11 @@ pub struct OpenAiRealtimeSession {
     pending_output_audio_transcripts: BTreeMap<String, String>,
     pending_text_suppressions: VecDeque<String>,
     active_response_id: Option<String>,
+    /// Prior response generations whose late lifecycle must not clear,
+    /// complete, or emit output into the continuation launched by a tool
+    /// result. A set is required because multiple delayed terminal events can
+    /// overlap successive continuations.
+    retiring_response_ids: BTreeSet<String>,
     /// One-shot response id captured from the provider's interruption witness.
     /// A delayed client `channel.interrupt` must cancel this response, not the
     /// next response that may already be active by the time the command drains.
@@ -1475,6 +1876,9 @@ pub struct OpenAiRealtimeSession {
     /// `provider_id` since a provider swap (Anthropic ↔ OpenAI) cannot be
     /// done in place on a hosted realtime session either.
     current_provider_id: Option<Provider>,
+    /// Canonical transcript revision used to reject in-place history rewrites
+    /// against an already-seeded provider conversation.
+    current_transcript_rewrite_generation: u64,
     /// #69 / #149: typed, model-keyed realtime operational policy (voice,
     /// input/output language, input transcription model). Resolved from the
     /// open-time `SessionLlmIdentity` in `set_current_identity` and consumed
@@ -1482,6 +1886,93 @@ pub struct OpenAiRealtimeSession {
     /// these facts are typed values that follow model identity, not process
     /// env reads scattered across the adapter.
     realtime_policy: OpenAiRealtimePolicy,
+}
+
+struct PendingRealtimeImageInput {
+    idempotency_key: String,
+    mime_type: String,
+    data: String,
+    content_digest: [u8; 32],
+    content_blob_id: meerkat_core::BlobId,
+    decoded_bytes: usize,
+    requested_previous_item_id: Option<String>,
+    memory_charge: usize,
+    /// Process-wide image reservation. The adapter transfers its command-byte
+    /// permit; direct `RealtimeSession` callers acquire from the same owner.
+    /// It remains attached through provider ACK and canonical-event delivery.
+    command_budget: Option<OwnedSemaphorePermit>,
+}
+
+struct BudgetedRealtimeSessionEvent {
+    event: RealtimeSessionEvent,
+    memory_budget: Option<OwnedSemaphorePermit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingImageAckKind {
+    Created,
+    Added,
+    Done,
+}
+
+fn openai_realtime_image_ack_matches(
+    item_id: &str,
+    content: &[ContentPart],
+    pending: &PendingRealtimeImageInput,
+) -> bool {
+    if item_id
+        != openai_realtime_synthetic_image_item_id(
+            &pending.idempotency_key,
+            &pending.content_blob_id,
+        )
+    {
+        return false;
+    }
+
+    match content {
+        [ContentPart::InputImage { image_url, .. }] if image_url.starts_with("data:") => {
+            let Some(data_url) = image_url.strip_prefix("data:") else {
+                return false;
+            };
+            let Some((media_and_encoding, data)) = data_url.split_once(',') else {
+                return false;
+            };
+            let Some(media_type) = media_and_encoding.strip_suffix(";base64") else {
+                return false;
+            };
+            matches!(
+                decode_and_validate_openai_realtime_image(media_type, data),
+                Ok((canonical_media_type, _, digest))
+                    if canonical_media_type == pending.mime_type
+                        && digest == pending.content_digest
+            )
+        }
+        // The lifecycle echo may redact the URL while retaining the typed
+        // content part. The deterministic expected item id already binds the
+        // caller key to the validated blob digest, so only a byte-bearing
+        // data URL needs a second MIME/digest check.
+        [ContentPart::InputImage { .. }] => true,
+        // OpenAI's authoritative `conversation.item.added` response for an
+        // input image intentionally elides `image_url` and returns only
+        // `{ "type": "input_image" }`. The request's synthetic item id embeds
+        // a deterministic 96-bit SHA-256 prefix over the idempotency key and
+        // content-addressed blob id, so the completed provider item still
+        // correlates to the exact outbound content without retaining or
+        // trusting a second byte-bearing echo.
+        // If OpenAI does echo an URL (the arm above), we additionally verify
+        // the full SHA-256 digest and canonical MIME.
+        [ContentPart::Unknown(value)] => value.as_object().is_some_and(|object| {
+            object.get("type").and_then(serde_json::Value::as_str) == Some("input_image")
+        }),
+        _ => false,
+    }
+}
+
+struct PendingExplicitCommitTextInput {
+    transcript: AppendRealtimeTranscript,
+    previous_item_id: Option<String>,
+    memory_charge: usize,
+    command_budget: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1506,7 +1997,20 @@ impl OpenAiRealtimeSession {
             has_staged_input: false,
             has_staged_audio: false,
             pending_explicit_commit_text_items: Vec::new(),
+            pending_explicit_commit_text_bytes: 0,
+            pending_image_inputs: BTreeMap::new(),
+            pending_image_input_bytes: 0,
+            direct_image_payload_budget: openai_process_live_payload_budget(),
+            known_user_content_identities: BTreeMap::new(),
+            known_user_content_tombstones: BTreeSet::new(),
+            committed_user_image_bytes: 0,
+            user_image_history_budget_bytes:
+                meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+            pending_image_ack_deadline: None,
+            pending_image_ack_timeout: None,
+            pending_user_input_tail_item_id: None,
             pending_events: VecDeque::new(),
+            outgoing_event_memory_budget: None,
             pending_mcp_calls: BTreeMap::new(),
             item_previous: BTreeMap::new(),
             item_response: BTreeMap::new(),
@@ -1514,6 +2018,7 @@ impl OpenAiRealtimeSession {
             pending_output_audio_transcripts: BTreeMap::new(),
             pending_text_suppressions: VecDeque::new(),
             active_response_id: None,
+            retiring_response_ids: BTreeSet::new(),
             pending_interrupted_response_cancel: None,
             pending_response_cancel_event_ids: BTreeSet::new(),
             audio_output_active: false,
@@ -1526,6 +2031,7 @@ impl OpenAiRealtimeSession {
             pending_truncations: BTreeMap::new(),
             current_model_id: None,
             current_provider_id: None,
+            current_transcript_rewrite_generation: 0,
             realtime_policy: OpenAiRealtimePolicy::default(),
         }
     }
@@ -1535,6 +2041,81 @@ impl OpenAiRealtimeSession {
     pub fn set_response_nudge_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
         self.response_nudge_timeout_ms = timeout_ms;
         self.response_nudge_max_attempts = max_attempts;
+    }
+
+    #[cfg(test)]
+    fn set_user_image_history_budget_bytes_for_test(&mut self, max_decoded_bytes: usize) {
+        self.user_image_history_budget_bytes = max_decoded_bytes;
+    }
+
+    fn set_canonical_user_content_registry(
+        &mut self,
+        identities: &[RealtimeUserContentIdentity],
+        tombstones: &[RealtimeUserContentTombstone],
+    ) -> Result<(), LlmError> {
+        let (known, removed) =
+            Self::validate_canonical_user_content_registry(identities, tombstones)?;
+        self.known_user_content_identities = known;
+        self.known_user_content_tombstones = removed;
+        Ok(())
+    }
+
+    fn canonical_user_content_registry_matches(
+        &self,
+        identities: &[RealtimeUserContentIdentity],
+        tombstones: &[RealtimeUserContentTombstone],
+    ) -> Result<bool, LlmError> {
+        let (known, removed) =
+            Self::validate_canonical_user_content_registry(identities, tombstones)?;
+        Ok(self.known_user_content_identities == known
+            && self.known_user_content_tombstones == removed)
+    }
+
+    fn validate_canonical_user_content_registry(
+        identities: &[RealtimeUserContentIdentity],
+        tombstones: &[RealtimeUserContentTombstone],
+    ) -> Result<
+        (
+            BTreeMap<String, RealtimeUserContentIdentity>,
+            BTreeSet<String>,
+        ),
+        LlmError,
+    > {
+        let mut known = BTreeMap::new();
+        for identity in identities {
+            if !meerkat_core::live_adapter::live_image_idempotency_key_is_valid(
+                &identity.idempotency_key,
+            ) || identity.item_id.trim().is_empty()
+                || identity.blob_id.as_str().trim().is_empty()
+                || identity.media_type.trim().is_empty()
+                || known
+                    .insert(identity.idempotency_key.clone(), identity.clone())
+                    .is_some()
+            {
+                return Err(LlmError::InvalidConfig {
+                    message: "canonical realtime user-content identity registry is invalid"
+                        .to_string(),
+                });
+            }
+        }
+        let mut removed = BTreeSet::new();
+        for tombstone in tombstones {
+            if !meerkat_core::live_adapter::live_image_idempotency_key_is_valid(
+                &tombstone.idempotency_key,
+            ) || !removed.insert(tombstone.idempotency_key.clone())
+            {
+                return Err(LlmError::InvalidConfig {
+                    message: "canonical realtime user-content tombstone registry is invalid"
+                        .to_string(),
+                });
+            }
+        }
+        if removed.iter().any(|key| known.contains_key(key)) {
+            return Err(LlmError::InvalidConfig {
+                message: "canonical realtime user-content registry overlaps tombstones".to_string(),
+            });
+        }
+        Ok((known, removed))
     }
 
     /// R1: stamp the model + provider identity this session was opened
@@ -1556,6 +2137,10 @@ impl OpenAiRealtimeSession {
         self.realtime_policy = OpenAiRealtimePolicy::resolve(identity);
     }
 
+    fn set_current_transcript_rewrite_generation(&mut self, generation: u64) {
+        self.current_transcript_rewrite_generation = generation;
+    }
+
     fn effective_nudge_timeout_ms(&self) -> u64 {
         self.response_nudge_timeout_ms
             .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS)
@@ -1573,17 +2158,72 @@ impl OpenAiRealtimeSession {
         }
     }
 
+    fn push_pending_event(&mut self, event: RealtimeSessionEvent) {
+        self.pending_events.push_back(BudgetedRealtimeSessionEvent {
+            event,
+            memory_budget: None,
+        });
+    }
+
+    fn push_budgeted_pending_event(
+        &mut self,
+        event: RealtimeSessionEvent,
+        memory_budget: Option<OwnedSemaphorePermit>,
+    ) {
+        self.pending_events.push_back(BudgetedRealtimeSessionEvent {
+            event,
+            memory_budget,
+        });
+    }
+
+    fn pop_pending_event(&mut self) -> Option<RealtimeSessionEvent> {
+        let pending = self.pending_events.pop_front()?;
+        debug_assert!(
+            self.outgoing_event_memory_budget.is_none(),
+            "the prior realtime event reservation must be transferred or released before dequeue"
+        );
+        self.outgoing_event_memory_budget = pending.memory_budget;
+        Some(pending.event)
+    }
+
+    /// Transfer the reservation that followed the most recently returned
+    /// realtime event into the adapter's reliable control queue.
+    fn take_outgoing_event_memory_budget(&mut self) -> Option<OwnedSemaphorePermit> {
+        self.outgoing_event_memory_budget.take()
+    }
+
     async fn seed_history_projection(
         &mut self,
         seed_messages: &[Message],
         runtime_system_context: &[PendingSystemContextAppend],
     ) -> Result<(), LlmError> {
-        let seed_events = openai_realtime_history_events(seed_messages, runtime_system_context);
+        let committed_user_image_bytes = openai_realtime_seed_user_image_decoded_bytes(
+            seed_messages,
+            self.user_image_history_budget_bytes,
+        )?;
+        let mut seed_events =
+            openai_realtime_history_events(seed_messages, runtime_system_context)?;
         if seed_events.is_empty() {
+            self.committed_user_image_bytes = committed_user_image_bytes;
             return Ok(());
         }
 
-        let expected_ack_count = seed_events.len();
+        let mut expected_item_ids = BTreeSet::new();
+        for (index, event) in seed_events.iter_mut().enumerate() {
+            let item_id = stamp_openai_realtime_seed_item_id(index, event)?;
+            if !expected_item_ids.insert(item_id) {
+                return Err(LlmError::InvalidConfig {
+                    message: "realtime seed projection minted a duplicate item id".to_string(),
+                });
+            }
+        }
+        let seed_payload_bytes = seed_events.iter().try_fold(0usize, |total, event| {
+            serde_json::to_vec(event)
+                .map(|bytes| total.saturating_add(bytes.len()))
+                .map_err(|error| LlmError::InvalidConfig {
+                    message: format!("failed to size realtime seed projection: {error}"),
+                })
+        })?;
         for event in seed_events {
             self.raw_mut()?.send_raw(event).await?;
         }
@@ -1594,32 +2234,39 @@ impl OpenAiRealtimeSession {
         // the next user turn until the provider has acknowledged that seeded
         // history. Otherwise the next turn can race ahead of the reconstructed
         // context and produce stale answers.
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let mut acknowledged = 0usize;
-            while acknowledged < expected_ack_count {
-                let Some(event) = self.raw_mut()?.next_event().await? else {
-                    return Err(LlmError::ConnectionReset);
-                };
-                match event {
-                    ServerEvent::ConversationItemCreated { item, .. }
-                    | ServerEvent::ConversationItemAdded { item, .. } => {
-                        if let Some(item_id) = openai_realtime_item_id(&item) {
-                            self.projected_seed_item_ids.insert(item_id.to_string());
+        tokio::time::timeout(
+            openai_realtime_provider_ack_timeout(seed_payload_bytes),
+            async {
+                let mut acknowledged_item_ids = BTreeSet::new();
+                while acknowledged_item_ids.len() < expected_item_ids.len() {
+                    let Some(event) = self.raw_mut()?.next_event().await? else {
+                        return Err(LlmError::ConnectionReset);
+                    };
+                    match event {
+                        ServerEvent::ConversationItemCreated { ref item, .. }
+                        | ServerEvent::ConversationItemAdded { ref item, .. }
+                            if openai_realtime_item_id(item)
+                                .is_some_and(|item_id| expected_item_ids.contains(item_id)) =>
+                        {
+                            if let Some(item_id) = openai_realtime_item_id(item) {
+                                self.projected_seed_item_ids.insert(item_id.to_string());
+                                acknowledged_item_ids.insert(item_id.to_string());
+                            }
                         }
-                        acknowledged += 1;
-                    }
-                    other => {
-                        if let Some(mapped) = self.map_server_event(other)? {
-                            self.pending_events.push_back(mapped);
+                        other => {
+                            if let Some(mapped) = self.map_server_event(other)? {
+                                self.push_pending_event(mapped);
+                            }
                         }
                     }
                 }
-            }
-            Ok::<(), LlmError>(())
-        })
+                Ok::<(), LlmError>(())
+            },
+        )
         .await
         .map_err(|_| LlmError::ConnectionReset)??;
 
+        self.committed_user_image_bytes = committed_user_image_bytes;
         Ok(())
     }
 
@@ -1657,6 +2304,37 @@ impl OpenAiRealtimeSession {
     fn clear_response_output_active(&mut self) {
         self.audio_output_active = false;
         self.text_output_active = false;
+    }
+
+    /// Normalize both provider cancellation shapes (`response.cancelled` and
+    /// `response.done { status: cancelled }`) onto the same public terminal
+    /// sequence. If barge-in already surfaced `Interrupted`, return only the
+    /// canonical close; otherwise return `Interrupted` now and queue exactly
+    /// one `TurnCompleted(Cancelled)` behind it.
+    fn normalize_cancelled_response_terminal(
+        &mut self,
+        response: &oai_rt_rs::protocol::models::Response,
+    ) -> RealtimeSessionEvent {
+        debug_assert!(matches!(
+            response.status,
+            oai_rt_rs::protocol::models::ResponseStatus::Cancelled
+        ));
+        let response_id = response.id.clone();
+        let turn_completed = RealtimeSessionEvent::TurnCompleted {
+            response_id: response_id.clone(),
+            stop_reason: StopReason::Cancelled,
+            usage: openai_response_usage(response.usage.as_ref()),
+        };
+        if std::mem::replace(&mut self.response_interrupt_emitted, false) {
+            turn_completed
+        } else {
+            self.response_interrupt_emitted = true;
+            self.remember_interrupted_response_cancel_target(Some(&response_id));
+            self.push_pending_event(turn_completed);
+            RealtimeSessionEvent::Interrupted {
+                response_id: Some(response_id),
+            }
+        }
     }
 
     fn previous_item_id_for(&self, item_id: &str) -> Option<String> {
@@ -1933,6 +2611,170 @@ impl OpenAiRealtimeSession {
         })
     }
 
+    fn acknowledge_pending_image_item(
+        &mut self,
+        previous_item_id: Option<String>,
+        item: &Item,
+        ack_kind: PendingImageAckKind,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
+        let Some(item_id) = openai_realtime_item_id(item) else {
+            return Ok(None);
+        };
+        if !self.pending_image_inputs.contains_key(item_id) {
+            return Ok(None);
+        }
+        let Item::Message {
+            status,
+            role,
+            content,
+            ..
+        } = item
+        else {
+            return Err(LlmError::InvalidRequest {
+                message: "openai realtime image acknowledgement had the wrong item shape"
+                    .to_string(),
+            });
+        };
+        if *role != Role::User {
+            return Err(LlmError::InvalidRequest {
+                message: "openai realtime image acknowledgement had the wrong item role"
+                    .to_string(),
+            });
+        }
+        match (ack_kind, status) {
+            (_, Some(ItemStatus::Incomplete)) => {
+                return Err(LlmError::InvalidRequest {
+                    message: "openai realtime image acknowledgement had incomplete status"
+                        .to_string(),
+                });
+            }
+            (PendingImageAckKind::Created | PendingImageAckKind::Added, _) => {}
+            (PendingImageAckKind::Done, Some(ItemStatus::Completed)) => {}
+            (PendingImageAckKind::Done, None | Some(ItemStatus::InProgress)) => return Ok(None),
+        }
+        if !matches!(self.response_state, RealtimeResponseState::Idle) {
+            return Err(LlmError::InvalidRequest {
+                message: "openai realtime image acknowledgement raced an active response"
+                    .to_string(),
+            });
+        }
+        let pending =
+            self.pending_image_inputs
+                .get(item_id)
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: "openai realtime image acknowledgement lost pending identity"
+                        .to_string(),
+                })?;
+        if pending.requested_previous_item_id.is_some()
+            && previous_item_id != pending.requested_previous_item_id
+        {
+            return Err(LlmError::InvalidRequest {
+                message: "openai realtime image acknowledgement broke the requested item order"
+                    .to_string(),
+            });
+        }
+        if !openai_realtime_image_ack_matches(item_id, content, pending) {
+            return Err(LlmError::InvalidRequest {
+                message: "openai realtime image acknowledgement did not correlate to the submitted image content"
+                    .to_string(),
+            });
+        }
+        let committed_user_image_bytes_after_ack = self
+            .committed_user_image_bytes
+            .checked_add(pending.decoded_bytes)
+            .filter(|attempted| *attempted <= self.user_image_history_budget_bytes)
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "openai realtime image acknowledgement exceeded canonical history budget"
+                    .to_string(),
+            })?;
+        let Some(mut pending) = self.pending_image_inputs.remove(item_id) else {
+            return Ok(None);
+        };
+        let command_budget = pending.command_budget.take();
+        self.pending_image_input_bytes = self
+            .pending_image_input_bytes
+            .saturating_sub(pending.memory_charge);
+        self.pending_image_ack_deadline = None;
+        self.pending_image_ack_timeout = None;
+        self.committed_user_image_bytes = committed_user_image_bytes_after_ack;
+        self.pending_user_input_tail_item_id = Some(item_id.to_string());
+        // Freshly acknowledged image context is now a staged user turn. In
+        // explicit-commit mode this permits an image-only commit; historical
+        // idempotent receipt replay bypasses this ACK path and does not reopen
+        // an old turn.
+        self.has_staged_input = true;
+        self.note_previous_for_item(item_id, previous_item_id.clone());
+        let previous_item_id = self.canonical_previous_item_id(previous_item_id);
+        let identity = RealtimeUserContentIdentity {
+            idempotency_key: pending.idempotency_key.clone(),
+            item_id: item_id.to_string(),
+            previous_item_id: previous_item_id.clone(),
+            content_index: 0,
+            blob_id: pending.content_blob_id.clone(),
+            media_type: pending.mime_type.clone(),
+        };
+        self.known_user_content_identities
+            .insert(identity.idempotency_key.clone(), identity);
+        debug_assert!(
+            self.outgoing_event_memory_budget.is_none(),
+            "image ACK must not overwrite another event's transferred reservation"
+        );
+        self.outgoing_event_memory_budget = command_budget;
+        Ok(Some(RealtimeSessionEvent::RealtimeTranscript {
+            event: RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: pending.idempotency_key,
+                item_id: item_id.to_string(),
+                previous_item_id,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: pending.mime_type,
+                    data: ImageData::Inline { data: pending.data },
+                }],
+            },
+        }))
+    }
+
+    fn expire_pending_image_ack(&mut self) -> LlmError {
+        let timeout = self
+            .pending_image_ack_timeout
+            .take()
+            .unwrap_or(OPENAI_REALTIME_ACK_BASE_TIMEOUT);
+        self.pending_image_inputs.clear();
+        self.pending_image_input_bytes = 0;
+        self.pending_image_ack_deadline = None;
+        LlmError::NetworkTimeout {
+            duration_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+
+    fn map_conversation_item_lifecycle(
+        &mut self,
+        previous_item_id: Option<String>,
+        item: Item,
+        ack_kind: PendingImageAckKind,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
+        let pending_image = openai_realtime_item_id(&item)
+            .is_some_and(|item_id| self.pending_image_inputs.contains_key(item_id));
+        if pending_image {
+            self.acknowledge_pending_image_item(previous_item_id, &item, ack_kind)
+        } else if let Some(item_id) = openai_realtime_item_id(&item)
+            && self.is_projected_seed_item(item_id)
+        {
+            self.note_previous_for_item(item_id, previous_item_id);
+            Ok(None)
+        } else if let Some((item_id, role)) = openai_realtime_item_transcript_identity(&item) {
+            Ok(Some(self.observe_transcript_item(
+                item_id,
+                previous_item_id,
+                role,
+                None,
+            )))
+        } else {
+            Ok(openai_realtime_skipped_item_id(&item)
+                .map(|item_id| self.observe_skipped_item(item_id, previous_item_id)))
+        }
+    }
+
     fn map_server_event(
         &mut self,
         event: ServerEvent,
@@ -1942,31 +2784,29 @@ impl OpenAiRealtimeSession {
                 previous_item_id,
                 item,
                 ..
-            }
-            | ServerEvent::ConversationItemAdded {
+            } => self.map_conversation_item_lifecycle(
+                previous_item_id,
+                item,
+                PendingImageAckKind::Created,
+            )?,
+            ServerEvent::ConversationItemAdded {
                 previous_item_id,
                 item,
                 ..
-            }
-            | ServerEvent::ConversationItemDone {
+            } => self.map_conversation_item_lifecycle(
+                previous_item_id,
+                item,
+                PendingImageAckKind::Added,
+            )?,
+            ServerEvent::ConversationItemDone {
                 previous_item_id,
                 item,
                 ..
-            } => {
-                if let Some(item_id) = openai_realtime_item_id(&item)
-                    && self.is_projected_seed_item(item_id)
-                {
-                    self.note_previous_for_item(item_id, previous_item_id);
-                    None
-                } else if let Some((item_id, role)) =
-                    openai_realtime_item_transcript_identity(&item)
-                {
-                    Some(self.observe_transcript_item(item_id, previous_item_id, role, None))
-                } else {
-                    openai_realtime_skipped_item_id(&item)
-                        .map(|item_id| self.observe_skipped_item(item_id, previous_item_id))
-                }
-            }
+            } => self.map_conversation_item_lifecycle(
+                previous_item_id,
+                item,
+                PendingImageAckKind::Done,
+            )?,
             ServerEvent::InputAudioTranscriptionDelta { item_id, delta, .. } => {
                 if self.is_projected_seed_item(&item_id) {
                     return Ok(None);
@@ -2003,8 +2843,7 @@ impl OpenAiRealtimeSession {
                     self.audio_output_active = false;
                     self.response_interrupt_emitted = true;
                     self.remember_interrupted_response_cancel_target(response_id.as_deref());
-                    self.pending_events
-                        .push_back(RealtimeSessionEvent::TurnStarted);
+                    self.push_pending_event(RealtimeSessionEvent::TurnStarted);
                     Some(RealtimeSessionEvent::Interrupted { response_id })
                 } else {
                     Some(RealtimeSessionEvent::TurnStarted)
@@ -2018,7 +2857,22 @@ impl OpenAiRealtimeSession {
                 if self.is_projected_seed_item(&item_id) {
                     return Ok(None);
                 }
+                if self.pending_user_input_tail_item_id.is_some()
+                    && previous_item_id != self.pending_user_input_tail_item_id
+                {
+                    return Err(LlmError::InvalidRequest {
+                        message: "openai realtime audio commit broke the staged user-input order"
+                            .to_string(),
+                    });
+                }
                 self.note_previous_for_item(&item_id, previous_item_id);
+                self.pending_user_input_tail_item_id = Some(item_id.clone());
+                // The provider's commit is the authoritative drain boundary
+                // for provider-managed audio. Leaving these set would make
+                // every later image look like it depended on uncommitted
+                // audio, even though explicit commit is invalid in this mode.
+                self.has_staged_input = false;
+                self.has_staged_audio = false;
                 // A fresh commit resets the nudge machine: provider-managed
                 // turns wait for the next acknowledgement (with a fresh
                 // recovery budget); explicit-commit turns drive
@@ -2051,16 +2905,20 @@ impl OpenAiRealtimeSession {
                     self.audio_output_active = false;
                     self.response_interrupt_emitted = true;
                     self.remember_interrupted_response_cancel_target(response_id.as_deref());
-                    self.pending_events
-                        .push_back(RealtimeSessionEvent::TurnStarted);
-                    self.pending_events
-                        .push_back(RealtimeSessionEvent::TurnCommitted);
+                    self.push_pending_event(RealtimeSessionEvent::TurnStarted);
+                    self.push_pending_event(RealtimeSessionEvent::TurnCommitted);
                     Some(RealtimeSessionEvent::Interrupted { response_id })
                 } else {
                     Some(RealtimeSessionEvent::TurnCommitted)
                 }
             }
             ServerEvent::ResponseCreated { response, .. } => {
+                if self.retiring_response_ids.contains(response.id.as_str()) {
+                    trace_openai_realtime_lifecycle(
+                        "response.created suppressed_for_continuation_predecessor",
+                    );
+                    return Ok(None);
+                }
                 // `response.created` proves the provider accepted a response,
                 // but it does not yet prove turn progress. Keep the adapter in
                 // a bounded waiting state until we see output, tool activity,
@@ -2071,28 +2929,22 @@ impl OpenAiRealtimeSession {
                 None
             }
             ServerEvent::ResponseDone { response, .. } => {
-                if self.response_state.awaiting_after_commit() {
-                    trace_openai_realtime_lifecycle(format!(
-                        "response.done suppressed_while_awaiting status={:?}",
-                        response.status
-                    ));
-                    // Provider-lifecycle ordering:
-                    // a late completion from the previous response can arrive
-                    // after the next user audio turn has already committed but
-                    // before the provider has actually started the new
-                    // response. That stale `response.done` must not be exposed
-                    // as the new turn's completion or it will collapse turn
-                    // boundaries and let higher layers believe the new turn is
-                    // already terminal.
-                    self.clear_response_output_active();
-                    self.response_interrupt_emitted = false;
-                    self.response_tool_call_observed = false;
+                if self.retiring_response_ids.remove(response.id.as_str()) {
+                    trace_openai_realtime_lifecycle(
+                        "response.done suppressed_for_continuation_predecessor",
+                    );
+                    return Ok(None);
+                }
+                if self.active_response_id.as_deref() != Some(response.id.as_str()) {
+                    trace_openai_realtime_lifecycle(
+                        "response.done suppressed_for_non_current_generation",
+                    );
                     return Ok(None);
                 }
                 self.note_provider_response_progressed();
+                self.active_response_id = None;
+                self.pending_user_input_tail_item_id = None;
                 self.clear_response_output_active();
-                let interrupt_already_emitted =
-                    std::mem::replace(&mut self.response_interrupt_emitted, false);
                 let observed_tool_call = std::mem::take(&mut self.response_tool_call_observed);
                 trace_openai_realtime_lifecycle(format!(
                     "response.done surfaced status={:?} observed_tool_call={observed_tool_call}",
@@ -2101,54 +2953,40 @@ impl OpenAiRealtimeSession {
                 let stop_reason = openai_response_stop_reason(&response, observed_tool_call);
                 let response_id = response.id.clone();
                 let turn_completed = RealtimeSessionEvent::TurnCompleted {
-                    response_id: response_id.clone(),
+                    response_id,
                     stop_reason,
                     usage: openai_response_usage(response.usage.as_ref()),
                 };
-                // Provider-normalization for cancelled response.done:
-                // OpenAI Realtime reports an interrupted/cancelled response via
-                // `response.done` with status=cancelled rather than via a
-                // separate `response.cancelled` event. When that terminal
-                // lands and we have not already surfaced an `Interrupted`
-                // product witness (via `speech_started` or the commit-time
-                // fallback), synthesize it here so the public channel records
-                // the preemption. TurnCompleted still fires on the next
-                // adapter poll so the canonical finalize path remains intact.
                 if matches!(
                     response.status,
                     oai_rt_rs::protocol::models::ResponseStatus::Cancelled
-                ) && !interrupt_already_emitted
-                {
-                    self.response_interrupt_emitted = true;
-                    self.remember_interrupted_response_cancel_target(Some(&response_id));
-                    self.pending_events.push_back(turn_completed);
-                    Some(RealtimeSessionEvent::Interrupted {
-                        response_id: Some(response_id),
-                    })
+                ) {
+                    Some(self.normalize_cancelled_response_terminal(&response))
                 } else {
+                    self.response_interrupt_emitted = false;
                     Some(turn_completed)
                 }
             }
             ServerEvent::ResponseCancelled { response, .. } => {
-                if self.response_state.awaiting_after_commit() {
-                    trace_openai_realtime_lifecycle("response.cancelled suppressed_while_awaiting");
-                    self.clear_response_output_active();
-                    self.response_tool_call_observed = false;
+                if self.retiring_response_ids.remove(response.id.as_str()) {
+                    trace_openai_realtime_lifecycle(
+                        "response.cancelled suppressed_for_continuation_predecessor",
+                    );
+                    return Ok(None);
+                }
+                if self.active_response_id.as_deref() != Some(response.id.as_str()) {
+                    trace_openai_realtime_lifecycle(
+                        "response.cancelled suppressed_for_non_current_generation",
+                    );
                     return Ok(None);
                 }
                 self.note_provider_response_progressed();
+                self.active_response_id = None;
+                self.pending_user_input_tail_item_id = None;
                 self.clear_response_output_active();
                 self.response_tool_call_observed = false;
                 trace_openai_realtime_lifecycle("response.cancelled surfaced");
-                if self.response_interrupt_emitted {
-                    None
-                } else {
-                    self.response_interrupt_emitted = true;
-                    self.remember_interrupted_response_cancel_target(Some(&response.id));
-                    Some(RealtimeSessionEvent::Interrupted {
-                        response_id: Some(response.id),
-                    })
-                }
+                Some(self.normalize_cancelled_response_terminal(&response))
             }
             ServerEvent::ResponseOutputItemAdded {
                 response_id, item, ..
@@ -2156,6 +2994,9 @@ impl OpenAiRealtimeSession {
             | ServerEvent::ResponseOutputItemDone {
                 response_id, item, ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 if let Some(item_id) = openai_realtime_item_id(&item)
                     && self.is_projected_seed_item(item_id)
                 {
@@ -2183,6 +3024,9 @@ impl OpenAiRealtimeSession {
                 delta,
                 ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
                 self.note_mcp_argument_delta(&item_id, delta);
@@ -2194,6 +3038,9 @@ impl OpenAiRealtimeSession {
                 arguments,
                 ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
                 self.note_mcp_argument_done(&item_id, arguments)?
@@ -2206,6 +3053,9 @@ impl OpenAiRealtimeSession {
                 delta,
                 ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 if self.is_projected_seed_item(&item_id) {
                     return Ok(None);
                 }
@@ -2238,6 +3088,9 @@ impl OpenAiRealtimeSession {
                 delta,
                 ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 if self.is_projected_seed_item(&item_id) {
                     return Ok(None);
                 }
@@ -2258,6 +3111,9 @@ impl OpenAiRealtimeSession {
                 transcript,
                 ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 if self.is_projected_seed_item(&item_id) {
                     return Ok(None);
                 }
@@ -2294,7 +3150,7 @@ impl OpenAiRealtimeSession {
                 // delta-stream consumers see the suffix before the close.
                 match trailing_delta {
                     Some(delta_event) => {
-                        self.pending_events.push_back(final_event);
+                        self.push_pending_event(final_event);
                         Some(delta_event)
                     }
                     None => Some(final_event),
@@ -2307,6 +3163,9 @@ impl OpenAiRealtimeSession {
                 delta,
                 ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 if self.is_projected_seed_item(&item_id) {
                     return Ok(None);
                 }
@@ -2334,6 +3193,9 @@ impl OpenAiRealtimeSession {
                 arguments,
                 ..
             } => {
+                if self.retiring_response_ids.contains(&response_id) {
+                    return Ok(None);
+                }
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
                 let parsed = parse_tool_call_args(&arguments, &call_id)?;
@@ -2489,7 +3351,7 @@ impl OpenAiRealtimeSession {
                 ServerEvent::SessionUpdated { .. } => return Ok(()),
                 other => {
                     if let Some(mapped) = self.map_server_event(other)? {
-                        self.pending_events.push_back(mapped);
+                        self.push_pending_event(mapped);
                     }
                 }
             }
@@ -2516,39 +3378,16 @@ impl OpenAiRealtimeSession {
                     .to_string(),
             });
         }
+        if !self.pending_image_inputs.is_empty() {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_pending_budget_exceeded".to_string(),
+            });
+        }
         if !self.has_staged_input {
             return Err(LlmError::InvalidRequest {
                 message: "realtime commit_turn requires staged input".to_string(),
             });
         }
-        if self.has_staged_audio {
-            self.raw_mut()?
-                .send_raw(ClientEvent::InputAudioBufferCommit { event_id: None })
-                .await?;
-        }
-        // R4-1 (P1): drain text items staged via `send_input` while the
-        // turn was open and synthesize the canonical user-turn
-        // observation sequence BEFORE clearing staged input. Each text
-        // item gets its own TurnStarted / InputTranscriptPartial /
-        // InputTranscriptFinalForItem / TurnCommitted block — same shape
-        // ProviderManaged emits inline per text chunk — so explicit-commit
-        // text turns are projected into canonical history identically
-        // to provider-managed text turns. Audio commits do not need this
-        // synthesis: OpenAI's `input_audio_buffer.committed` server event
-        // drives the TurnCommitted observation through the normal mapping
-        // path (see `map_server_event`).
-        let pending_text_items = std::mem::take(&mut self.pending_explicit_commit_text_items);
-        for staged in &pending_text_items {
-            Self::synthesize_text_turn_observations(
-                &mut self.pending_events,
-                &staged.item_id,
-                &staged.text,
-            );
-        }
-        // `LiveResponseModality` is `#[non_exhaustive]`; future variants
-        // the OpenAI realtime adapter does not yet honor must surface a
-        // typed `InvalidRequest` rejection rather than silently dropping
-        // the override.
         let response_config = match response_modality {
             None | Some(LiveResponseModality::Audio) => {
                 openai_audio_response_config(&self.realtime_policy.voice)
@@ -2562,15 +3401,348 @@ impl OpenAiRealtimeSession {
                 });
             }
         };
+        if self.has_staged_audio {
+            self.raw_mut()?
+                .send_raw(ClientEvent::InputAudioBufferCommit { event_id: None })
+                .await?;
+        }
         self.raw_mut()?
             .send_raw(ClientEvent::ResponseCreate {
                 event_id: None,
                 response: Some(Box::new(response_config)),
             })
             .await?;
+        // R4-1 (P1): drain text items staged via `send_input` while the
+        // turn was open and synthesize the canonical user-turn
+        // observation sequence BEFORE clearing staged input. Each text
+        // item gets its own TurnStarted / InputTranscriptPartial /
+        // InputTranscriptFinalForItem / TurnCommitted block — same shape
+        // ProviderManaged emits inline per text chunk — so explicit-commit
+        // text turns are projected into canonical history identically
+        // to provider-managed text turns. Audio commits do not need this
+        // synthesis: OpenAI's `input_audio_buffer.committed` server event
+        // drives the TurnCommitted observation through the normal mapping
+        // path (see `map_server_event`).
+        let pending_text_items = std::mem::take(&mut self.pending_explicit_commit_text_items);
+        for staged in pending_text_items {
+            self.pending_explicit_commit_text_bytes = self
+                .pending_explicit_commit_text_bytes
+                .saturating_sub(staged.memory_charge);
+            self.synthesize_text_turn_observations(
+                &staged.transcript.item_id,
+                staged.previous_item_id,
+                &staged.transcript.text,
+                staged.command_budget,
+            )?;
+        }
+        debug_assert_eq!(self.pending_explicit_commit_text_bytes, 0);
         self.has_staged_input = false;
         self.has_staged_audio = false;
+        self.response_state = RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
         Ok(())
+    }
+
+    async fn send_image_input(
+        &mut self,
+        chunk: meerkat_contracts::RealtimeImageChunk,
+        command_budget: Option<OwnedSemaphorePermit>,
+    ) -> Result<(), LlmError> {
+        let meerkat_contracts::RealtimeImageChunk {
+            idempotency_key,
+            mime_type: raw_mime_type,
+            data,
+        } = chunk;
+        if !meerkat_core::live_adapter::live_image_idempotency_key_is_valid(&idempotency_key) {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_idempotency_key_invalid".to_string(),
+            });
+        }
+        if self
+            .known_user_content_tombstones
+            .contains(&idempotency_key)
+        {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_idempotency_conflict".to_string(),
+            });
+        }
+        if !self
+            .capabilities
+            .input_kinds
+            .contains(&RealtimeInputKind::Image)
+        {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_not_implemented".to_string(),
+            });
+        }
+        let command_budget = match command_budget {
+            Some(transferred) => Some(transferred),
+            None => {
+                // Length checks and conservative charge calculation allocate
+                // nothing. Own the encoded input, decode buffer, data-URL
+                // copy, and serialized provider frame before base64 decode.
+                if data.len() > meerkat_core::live_adapter::MAX_LIVE_IMAGE_BASE64_BYTES {
+                    return Err(LlmError::InvalidInputShape {
+                        message: OpenAiRealtimeImageValidationError::TooLarge {
+                            max_bytes: meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES,
+                            actual_bytes: data.len().div_ceil(4).saturating_mul(3),
+                        }
+                        .to_string(),
+                    });
+                }
+                let decoded_upper_bound = data.len().div_ceil(4).saturating_mul(3);
+                let charge = openai_live_image_command_memory_charge(
+                    decoded_upper_bound,
+                    idempotency_key.len(),
+                    raw_mime_type.len(),
+                )
+                .max(meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES);
+                let permits = u32::try_from(charge).map_err(|_| LlmError::InvalidInputShape {
+                    message: "image_input_pending_budget_exceeded".to_string(),
+                })?;
+                let permit = Arc::clone(&self.direct_image_payload_budget)
+                    .try_acquire_many_owned(permits)
+                    .map_err(|_| LlmError::InvalidInputShape {
+                        message: "image_input_pending_budget_exceeded".to_string(),
+                    })?;
+                Some(permit)
+            }
+        };
+        let (mime_type, decoded_bytes, content_digest) =
+            decode_and_validate_openai_realtime_image(&raw_mime_type, &data).map_err(|err| {
+                LlmError::InvalidInputShape {
+                    message: err.to_string(),
+                }
+            })?;
+        let content_blob_id = meerkat_core::blob::content_blob_id(&mime_type, &data);
+        if let Some(known) = self
+            .known_user_content_identities
+            .get(&idempotency_key)
+            .cloned()
+        {
+            if known.blob_id != content_blob_id || known.media_type != mime_type {
+                return Err(LlmError::InvalidInputShape {
+                    message: "image_input_idempotency_conflict".to_string(),
+                });
+            }
+            // Retry after a lost receipt: do not bill or resend provider
+            // input. Replay the canonical identity through the reducer so the
+            // host emits a persistence-backed `AlreadyCommitted` receipt.
+            self.push_pending_event(RealtimeSessionEvent::RealtimeTranscript {
+                event: RealtimeTranscriptEvent::UserContentFinal {
+                    idempotency_key: known.idempotency_key,
+                    item_id: known.item_id,
+                    previous_item_id: known.previous_item_id,
+                    content_index: known.content_index,
+                    content: vec![ContentBlock::Image {
+                        media_type: known.media_type,
+                        data: ImageData::Blob {
+                            blob_id: known.blob_id,
+                        },
+                    }],
+                },
+            });
+            return Ok(());
+        }
+        if self.has_staged_input
+            || self.has_staged_audio
+            || !self.pending_explicit_commit_text_items.is_empty()
+        {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_requires_commit".to_string(),
+            });
+        }
+        if !matches!(self.response_state, RealtimeResponseState::Idle)
+            || self.any_response_output_active()
+            || self.active_response_id.is_some()
+            || !self.pending_image_inputs.is_empty()
+        {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_pending_budget_exceeded".to_string(),
+            });
+        }
+        if self
+            .committed_user_image_bytes
+            .checked_add(decoded_bytes)
+            .is_none_or(|attempted| attempted > self.user_image_history_budget_bytes)
+        {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_history_budget_exceeded".to_string(),
+            });
+        }
+        let memory_charge =
+            decoded_bytes.max(meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES);
+        if self.pending_image_input_bytes.saturating_add(memory_charge)
+            > OPENAI_REALTIME_PENDING_INPUT_BUDGET_BYTES
+        {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_pending_budget_exceeded".to_string(),
+            });
+        }
+
+        let item_id = openai_realtime_synthetic_image_item_id(&idempotency_key, &content_blob_id);
+        let image_url = format!("data:{mime_type};base64,{data}");
+        let requested_previous_item_id = self.pending_user_input_tail_item_id.clone();
+        self.raw_mut()?
+            .send_raw(ClientEvent::ConversationItemCreate {
+                event_id: None,
+                previous_item_id: requested_previous_item_id.clone(),
+                item: Box::new(Item::Message {
+                    id: Some(item_id.clone()),
+                    status: None,
+                    phase: None,
+                    role: Role::User,
+                    content: vec![ContentPart::InputImage {
+                        image_url,
+                        detail: None,
+                    }],
+                }),
+            })
+            .await?;
+        self.pending_image_input_bytes =
+            self.pending_image_input_bytes.saturating_add(memory_charge);
+        let encoded_bytes = data.len();
+        self.pending_image_inputs.insert(
+            item_id,
+            PendingRealtimeImageInput {
+                idempotency_key,
+                mime_type,
+                data,
+                content_digest,
+                content_blob_id,
+                decoded_bytes,
+                requested_previous_item_id,
+                memory_charge,
+                command_budget,
+            },
+        );
+        let ack_timeout = openai_realtime_provider_ack_timeout(encoded_bytes);
+        self.pending_image_ack_timeout = Some(ack_timeout);
+        self.pending_image_ack_deadline = Some(tokio::time::Instant::now() + ack_timeout);
+        Ok(())
+    }
+
+    async fn send_input_with_command_budget(
+        &mut self,
+        chunk: RealtimeInputChunk,
+        command_budget: Option<OwnedSemaphorePermit>,
+    ) -> Result<(), LlmError> {
+        if !matches!(chunk, RealtimeInputChunk::ImageChunk(_))
+            && !self.pending_image_inputs.is_empty()
+        {
+            return Err(LlmError::InvalidInputShape {
+                message: "image_input_pending_budget_exceeded".to_string(),
+            });
+        }
+        match chunk {
+            RealtimeInputChunk::ImageChunk(chunk) => {
+                self.send_image_input(chunk, command_budget).await
+            }
+            RealtimeInputChunk::AudioChunk(chunk) => {
+                if chunk.data.len() > meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES {
+                    return Err(LlmError::InvalidInputShape {
+                        message: "live input chunk exceeds the maximum encoded size".to_string(),
+                    });
+                }
+                self.raw_mut()?
+                    .send_raw(ClientEvent::InputAudioBufferAppend {
+                        event_id: None,
+                        audio: chunk.data,
+                    })
+                    .await?;
+                self.has_staged_input = true;
+                self.has_staged_audio = true;
+                Ok(())
+            }
+            RealtimeInputChunk::TextChunk(chunk) => {
+                let text = chunk.text;
+                if text.len() > meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES {
+                    return Err(LlmError::InvalidInputShape {
+                        message: "live input chunk exceeds the maximum encoded size".to_string(),
+                    });
+                }
+                let memory_charge = text
+                    .len()
+                    .max(meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES);
+                if self.turning_mode == RealtimeTurningMode::ExplicitCommit
+                    && self
+                        .pending_explicit_commit_text_bytes
+                        .saturating_add(memory_charge)
+                        > OPENAI_REALTIME_PENDING_INPUT_BUDGET_BYTES
+                {
+                    return Err(LlmError::InvalidInputShape {
+                        message: "live_input_pending_budget_exceeded".to_string(),
+                    });
+                }
+                let synthetic_item_id = openai_realtime_synthetic_text_item_id();
+                let previous_item_id = self.pending_user_input_tail_item_id.clone();
+                self.raw_mut()?
+                    .send_raw(ClientEvent::ConversationItemCreate {
+                        event_id: None,
+                        previous_item_id: previous_item_id.clone(),
+                        item: Box::new(Item::Message {
+                            id: Some(synthetic_item_id.clone()),
+                            status: None,
+                            phase: None,
+                            role: Role::User,
+                            content: vec![ContentPart::InputText { text: text.clone() }],
+                        }),
+                    })
+                    .await?;
+                self.pending_user_input_tail_item_id = Some(synthetic_item_id.clone());
+                self.has_staged_input = true;
+                match self.turning_mode {
+                    RealtimeTurningMode::ProviderManaged => {
+                        self.synthesize_text_turn_observations(
+                            &synthetic_item_id,
+                            previous_item_id,
+                            &text,
+                            command_budget,
+                        )?;
+                        let response_config =
+                            openai_audio_response_config(&self.realtime_policy.voice);
+                        self.raw_mut()?
+                            .send_raw(ClientEvent::ResponseCreate {
+                                event_id: None,
+                                response: Some(Box::new(response_config)),
+                            })
+                            .await?;
+                        self.has_staged_input = false;
+                        self.response_state =
+                            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
+                    }
+                    RealtimeTurningMode::ExplicitCommit => {
+                        self.pending_explicit_commit_text_bytes = self
+                            .pending_explicit_commit_text_bytes
+                            .saturating_add(memory_charge);
+                        self.pending_explicit_commit_text_items.push(
+                            PendingExplicitCommitTextInput {
+                                transcript: AppendRealtimeTranscript {
+                                    item_id: synthetic_item_id,
+                                    text,
+                                    role: RealtimeTranscriptRole::User,
+                                    lane: TranscriptLane::Display,
+                                },
+                                previous_item_id,
+                                memory_charge,
+                                command_budget,
+                            },
+                        );
+                    }
+                }
+                Ok(())
+            }
+            RealtimeInputChunk::VideoChunk(chunk) => {
+                if chunk.data.len() > meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES {
+                    return Err(LlmError::InvalidInputShape {
+                        message: "live input chunk exceeds the maximum encoded size".to_string(),
+                    });
+                }
+                Err(LlmError::InvalidInputShape {
+                    message: "openai realtime video input is not supported by the current adapter"
+                        .to_string(),
+                })
+            }
+        }
     }
 
     /// R4-1 (P1): shared canonical-history synthesis for a single text
@@ -2587,21 +3759,53 @@ impl OpenAiRealtimeSession {
     /// staged queue). Both modes produce equivalent canonical
     /// projection for text input.
     fn synthesize_text_turn_observations(
-        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+        &mut self,
         item_id: &str,
+        previous_item_id: Option<String>,
         text: &str,
-    ) {
-        pending_events.push_back(RealtimeSessionEvent::TurnStarted);
-        pending_events.push_back(RealtimeSessionEvent::InputTranscriptPartial {
-            text: text.to_string(),
-        });
-        pending_events.push_back(RealtimeSessionEvent::InputTranscriptFinalForItem {
-            item_id: item_id.to_string(),
-            previous_item_id: None,
-            content_index: 0,
-            text: text.to_string(),
-        });
-        pending_events.push_back(RealtimeSessionEvent::TurnCommitted);
+        command_budget: Option<OwnedSemaphorePermit>,
+    ) -> Result<(), LlmError> {
+        let payload_charge = text.len().max(OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES);
+        let (partial_budget, final_budget) =
+            match command_budget {
+                Some(mut budget) => {
+                    let partial = budget.split(payload_charge).ok_or_else(|| {
+                        LlmError::InvalidRequest {
+                        message:
+                            "live text command reservation is smaller than its partial observation"
+                                .to_string(),
+                    }
+                    })?;
+                    let final_budget = budget.split(payload_charge).ok_or_else(|| {
+                        LlmError::InvalidRequest {
+                        message:
+                            "live text command reservation is smaller than its final observation"
+                                .to_string(),
+                    }
+                    })?;
+                    (Some(partial), Some(final_budget))
+                }
+                None => (None, None),
+            };
+
+        self.push_pending_event(RealtimeSessionEvent::TurnStarted);
+        self.push_budgeted_pending_event(
+            RealtimeSessionEvent::InputTranscriptPartial {
+                text: text.to_string(),
+            },
+            partial_budget,
+        );
+        self.push_budgeted_pending_event(
+            RealtimeSessionEvent::InputTranscriptFinalForItem {
+                item_id: item_id.to_string(),
+                previous_item_id,
+                content_index: 0,
+                text: text.to_string(),
+            },
+            final_budget,
+        );
+        self.push_pending_event(RealtimeSessionEvent::TurnCommitted);
+        Ok(())
     }
 }
 
@@ -2624,94 +3828,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
     }
 
     async fn send_input(&mut self, chunk: RealtimeInputChunk) -> Result<(), LlmError> {
-        match chunk {
-            RealtimeInputChunk::AudioChunk(chunk) => {
-                self.raw_mut()?
-                    .send_raw(ClientEvent::InputAudioBufferAppend {
-                        event_id: None,
-                        audio: chunk.data,
-                    })
-                    .await?;
-                self.has_staged_input = true;
-                self.has_staged_audio = true;
-                Ok(())
-            }
-            RealtimeInputChunk::TextChunk(chunk) => {
-                let text = chunk.text;
-                let synthetic_item_id = openai_realtime_synthetic_text_item_id();
-                self.raw_mut()?
-                    .send_raw(ClientEvent::ConversationItemCreate {
-                        event_id: None,
-                        previous_item_id: None,
-                        item: Box::new(Item::Message {
-                            id: Some(synthetic_item_id.clone()),
-                            status: None,
-                            phase: None,
-                            role: Role::User,
-                            content: vec![ContentPart::InputText { text: text.clone() }],
-                        }),
-                    })
-                    .await?;
-                self.has_staged_input = true;
-                // Text turns in provider-managed mode have no server-VAD commit
-                // analogue: OpenAI only emits `input_audio_buffer.committed`
-                // (which drives TurnCommitted) for audio turns. Mirror the audio
-                // flow synthetically for text so the public realtime contract
-                // stays consistent — callers waiting for the canonical
-                // TurnStarted / InputTranscriptPartial / InputTranscriptFinal /
-                // TurnCommitted sequence get the same events for text as for
-                // audio. The synthetic item id is sent to OpenAI as the item id
-                // and then reused on the typed transcript seam so canonical
-                // session append remains keyed and idempotent.
-                match self.turning_mode {
-                    RealtimeTurningMode::ProviderManaged => {
-                        Self::synthesize_text_turn_observations(
-                            &mut self.pending_events,
-                            &synthetic_item_id,
-                            &text,
-                        );
-                        let response_config =
-                            openai_audio_response_config(&self.realtime_policy.voice);
-                        self.raw_mut()?
-                            .send_raw(ClientEvent::ResponseCreate {
-                                event_id: None,
-                                response: Some(Box::new(response_config)),
-                            })
-                            .await?;
-                        self.has_staged_input = false;
-                        self.response_state =
-                            RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
-                    }
-                    RealtimeTurningMode::ExplicitCommit => {
-                        // R4-1 (P1) / #51: defer canonical-history synthesis
-                        // until commit. The provider has accepted the
-                        // `conversation.item.create` for this text item and
-                        // assigned it `synthetic_item_id`; on
-                        // `commit_turn_with_modality` we drain the staged
-                        // queue and emit the same observation sequence
-                        // ProviderManaged emits inline so explicit-commit
-                        // text turns reach canonical history. The staged turn
-                        // is held as the machine-owned typed staging seam
-                        // `AppendRealtimeTranscript` (the exact fact the
-                        // generated `MeerkatMachine` consumes to emit
-                        // `RealtimeTranscriptAppended`): an explicit-commit
-                        // text turn is a `User` item on the `Display` lane.
-                        self.pending_explicit_commit_text_items
-                            .push(AppendRealtimeTranscript {
-                                item_id: synthetic_item_id,
-                                text,
-                                role: RealtimeTranscriptRole::User,
-                                lane: TranscriptLane::Display,
-                            });
-                    }
-                }
-                Ok(())
-            }
-            RealtimeInputChunk::VideoChunk(_) => Err(LlmError::InvalidInputShape {
-                message: "openai realtime video input is not supported by the current adapter"
-                    .to_string(),
-            }),
-        }
+        self.send_input_with_command_budget(chunk, None).await
     }
 
     async fn commit_turn(&mut self) -> Result<(), LlmError> {
@@ -2776,6 +3893,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 ))
                 .await?;
         } else {
+            let predecessor_response_id = self.active_response_id.take();
             let events = openai_live_function_call_success_events(
                 call_id,
                 &output,
@@ -2784,6 +3902,18 @@ impl RealtimeSession for OpenAiRealtimeSession {
             for event in events {
                 self.raw_mut()?.send_raw(event).await?;
             }
+            // The event batch ends with response.create. Transition before
+            // returning command acceptance so image admission cannot race the
+            // continuation's response.created acknowledgement. Keep the prior
+            // response identity until its late terminal arrives, preventing it
+            // from clearing a newer active continuation.
+            if let Some(predecessor_response_id) = predecessor_response_id {
+                self.retiring_response_ids.insert(predecessor_response_id);
+            }
+            self.clear_response_output_active();
+            self.response_interrupt_emitted = false;
+            self.response_tool_call_observed = false;
+            self.response_state = RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 };
         }
         Ok(())
     }
@@ -2795,7 +3925,18 @@ impl RealtimeSession for OpenAiRealtimeSession {
     }
 
     async fn next_event(&mut self) -> Result<Option<RealtimeSessionEvent>, LlmError> {
-        if let Some(event) = self.pending_events.pop_front() {
+        // A direct `RealtimeSession` caller signals completion of the prior
+        // event by polling again. The adapter pump takes this reservation
+        // immediately instead, transferring it into the reliable control
+        // queue before any await that could retain the payload unbudgeted.
+        self.outgoing_event_memory_budget.take();
+        if self
+            .pending_image_ack_deadline
+            .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+        {
+            return Err(self.expire_pending_image_ack());
+        }
+        if let Some(event) = self.pop_pending_event() {
             return Ok(Some(event));
         }
 
@@ -2811,12 +3952,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // the upstream/provider session behavior is fully understood.
                 let nudge_timeout_ms = self.effective_nudge_timeout_ms();
                 let nudge_max_attempts = self.effective_nudge_max_attempts();
-                match tokio::time::timeout(
-                    Duration::from_millis(nudge_timeout_ms),
-                    self.raw_mut()?.next_event(),
-                )
-                .await
-                {
+                let nudge_deadline =
+                    tokio::time::Instant::now() + Duration::from_millis(nudge_timeout_ms);
+                let wait_deadline = self
+                    .pending_image_ack_deadline
+                    .map_or(nudge_deadline, |image_deadline| {
+                        image_deadline.min(nudge_deadline)
+                    });
+                match tokio::time::timeout_at(wait_deadline, self.raw_mut()?.next_event()).await {
                     Ok(result) => match result {
                         Ok(event) => event,
                         Err(LlmError::InvalidRequest { message })
@@ -2841,6 +3984,13 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         }
                         Err(error) => return Err(error),
                     },
+                    Err(_)
+                        if self
+                            .pending_image_ack_deadline
+                            .is_some_and(|image_deadline| image_deadline <= nudge_deadline) =>
+                    {
+                        return Err(self.expire_pending_image_ack());
+                    }
                     Err(_) => {
                         let nudge_attempts = self.response_state.nudge_attempts();
                         if self.response_state.acknowledged_without_progress() {
@@ -2926,7 +4076,15 @@ impl RealtimeSession for OpenAiRealtimeSession {
                     }
                 }
             } else {
-                match self.raw_mut()?.next_event().await {
+                let result = if let Some(deadline) = self.pending_image_ack_deadline {
+                    match tokio::time::timeout_at(deadline, self.raw_mut()?.next_event()).await {
+                        Ok(result) => result,
+                        Err(_) => return Err(self.expire_pending_image_ack()),
+                    }
+                } else {
+                    self.raw_mut()?.next_event().await
+                };
+                match result {
                     Ok(event) => event,
                     Err(LlmError::InvalidRequest { message })
                         if {
@@ -2968,11 +4126,21 @@ impl RealtimeSession for OpenAiRealtimeSession {
         self.has_staged_input = false;
         self.has_staged_audio = false;
         self.pending_explicit_commit_text_items.clear();
+        self.pending_explicit_commit_text_bytes = 0;
+        self.pending_image_inputs.clear();
+        self.pending_image_input_bytes = 0;
+        self.pending_image_ack_deadline = None;
+        self.pending_image_ack_timeout = None;
+        self.committed_user_image_bytes = 0;
+        self.pending_user_input_tail_item_id = None;
         self.pending_events.clear();
+        self.outgoing_event_memory_budget = None;
         self.pending_mcp_calls.clear();
         self.pending_text_suppressions.clear();
         self.pending_interrupted_response_cancel = None;
         self.pending_response_cancel_event_ids.clear();
+        self.active_response_id = None;
+        self.retiring_response_ids.clear();
         // R3-5 (P2): clear both modality bits on close.
         self.clear_response_output_active();
         self.response_interrupt_emitted = false;
@@ -3029,12 +4197,69 @@ fn openai_response_usage(usage: Option<&oai_rt_rs::protocol::models::Usage>) -> 
 #[derive(Clone)]
 pub struct OpenAiRealtimeSessionFactory {
     raw_factory: Arc<dyn OpenAiLiveSessionFactory>,
+    open_projection_admission: RealtimeOpenProjectionAdmission,
+    user_image_history_budget_bytes: usize,
 }
 
 impl OpenAiRealtimeSessionFactory {
     /// Create a new OpenAI realtime session factory from a raw sideband factory.
     pub fn new(raw_factory: Arc<dyn OpenAiLiveSessionFactory>) -> Self {
-        Self { raw_factory }
+        #[cfg(not(test))]
+        let open_projection_admission = RealtimeOpenProjectionAdmission::global().clone();
+        // Unit tests construct many independent fake factories in parallel;
+        // give each fake process its own owner so only tests explicitly aimed
+        // at cross-open contention share an admission pool.
+        #[cfg(test)]
+        let open_projection_admission = RealtimeOpenProjectionAdmission::new(
+            meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+            meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+        )
+        .unwrap_or_else(|_| RealtimeOpenProjectionAdmission::global().clone());
+        Self {
+            raw_factory,
+            open_projection_admission,
+            user_image_history_budget_bytes:
+                meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_open_projection_admission(
+        raw_factory: Arc<dyn OpenAiLiveSessionFactory>,
+        open_projection_admission: RealtimeOpenProjectionAdmission,
+    ) -> Self {
+        Self::with_open_projection_admission_and_history_budget(
+            raw_factory,
+            open_projection_admission,
+            meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_open_projection_admission_and_history_budget(
+        raw_factory: Arc<dyn OpenAiLiveSessionFactory>,
+        open_projection_admission: RealtimeOpenProjectionAdmission,
+        user_image_history_budget_bytes: usize,
+    ) -> Self {
+        Self {
+            raw_factory,
+            open_projection_admission,
+            user_image_history_budget_bytes,
+        }
+    }
+
+    fn take_or_acquire_open_projection_lease(
+        &self,
+        open_config: &RealtimeSessionOpenConfig,
+    ) -> Result<RealtimeOpenProjectionLease, LlmError> {
+        if let Some(lease) = open_config.take_open_projection_lease() {
+            return Ok(lease);
+        }
+        self.open_projection_admission
+            .try_acquire()
+            .map_err(|_| LlmError::InvalidInputShape {
+                message: "realtime_open_projection_backpressured".to_string(),
+            })
     }
 }
 
@@ -3053,8 +4278,16 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         &self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
+        // Hold the take-once runtime lease (or fresh direct-factory fallback)
+        // until every canonical seed item has received provider ACK.
+        let _open_projection_lease = self.take_or_acquire_open_projection_lease(open_config)?;
+        openai_realtime_seed_user_image_decoded_bytes(
+            &open_config.seed_messages,
+            self.user_image_history_budget_bytes,
+        )?;
         let raw = self.raw_factory.open_session(open_config).await?;
         let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
+        session.user_image_history_budget_bytes = self.user_image_history_budget_bytes;
         session.set_response_nudge_config(
             open_config.response_nudge_timeout_ms,
             open_config.response_nudge_max_attempts,
@@ -3064,6 +4297,12 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // mid-session model swap and reject it (the OpenAI Realtime API
         // does not accept a `model` field on `session.update`).
         session.set_current_identity(&open_config.llm_identity);
+        session
+            .set_current_transcript_rewrite_generation(open_config.transcript_rewrite_generation);
+        session.set_canonical_user_content_registry(
+            &open_config.user_content_identities,
+            &open_config.user_content_tombstones,
+        )?;
         session
             .seed_history_projection(
                 &open_config.seed_messages,
@@ -3076,16 +4315,41 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
     async fn attach_external_session(
         &self,
         target: &RealtimeExternalSessionTarget,
-        identity: &meerkat_core::SessionLlmIdentity,
-        turning_mode: RealtimeTurningMode,
+        open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
+        // Attach does not replay canonical history, but a runtime-built config
+        // may still carry pre-hydration custody. Consume it exactly once and
+        // release it when this attach attempt returns so a retained config
+        // cannot pin process admission indefinitely. No fresh fallback lease
+        // is needed because this path materializes no seed events.
+        let _carried_open_projection_lease = open_config.take_open_projection_lease();
+        let committed_user_image_bytes = openai_realtime_seed_user_image_decoded_bytes(
+            &open_config.seed_messages,
+            self.user_image_history_budget_bytes,
+        )?;
         let target = OpenAiLiveCallTarget::new(target.provider_session_id.clone())?;
         let raw = self.raw_factory.attach_to_call(&target).await?;
-        let mut session = OpenAiRealtimeSession::new(raw, turning_mode);
+        let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
+        session.user_image_history_budget_bytes = self.user_image_history_budget_bytes;
+        session.set_response_nudge_config(
+            open_config.response_nudge_timeout_ms,
+            open_config.response_nudge_max_attempts,
+        );
         // R1: attach binds the channel to the owning session identity the
         // same way the open paths do, so model-keyed capabilities/policy and
         // the Refresh swap guard follow the attached session's identity.
-        session.set_current_identity(identity);
+        session.set_current_identity(&open_config.llm_identity);
+        session
+            .set_current_transcript_rewrite_generation(open_config.transcript_rewrite_generation);
+        session.set_canonical_user_content_registry(
+            &open_config.user_content_identities,
+            &open_config.user_content_tombstones,
+        )?;
+        // Attach does not seed the external provider conversation, but future
+        // live input still appends to this canonical Meerkat session. Start
+        // cumulative admission from the canonical image total so attachment
+        // cannot accept history that a later ordinary reopen cannot replay.
+        session.committed_user_image_bytes = committed_user_image_bytes;
         Ok(Box::new(session))
     }
 
@@ -3099,8 +4363,18 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         &self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Arc<dyn LiveAdapter>, LlmError> {
+        // Direct Rust callers can construct configs without the runtime's
+        // pre-hydration lease. Acquire the same process owner before any seed
+        // event/data-URL materialization so the factory surface cannot bypass
+        // aggregate memory custody.
+        let _open_projection_lease = self.take_or_acquire_open_projection_lease(open_config)?;
+        openai_realtime_seed_user_image_decoded_bytes(
+            &open_config.seed_messages,
+            self.user_image_history_budget_bytes,
+        )?;
         let raw = self.raw_factory.open_session(open_config).await?;
         let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
+        session.user_image_history_budget_bytes = self.user_image_history_budget_bytes;
         session.set_response_nudge_config(
             open_config.response_nudge_timeout_ms,
             open_config.response_nudge_max_attempts,
@@ -3110,6 +4384,12 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         // mid-session model swap and reject it (the OpenAI Realtime API
         // does not accept a `model` field on `session.update`).
         session.set_current_identity(&open_config.llm_identity);
+        session
+            .set_current_transcript_rewrite_generation(open_config.transcript_rewrite_generation);
+        session.set_canonical_user_content_registry(
+            &open_config.user_content_identities,
+            &open_config.user_content_tombstones,
+        )?;
         // E25 + A9: seed canonical history at session-open time. The
         // `LiveAdapterCommand::Open { snapshot }` arm in
         // `execute_openai_live_command` re-runs the same path against any
@@ -3210,36 +4490,21 @@ pub fn openai_live_function_call_error_event(
 
 fn map_openai_live_error(error: OpenAiLiveError) -> LlmError {
     match error {
-        OpenAiLiveError::Api(server_error) => match server_error.error_type {
-            ApiErrorType::RateLimitError => LlmError::RateLimited {
-                retry_after_ms: None,
-            },
-            ApiErrorType::AuthenticationError => LlmError::AuthenticationFailed {
-                message: server_error.message,
-            },
-            ApiErrorType::InvalidRequestError => LlmError::InvalidRequest {
-                message: server_error.message,
-            },
-            ApiErrorType::ServerError => LlmError::ServerError {
-                status: 500,
-                message: server_error.message,
-            },
-            ApiErrorType::Unknown => LlmError::Unknown {
-                message: server_error.message,
-            },
-        },
+        OpenAiLiveError::Api(server_error) => map_openai_live_server_error(server_error),
         OpenAiLiveError::ConnectionClosed => LlmError::ConnectionReset,
-        OpenAiLiveError::InvalidClientEvent(message) => LlmError::InvalidRequest { message },
+        OpenAiLiveError::InvalidClientEvent(message) => LlmError::InvalidRequest {
+            message: redact_realtime_image_text(&message),
+        },
         OpenAiLiveError::Serialization(error) => LlmError::StreamParseError {
             message: error.to_string(),
         },
         OpenAiLiveError::WebSocket(error) => map_openai_websocket_error(error),
         OpenAiLiveError::Http(error) => LlmError::ServerError {
             status: error.status().map_or(500, |status| status.as_u16()),
-            message: error.to_string(),
+            message: redact_realtime_image_text(&error.to_string()),
         },
         other => LlmError::Unknown {
-            message: other.to_string(),
+            message: redact_realtime_image_text(&other.to_string()),
         },
     }
 }
@@ -3280,29 +4545,24 @@ fn map_openai_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> L
             }
         }
         other => LlmError::Unknown {
-            message: other.to_string(),
+            message: redact_realtime_image_text(&other.to_string()),
         },
     }
 }
 
 fn map_openai_live_server_error(error: OpenAiServerError) -> LlmError {
+    let message = redact_realtime_image_text(&error.message);
     match error.error_type {
         ApiErrorType::RateLimitError => LlmError::RateLimited {
             retry_after_ms: None,
         },
-        ApiErrorType::AuthenticationError => LlmError::AuthenticationFailed {
-            message: error.message,
-        },
-        ApiErrorType::InvalidRequestError => LlmError::InvalidRequest {
-            message: error.message,
-        },
+        ApiErrorType::AuthenticationError => LlmError::AuthenticationFailed { message },
+        ApiErrorType::InvalidRequestError => LlmError::InvalidRequest { message },
         ApiErrorType::ServerError => LlmError::ServerError {
             status: 500,
-            message: error.message,
+            message,
         },
-        ApiErrorType::Unknown => LlmError::Unknown {
-            message: error.message,
-        },
+        ApiErrorType::Unknown => LlmError::Unknown { message },
     }
 }
 
@@ -3334,6 +4594,232 @@ use meerkat_core::types::ToolResult as CoreToolResult;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// One process-wide reservation pool owns every payload retained by the
+/// OpenAI live adapter: queued commands, provider-pending input, reliable
+/// control observations, and the observation currently being persisted.
+/// Command-originated reservations transfer across those phases instead of
+/// releasing and reacquiring from a second semaphore.
+const OPENAI_LIVE_PAYLOAD_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const OPENAI_LIVE_COMMAND_BUDGET_BYTES: usize = OPENAI_LIVE_PAYLOAD_BUDGET_BYTES;
+const OPENAI_LIVE_CONTROL_BUDGET_BYTES: usize = OPENAI_LIVE_PAYLOAD_BUDGET_BYTES;
+const OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES: usize = 4 * 1024;
+const OPENAI_LIVE_PROJECTION_SNAPSHOT_MAX_BYTES: usize =
+    meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES;
+
+/// Count a snapshot's serialized retained shape without allocating a second
+/// payload-sized buffer. `LiveAdapterCommand::{Open, Refresh}` owns the
+/// snapshot after enqueue, so the reliable command queue must charge those
+/// bytes just like it charges image/audio/text inputs.
+#[derive(Default)]
+struct SerializedSizeCounter {
+    bytes: usize,
+}
+
+impl std::io::Write for SerializedSizeCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.checked_add(buffer.len()).ok_or_else(|| {
+            std::io::Error::other("live projection snapshot serialized size overflow")
+        })?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn openai_live_projection_snapshot_serialized_size(
+    snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
+) -> Result<usize, serde_json::Error> {
+    let mut counter = SerializedSizeCounter::default();
+    serde_json::to_writer(&mut counter, snapshot)?;
+    Ok(counter.bytes)
+}
+
+fn openai_live_base64_encoded_len(raw_bytes: usize) -> usize {
+    raw_bytes.div_ceil(3).saturating_mul(4)
+}
+
+/// Peak retained bytes while an image crosses the adapter and provider send
+/// phases. Adapter encoding holds decoded + encoded data; provider send can
+/// simultaneously hold the encoded chunk, its `data:` URL copy, and the
+/// serialized WebSocket frame. The latter triple-encoded peak dominates at
+/// normal image sizes and must be charged before queueing.
+fn openai_live_image_command_memory_charge(
+    decoded_bytes: usize,
+    idempotency_key_bytes: usize,
+    mime_bytes: usize,
+) -> usize {
+    let encoded_bytes = openai_live_base64_encoded_len(decoded_bytes);
+    let adapter_encode_peak = decoded_bytes.saturating_add(encoded_bytes);
+    let provider_send_peak = encoded_bytes.saturating_mul(3);
+    adapter_encode_peak
+        .max(provider_send_peak)
+        .saturating_add(idempotency_key_bytes)
+        .saturating_add(mime_bytes)
+}
+
+/// Peak retained bytes while audio crosses its two allocation phases. Base64
+/// encoding holds raw + encoded data; provider transmission then holds the
+/// encoded chunk alongside the serialized WebSocket frame.
+fn openai_live_audio_command_memory_charge(raw_bytes: usize) -> usize {
+    let encoded_bytes = openai_live_base64_encoded_len(raw_bytes);
+    raw_bytes
+        .saturating_add(encoded_bytes)
+        .max(encoded_bytes.saturating_mul(2))
+}
+
+fn openai_process_live_payload_budget() -> Arc<Semaphore> {
+    static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    Arc::clone(BUDGET.get_or_init(|| Arc::new(Semaphore::new(OPENAI_LIVE_PAYLOAD_BUDGET_BYTES))))
+}
+
+fn openai_process_live_command_budget() -> Arc<Semaphore> {
+    openai_process_live_payload_budget()
+}
+
+fn openai_process_live_control_budget() -> Arc<Semaphore> {
+    openai_process_live_payload_budget()
+}
+
+struct QueuedLiveCommand {
+    command: LiveAdapterCommand,
+    /// Owned byte-budget reservation. Dropped only after the pump finishes
+    /// executing this command, so the count-bounded queue cannot retain 64
+    /// large payloads simultaneously. For image commands the permit follows
+    /// the provider-pending item until its acknowledgement arrives.
+    memory_budget: Option<OwnedSemaphorePermit>,
+    /// Full projection custody acquired before an `Open { snapshot }`
+    /// command enters the count-bounded queue. It prevents many large seed
+    /// snapshots from sitting uncharged ahead of the pump and follows the
+    /// command through provider seed acknowledgement.
+    open_projection_lease: Option<RealtimeOpenProjectionLease>,
+}
+
+struct QueuedControlObservation {
+    observation: LiveAdapterObservation,
+    /// Reservation for caller/provider-controlled payload retained here.
+    /// Dequeue transfers the permit into the adapter's in-flight slot; the
+    /// consumer's next poll releases it after persistence/public delivery, so
+    /// the count-bounded control queue cannot retain hundreds of maximum-size
+    /// semantic events when its consumer stalls.
+    _memory_budget: Option<OwnedSemaphorePermit>,
+}
+
+impl From<LiveAdapterObservation> for QueuedControlObservation {
+    fn from(observation: LiveAdapterObservation) -> Self {
+        Self {
+            observation,
+            _memory_budget: None,
+        }
+    }
+}
+
+fn content_blocks_payload_bytes(content: &[ContentBlock]) -> usize {
+    content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::Image {
+                data: ImageData::Inline { data },
+                ..
+            } => data.len(),
+            ContentBlock::Image {
+                data: ImageData::Blob { blob_id },
+                ..
+            } => blob_id.as_str().len(),
+            other => other.text_projection().len(),
+        })
+        .sum()
+}
+
+fn json_value_payload_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => 1,
+        serde_json::Value::Number(number) => number.to_string().len(),
+        serde_json::Value::String(text) => text.len(),
+        serde_json::Value::Array(values) => values.iter().map(json_value_payload_bytes).sum(),
+        serde_json::Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| key.len().saturating_add(json_value_payload_bytes(value)))
+            .sum(),
+    }
+}
+
+fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
+    match event {
+        RealtimeTranscriptEvent::UserTranscriptFinal { text, .. }
+        | RealtimeTranscriptEvent::AssistantTranscriptTruncated { text, .. }
+        | RealtimeTranscriptEvent::AssistantTranscriptFinalText { text, .. } => text.len(),
+        RealtimeTranscriptEvent::UserContentFinal { content, .. } => {
+            content_blocks_payload_bytes(content)
+        }
+        RealtimeTranscriptEvent::AssistantTextDelta { delta, .. }
+        | RealtimeTranscriptEvent::AssistantTranscriptDelta { delta, .. } => delta.len(),
+        RealtimeTranscriptEvent::ItemObserved { .. }
+        | RealtimeTranscriptEvent::ItemSkipped { .. }
+        | RealtimeTranscriptEvent::AssistantTurnCompleted { .. }
+        | RealtimeTranscriptEvent::AssistantTurnInterrupted { .. } => 0,
+    }
+}
+
+fn control_observation_payload_bytes(observation: &LiveAdapterObservation) -> usize {
+    match observation {
+        LiveAdapterObservation::UserTranscriptFinal { text, .. }
+        | LiveAdapterObservation::AssistantTextDelta { delta: text, .. }
+        | LiveAdapterObservation::AssistantTranscriptDelta { delta: text, .. }
+        | LiveAdapterObservation::AssistantTranscriptFinal { text, .. } => text.len(),
+        LiveAdapterObservation::AssistantTranscriptTruncated { text, .. } => {
+            text.as_deref().map_or(0, str::len)
+        }
+        LiveAdapterObservation::RealtimeTranscript { event } => {
+            realtime_transcript_payload_bytes(event)
+        }
+        LiveAdapterObservation::ToolCallRequested { arguments, .. } => {
+            json_value_payload_bytes(arguments)
+        }
+        LiveAdapterObservation::Error { message, .. }
+        | LiveAdapterObservation::CommandRejected { message, .. } => message.len(),
+        _ => 0,
+    }
+}
+
+async fn send_control_observation(
+    sender: &mpsc::Sender<QueuedControlObservation>,
+    memory_budget: &Arc<Semaphore>,
+    observation: LiveAdapterObservation,
+    transferred_budget: Option<OwnedSemaphorePermit>,
+) -> Result<(), ()> {
+    let payload_bytes = control_observation_payload_bytes(&observation);
+    let charge = payload_bytes.clamp(
+        OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES,
+        OPENAI_LIVE_CONTROL_BUDGET_BYTES,
+    );
+    let reservation = match transferred_budget {
+        Some(reservation) if reservation.num_permits() >= charge => reservation,
+        // A command-originated payload must arrive with a reservation large
+        // enough for its public/control representation. Fail closed rather
+        // than drop the existing permit and wait unbudgeted for another one.
+        Some(_) => return Err(()),
+        None => {
+            let permits = u32::try_from(charge).map_err(|_| ())?;
+            // Never enqueue a payload-bearing semaphore waiter. Under global
+            // saturation the provider pump fails closed; successful admission
+            // owns its bytes before the count-bounded channel send can await.
+            Arc::clone(memory_budget)
+                .try_acquire_many_owned(permits)
+                .map_err(|_| ())?
+        }
+    };
+    sender
+        .send(QueuedControlObservation {
+            observation,
+            _memory_budget: Some(reservation),
+        })
+        .await
+        .map_err(|_| ())
+}
+
 /// Provider-native `LiveAdapter` implementation backed by an
 /// `OpenAiRealtimeSession`.
 ///
@@ -3343,7 +4829,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// existing host-level invariants (status reflects live phase; close aborts
 /// the pump on timeout instead of detaching it) are preserved.
 pub struct OpenAiLiveAdapter {
-    cmd_tx: mpsc::Sender<LiveAdapterCommand>,
+    cmd_tx: mpsc::Sender<QueuedLiveCommand>,
+    command_budget: Arc<Semaphore>,
+    control_budget: Arc<Semaphore>,
+    open_projection_admission: RealtimeOpenProjectionAdmission,
+    /// Hard cap for one retained Open/Refresh snapshot. Production uses the
+    /// same 256 MiB ceiling as projection amplification custody; the field is
+    /// explicit so focused tests can exercise the boundary without allocating
+    /// a quarter-gigabyte fixture.
+    projection_snapshot_max_bytes: usize,
+    command_gate: tokio::sync::Mutex<()>,
     /// R5-1: control / semantic-event channel.
     ///
     /// Carries every observation that MUST NOT be dropped — transcript
@@ -3358,7 +4853,11 @@ pub struct OpenAiLiveAdapter {
     /// (a handful per turn) and the consumer drains them via the WS pump
     /// in microseconds. 256 is far above any realistic single-turn burst
     /// but bounded so a stuck consumer cannot grow the queue without limit.
-    control_rx: tokio::sync::Mutex<mpsc::Receiver<LiveAdapterObservation>>,
+    control_rx: tokio::sync::Mutex<mpsc::Receiver<QueuedControlObservation>>,
+    /// Process-wide byte reservation for the most recently dequeued control
+    /// observation. Released only when the consumer asks for the next item,
+    /// which carries admission through reducer persistence/public delivery.
+    inflight_control_budget: tokio::sync::Mutex<Option<OwnedSemaphorePermit>>,
     /// R5-1: lossy audio channel.
     ///
     /// Carries `AssistantAudioChunk` only. Producer uses `try_send` and
@@ -3395,7 +4894,11 @@ pub struct OpenAiLiveAdapter {
     /// loop instead of parking forever on a half-closed channel.
     /// Synthetic injection callers who fire after the pump has exited
     /// get a typed `LiveAdapterError::Closed`.
-    control_tx: Arc<StdMutex<Option<mpsc::Sender<LiveAdapterObservation>>>>,
+    control_tx: Arc<StdMutex<Option<mpsc::Sender<QueuedControlObservation>>>>,
+    /// Whether the bound model's capability projection admits still-image
+    /// input on this channel (catalog vision fact). Captured at
+    /// construction, advertised via `LiveChannelCapabilities.image_in`.
+    image_in: bool,
 }
 
 impl OpenAiLiveAdapter {
@@ -3411,24 +4914,50 @@ impl OpenAiLiveAdapter {
     /// during tests.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn new_for_test() -> (
+    fn new_for_test() -> (
         Self,
+        mpsc::Sender<QueuedControlObservation>,
         mpsc::Sender<LiveAdapterObservation>,
+        mpsc::Receiver<QueuedLiveCommand>,
+    ) {
+        Self::new_for_test_with_open_projection_admission(
+            RealtimeOpenProjectionAdmission::new(
+                meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+                meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+            )
+            .unwrap_or_else(|_| RealtimeOpenProjectionAdmission::global().clone()),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_open_projection_admission(
+        open_projection_admission: RealtimeOpenProjectionAdmission,
+    ) -> (
+        Self,
+        mpsc::Sender<QueuedControlObservation>,
         mpsc::Sender<LiveAdapterObservation>,
-        mpsc::Receiver<LiveAdapterCommand>,
+        mpsc::Receiver<QueuedLiveCommand>,
     ) {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (control_tx, control_rx) = mpsc::channel(256);
         let (audio_tx, audio_rx) = mpsc::channel(64);
         let status = Arc::new(StdMutex::new(LiveAdapterStatus::Ready));
+        let payload_budget = Arc::new(Semaphore::new(OPENAI_LIVE_PAYLOAD_BUDGET_BYTES));
         let adapter = Self {
             cmd_tx,
+            command_budget: Arc::clone(&payload_budget),
+            control_budget: payload_budget,
+            open_projection_admission,
+            projection_snapshot_max_bytes: OPENAI_LIVE_PROJECTION_SNAPSHOT_MAX_BYTES,
+            command_gate: tokio::sync::Mutex::new(()),
             control_rx: tokio::sync::Mutex::new(control_rx),
+            inflight_control_budget: tokio::sync::Mutex::new(None),
             audio_rx: tokio::sync::Mutex::new(audio_rx),
             closed: AtomicBool::new(false),
             status,
             pump_handle: StdMutex::new(None),
             control_tx: Arc::new(StdMutex::new(Some(control_tx.clone()))),
+            image_in: false,
         };
         (adapter, control_tx, audio_tx, cmd_rx)
     }
@@ -3441,12 +4970,20 @@ impl OpenAiLiveAdapter {
     /// `LiveAdapterObservation`s for downstream `LiveAdapterHost` consumption.
     #[must_use]
     pub fn new(session: OpenAiRealtimeSession) -> Self {
+        // Captured before the session moves into the pump: the channel
+        // capability advertisement follows the bound model's capability
+        // projection (catalog vision fact → Image input kind).
+        let image_in = session
+            .capabilities()
+            .input_kinds
+            .contains(&RealtimeInputKind::Image);
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         // R5-1: split lossy audio from reliable control. See struct field
         // docs above for capacity rationale.
         let (control_tx, control_rx) = mpsc::channel(256);
         let (audio_tx, audio_rx) = mpsc::channel(64);
         let status = Arc::new(StdMutex::new(LiveAdapterStatus::Opening));
+        let control_budget = openai_process_live_control_budget();
         // R6-1 (P1, Shape A): the adapter-side `control_tx` clone lives in
         // a shared `Arc<StdMutex<Option<...>>>` slot so the pump can drop
         // it on exit. Without this, the adapter retains the only remaining
@@ -3461,15 +4998,34 @@ impl OpenAiLiveAdapter {
             audio_tx,
             Arc::clone(&status),
             Arc::clone(&adapter_control_slot),
+            Arc::clone(&control_budget),
         ));
+        #[cfg(not(test))]
+        let open_projection_admission = RealtimeOpenProjectionAdmission::global().clone();
+        #[cfg(test)]
+        let open_projection_admission = RealtimeOpenProjectionAdmission::new(
+            meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+            meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES,
+        )
+        .unwrap_or_else(|_| RealtimeOpenProjectionAdmission::global().clone());
         Self {
             cmd_tx,
+            // Process-wide: the permit follows image/text bytes through the
+            // provider ACK/commit boundary, bounding aggregate retention
+            // across every WS/RPC channel rather than per adapter instance.
+            command_budget: openai_process_live_command_budget(),
+            control_budget,
+            open_projection_admission,
+            projection_snapshot_max_bytes: OPENAI_LIVE_PROJECTION_SNAPSHOT_MAX_BYTES,
+            command_gate: tokio::sync::Mutex::new(()),
             control_rx: tokio::sync::Mutex::new(control_rx),
+            inflight_control_budget: tokio::sync::Mutex::new(None),
             audio_rx: tokio::sync::Mutex::new(audio_rx),
             closed: AtomicBool::new(false),
             status,
             pump_handle: StdMutex::new(Some(pump_handle)),
             control_tx: adapter_control_slot,
+            image_in,
         }
     }
 }
@@ -3484,16 +5040,247 @@ fn set_status(cell: &StdMutex<LiveAdapterStatus>, new_status: LiveAdapterStatus)
 #[async_trait]
 impl LiveAdapter for OpenAiLiveAdapter {
     async fn send_command(&self, command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+        let _gate = self.command_gate.lock().await;
         if self.closed.load(Ordering::Acquire) {
             return Err(LiveAdapterError::Closed);
         }
-        self.cmd_tx
-            .send(command)
-            .await
-            .map_err(|_| LiveAdapterError::Closed)
+        if let LiveAdapterCommand::SendInput {
+            chunk: LiveInputChunk::Image {
+                idempotency_key, ..
+            },
+        } = &command
+            && !meerkat_core::live_adapter::live_image_idempotency_key_is_valid(idempotency_key)
+        {
+            let reason = LiveConfigRejectionReason::ImageInputIdempotencyKeyInvalid {
+                max_bytes: meerkat_core::live_adapter::MAX_LIVE_IMAGE_IDEMPOTENCY_KEY_BYTES as u64,
+                actual_bytes: u64::try_from(idempotency_key.len()).unwrap_or(u64::MAX),
+            };
+            return Err(LiveAdapterError::ProviderError {
+                message: reason.to_string(),
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+            });
+        }
+        if let LiveAdapterCommand::Refresh { snapshot } = &command
+            && !snapshot.seed_messages.is_empty()
+        {
+            let reason = LiveConfigRejectionReason::Other {
+                detail: "refresh_seed_history_must_be_empty".to_string(),
+            };
+            return Err(LiveAdapterError::ProviderError {
+                message: reason.to_string(),
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+            });
+        }
+        let open_projection_lease = if let LiveAdapterCommand::Open { snapshot } = &command {
+            let lease = self.open_projection_admission.try_acquire().map_err(|_| {
+                let reason = LiveConfigRejectionReason::InputBackpressured {
+                    max_pending_bytes:
+                        meerkat_core::image_content::REALTIME_OPEN_PROJECTION_MEMORY_BUDGET_BYTES
+                            as u64,
+                };
+                LiveAdapterError::ProviderError {
+                    message: reason.to_string(),
+                    code: LiveAdapterErrorCode::ConfigRejected { reason },
+                }
+            })?;
+            if let Err(error) = openai_realtime_seed_user_image_decoded_bytes(
+                &snapshot.seed_messages,
+                meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES,
+            ) {
+                let reason = if matches!(
+                    &error,
+                    LlmError::InvalidInputShape { message }
+                        if message == "image_input_history_budget_exceeded"
+                ) {
+                    LiveConfigRejectionReason::ImageInputHistoryBudgetExceeded {
+                        max_decoded_bytes:
+                            meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES
+                                as u64,
+                    }
+                } else {
+                    LiveConfigRejectionReason::Other {
+                        detail: error.to_string(),
+                    }
+                };
+                return Err(LiveAdapterError::ProviderError {
+                    message: reason.to_string(),
+                    code: LiveAdapterErrorCode::ConfigRejected { reason },
+                });
+            }
+            Some(lease)
+        } else {
+            None
+        };
+        let projection_snapshot_memory_charge = match &command {
+            LiveAdapterCommand::Open { snapshot } | LiveAdapterCommand::Refresh { snapshot } => {
+                let serialized_bytes = openai_live_projection_snapshot_serialized_size(snapshot)
+                    .map_err(|error| LiveAdapterError::TransportError {
+                        message: format!(
+                            "failed to size live projection snapshot before enqueue: {error}"
+                        ),
+                    })?;
+                if serialized_bytes > self.projection_snapshot_max_bytes {
+                    let reason = LiveConfigRejectionReason::InputTooLarge {
+                        max_bytes: u64::try_from(self.projection_snapshot_max_bytes)
+                            .unwrap_or(u64::MAX),
+                        actual_bytes: u64::try_from(serialized_bytes).unwrap_or(u64::MAX),
+                    };
+                    return Err(LiveAdapterError::ProviderError {
+                        message: reason.to_string(),
+                        code: LiveAdapterErrorCode::ConfigRejected { reason },
+                    });
+                }
+                serialized_bytes.max(OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES)
+            }
+            _ => 0,
+        };
+        let (payload_bytes, memory_charge_bytes, image_mime_bytes, image_input, text_input) =
+            match &command {
+                LiveAdapterCommand::Open { .. } | LiveAdapterCommand::Refresh { .. } => {
+                    (0, projection_snapshot_memory_charge, 0, false, false)
+                }
+                LiveAdapterCommand::SendInput {
+                    chunk:
+                        LiveInputChunk::Image {
+                            idempotency_key,
+                            mime,
+                            data,
+                        },
+                } => (
+                    data.len(),
+                    openai_live_image_command_memory_charge(
+                        data.len(),
+                        idempotency_key.len(),
+                        mime.len(),
+                    ),
+                    mime.len(),
+                    true,
+                    false,
+                ),
+                LiveAdapterCommand::SendInput {
+                    chunk: LiveInputChunk::Audio { data, .. },
+                } => (
+                    data.len(),
+                    openai_live_audio_command_memory_charge(data.len()),
+                    0,
+                    false,
+                    false,
+                ),
+                LiveAdapterCommand::SendInput {
+                    chunk: LiveInputChunk::VideoFrame { data, .. },
+                } => (data.len(), data.len(), 0, false, false),
+                LiveAdapterCommand::SendInput {
+                    chunk: LiveInputChunk::Text { text },
+                } => (
+                    text.len(),
+                    text.len()
+                        .max(OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES)
+                        .saturating_mul(4),
+                    0,
+                    false,
+                    true,
+                ),
+                _ => (0, 0, 0, false, false),
+            };
+        if image_mime_bytes > meerkat_core::live_adapter::MAX_LIVE_IMAGE_MIME_BYTES {
+            let reason = LiveConfigRejectionReason::ImageInputUnsupportedMime {
+                mime_type: format!("<too-long:{image_mime_bytes}-bytes>"),
+            };
+            return Err(LiveAdapterError::ProviderError {
+                message: reason.to_string(),
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+            });
+        }
+        if image_input && payload_bytes > meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES {
+            let reason = LiveConfigRejectionReason::ImageInputTooLarge {
+                max_bytes: meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES as u64,
+                actual_bytes: u64::try_from(payload_bytes).unwrap_or(u64::MAX),
+            };
+            return Err(LiveAdapterError::ProviderError {
+                message: reason.to_string(),
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+            });
+        }
+        if payload_bytes > meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES {
+            let reason = LiveConfigRejectionReason::InputTooLarge {
+                max_bytes: meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES as u64,
+                actual_bytes: u64::try_from(payload_bytes).unwrap_or(u64::MAX),
+            };
+            return Err(LiveAdapterError::ProviderError {
+                message: reason.to_string(),
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+            });
+        }
+        if text_input && memory_charge_bytes > OPENAI_LIVE_COMMAND_BUDGET_BYTES {
+            let reason = LiveConfigRejectionReason::InputTooLarge {
+                max_bytes: (OPENAI_LIVE_COMMAND_BUDGET_BYTES / 4) as u64,
+                actual_bytes: u64::try_from(payload_bytes).unwrap_or(u64::MAX),
+            };
+            return Err(LiveAdapterError::ProviderError {
+                message: reason.to_string(),
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+            });
+        }
+        let memory_budget = if memory_charge_bytes == 0 {
+            None
+        } else {
+            let permits = memory_charge_bytes
+                .max(meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES);
+            let permits = u32::try_from(permits).map_err(|_| LiveAdapterError::TransportError {
+                message: "live command queue byte budget exceeds semaphore range".to_string(),
+            })?;
+            match Arc::clone(&self.command_budget).try_acquire_many_owned(permits) {
+                Ok(permit) => Some(permit),
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    return Err(LiveAdapterError::Closed);
+                }
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    let reason = if image_input {
+                        LiveConfigRejectionReason::ImageInputBackpressured {
+                            max_pending_bytes: OPENAI_LIVE_COMMAND_BUDGET_BYTES as u64,
+                        }
+                    } else {
+                        LiveConfigRejectionReason::InputBackpressured {
+                            max_pending_bytes: OPENAI_LIVE_COMMAND_BUDGET_BYTES as u64,
+                        }
+                    };
+                    return Err(LiveAdapterError::ProviderError {
+                        message: reason.to_string(),
+                        code: LiveAdapterErrorCode::ConfigRejected { reason },
+                    });
+                }
+            }
+        };
+        match self.cmd_tx.try_send(QueuedLiveCommand {
+            command,
+            memory_budget,
+            open_projection_lease,
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LiveAdapterError::Closed),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let reason = if image_input {
+                    LiveConfigRejectionReason::ImageInputBackpressured {
+                        max_pending_bytes: OPENAI_LIVE_COMMAND_BUDGET_BYTES as u64,
+                    }
+                } else {
+                    LiveConfigRejectionReason::InputBackpressured {
+                        max_pending_bytes: OPENAI_LIVE_COMMAND_BUDGET_BYTES as u64,
+                    }
+                };
+                Err(LiveAdapterError::ProviderError {
+                    message: reason.to_string(),
+                    code: LiveAdapterErrorCode::ConfigRejected { reason },
+                })
+            }
+        }
     }
 
     async fn next_observation(&self) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+        // Polling again is the consumer's completion witness for the prior
+        // control observation. Release its reservation now, not when it was
+        // dequeued, so byte admission spans host persistence.
+        self.inflight_control_budget.lock().await.take();
         // R5-1: biased select between the two internal channels. `biased`
         // ordering means the runtime tries `control_rx` first on every
         // wake; only if it has nothing pending do we poll the audio
@@ -3516,13 +5303,30 @@ impl LiveAdapter for OpenAiLiveAdapter {
             // and the loop would busy-spin. Detect that case and only
             // await the control side.
             if audio_rx.is_closed() && audio_rx.is_empty() {
-                return Ok(control_rx.recv().await);
+                return Ok(match control_rx.recv().await {
+                    Some(queued) => {
+                        let QueuedControlObservation {
+                            observation,
+                            _memory_budget,
+                        } = queued;
+                        *self.inflight_control_budget.lock().await = _memory_budget;
+                        Some(observation)
+                    }
+                    None => None,
+                });
             }
             tokio::select! {
                 biased;
                 obs = control_rx.recv() => {
                     match obs {
-                        Some(o) => return Ok(Some(o)),
+                        Some(queued) => {
+                            let QueuedControlObservation {
+                                observation,
+                                _memory_budget,
+                            } = queued;
+                            *self.inflight_control_budget.lock().await = _memory_budget;
+                            return Ok(Some(observation));
+                        }
                         None => {
                             // Control side closed. Drain any remaining
                             // audio (test stubs can pre-queue chunks)
@@ -3554,11 +5358,23 @@ impl LiveAdapter for OpenAiLiveAdapter {
     }
 
     async fn close(&self) -> Result<(), LiveAdapterError> {
+        let gate = self.command_gate.lock().await;
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
         set_status(&self.status, LiveAdapterStatus::Closing);
-        let _ = self.cmd_tx.send(LiveAdapterCommand::Close).await;
+        // `command_budget` is process-wide; closing one channel must not
+        // poison admission for unrelated adapters. Pending command/session
+        // permits are released when this pump and its queues are dropped.
+        // The control budget is also process-wide; channel shutdown drops
+        // this channel's queued reservations but must not close global
+        // admission for other or future adapters.
+        let _ = self.cmd_tx.try_send(QueuedLiveCommand {
+            command: LiveAdapterCommand::Close,
+            memory_budget: None,
+            open_projection_lease: None,
+        });
+        drop(gate);
         let pump = match self.pump_handle.lock() {
             Ok(mut g) => g.take(),
             Err(poisoned) => poisoned.into_inner().take(),
@@ -3570,6 +5386,23 @@ impl LiveAdapter for OpenAiLiveAdapter {
         {
             handle.abort();
         }
+        match self.control_tx.lock() {
+            Ok(mut guard) => {
+                guard.take();
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().take();
+            }
+        }
+        // `close` is the lifecycle boundary, even if callers keep the adapter
+        // facade allocated afterward. Drain reliable observations now so this
+        // closed channel cannot retain process-wide payload permits and starve
+        // unrelated adapters until its Rust value is eventually dropped.
+        let mut control_rx = self.control_rx.lock().await;
+        control_rx.close();
+        while control_rx.try_recv().is_ok() {}
+        drop(control_rx);
+        self.inflight_control_budget.lock().await.take();
         set_status(&self.status, LiveAdapterStatus::Closed);
         Ok(())
     }
@@ -3579,8 +5412,9 @@ impl LiveAdapter for OpenAiLiveAdapter {
     ///
     /// All audio/text in/out lanes, spoken-transcript output, and
     /// user-initiated barge-in are GA on the OpenAI Realtime surface.
-    /// `image_in` / `video_in` are reserved for `gpt-realtime-2` (image)
-    /// and Gemini Live (video) — `false` here. Provider-native resume is
+    /// `image_in` follows the bound model's capability projection (catalog
+    /// vision fact — `gpt-realtime-2` accepts still images); `video_in`
+    /// stays reserved for Gemini Live. Provider-native resume is
     /// not exposed yet (transcript-only seam handles continuation across
     /// reconnect, see `LiveContinuityMode::TranscriptOnly`).
     fn capabilities(&self) -> LiveChannelCapabilities {
@@ -3599,7 +5433,11 @@ impl LiveAdapter for OpenAiLiveAdapter {
             // genuine: the display-text lane (`text_out=true`) and
             // the spoken-transcript lane (`transcript_supported=true`).
             text_out: true,
-            image_in: false,
+            // Still-image input follows the bound model's capability
+            // projection (catalog vision fact — true for `gpt-realtime-2`,
+            // captured at adapter construction). Video remains reserved
+            // (Gemini Live).
+            image_in: self.image_in,
             video_in: false,
             transcript_supported: true,
             barge_in_supported: true,
@@ -3646,10 +5484,9 @@ impl LiveAdapter for OpenAiLiveAdapter {
         let Some(sender) = sender else {
             return Err(LiveAdapterError::Closed);
         };
-        sender
-            .send(observation)
+        send_control_observation(&sender, &self.control_budget, observation, None)
             .await
-            .map_err(|_| LiveAdapterError::Closed)
+            .map_err(|()| LiveAdapterError::Closed)
     }
 }
 
@@ -3684,21 +5521,26 @@ impl LiveAdapter for OpenAiLiveAdapter {
 /// not the event.
 async fn openai_live_pump(
     mut session: OpenAiRealtimeSession,
-    mut cmd_rx: mpsc::Receiver<LiveAdapterCommand>,
-    control_tx: mpsc::Sender<LiveAdapterObservation>,
+    mut cmd_rx: mpsc::Receiver<QueuedLiveCommand>,
+    control_tx: mpsc::Sender<QueuedControlObservation>,
     audio_tx: mpsc::Sender<LiveAdapterObservation>,
     status: Arc<StdMutex<LiveAdapterStatus>>,
-    adapter_control_slot: Arc<StdMutex<Option<mpsc::Sender<LiveAdapterObservation>>>>,
+    adapter_control_slot: Arc<StdMutex<Option<mpsc::Sender<QueuedControlObservation>>>>,
+    control_budget: Arc<Semaphore>,
 ) {
     // R5-1: route observations by variant. Audio chunks are lossy
     // (try_send + drop on full); everything else is reliable
     // (send().await with backpressure). The host's biased select on the
     // consumer side guarantees control events drain ahead of queued
     // audio.
-    if control_tx
-        .send(LiveAdapterObservation::Ready)
-        .await
-        .is_err()
+    if send_control_observation(
+        &control_tx,
+        &control_budget,
+        LiveAdapterObservation::Ready,
+        None,
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -3715,6 +5557,7 @@ async fn openai_live_pump(
             event_result = session.next_event() => {
                 match event_result {
                     Ok(Some(event)) => {
+                        let transferred_budget = session.take_outgoing_event_memory_budget();
                         let obs = translate_realtime_event(event);
                         if let LiveAdapterObservation::StatusChanged { status: ref s } = obs {
                             set_status(&status, s.clone());
@@ -3729,6 +5572,10 @@ async fn openai_live_pump(
                         // semantic facts.
                         match obs {
                             LiveAdapterObservation::AssistantAudioChunk { .. } => {
+                                debug_assert!(
+                                    transferred_budget.is_none(),
+                                    "lossy audio must not carry a reliable payload reservation"
+                                );
                                 match audio_tx.try_send(obs) {
                                     Ok(()) => {}
                                     Err(mpsc::error::TrySendError::Full(dropped)) => {
@@ -3742,7 +5589,15 @@ async fn openai_live_pump(
                                 }
                             }
                             other => {
-                                if control_tx.send(other).await.is_err() {
+                                if send_control_observation(
+                                    &control_tx,
+                                    &control_budget,
+                                    other,
+                                    transferred_budget,
+                                )
+                                .await
+                                .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -3750,29 +5605,63 @@ async fn openai_live_pump(
                     }
                     Ok(None) => {
                         set_status(&status, LiveAdapterStatus::Closed);
-                        let _ = control_tx
-                            .send(LiveAdapterObservation::StatusChanged {
+                        let _ = send_control_observation(
+                            &control_tx,
+                            &control_budget,
+                            LiveAdapterObservation::StatusChanged {
                                 status: LiveAdapterStatus::Closed,
-                            })
-                            .await;
+                            },
+                            None,
+                        )
+                        .await;
                         break;
                     }
                     Err(err) => {
-                        let _ = control_tx
-                            .send(LiveAdapterObservation::Error {
+                        let _ = send_control_observation(
+                            &control_tx,
+                            &control_budget,
+                            LiveAdapterObservation::Error {
                                 code: LiveAdapterErrorCode::ProviderError,
                                 message: err.to_string(),
-                            })
-                            .await;
+                            },
+                            None,
+                        )
+                        .await;
                         break;
                     }
                 }
             }
-            cmd = cmd_rx.recv() => {
+            // An image command is only authoritative after OpenAI echoes its
+            // completed conversation item. Preserve command FIFO across that
+            // acknowledgement boundary: commands already accepted by the
+            // adapter stay in the bounded `cmd_rx` queue (and retain their
+            // byte-budget permits) until the image becomes the canonical
+            // predecessor. Otherwise the common SDK sequence
+            // `send_image().await; send_text().await` races the provider
+            // network ACK and the text is asynchronously rejected despite
+            // both enqueue calls reporting success.
+            //
+            // `close()` remains bounded if the provider never acknowledges:
+            // it aborts this pump after its documented two-second timeout.
+            cmd = cmd_rx.recv(), if session.pending_image_inputs.is_empty() => {
                 match cmd {
-                    Some(LiveAdapterCommand::Close) | None => break,
-                    Some(cmd) => {
-                        if let Err(err) = execute_openai_live_command(&mut session, cmd).await {
+                    Some(QueuedLiveCommand {
+                        command: LiveAdapterCommand::Close,
+                        ..
+                    }) | None => break,
+                    Some(QueuedLiveCommand {
+                        command: cmd,
+                        memory_budget,
+                        open_projection_lease,
+                    }) => {
+                        if let Err(err) = execute_openai_live_command_with_budget(
+                            &mut session,
+                            cmd,
+                            memory_budget,
+                            open_projection_lease,
+                        )
+                        .await
+                        {
                             // R12 + R5-9 (FIX-OPENAI follow-up): classify the local
                             // guard rejection by *variant*, not by reason
                             // string. The producer now distinguishes:
@@ -3816,7 +5705,15 @@ async fn openai_live_pump(
                             // Command rejections / errors are control-lane;
                             // never drop. If the consumer has gone away,
                             // exit the pump.
-                            if control_tx.send(obs).await.is_err() {
+                            if send_control_observation(
+                                &control_tx,
+                                &control_budget,
+                                obs,
+                                None,
+                            )
+                            .await
+                            .is_err()
+                            {
                                 break;
                             }
                         }
@@ -3848,14 +5745,15 @@ async fn openai_live_pump(
 /// R5-2 (P2 dogma): map an `LlmError::InvalidInputShape { message }`
 /// emitted by `execute_openai_live_command` onto the typed
 /// `LiveConfigRejectionReason`. The producer (the `SendInput` arm of
-/// `execute_openai_live_command`) emits exactly three stable tokens on
-/// the message field — `image_input_not_implemented`,
-/// `video_frame_input_not_implemented`, and
-/// `unsupported_input_chunk_variant` — each of which has a typed sibling
-/// here. The classifier uses **exact equality** on the closed token set
-/// (it does not substring-match), so a future provider error message
-/// that incidentally contains `"image_input"` cannot leak across the
-/// typed boundary. Any unknown token falls back to
+/// `execute_openai_live_command`) emits a closed set of stable tokens for
+/// provider capability, pending-budget, idempotency, and commit-shape
+/// rejections, each with a typed sibling here. The classifier uses **exact
+/// equality** on that token set (it does not substring-match), so a future
+/// provider error message that incidentally contains `"image_input"` cannot
+/// leak across the typed boundary. Image validation failures such as MIME and
+/// decoded-content rejection bypass this string seam entirely through the
+/// structural `OpenAiLiveCommandError::ImageInput` path. Any unknown token
+/// falls back to
 /// [`LiveConfigRejectionReason::UnsupportedInputChunkVariant`] (the
 /// catch-all for input-shape rejections in this surface) rather than
 /// dropping into the diagnostic `Other`, since the variant set here is
@@ -3863,6 +5761,30 @@ async fn openai_live_pump(
 fn classify_invalid_input_shape(message: &str) -> LiveConfigRejectionReason {
     match message {
         "image_input_not_implemented" => LiveConfigRejectionReason::ImageInputNotImplemented,
+        "image_input_pending_budget_exceeded" => {
+            LiveConfigRejectionReason::ImageInputBackpressured {
+                max_pending_bytes: OPENAI_REALTIME_PENDING_INPUT_BUDGET_BYTES as u64,
+            }
+        }
+        "image_input_idempotency_key_invalid" => {
+            LiveConfigRejectionReason::ImageInputIdempotencyKeyInvalid {
+                max_bytes: meerkat_core::live_adapter::MAX_LIVE_IMAGE_IDEMPOTENCY_KEY_BYTES as u64,
+                actual_bytes: 0,
+            }
+        }
+        "image_input_idempotency_conflict" => {
+            LiveConfigRejectionReason::ImageInputIdempotencyConflict
+        }
+        "image_input_history_budget_exceeded" => {
+            LiveConfigRejectionReason::ImageInputHistoryBudgetExceeded {
+                max_decoded_bytes:
+                    meerkat_core::image_content::MAX_REALTIME_USER_IMAGE_PROJECTION_BYTES as u64,
+            }
+        }
+        "image_input_requires_commit" => LiveConfigRejectionReason::ImageInputRequiresCommit,
+        "live_input_pending_budget_exceeded" => LiveConfigRejectionReason::InputBackpressured {
+            max_pending_bytes: OPENAI_REALTIME_PENDING_INPUT_BUDGET_BYTES as u64,
+        },
         "video_frame_input_not_implemented" => {
             LiveConfigRejectionReason::VideoFrameInputNotImplemented
         }
@@ -3885,6 +5807,10 @@ fn classify_invalid_input_shape(message: &str) -> LiveConfigRejectionReason {
 /// rather than reach for [`Self::Llm`].
 #[derive(Debug)]
 enum OpenAiLiveCommandError {
+    /// Refresh rejected because canonical history or its durable image-key
+    /// registry changed. OpenAI Realtime cannot delete/rewrite seeded
+    /// conversation items in place; the channel must close and reopen.
+    RefreshTranscriptRewriteRequiresReopen,
     /// Refresh rejected: snapshot's `model_id` differs from the bound
     /// model. OpenAI Realtime `session.update` cannot rebind model in
     /// place; the channel must close + reopen.
@@ -3901,7 +5827,9 @@ enum OpenAiLiveCommandError {
     /// Refresh rejected: snapshot's `audio_config` cannot be applied in
     /// place (OpenAI Realtime is fixed to pcm/24kHz mono). `detail`
     /// carries the offending rate/channel projection for logs.
-    RefreshAudioConfigMismatch { detail: String },
+    RefreshAudioConfigMismatch {
+        detail: String,
+    },
     /// R6-4 (P2): `SendInput` rejected because the audio chunk's
     /// declared `sample_rate_hz` / `channels` diverges from the bound
     /// OpenAI Realtime session's fixed PCM 24 kHz mono format. Without
@@ -3916,6 +5844,16 @@ enum OpenAiLiveCommandError {
         actual_sample_rate_hz: u32,
         actual_channels: u16,
     },
+    /// Scoped image validation rejection. The typed validation cause maps
+    /// directly onto the public `LiveConfigRejectionReason`; no dynamic
+    /// `InvalidInputShape.message` token parsing is involved.
+    ImageInput(OpenAiRealtimeImageValidationError),
+    ImageInputIdempotencyKeyInvalid {
+        max_bytes: usize,
+        actual_bytes: usize,
+    },
+    ImageInputIdempotencyConflict,
+    ImageInputRequiresCommit,
     /// Catch-all for every other underlying [`LlmError`] (input-shape
     /// rejections, provider outages, network timeouts, etc.). The pump
     /// caller continues to classify these via the existing `LlmError`
@@ -3932,6 +5870,9 @@ impl From<LlmError> for OpenAiLiveCommandError {
 impl std::fmt::Display for OpenAiLiveCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RefreshTranscriptRewriteRequiresReopen => f.write_str(
+                "live adapter refresh: canonical transcript rewrite requires close + reopen",
+            ),
             Self::RefreshModelSwap {
                 from_model,
                 to_model,
@@ -3959,7 +5900,21 @@ impl std::fmt::Display for OpenAiLiveCommandError {
                 f,
                 "live adapter send_input: audio chunk declared rate={actual_sample_rate_hz}Hz \
                  ch={actual_channels} but OpenAI Realtime session is fixed at \
-                 rate={expected_sample_rate_hz}Hz ch={expected_channels} (PCM mono)"
+                rate={expected_sample_rate_hz}Hz ch={expected_channels} (PCM mono)"
+            ),
+            Self::ImageInput(err) => write!(f, "live adapter send_input: {err}"),
+            Self::ImageInputIdempotencyKeyInvalid {
+                max_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "live adapter send_input: image idempotency key bytes={actual_bytes}, maximum={max_bytes}"
+            ),
+            Self::ImageInputIdempotencyConflict => f.write_str(
+                "live adapter send_input: image idempotency key is bound to another payload",
+            ),
+            Self::ImageInputRequiresCommit => f.write_str(
+                "live adapter send_input: staged text/audio must be committed before image input",
             ),
             Self::Llm(err) => write!(f, "{err}"),
         }
@@ -3983,6 +5938,12 @@ fn classify_command_error(
     err: &OpenAiLiveCommandError,
 ) -> (LiveAdapterErrorCode, /* scoped */ bool) {
     match err {
+        OpenAiLiveCommandError::RefreshTranscriptRewriteRequiresReopen => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::RefreshTranscriptRewriteRequiresReopen,
+            },
+            false,
+        ),
         OpenAiLiveCommandError::RefreshModelSwap {
             from_model,
             to_model,
@@ -4034,6 +5995,72 @@ fn classify_command_error(
             },
             true,
         ),
+        OpenAiLiveCommandError::ImageInput(
+            OpenAiRealtimeImageValidationError::UnsupportedMime { mime_type },
+        ) => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::ImageInputUnsupportedMime {
+                    mime_type: mime_type.clone(),
+                },
+            },
+            true,
+        ),
+        OpenAiLiveCommandError::ImageInput(
+            OpenAiRealtimeImageValidationError::ContentMismatch { mime_type },
+        ) => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::ImageInputContentMismatch {
+                    mime_type: mime_type.clone(),
+                },
+            },
+            true,
+        ),
+        OpenAiLiveCommandError::ImageInput(OpenAiRealtimeImageValidationError::TooLarge {
+            max_bytes,
+            actual_bytes,
+        }) => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::ImageInputTooLarge {
+                    max_bytes: u64::try_from(*max_bytes).unwrap_or(u64::MAX),
+                    actual_bytes: u64::try_from(*actual_bytes).unwrap_or(u64::MAX),
+                },
+            },
+            true,
+        ),
+        OpenAiLiveCommandError::ImageInput(OpenAiRealtimeImageValidationError::InvalidBase64 {
+            detail,
+        }) => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::Other {
+                    detail: format!("invalid image base64 at internal provider boundary: {detail}"),
+                },
+            },
+            true,
+        ),
+        OpenAiLiveCommandError::ImageInputIdempotencyKeyInvalid {
+            max_bytes,
+            actual_bytes,
+        } => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::ImageInputIdempotencyKeyInvalid {
+                    max_bytes: u64::try_from(*max_bytes).unwrap_or(u64::MAX),
+                    actual_bytes: u64::try_from(*actual_bytes).unwrap_or(u64::MAX),
+                },
+            },
+            true,
+        ),
+        OpenAiLiveCommandError::ImageInputIdempotencyConflict => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::ImageInputIdempotencyConflict,
+            },
+            true,
+        ),
+        OpenAiLiveCommandError::ImageInputRequiresCommit => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::ImageInputRequiresCommit,
+            },
+            true,
+        ),
         OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape { message }) => (
             LiveAdapterErrorCode::ConfigRejected {
                 reason: classify_invalid_input_shape(message),
@@ -4063,12 +6090,55 @@ fn classify_command_error(
 /// The audio config and provider id from the snapshot are validated against
 /// the realtime session's static defaults; a mismatch emits a typed error
 /// observation rather than silently coercing the snapshot.
+#[cfg(test)]
 async fn execute_openai_live_command(
     session: &mut OpenAiRealtimeSession,
     command: LiveAdapterCommand,
 ) -> Result<(), OpenAiLiveCommandError> {
+    let open_projection_lease = if matches!(command, LiveAdapterCommand::Open { .. }) {
+        let admission = RealtimeOpenProjectionAdmission::new(1, 1).map_err(|error| {
+            OpenAiLiveCommandError::Llm(LlmError::InvalidConfig {
+                message: error.to_string(),
+            })
+        })?;
+        Some(admission.try_acquire().map_err(|error| {
+            OpenAiLiveCommandError::Llm(LlmError::InvalidConfig {
+                message: error.to_string(),
+            })
+        })?)
+    } else {
+        None
+    };
+    execute_openai_live_command_with_budget(session, command, None, open_projection_lease).await
+}
+
+async fn execute_openai_live_command_with_budget(
+    session: &mut OpenAiRealtimeSession,
+    command: LiveAdapterCommand,
+    memory_budget: Option<OwnedSemaphorePermit>,
+    open_projection_lease: Option<RealtimeOpenProjectionLease>,
+) -> Result<(), OpenAiLiveCommandError> {
     match command {
         LiveAdapterCommand::Open { snapshot } => {
+            // Normal adapter admission transfers a lease with the queued Open
+            // command. Direct internal/test invocation must acquire the same
+            // owner here before constructing any provider data-URL events.
+            let _open_projection_lease = match open_projection_lease {
+                Some(lease) => lease,
+                None => RealtimeOpenProjectionAdmission::global()
+                    .try_acquire()
+                    .map_err(|_| {
+                        OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
+                            message: "realtime_open_projection_backpressured".to_string(),
+                        })
+                    })?,
+            };
+            session.set_canonical_user_content_registry(
+                &snapshot.user_content_identities,
+                &snapshot.user_content_tombstones,
+            )?;
+            session
+                .set_current_transcript_rewrite_generation(snapshot.transcript_rewrite_generation);
             // A9 + R3: drive the canonical seed path directly from the
             // projection snapshot — `seed_history_projection` is the same
             // routine the factory uses at open-time. It mints
@@ -4085,6 +6155,11 @@ async fn execute_openai_live_command(
             Ok(())
         }
         LiveAdapterCommand::Refresh { snapshot } => {
+            if !snapshot.seed_messages.is_empty() {
+                return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
+                    message: "refresh_seed_history_must_be_empty".to_string(),
+                }));
+            }
             // R1 + R9: a snapshot-driven refresh applies the mutable
             // configuration fields (instructions / tools / audio) on
             // the already-open hosted session, but it must NOT replay
@@ -4150,12 +6225,22 @@ async fn execute_openai_live_command(
                     ),
                 });
             }
+            if session.current_transcript_rewrite_generation
+                != snapshot.transcript_rewrite_generation
+                || !session.canonical_user_content_registry_matches(
+                    &snapshot.user_content_identities,
+                    &snapshot.user_content_tombstones,
+                )?
+            {
+                return Err(OpenAiLiveCommandError::RefreshTranscriptRewriteRequiresReopen);
+            }
             session
                 .apply_refresh_session_update_from_snapshot(&snapshot)
                 .await?;
             Ok(())
         }
         LiveAdapterCommand::SendInput { chunk } => {
+            let mut image_idempotency_key_bytes = None;
             let input = match chunk {
                 LiveInputChunk::Audio {
                     data,
@@ -4198,19 +6283,35 @@ async fn execute_openai_live_command(
                     use meerkat_contracts::RealtimeTextChunk;
                     RealtimeInputChunk::TextChunk(RealtimeTextChunk { text })
                 }
-                // T11 + R5-9 (FIX-OPENAI follow-up): image / video-frame
-                // variants are typed at the seam but not yet supported by
-                // OpenAI Realtime. Reject with the documented `reason`
-                // strings using the typed `LlmError::InvalidInputShape`
-                // variant — the pump (above) routes that variant to a
-                // scoped `LiveAdapterObservation::CommandRejected`
-                // (channel survives) rather than the terminal `Error`
-                // path. The classification is now structural — the pump
-                // never inspects the reason string.
-                LiveInputChunk::Image { .. } => {
-                    return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
-                        message: "image_input_not_implemented".to_string(),
-                    }));
+                // Still-image input: supported when the bound model's
+                // capability projection carries the Image input kind
+                // (catalog `vision` fact — `gpt-realtime-2`). A non-vision
+                // realtime model keeps the documented typed rejection
+                // (`image_input_not_implemented`) — scoped, channel
+                // survives, structural classification (T11 + R5-9 shape).
+                LiveInputChunk::Image {
+                    idempotency_key,
+                    mime,
+                    data,
+                } => {
+                    image_idempotency_key_bytes = Some(idempotency_key.len());
+                    if !session
+                        .capabilities()
+                        .input_kinds
+                        .contains(&RealtimeInputKind::Image)
+                    {
+                        return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
+                            message: "image_input_not_implemented".to_string(),
+                        }));
+                    }
+                    let mime_type = validate_openai_realtime_image_bytes(&mime, &data)
+                        .map_err(OpenAiLiveCommandError::ImageInput)?;
+                    use base64::Engine;
+                    RealtimeInputChunk::ImageChunk(meerkat_contracts::RealtimeImageChunk {
+                        idempotency_key,
+                        mime_type,
+                        data: base64::engine::general_purpose::STANDARD.encode(&data),
+                    })
                 }
                 LiveInputChunk::VideoFrame { .. } => {
                     return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
@@ -4227,7 +6328,33 @@ async fn execute_openai_live_command(
                     }));
                 }
             };
-            session.send_input(input).await?;
+            if let Err(error) = session
+                .send_input_with_command_budget(input, memory_budget)
+                .await
+            {
+                return Err(match error {
+                    LlmError::InvalidInputShape { ref message }
+                        if message == "image_input_idempotency_key_invalid" =>
+                    {
+                        OpenAiLiveCommandError::ImageInputIdempotencyKeyInvalid {
+                            max_bytes:
+                                meerkat_core::live_adapter::MAX_LIVE_IMAGE_IDEMPOTENCY_KEY_BYTES,
+                            actual_bytes: image_idempotency_key_bytes.unwrap_or_default(),
+                        }
+                    }
+                    LlmError::InvalidInputShape { ref message }
+                        if message == "image_input_idempotency_conflict" =>
+                    {
+                        OpenAiLiveCommandError::ImageInputIdempotencyConflict
+                    }
+                    LlmError::InvalidInputShape { ref message }
+                        if message == "image_input_requires_commit" =>
+                    {
+                        OpenAiLiveCommandError::ImageInputRequiresCommit
+                    }
+                    other => OpenAiLiveCommandError::Llm(other),
+                });
+            }
             Ok(())
         }
         LiveAdapterCommand::CommitInput { response_modality } => {
@@ -4485,13 +6612,248 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_text_item_ids_fit_openai_realtime_limit() {
-        let id = openai_realtime_synthetic_text_item_id();
-        assert!(
-            id.len() <= 32,
-            "OpenAI Realtime item.id must be at most 32 bytes: {id}"
+    fn synthetic_item_ids_fit_openai_realtime_limit() {
+        for (id, prefix) in [
+            (openai_realtime_synthetic_text_item_id(), "mk_text_"),
+            (
+                openai_realtime_synthetic_image_item_id(
+                    "image-request-1",
+                    &meerkat_core::BlobId::new(format!("sha256:{}", "07".repeat(32))),
+                ),
+                "mk_img_",
+            ),
+        ] {
+            assert!(
+                id.len() <= 32,
+                "OpenAI Realtime item.id must be at most 32 bytes: {id}"
+            );
+            assert!(id.starts_with(prefix), "unexpected synthetic id: {id}");
+        }
+    }
+
+    #[test]
+    fn realtime_image_traces_redact_client_and_server_payloads() {
+        let secret = "super-secret-image-payload";
+        let item = Item::Message {
+            id: Some("mk_image_trace".to_string()),
+            status: None,
+            phase: None,
+            role: Role::User,
+            content: vec![ContentPart::InputImage {
+                image_url: format!("data:image/png;base64,{secret}"),
+                detail: None,
+            }],
+        };
+        let client = trace_client_event_json(&ClientEvent::ConversationItemCreate {
+            event_id: None,
+            previous_item_id: None,
+            item: Box::new(item.clone()),
+        })
+        .expect("client image trace summary");
+        let server = trace_server_event_json(&ServerEvent::ConversationItemRetrieved {
+            event_id: "evt_trace".to_string(),
+            item,
+        })
+        .expect("server image trace summary");
+
+        for trace in [&client, &server] {
+            assert!(trace.contains("\"image_redacted\":true"), "{trace}");
+            assert!(
+                !trace.contains(secret),
+                "image bytes leaked in trace: {trace}"
+            );
+            assert!(!trace.contains("data:image/png;base64"), "{trace}");
+        }
+
+        let embedded_error = trace_server_event_json(&ServerEvent::Error {
+            event_id: "evt_trace_error".to_string(),
+            error: OpenAiServerError {
+                error_type: ApiErrorType::InvalidRequestError,
+                code: None,
+                message: format!("invalid image_url data:image/png;base64,{secret}"),
+                param: Some("item.content[0].image_url".to_string()),
+                event_id: None,
+            },
+        })
+        .expect("server error trace");
+        assert!(embedded_error.contains("redacted embedded realtime image data"));
+        assert!(!embedded_error.contains(secret));
+        assert!(!embedded_error.contains("data:image/png;base64"));
+
+        let surfaced_error = map_openai_live_server_error(OpenAiServerError {
+            error_type: ApiErrorType::InvalidRequestError,
+            code: None,
+            message: format!("invalid image_url data:image/png;base64,{secret}"),
+            param: Some("item.content[0].image_url".to_string()),
+            event_id: None,
+        });
+        let surfaced = surfaced_error.to_string();
+        assert!(surfaced.contains("redacted embedded realtime image data"));
+        assert!(!surfaced.contains(secret));
+    }
+
+    #[test]
+    fn realtime_image_error_redaction_is_ascii_case_insensitive() {
+        let secret = "mixed-case-secret-image-payload";
+        for data_uri in [
+            format!("DATA:IMAGE/PNG;BASE64,{secret}"),
+            format!("DaTa:ImAgE/JpEg;BaSe64,{secret}"),
+        ] {
+            let surfaced = map_openai_live_server_error(OpenAiServerError {
+                error_type: ApiErrorType::InvalidRequestError,
+                code: None,
+                message: format!("provider rejected image_url {data_uri}"),
+                param: Some("item.content[0].image_url".to_string()),
+                event_id: None,
+            })
+            .to_string();
+            assert!(surfaced.contains("redacted embedded realtime image data"));
+            assert!(!surfaced.contains(secret));
+            assert!(!surfaced.contains(&data_uri));
+        }
+    }
+
+    #[test]
+    fn realtime_image_validation_is_allowlisted_signature_checked_and_bounded() {
+        let png = b"\x89PNG\r\n\x1a\n";
+        assert_eq!(
+            validate_openai_realtime_image_bytes(" IMAGE/PNG;ignored=true ", png)
+                .expect("canonical PNG must validate"),
+            "image/png"
         );
-        assert!(id.starts_with("mk_text_"));
+        assert!(matches!(
+            validate_openai_realtime_image_bytes("image/svg+xml", b"<svg/>")
+                .expect_err("SVG must not enter the OpenAI realtime image lane"),
+            OpenAiRealtimeImageValidationError::UnsupportedMime { .. }
+        ));
+        assert!(matches!(
+            validate_openai_realtime_image_bytes("image/png", b"not a png")
+                .expect_err("declared MIME must agree with the byte signature"),
+            OpenAiRealtimeImageValidationError::ContentMismatch { .. }
+        ));
+        let oversized = vec![0_u8; meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES + 1];
+        assert!(matches!(
+            validate_openai_realtime_image_bytes("image/png", &oversized)
+                .expect_err("oversized image must reject before provider encoding"),
+            OpenAiRealtimeImageValidationError::TooLarge { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn seed_image_history_over_budget_rejects_before_any_provider_item() {
+        use base64::Engine as _;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session.set_user_image_history_budget_bytes_for_test(7);
+        let seed = vec![Message::User(meerkat_core::UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+                },
+            },
+        ]))];
+
+        let error = session
+            .seed_history_projection(&seed, &[])
+            .await
+            .expect_err("an eight-byte image must not fit a seven-byte replay budget");
+        assert!(matches!(
+            error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_history_budget_exceeded"
+        ));
+        assert!(
+            seen.lock().await.is_empty(),
+            "over-budget seed history must reject before materializing a provider item"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_images_cannot_cross_the_non_lossy_reopen_budget() {
+        use base64::Engine as _;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session.set_user_image_history_budget_bytes_for_test(16);
+        let data = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n");
+        let mut previous_item_id = None;
+
+        for index in 0..2 {
+            session
+                .send_input(RealtimeInputChunk::ImageChunk(
+                    meerkat_contracts::RealtimeImageChunk {
+                        idempotency_key: format!("history-budget-{index}"),
+                        mime_type: "image/png".to_string(),
+                        data: data.clone(),
+                    },
+                ))
+                .await
+                .expect("each image within the cumulative budget must be admitted");
+            let (item_id, provider_item) = completed_last_image_item(&seen).await;
+            let event = session
+                .map_server_event(ServerEvent::ConversationItemCreated {
+                    event_id: format!("evt_history_budget_{index}"),
+                    previous_item_id: previous_item_id.clone(),
+                    item: provider_item,
+                })
+                .expect("correlated provider ACK must map")
+                .expect("correlated provider ACK must emit canonical user content");
+            assert!(matches!(
+                event,
+                RealtimeSessionEvent::RealtimeTranscript {
+                    event: RealtimeTranscriptEvent::UserContentFinal { .. }
+                }
+            ));
+            previous_item_id = Some(item_id);
+            // Direct-session polling is the completion witness for the ACK
+            // event's transferred memory reservation.
+            assert!(
+                session
+                    .next_event()
+                    .await
+                    .expect("completion poll")
+                    .is_none()
+            );
+            // Model the completed response boundary between sequential turns.
+            session.has_staged_input = false;
+        }
+        assert_eq!(session.committed_user_image_bytes, 16);
+
+        let provider_frames_before_rejection = seen.lock().await.len();
+        let error = session
+            .send_input(RealtimeInputChunk::ImageChunk(
+                meerkat_contracts::RealtimeImageChunk {
+                    idempotency_key: "history-budget-overflow".to_string(),
+                    mime_type: "image/png".to_string(),
+                    data,
+                },
+            ))
+            .await
+            .expect_err("the next durable image would make cold reopen impossible");
+        assert!(matches!(
+            error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_history_budget_exceeded"
+        ));
+        assert_eq!(
+            seen.lock().await.len(),
+            provider_frames_before_rejection,
+            "history-budget rejection must happen before provider send"
+        );
     }
 
     /// R5-2 follow-up: the typed constructor for `SessionUpdateConfig`
@@ -4567,6 +6929,33 @@ mod tests {
         }
     }
 
+    async fn completed_last_image_item(seen: &Arc<Mutex<Vec<ClientEvent>>>) -> (String, Item) {
+        let seen = seen.lock().await;
+        let item = seen
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::ConversationItemCreate { item, .. }
+                    if matches!(
+                        item.as_ref(),
+                        Item::Message { content, .. }
+                            if content.iter().any(|part| matches!(part, ContentPart::InputImage { .. }))
+                    ) => Some(item.as_ref().clone()),
+                _ => None,
+            })
+            .expect("an image item must have been sent");
+        let mut item = item;
+        let Item::Message { id, status, .. } = &mut item else {
+            panic!("image input must be a message item");
+        };
+        *status = Some(ItemStatus::Completed);
+        (
+            id.clone()
+                .expect("image input must have a synthetic item id"),
+            item,
+        )
+    }
+
     struct FakeOpenAiLiveFactory {
         opened_sessions: Mutex<VecDeque<Result<Box<dyn OpenAiLiveSession>, LlmError>>>,
         attached_sessions: Mutex<VecDeque<Result<Box<dyn OpenAiLiveSession>, LlmError>>>,
@@ -4586,6 +6975,22 @@ mod tests {
         }
     }
 
+    fn expected_seed_item_ids(
+        seed_messages: &[Message],
+        runtime_system_context: &[PendingSystemContextAppend],
+    ) -> Vec<String> {
+        let mut events = openai_realtime_history_events(seed_messages, runtime_system_context)
+            .expect("sample seed history must project");
+        events
+            .iter_mut()
+            .enumerate()
+            .map(|(index, event)| {
+                stamp_openai_realtime_seed_item_id(index, event)
+                    .expect("sample seed item identity must stamp")
+            })
+            .collect()
+    }
+
     #[allow(clippy::type_complexity)]
     fn sample_open_handshake_events(
         open_config: &RealtimeSessionOpenConfig,
@@ -4600,17 +7005,16 @@ mod tests {
                 session: sample_server_session(&open_config.llm_identity.model),
             })),
         ]);
-        let seed_ack_count = openai_realtime_history_events(
+        let seed_item_ids = expected_seed_item_ids(
             &open_config.seed_messages,
             &open_config.runtime_system_context,
-        )
-        .len();
-        for index in 0..seed_ack_count {
+        );
+        for (index, item_id) in seed_item_ids.into_iter().enumerate() {
             events.push_back(Ok(Some(ServerEvent::ConversationItemCreated {
                 event_id: format!("evt_seed_item_created_{index}"),
                 previous_item_id: None,
                 item: Item::Message {
-                    id: Some(format!("msg_seed_{index}")),
+                    id: Some(item_id),
                     status: None,
                     phase: None,
                     role: Role::System,
@@ -4697,6 +7101,23 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+        }
+    }
+
+    fn sample_projection_snapshot() -> meerkat_core::live_adapter::LiveProjectionSnapshot {
+        meerkat_core::live_adapter::LiveProjectionSnapshot {
+            session_id: meerkat_core::SessionId::new(),
+            snapshot_version: 1,
+            seed_messages: Vec::new(),
+            visible_tools: Vec::new(),
+            system_prompt: None,
+            model_id: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+            provider_id: Provider::OpenAI,
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         }
     }
 
@@ -4839,6 +7260,15 @@ mod tests {
             caps.input_kinds.contains(&RealtimeInputKind::Video),
             row.inline_video,
             "Video input kind must follow the catalog inline_video flag"
+        );
+        assert_eq!(
+            caps.input_kinds.contains(&RealtimeInputKind::Image),
+            row.vision,
+            "Image input kind must follow the catalog vision flag"
+        );
+        assert!(
+            row.vision,
+            "gpt-realtime-2 accepts still-image input per the catalog row"
         );
 
         // #68: the realtime transport facts (turning modes, interrupt,
@@ -5305,7 +7735,8 @@ mod tests {
             peer_response_terminal: None,
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
         }];
-        let events = openai_realtime_history_events(&seed_messages, &runtime_system_context);
+        let events = openai_realtime_history_events(&seed_messages, &runtime_system_context)
+            .expect("canonical history must project");
 
         assert_eq!(events.len(), 4);
         assert!(matches!(
@@ -5433,6 +7864,51 @@ mod tests {
     }
 
     #[test]
+    fn realtime_history_replays_inline_images_and_rejects_unhydrated_blobs() {
+        let inline = Message::User(meerkat_core::UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "iVBORw0KGgo=".to_string(),
+                },
+            },
+        ]));
+        let events = openai_realtime_history_events(&[inline], &[])
+            .expect("hydrated inline image history must project");
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::ConversationItemCreate { item, .. }]
+                if matches!(
+                    item.as_ref(),
+                    Item::Message {
+                        role: Role::User,
+                        content,
+                        ..
+                    } if matches!(
+                        content.as_slice(),
+                        [ContentPart::InputImage { image_url, .. }]
+                            if image_url == "data:image/png;base64,iVBORw0KGgo="
+                    )
+                )
+        ));
+
+        let blob = Message::User(meerkat_core::UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: "sha256:missing".to_string().into(),
+                },
+            },
+        ]));
+        assert!(matches!(
+            openai_realtime_history_events(&[blob], &[])
+                .expect_err("unhydrated blob must fail closed at provider projection"),
+            LlmError::InvalidConfig { message }
+                if message.contains("was not hydrated at the projection boundary")
+        ));
+    }
+
+    #[test]
     fn realtime_history_events_do_not_replay_marker_system_message_without_typed_context() {
         let seed_messages = vec![
             Message::System(meerkat_core::SystemMessage::new(
@@ -5442,7 +7918,8 @@ mod tests {
             Message::User(meerkat_core::UserMessage::text("hello")),
         ];
 
-        let events = openai_realtime_history_events(&seed_messages, &[]);
+        let events = openai_realtime_history_events(&seed_messages, &[])
+            .expect("canonical history must project");
 
         assert_eq!(events.len(), 1);
         assert!(matches!(
@@ -5487,7 +7964,8 @@ mod tests {
             ));
         }
 
-        let events = openai_realtime_history_events(&seed_messages, &[]);
+        let events = openai_realtime_history_events(&seed_messages, &[])
+            .expect("canonical history must project");
         let replayed_texts = events
             .iter()
             .filter_map(|event| match event {
@@ -5615,8 +8093,7 @@ mod tests {
         let mut opened = factory
             .attach_external_session(
                 &RealtimeExternalSessionTarget::new("call_123").expect("target"),
-                &sample_realtime_identity(),
-                RealtimeTurningMode::ExplicitCommit,
+                &sample_open_config(RealtimeTurningMode::ExplicitCommit),
             )
             .await
             .expect("open should succeed");
@@ -5625,7 +8102,12 @@ mod tests {
         let capabilities = opened.capabilities();
         assert_eq!(
             capabilities.input_kinds,
-            vec![RealtimeInputKind::Text, RealtimeInputKind::Audio]
+            vec![
+                RealtimeInputKind::Text,
+                RealtimeInputKind::Audio,
+                RealtimeInputKind::Image,
+            ],
+            "gpt-realtime-2's catalog vision fact adds the Image input kind"
         );
         assert_eq!(
             capabilities.output_kinds,
@@ -5642,6 +8124,1194 @@ mod tests {
                 .contains(&RealtimeTurningMode::ExplicitCommit)
         );
         assert!(opened.close().await.is_ok(), "close should succeed");
+    }
+
+    #[tokio::test]
+    async fn direct_factory_open_fails_before_raw_open_when_projection_custody_is_saturated() {
+        let admission = RealtimeOpenProjectionAdmission::new(1, 1)
+            .expect("isolated factory projection admission");
+        let held = admission
+            .try_acquire()
+            .expect("saturate isolated admission");
+        let open_configs = Arc::new(Mutex::new(Vec::new()));
+        let factory = OpenAiRealtimeSessionFactory::with_open_projection_admission(
+            Arc::new(FakeOpenAiLiveFactory {
+                opened_sessions: Mutex::new(VecDeque::new()),
+                attached_sessions: Mutex::new(VecDeque::new()),
+                open_configs: Arc::clone(&open_configs),
+            }),
+            admission.clone(),
+        );
+
+        let error = match factory
+            .open_session(&sample_open_config(RealtimeTurningMode::ProviderManaged))
+            .await
+        {
+            Ok(_) => panic!("saturated direct factory open must not succeed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "realtime_open_projection_backpressured"
+        ));
+        assert!(
+            open_configs.lock().await.is_empty(),
+            "projection admission must run before raw provider open/configuration"
+        );
+        drop(held);
+        assert!(admission.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn attach_consumes_and_releases_a_carried_projection_lease_once() {
+        let admission = RealtimeOpenProjectionAdmission::new(1, 1)
+            .expect("isolated attach projection admission");
+        let config = sample_open_config(RealtimeTurningMode::ProviderManaged)
+            .with_open_projection_lease(admission.try_acquire().expect("carried lease"));
+        let retained_clone = config.clone();
+        let session = FakeOpenAiLiveSession {
+            seen: Arc::new(Mutex::new(Vec::new())),
+            next_events: Arc::new(Mutex::new(VecDeque::new())),
+        };
+        let factory = OpenAiRealtimeSessionFactory::with_open_projection_admission(
+            Arc::new(FakeOpenAiLiveFactory {
+                opened_sessions: Mutex::new(VecDeque::new()),
+                attached_sessions: Mutex::new(VecDeque::from(vec![Ok(
+                    Box::new(session) as Box<dyn OpenAiLiveSession>
+                )])),
+                open_configs: Arc::new(Mutex::new(Vec::new())),
+            }),
+            admission.clone(),
+        );
+
+        let attached = factory
+            .attach_external_session(
+                &RealtimeExternalSessionTarget::new("call_release_lease").expect("target"),
+                &config,
+            )
+            .await
+            .expect("attach must succeed");
+        assert!(
+            retained_clone.take_open_projection_lease().is_none(),
+            "all config clones must observe the consumed take-once slot"
+        );
+        assert!(
+            admission.try_acquire().is_ok(),
+            "attach return must release unused pre-hydration custody"
+        );
+        drop(attached);
+    }
+
+    #[tokio::test]
+    async fn attach_rejects_over_budget_history_before_raw_provider_attach() {
+        use base64::Engine as _;
+
+        let admission = RealtimeOpenProjectionAdmission::new(1, 1)
+            .expect("isolated attach projection admission");
+        let mut config = sample_open_config(RealtimeTurningMode::ProviderManaged)
+            .with_open_projection_lease(admission.try_acquire().expect("carried lease"));
+        config
+            .seed_messages
+            .push(Message::User(meerkat_core::UserMessage::with_blocks(vec![
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: base64::engine::general_purpose::STANDARD
+                            .encode(b"\x89PNG\r\n\x1a\n"),
+                    },
+                },
+            ])));
+        let raw_factory = Arc::new(FakeOpenAiLiveFactory {
+            opened_sessions: Mutex::new(VecDeque::new()),
+            attached_sessions: Mutex::new(VecDeque::from(vec![Ok(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::new(Mutex::new(Vec::new())),
+                    next_events: Arc::new(Mutex::new(VecDeque::new())),
+                }) as Box<dyn OpenAiLiveSession>,
+            )])),
+            open_configs: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory =
+            OpenAiRealtimeSessionFactory::with_open_projection_admission_and_history_budget(
+                raw_factory.clone(),
+                admission.clone(),
+                7,
+            );
+
+        let error = match factory
+            .attach_external_session(
+                &RealtimeExternalSessionTarget::new("call_invalid_history").expect("target"),
+                &config,
+            )
+            .await
+        {
+            Ok(_) => panic!("over-budget canonical image history must reject attach"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_history_budget_exceeded"
+        ));
+        assert_eq!(
+            raw_factory.attached_sessions.lock().await.len(),
+            1,
+            "canonical history validation must precede provider attachment"
+        );
+        assert!(
+            admission.try_acquire().is_ok(),
+            "failed validation must release carried projection custody"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_attach_counts_canonical_images_before_new_image_admission() {
+        use base64::Engine as _;
+
+        let admission = RealtimeOpenProjectionAdmission::new(1, 1)
+            .expect("isolated attach projection admission");
+        let mut config = sample_open_config(RealtimeTurningMode::ProviderManaged)
+            .with_open_projection_lease(admission.try_acquire().expect("carried lease"));
+        config
+            .seed_messages
+            .push(Message::User(meerkat_core::UserMessage::with_blocks(vec![
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: base64::engine::general_purpose::STANDARD
+                            .encode(b"\x89PNG\r\n\x1a\n"),
+                    },
+                },
+            ])));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let raw_factory = Arc::new(FakeOpenAiLiveFactory {
+            opened_sessions: Mutex::new(VecDeque::new()),
+            attached_sessions: Mutex::new(VecDeque::from(vec![Ok(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::clone(&seen),
+                    next_events: Arc::new(Mutex::new(VecDeque::new())),
+                }) as Box<dyn OpenAiLiveSession>,
+            )])),
+            open_configs: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory =
+            OpenAiRealtimeSessionFactory::with_open_projection_admission_and_history_budget(
+                raw_factory,
+                admission,
+                15,
+            );
+        let mut attached = factory
+            .attach_external_session(
+                &RealtimeExternalSessionTarget::new("call_count_history").expect("target"),
+                &config,
+            )
+            .await
+            .expect("history within the attach budget must succeed");
+
+        let error = attached
+            .send_input(RealtimeInputChunk::ImageChunk(
+                meerkat_contracts::RealtimeImageChunk {
+                    idempotency_key: "attached-next-image".to_string(),
+                    mime_type: "image/png".to_string(),
+                    data: base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+                },
+            ))
+            .await
+            .expect_err("8 existing + 8 new bytes must exceed the injected 15-byte ceiling");
+        assert!(matches!(
+            error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_history_budget_exceeded"
+        ));
+        assert!(
+            seen.lock().await.is_empty(),
+            "history admission must reject before provider image send"
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_session_installs_tombstones_before_image_admission() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let session = FakeOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(VecDeque::new())),
+        };
+        let factory = OpenAiRealtimeSessionFactory::new(Arc::new(FakeOpenAiLiveFactory {
+            opened_sessions: Mutex::new(VecDeque::new()),
+            attached_sessions: Mutex::new(VecDeque::from(vec![Ok(
+                Box::new(session) as Box<dyn OpenAiLiveSession>
+            )])),
+            open_configs: Arc::new(Mutex::new(Vec::new())),
+        }));
+        let config = sample_open_config(RealtimeTurningMode::ProviderManaged)
+            .with_user_content_tombstones(vec![RealtimeUserContentTombstone {
+                idempotency_key: "removed-before-attach".to_string(),
+            }]);
+        let mut attached = factory
+            .attach_external_session(
+                &RealtimeExternalSessionTarget::new("call_tombstone").expect("target"),
+                &config,
+            )
+            .await
+            .expect("attach should install canonical registry");
+
+        let error = attached
+            .send_input(RealtimeInputChunk::ImageChunk(
+                meerkat_contracts::RealtimeImageChunk {
+                    idempotency_key: "removed-before-attach".to_string(),
+                    mime_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".to_string(),
+                },
+            ))
+            .await
+            .expect_err("tombstoned attached key must reject");
+        assert!(matches!(
+            error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_idempotency_conflict"
+        ));
+        assert!(
+            seen.lock().await.is_empty(),
+            "attach tombstone rejection must precede provider send"
+        );
+    }
+
+    /// Image input encoding: a `RealtimeInputChunk::ImageChunk` becomes a
+    /// `conversation.item.create` carrying an `input_image` data URL, and —
+    /// unlike text — never synthesizes a `response.create` in either
+    /// turning mode: the image is staged context for the turn that follows.
+    #[tokio::test]
+    async fn provider_neutral_session_stages_image_chunk_without_response() {
+        for turning_mode in [
+            RealtimeTurningMode::ProviderManaged,
+            RealtimeTurningMode::ExplicitCommit,
+        ] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let next_events = Arc::new(Mutex::new(VecDeque::new()));
+            let mut session = OpenAiRealtimeSession::new(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::clone(&seen),
+                    next_events: Arc::clone(&next_events),
+                }),
+                turning_mode,
+            );
+
+            session
+                .send_input(RealtimeInputChunk::ImageChunk(
+                    meerkat_contracts::RealtimeImageChunk {
+                        idempotency_key: "image-request-ack".to_string(),
+                        mime_type: "image/png".to_string(),
+                        data: "iVBORw0KGgo=".to_string(),
+                    },
+                ))
+                .await
+                .expect("image chunk should send");
+
+            assert!(
+                session.pending_events.is_empty(),
+                "transport acceptance is not provider acceptance: no canonical event or receipt may be emitted before the provider item ack"
+            );
+
+            let (committed_item_id, provider_item) = {
+                let seen = seen.lock().await;
+                let item_create = seen
+                    .iter()
+                    .find_map(|event| match event {
+                        ClientEvent::ConversationItemCreate { item, .. } => Some(item),
+                        _ => None,
+                    })
+                    .expect("image chunk must create a conversation item");
+                let item_id = openai_realtime_item_id(item_create)
+                    .expect("image item must carry its synthetic id")
+                    .to_string();
+                let mut provider_item = item_create.as_ref().clone();
+                if let Item::Message { status, .. } = &mut provider_item {
+                    *status = Some(ItemStatus::Completed);
+                }
+                (item_id, provider_item)
+            };
+            next_events
+                .lock()
+                .await
+                .push_back(Ok(Some(ServerEvent::ConversationItemCreated {
+                    event_id: "evt_image_accepted".to_string(),
+                    previous_item_id: Some("provider-predecessor".to_string()),
+                    item: provider_item,
+                })));
+
+            let observed_item_id = match session
+                .next_event()
+                .await
+                .expect("canonical image event must be readable")
+                .expect("canonical image event must be queued")
+            {
+                RealtimeSessionEvent::RealtimeTranscript {
+                    event:
+                        RealtimeTranscriptEvent::UserContentFinal {
+                            idempotency_key,
+                            item_id,
+                            previous_item_id,
+                            content_index,
+                            content,
+                        },
+                } => {
+                    assert_eq!(idempotency_key, "image-request-ack");
+                    assert_eq!(previous_item_id.as_deref(), Some("provider-predecessor"));
+                    assert_eq!(content_index, 0);
+                    assert!(matches!(
+                        content.as_slice(),
+                        [ContentBlock::Image {
+                            media_type,
+                            data: ImageData::Inline { data },
+                        }] if media_type == "image/png" && data == "iVBORw0KGgo="
+                    ));
+                    item_id
+                }
+                other => panic!("expected canonical user image event, got {other:?}"),
+            };
+            assert_eq!(observed_item_id, committed_item_id);
+
+            let seen_guard = seen.lock().await;
+            let item_create = seen_guard
+                .iter()
+                .find_map(|event| match event {
+                    ClientEvent::ConversationItemCreate { item, .. } => Some(item),
+                    _ => None,
+                })
+                .expect("image chunk must create a conversation item");
+            match item_create.as_ref() {
+                Item::Message {
+                    id, role, content, ..
+                } => {
+                    assert_eq!(id.as_deref(), Some(committed_item_id.as_str()));
+                    assert_eq!(*role, Role::User, "image item is user content");
+                    match content.as_slice() {
+                        [ContentPart::InputImage { image_url, .. }] => {
+                            assert_eq!(
+                                image_url, "data:image/png;base64,iVBORw0KGgo=",
+                                "image bytes must render as a typed data URL"
+                            );
+                        }
+                        other => panic!("expected a single input_image part, got {other:?}"),
+                    }
+                }
+                other => panic!("expected a message item, got {other:?}"),
+            }
+            assert!(
+                !seen_guard
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::ResponseCreate { .. })),
+                "an image is staged context: it must not synthesize a response \
+                 ({turning_mode:?})"
+            );
+            drop(seen_guard);
+
+            session
+                .send_input(RealtimeInputChunk::ImageChunk(
+                    meerkat_contracts::RealtimeImageChunk {
+                        idempotency_key: "image-request-ack".to_string(),
+                        mime_type: "image/png".to_string(),
+                        data: "iVBORw0KGgo=".to_string(),
+                    },
+                ))
+                .await
+                .expect("same-key exact retry should not resend provider input");
+            let replayed_item_id = match session
+                .next_event()
+                .await
+                .expect("replay event")
+                .expect("replay should queue canonical content")
+            {
+                RealtimeSessionEvent::RealtimeTranscript {
+                    event:
+                        RealtimeTranscriptEvent::UserContentFinal {
+                            idempotency_key,
+                            item_id,
+                            ..
+                        },
+                } => {
+                    assert_eq!(idempotency_key, "image-request-ack");
+                    item_id
+                }
+                other => panic!("expected canonical replay, got {other:?}"),
+            };
+            assert_eq!(replayed_item_id, committed_item_id);
+            assert_eq!(
+                seen.lock()
+                    .await
+                    .iter()
+                    .filter(|event| matches!(event, ClientEvent::ConversationItemCreate { .. }))
+                    .count(),
+                1,
+                "exact retry must not create a second provider item"
+            );
+
+            use base64::Engine as _;
+            let conflict = session
+                .send_input(RealtimeInputChunk::ImageChunk(
+                    meerkat_contracts::RealtimeImageChunk {
+                        idempotency_key: "image-request-ack".to_string(),
+                        mime_type: "image/png".to_string(),
+                        data: base64::engine::general_purpose::STANDARD
+                            .encode(b"\x89PNG\r\n\x1a\nDIFFERENT"),
+                    },
+                ))
+                .await
+                .expect_err("same key with another payload must conflict before provider send");
+            assert!(matches!(
+                conflict,
+                LlmError::InvalidInputShape { ref message }
+                    if message == "image_input_idempotency_conflict"
+            ));
+
+            if turning_mode == RealtimeTurningMode::ExplicitCommit {
+                session
+                    .commit_turn()
+                    .await
+                    .expect("acknowledged image alone is a committable explicit turn");
+                let seen_guard = seen.lock().await;
+                assert!(
+                    seen_guard
+                        .iter()
+                        .any(|event| matches!(event, ClientEvent::ResponseCreate { .. }))
+                );
+                assert!(
+                    !seen_guard
+                        .iter()
+                        .any(|event| matches!(event, ClientEvent::InputAudioBufferCommit { .. }))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_rejection_never_emits_a_canonical_image_or_receipt() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let next_events = Arc::new(Mutex::new(VecDeque::from([Err(
+            LlmError::InvalidRequest {
+                message: "provider rejected image item".to_string(),
+            },
+        )])));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession { seen, next_events }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        session
+            .send_input(RealtimeInputChunk::ImageChunk(
+                meerkat_contracts::RealtimeImageChunk {
+                    idempotency_key: "image-request-reject".to_string(),
+                    mime_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".to_string(),
+                },
+            ))
+            .await
+            .expect("transport send must succeed before the provider rejection");
+        assert!(session.pending_events.is_empty());
+
+        let error = session
+            .next_event()
+            .await
+            .expect_err("provider rejection must surface as an error");
+        assert!(matches!(error, LlmError::InvalidRequest { .. }));
+        assert!(
+            session.pending_events.is_empty(),
+            "a failed provider item must never produce canonical content or a public receipt"
+        );
+        assert_eq!(session.pending_image_inputs.len(), 1);
+
+        session
+            .close()
+            .await
+            .expect("close must clean pending images");
+        assert!(session.pending_image_inputs.is_empty());
+        assert_eq!(session.pending_image_input_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn pending_image_ack_gates_text_and_audio_and_preserves_causal_order() {
+        let image = || {
+            RealtimeInputChunk::ImageChunk(meerkat_contracts::RealtimeImageChunk {
+                idempotency_key: "image-request-order".to_string(),
+                mime_type: "image/png".to_string(),
+                data: "iVBORw0KGgo=".to_string(),
+            })
+        };
+
+        let text_seen = Arc::new(Mutex::new(Vec::new()));
+        let mut text_session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&text_seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        text_session
+            .send_input(image())
+            .await
+            .expect("image stages");
+        let text_error = text_session
+            .send_input(RealtimeInputChunk::TextChunk(RealtimeTextChunk {
+                text: "what is shown?".to_string(),
+            }))
+            .await
+            .expect_err("text cannot overtake an unacknowledged image");
+        assert!(matches!(
+            text_error,
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_pending_budget_exceeded"
+        ));
+
+        let (image_item_id, image_item) = completed_last_image_item(&text_seen).await;
+        text_session
+            .map_server_event(ServerEvent::ConversationItemCreated {
+                event_id: "evt_image_text_ack".to_string(),
+                previous_item_id: None,
+                item: image_item,
+            })
+            .expect("exact completed image ack maps")
+            .expect("exact completed image ack emits canonical content");
+        text_session
+            .send_input(RealtimeInputChunk::TextChunk(RealtimeTextChunk {
+                text: "what is shown?".to_string(),
+            }))
+            .await
+            .expect("text may follow the acknowledged image");
+        let text_seen = text_seen.lock().await;
+        assert!(text_seen.iter().any(|event| matches!(
+            event,
+            ClientEvent::ConversationItemCreate {
+                previous_item_id: Some(previous_item_id),
+                item,
+                ..
+            } if previous_item_id == &image_item_id
+                && matches!(
+                    item.as_ref(),
+                    Item::Message { content, .. }
+                        if matches!(content.as_slice(), [ContentPart::InputText { text }] if text == "what is shown?")
+                )
+        )));
+        assert!(text_session.pending_events.iter().any(|queued| matches!(
+            &queued.event,
+            RealtimeSessionEvent::InputTranscriptFinalForItem {
+                previous_item_id: Some(previous_item_id),
+                ..
+            } if previous_item_id == &image_item_id
+        )));
+        drop(text_seen);
+
+        let audio_seen = Arc::new(Mutex::new(Vec::new()));
+        let mut audio_session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&audio_seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        audio_session
+            .send_input(image())
+            .await
+            .expect("image stages");
+        let audio = || {
+            RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
+                mime_type: "audio/pcm".to_string(),
+                sample_rate_hz: OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+                channels: OPENAI_REALTIME_AUDIO_CHANNELS,
+                data: "AQID".to_string(),
+            })
+        };
+        assert!(matches!(
+            audio_session
+                .send_input(audio())
+                .await
+                .expect_err("audio cannot overtake an unacknowledged image"),
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_pending_budget_exceeded"
+        ));
+        let (image_item_id, image_item) = completed_last_image_item(&audio_seen).await;
+        audio_session
+            .map_server_event(ServerEvent::ConversationItemDone {
+                event_id: "evt_image_audio_ack".to_string(),
+                previous_item_id: None,
+                item: image_item,
+            })
+            .expect("exact completed image ack maps")
+            .expect("exact completed image ack emits canonical content");
+        audio_session
+            .send_input(audio())
+            .await
+            .expect("audio may follow the acknowledged image");
+        audio_session
+            .map_server_event(ServerEvent::InputAudioBufferCommitted {
+                event_id: "evt_audio_commit".to_string(),
+                previous_item_id: Some(image_item_id.clone()),
+                item_id: "audio_item".to_string(),
+            })
+            .expect("audio commit must preserve the image predecessor");
+        assert_eq!(
+            audio_session.pending_user_input_tail_item_id.as_deref(),
+            Some("audio_item")
+        );
+    }
+
+    #[tokio::test]
+    async fn image_ack_requires_completed_status_exact_content_and_item_order() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session
+            .send_input(RealtimeInputChunk::ImageChunk(
+                meerkat_contracts::RealtimeImageChunk {
+                    idempotency_key: "image-request-opaque-ack".to_string(),
+                    mime_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".to_string(),
+                },
+            ))
+            .await
+            .expect("image stages");
+        let (item_id, mut item) = completed_last_image_item(&seen).await;
+
+        let mut incomplete = item.clone();
+        if let Item::Message { status, .. } = &mut incomplete {
+            *status = Some(ItemStatus::Incomplete);
+        }
+        for ack_kind in [
+            PendingImageAckKind::Created,
+            PendingImageAckKind::Added,
+            PendingImageAckKind::Done,
+        ] {
+            assert!(matches!(
+                session.acknowledge_pending_image_item(None, &incomplete, ack_kind),
+                Err(LlmError::InvalidRequest { ref message })
+                    if message == "openai realtime image acknowledgement had incomplete status"
+            ));
+            assert!(
+                session.pending_image_inputs.contains_key(&item_id),
+                "{ack_kind:?} with explicit incomplete status must not consume the pending image"
+            );
+        }
+        assert!(session.pending_events.is_empty());
+
+        let mut unfinished = item.clone();
+        if let Item::Message { status, .. } = &mut unfinished {
+            *status = None;
+        }
+        assert!(
+            session
+                .map_server_event(ServerEvent::ConversationItemDone {
+                    event_id: "evt_unfinished".to_string(),
+                    previous_item_id: None,
+                    item: unfinished,
+                })
+                .expect("unfinished lifecycle event is not terminal")
+                .is_none()
+        );
+        assert!(session.pending_image_inputs.contains_key(&item_id));
+
+        if let Item::Message { content, .. } = &mut item {
+            *content = vec![ContentPart::InputText {
+                text: "not the submitted image".to_string(),
+            }];
+        }
+        assert!(matches!(
+            session.map_server_event(ServerEvent::ConversationItemDone {
+                event_id: "evt_wrong_content".to_string(),
+                previous_item_id: None,
+                item,
+            }),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        assert!(session.pending_image_inputs.contains_key(&item_id));
+        assert!(session.pending_events.is_empty());
+
+        let opaque_provider_ack = Item::Message {
+            id: Some(item_id),
+            status: None,
+            phase: None,
+            role: Role::User,
+            content: vec![ContentPart::Unknown(serde_json::json!({
+                "type": "input_image",
+                "detail": "auto",
+                "future_metadata": true
+            }))],
+        };
+        assert!(
+            session
+                .map_server_event(ServerEvent::ConversationItemCreated {
+                    event_id: "evt_opaque_provider_ack".to_string(),
+                    previous_item_id: None,
+                    item: opaque_provider_ack,
+                })
+                .expect(
+                    "OpenAI's byte-elided Created marker must correlate by digest-bound id even without status"
+                )
+                .is_some()
+        );
+        assert!(session.pending_image_inputs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_image_admission_is_process_shared_across_sessions_until_event_completion() {
+        let image_data = "iVBORw0KGgo=";
+        let decoded_upper_bound = image_data.len().div_ceil(4) * 3;
+        let image_charge = openai_live_image_command_memory_charge(
+            decoded_upper_bound,
+            "direct-budget-a".len(),
+            "image/png".len(),
+        )
+        .max(meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES);
+        let shared_budget = Arc::new(Semaphore::new(image_charge));
+
+        let seen_a = Arc::new(Mutex::new(Vec::new()));
+        let mut session_a = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen_a),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session_a.direct_image_payload_budget = Arc::clone(&shared_budget);
+        let seen_b = Arc::new(Mutex::new(Vec::new()));
+        let mut session_b = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen_b),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session_b.direct_image_payload_budget = Arc::clone(&shared_budget);
+
+        let image = |key: &str| {
+            RealtimeInputChunk::ImageChunk(meerkat_contracts::RealtimeImageChunk {
+                idempotency_key: key.to_string(),
+                mime_type: "image/png".to_string(),
+                data: image_data.to_string(),
+            })
+        };
+        session_a
+            .send_input(image("direct-budget-a"))
+            .await
+            .expect("first direct session must acquire the shared image owner");
+        assert_eq!(shared_budget.available_permits(), 0);
+        assert!(matches!(
+            session_b
+                .send_input(image("direct-budget-b"))
+                .await
+                .expect_err("second direct session must fail fast while shared custody is held"),
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_pending_budget_exceeded"
+        ));
+        assert!(seen_b.lock().await.is_empty());
+
+        let (_, completed_item) = completed_last_image_item(&seen_a).await;
+        let event = session_a
+            .map_server_event(ServerEvent::ConversationItemCreated {
+                event_id: "evt_direct_budget_ack".to_string(),
+                previous_item_id: None,
+                item: completed_item,
+            })
+            .expect("provider ACK must map")
+            .expect("provider ACK must emit canonical content");
+        assert!(matches!(
+            event,
+            RealtimeSessionEvent::RealtimeTranscript {
+                event: RealtimeTranscriptEvent::UserContentFinal { .. }
+            }
+        ));
+        assert_eq!(
+            shared_budget.available_permits(),
+            0,
+            "ACK transfers the reservation to the returned canonical event"
+        );
+        assert!(
+            session_a
+                .next_event()
+                .await
+                .expect("completion poll")
+                .is_none()
+        );
+        assert_eq!(shared_budget.available_permits(), image_charge);
+
+        session_b
+            .send_input(image("direct-budget-b"))
+            .await
+            .expect("second direct session must admit after completion releases custody");
+        assert_eq!(shared_budget.available_permits(), 0);
+        drop(session_b);
+        assert_eq!(shared_budget.available_permits(), image_charge);
+    }
+
+    #[tokio::test]
+    async fn image_input_waits_for_previous_response_terminal_boundary() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session.active_response_id = Some("response_before_image".to_string());
+        session.text_output_active = true;
+        let image = || {
+            RealtimeInputChunk::ImageChunk(meerkat_contracts::RealtimeImageChunk {
+                idempotency_key: "image-request-validation".to_string(),
+                mime_type: "image/png".to_string(),
+                data: "iVBORw0KGgo=".to_string(),
+            })
+        };
+        assert!(matches!(
+            session
+                .send_input(image())
+                .await
+                .expect_err("image cannot be accepted behind unfinished assistant output"),
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_pending_budget_exceeded"
+        ));
+        assert!(seen.lock().await.is_empty());
+
+        session
+            .map_server_event(ServerEvent::ResponseDone {
+                event_id: "evt_previous_done".to_string(),
+                response: fake_response("response_before_image", ResponseStatus::Completed),
+            })
+            .expect("terminal response maps")
+            .expect("terminal response is surfaced");
+        session
+            .send_input(image())
+            .await
+            .expect("image may be accepted after the terminal response boundary");
+        assert_eq!(session.pending_image_inputs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_commit_image_only_turn_creates_response_without_audio_commit() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ExplicitCommit,
+        );
+        session
+            .send_input(RealtimeInputChunk::ImageChunk(
+                meerkat_contracts::RealtimeImageChunk {
+                    idempotency_key: "image-request-commit".to_string(),
+                    mime_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".to_string(),
+                },
+            ))
+            .await
+            .expect("image-only input must stage");
+        assert!(matches!(
+            session
+                .commit_turn()
+                .await
+                .expect_err("image-only commit must wait for provider acknowledgement"),
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_pending_budget_exceeded"
+        ));
+        assert!(
+            !seen
+                .lock()
+                .await
+                .iter()
+                .any(|event| matches!(event, ClientEvent::ResponseCreate { .. }))
+        );
+        let (_, provider_item) = completed_last_image_item(&seen).await;
+        session
+            .map_server_event(ServerEvent::ConversationItemCreated {
+                event_id: "evt_image_accepted".to_string(),
+                previous_item_id: None,
+                item: provider_item,
+            })
+            .expect("completed provider image acknowledgement must map")
+            .expect("completed provider image acknowledgement must commit canonical content");
+        session
+            .commit_turn()
+            .await
+            .expect("explicit image-only turn must commit");
+
+        let seen = seen.lock().await;
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, ClientEvent::ResponseCreate { .. })),
+            "image-only explicit commit must request a response"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, ClientEvent::InputAudioBufferCommit { .. })),
+            "image-only commit must not synthesize an empty audio-buffer commit"
+        );
+    }
+
+    /// Live-command gate: image input on a session whose bound model lacks
+    /// the Image capability (uncatalogued model → fail-closed base) keeps
+    /// the documented scoped rejection; an image chunk with a non-image
+    /// MIME rejects typed before any provider send.
+    #[tokio::test]
+    async fn live_command_image_input_gates_on_model_capability_and_mime() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session.set_current_identity(&SessionLlmIdentity {
+            model: "totally-unknown-realtime-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        });
+
+        let error = execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-nonvision".to_string(),
+                    mime: "image/png".to_string(),
+                    data: vec![1, 2, 3],
+                },
+            },
+        )
+        .await
+        .expect_err("image input on a non-vision model must reject");
+        match error {
+            OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape { message }) => {
+                assert_eq!(
+                    message, "image_input_not_implemented",
+                    "non-vision model keeps the documented scoped rejection reason"
+                );
+            }
+            other => panic!("expected typed InvalidInputShape, got {other:?}"),
+        }
+
+        // Vision-capable identity + bogus MIME: typed rejection, no send.
+        session.set_current_identity(&SessionLlmIdentity {
+            model: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        });
+        let error = execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-mime".to_string(),
+                    mime: "text/plain".to_string(),
+                    data: vec![1, 2, 3],
+                },
+            },
+        )
+        .await
+        .expect_err("a non-image MIME must reject typed");
+        assert!(matches!(
+            error,
+            OpenAiLiveCommandError::ImageInput(
+                OpenAiRealtimeImageValidationError::UnsupportedMime { ref mime_type }
+            ) if mime_type == "text/plain"
+        ));
+        assert!(
+            seen.lock().await.is_empty(),
+            "rejected image inputs must not reach the provider socket"
+        );
+
+        // Vision-capable identity + image MIME: the gate admits and encodes.
+        execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-valid".to_string(),
+                    mime: "image/png".to_string(),
+                    data: b"\x89PNG\r\n\x1a\n".to_vec(),
+                },
+            },
+        )
+        .await
+        .expect("image input on gpt-realtime-2 must be admitted");
+        assert!(
+            seen.lock()
+                .await
+                .iter()
+                .any(|event| matches!(event, ClientEvent::ConversationItemCreate { .. })),
+            "admitted image must reach the provider as a conversation item"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_allows_normal_live_turn_but_rejects_rewrite_generation_change() {
+        use meerkat_core::live_adapter::LiveProjectionSnapshot;
+        use meerkat_core::types::SessionId;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let next_events = Arc::new(Mutex::new(VecDeque::from(vec![Ok(Some(
+            ServerEvent::SessionUpdated {
+                event_id: "evt_refresh_after_normal_turn".to_string(),
+                session: sample_server_session(OPENAI_CANONICAL_REALTIME_MODEL),
+            },
+        ))])));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events,
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session.set_current_identity(&sample_realtime_identity());
+        session.set_current_transcript_rewrite_generation(4);
+        session
+            .synthesize_text_turn_observations("normal-live-item", None, "hello", None)
+            .expect("normal live turn should stage canonical observations");
+
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 1,
+            seed_messages: Vec::new(),
+            visible_tools: Vec::new(),
+            system_prompt: Some("refreshed prompt".to_string()),
+            model_id: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+            provider_id: Provider::OpenAI,
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 4,
+        };
+        execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::Refresh {
+                snapshot: snapshot.clone(),
+            },
+        )
+        .await
+        .expect("ordinary live append does not advance rewrite generation");
+        let provider_events_after_normal_refresh = seen.lock().await.len();
+        assert!(provider_events_after_normal_refresh > 0);
+
+        let mut rewritten_snapshot = snapshot;
+        rewritten_snapshot.snapshot_version = 2;
+        rewritten_snapshot.transcript_rewrite_generation = 5;
+        let error = execute_openai_live_command(
+            &mut session,
+            LiveAdapterCommand::Refresh {
+                snapshot: rewritten_snapshot,
+            },
+        )
+        .await
+        .expect_err("same-session rewrite requires close and reopen");
+        assert!(matches!(
+            error,
+            OpenAiLiveCommandError::RefreshTranscriptRewriteRequiresReopen
+        ));
+        assert_eq!(
+            seen.lock().await.len(),
+            provider_events_after_normal_refresh,
+            "rewrite rejection must precede session.update/provider send"
+        );
+        let (code, scoped) = classify_command_error(&error);
+        assert!(!scoped, "rewrite refresh rejection is terminal");
+        assert!(matches!(
+            code,
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::RefreshTranscriptRewriteRequiresReopen
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn provider_managed_audio_commit_reopens_later_image_admission() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+        session
+            .send_input(RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
+                mime_type: "audio/pcm".to_string(),
+                data: "AA==".to_string(),
+                sample_rate_hz: OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+                channels: OPENAI_REALTIME_AUDIO_CHANNELS,
+            }))
+            .await
+            .expect("audio stages");
+        let image = || {
+            RealtimeInputChunk::ImageChunk(meerkat_contracts::RealtimeImageChunk {
+                idempotency_key: "image-after-audio".to_string(),
+                mime_type: "image/png".to_string(),
+                data: "iVBORw0KGgo=".to_string(),
+            })
+        };
+        assert!(matches!(
+            session
+                .send_input(image())
+                .await
+                .expect_err("uncommitted audio must block image order"),
+            LlmError::InvalidInputShape { ref message }
+                if message == "image_input_requires_commit"
+        ));
+
+        session
+            .map_server_event(ServerEvent::InputAudioBufferCommitted {
+                event_id: "evt-audio-committed".to_string(),
+                previous_item_id: None,
+                item_id: "audio-item".to_string(),
+            })
+            .expect("audio commit maps");
+        assert!(!session.has_staged_input && !session.has_staged_audio);
+        session
+            .map_server_event(ServerEvent::ResponseCreated {
+                event_id: "evt-audio-response-created".to_string(),
+                response: fake_response("audio-response", ResponseStatus::InProgress),
+            })
+            .expect("audio response created");
+        session
+            .map_server_event(ServerEvent::ResponseDone {
+                event_id: "evt-audio-response-done".to_string(),
+                response: fake_response("audio-response", ResponseStatus::Completed),
+            })
+            .expect("audio response done")
+            .expect("audio turn completion surfaces");
+
+        session
+            .send_input(image())
+            .await
+            .expect("provider-committed audio must not permanently block later image input");
+        assert_eq!(session.pending_image_inputs.len(), 1);
+    }
+
+    #[test]
+    fn provider_ack_timeout_scales_with_admitted_payload_size() {
+        assert_eq!(
+            openai_realtime_provider_ack_timeout(0),
+            OPENAI_REALTIME_ACK_BASE_TIMEOUT
+        );
+        assert!(
+            openai_realtime_provider_ack_timeout(
+                meerkat_core::live_adapter::MAX_LIVE_IMAGE_BASE64_BYTES
+            ) > Duration::from_secs(30)
+        );
+        assert!(
+            openai_realtime_provider_ack_timeout(
+                2 * meerkat_core::live_adapter::MAX_LIVE_IMAGE_BASE64_BYTES
+            ) > openai_realtime_provider_ack_timeout(
+                meerkat_core::live_adapter::MAX_LIVE_IMAGE_BASE64_BYTES
+            )
+        );
     }
 
     #[tokio::test]
@@ -5882,6 +9552,135 @@ mod tests {
         );
     }
 
+    /// A text command's byte reservation must remain owned while an
+    /// explicit-commit turn is staged, then transfer to each payload-bearing
+    /// canonical event and onward into the reliable control queue. At no
+    /// command -> commit -> control boundary may the retained text exist as
+    /// an unreserved semaphore waiter.
+    #[tokio::test]
+    async fn explicit_commit_text_reservation_transfers_through_control_delivery() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen,
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ExplicitCommit,
+        );
+        let reservation_bytes = meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES;
+        let payload_budget = Arc::new(Semaphore::new(reservation_bytes));
+        let command_budget = Arc::clone(&payload_budget)
+            .try_acquire_many_owned(reservation_bytes as u32)
+            .expect("the explicit text command must own its admission reservation");
+        let user_text = "explicit text reservation custody".to_string();
+        let event_charge = user_text.len().max(OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES);
+
+        session
+            .send_input_with_command_budget(
+                RealtimeInputChunk::TextChunk(RealtimeTextChunk {
+                    text: user_text.clone(),
+                }),
+                Some(command_budget),
+            )
+            .await
+            .expect("budgeted explicit text must stage");
+        assert_eq!(payload_budget.available_permits(), 0);
+        assert_eq!(session.pending_explicit_commit_text_items.len(), 1);
+        assert_eq!(
+            session.pending_explicit_commit_text_items[0]
+                .command_budget
+                .as_ref()
+                .expect("staged text must retain command custody")
+                .num_permits(),
+            reservation_bytes
+        );
+
+        session
+            .commit_turn_with_modality(Some(LiveResponseModality::Text))
+            .await
+            .expect("explicit text commit must synthesize canonical events");
+        assert!(session.pending_explicit_commit_text_items.is_empty());
+        assert_eq!(
+            payload_budget.available_permits(),
+            reservation_bytes - (2 * event_charge),
+            "commit may release excess command capacity, but both retained text copies must remain reserved"
+        );
+
+        let (control_tx, mut control_rx) = mpsc::channel(4);
+        let started = session
+            .next_event()
+            .await
+            .expect("turn-start poll")
+            .expect("turn start must be queued");
+        assert!(matches!(started, RealtimeSessionEvent::TurnStarted));
+        assert!(session.take_outgoing_event_memory_budget().is_none());
+
+        let partial = session
+            .next_event()
+            .await
+            .expect("partial poll")
+            .expect("partial must be queued");
+        assert!(matches!(
+            &partial,
+            RealtimeSessionEvent::InputTranscriptPartial { text } if text == &user_text
+        ));
+        let partial_budget = session
+            .take_outgoing_event_memory_budget()
+            .expect("partial text must carry transferred custody");
+        assert_eq!(partial_budget.num_permits(), event_charge);
+        send_control_observation(
+            &control_tx,
+            &payload_budget,
+            translate_realtime_event(partial),
+            Some(partial_budget),
+        )
+        .await
+        .expect("partial custody must transfer without reacquisition");
+
+        let final_for_item = session
+            .next_event()
+            .await
+            .expect("final poll")
+            .expect("final-for-item must be queued");
+        assert!(matches!(
+            &final_for_item,
+            RealtimeSessionEvent::InputTranscriptFinalForItem { text, .. } if text == &user_text
+        ));
+        let final_budget = session
+            .take_outgoing_event_memory_budget()
+            .expect("final text must carry transferred custody");
+        assert_eq!(final_budget.num_permits(), event_charge);
+        send_control_observation(
+            &control_tx,
+            &payload_budget,
+            translate_realtime_event(final_for_item),
+            Some(final_budget),
+        )
+        .await
+        .expect("final custody must transfer without reacquisition");
+
+        let committed = session
+            .next_event()
+            .await
+            .expect("committed poll")
+            .expect("turn commit must be queued");
+        assert!(matches!(committed, RealtimeSessionEvent::TurnCommitted));
+        assert!(session.take_outgoing_event_memory_budget().is_none());
+        assert_eq!(
+            payload_budget.available_permits(),
+            reservation_bytes - (2 * event_charge),
+            "both queued control observations must still own their transferred reservations"
+        );
+
+        drop(control_rx.recv().await.expect("queued partial observation"));
+        assert_eq!(
+            payload_budget.available_permits(),
+            reservation_bytes - event_charge
+        );
+        drop(control_rx.recv().await.expect("queued final observation"));
+        assert_eq!(payload_budget.available_permits(), reservation_bytes);
+    }
+
     /// Gate (#51): explicit-commit text turns are staged as the machine-owned
     /// typed [`AppendRealtimeTranscript`] seam (named `item_id` + `text` +
     /// typed `role`/`lane` classifiers) — the exact fact the generated
@@ -5918,16 +9717,20 @@ mod tests {
         // transcript authority dispatches on.
         assert_eq!(session.pending_explicit_commit_text_items.len(), 2);
         assert_eq!(
-            session.pending_explicit_commit_text_items[0].text,
+            session.pending_explicit_commit_text_items[0]
+                .transcript
+                .text,
             "first staged turn"
         );
         assert_eq!(
-            session.pending_explicit_commit_text_items[1].text,
+            session.pending_explicit_commit_text_items[1]
+                .transcript
+                .text,
             "second staged turn"
         );
         for staged in &session.pending_explicit_commit_text_items {
-            assert_eq!(staged.role, RealtimeTranscriptRole::User);
-            assert_eq!(staged.lane, TranscriptLane::Display);
+            assert_eq!(staged.transcript.role, RealtimeTranscriptRole::User);
+            assert_eq!(staged.transcript.lane, TranscriptLane::Display);
         }
 
         // The staged item ids are exactly the synthetic ids sent to the
@@ -5953,7 +9756,7 @@ mod tests {
         let staged_item_ids: Vec<String> = session
             .pending_explicit_commit_text_items
             .iter()
-            .map(|staged| staged.item_id.clone())
+            .map(|staged| staged.transcript.item_id.clone())
             .collect();
         assert_eq!(
             staged_item_ids, provider_item_ids,
@@ -6211,7 +10014,7 @@ mod tests {
                     })),
                     Ok(Some(ServerEvent::ResponseDone {
                         event_id: "evt_9".to_string(),
-                        response: fake_response("resp_1", ResponseStatus::Completed),
+                        response: fake_response("resp_1", ResponseStatus::Cancelled),
                     })),
                     Ok(None),
                 ]))),
@@ -6254,7 +10057,7 @@ mod tests {
         assert!(matches!(
             session.next_event().await.expect("completed"),
             Some(RealtimeSessionEvent::TurnCompleted {
-                stop_reason: StopReason::EndTurn,
+                stop_reason: StopReason::Cancelled,
                 ..
             })
         ));
@@ -6354,6 +10157,13 @@ mod tests {
     #[tokio::test]
     async fn provider_neutral_session_treats_projected_seed_items_as_transcript_boundaries() {
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let seed_messages = vec![Message::User(meerkat_core::UserMessage::text(
+            "remember amber lantern",
+        ))];
+        let seed_item_id = expected_seed_item_ids(&seed_messages, &[])
+            .into_iter()
+            .next()
+            .expect("one projected seed item");
         let mut session = OpenAiRealtimeSession::new(
             Box::new(FakeOpenAiLiveSession {
                 seen: Arc::clone(&seen),
@@ -6362,7 +10172,7 @@ mod tests {
                         event_id: "evt_seed_user".to_string(),
                         previous_item_id: None,
                         item: Item::Message {
-                            id: Some("item_seed_user".to_string()),
+                            id: Some(seed_item_id.clone()),
                             status: None,
                             phase: None,
                             role: Role::User,
@@ -6375,7 +10185,7 @@ mod tests {
                         event_id: "evt_seed_user_done".to_string(),
                         previous_item_id: None,
                         item: Item::Message {
-                            id: Some("item_seed_user".to_string()),
+                            id: Some(seed_item_id.clone()),
                             status: None,
                             phase: None,
                             role: Role::User,
@@ -6386,7 +10196,7 @@ mod tests {
                     })),
                     Ok(Some(ServerEvent::InputAudioBufferCommitted {
                         event_id: "evt_commit".to_string(),
-                        previous_item_id: Some("item_seed_user".to_string()),
+                        previous_item_id: Some(seed_item_id),
                         item_id: "item_live_user".to_string(),
                     })),
                     Ok(Some(ServerEvent::InputAudioTranscriptionCompleted {
@@ -6402,10 +10212,6 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        let seed_messages = vec![Message::User(meerkat_core::UserMessage::text(
-            "remember amber lantern",
-        ))];
-
         session
             .seed_history_projection(&seed_messages, &[])
             .await
@@ -7209,6 +11015,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_cancelled_terminal_is_exactly_once_with_or_without_followup_done() {
+        for include_followup_done in [false, true] {
+            let mut events = VecDeque::from([
+                Ok(Some(ServerEvent::ResponseOutputTextDelta {
+                    event_id: "evt_cancel_delta".to_string(),
+                    response_id: "resp_cancel".to_string(),
+                    item_id: "item_cancel".to_string(),
+                    output_index: 0,
+                    content_index: 0,
+                    delta: "before cancel".to_string(),
+                })),
+                Ok(Some(ServerEvent::ResponseCancelled {
+                    event_id: "evt_cancelled".to_string(),
+                    response: fake_response("resp_cancel", ResponseStatus::Cancelled),
+                })),
+            ]);
+            if include_followup_done {
+                events.push_back(Ok(Some(ServerEvent::ResponseDone {
+                    event_id: "evt_cancel_done".to_string(),
+                    response: fake_response("resp_cancel", ResponseStatus::Cancelled),
+                })));
+            }
+            events.push_back(Ok(None));
+            let mut session = OpenAiRealtimeSession::new(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::new(Mutex::new(Vec::new())),
+                    next_events: Arc::new(Mutex::new(events)),
+                }),
+                RealtimeTurningMode::ProviderManaged,
+            );
+
+            let mut observed = Vec::new();
+            while let Some(event) = session.next_event().await.expect("cancelled event stream") {
+                observed.push(event);
+            }
+            let interrupted_positions: Vec<usize> = observed
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    matches!(event, RealtimeSessionEvent::Interrupted { .. }).then_some(index)
+                })
+                .collect();
+            let completed_positions: Vec<usize> = observed
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    matches!(
+                        event,
+                        RealtimeSessionEvent::TurnCompleted {
+                            stop_reason: StopReason::Cancelled,
+                            ..
+                        }
+                    )
+                    .then_some(index)
+                })
+                .collect();
+            assert_eq!(
+                interrupted_positions.len(),
+                1,
+                "ResponseCancelled must materialize exactly one Interrupted (followup_done={include_followup_done})"
+            );
+            assert_eq!(
+                completed_positions.len(),
+                1,
+                "ResponseCancelled must materialize exactly one cancelled close (followup_done={include_followup_done})"
+            );
+            assert!(
+                interrupted_positions[0] < completed_positions[0],
+                "Interrupted must precede TurnCompleted(Cancelled)"
+            );
+            assert_eq!(
+                observed
+                    .iter()
+                    .filter(|event| matches!(event, RealtimeSessionEvent::TurnCompleted { .. }))
+                    .count(),
+                1,
+                "a follow-up ResponseDone must not duplicate the terminal close"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn provider_neutral_session_synthesizes_interrupted_on_response_done_cancelled_during_active_output()
      {
         // Dogma note:
@@ -7763,6 +11651,7 @@ mod tests {
             &open_config.seed_messages,
             &open_config.runtime_system_context,
         )
+        .expect("sample seed history must project")
         .len();
         events.insert(
             2 + seed_ack_count,
@@ -7873,6 +11762,90 @@ mod tests {
             other => panic!("unexpected first event: {other:?}"),
         }
         assert_response_create_requests_audio(&seen[1]);
+    }
+
+    #[tokio::test]
+    async fn tool_result_continuation_ignores_retiring_response_in_both_terminal_orders() {
+        for old_terminal_first in [true, false] {
+            let mut session = OpenAiRealtimeSession::new(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::new(Mutex::new(Vec::new())),
+                    next_events: Arc::new(Mutex::new(VecDeque::new())),
+                }),
+                RealtimeTurningMode::ProviderManaged,
+            );
+            session.active_response_id = Some("response-old".to_string());
+            session.response_state = RealtimeResponseState::Idle;
+            session.response_tool_call_observed = true;
+
+            session
+                .submit_tool_result(ToolResult::new(
+                    "call-continuation".to_string(),
+                    "ok".to_string(),
+                    false,
+                ))
+                .await
+                .expect("tool result launches continuation");
+            assert!(session.retiring_response_ids.contains("response-old"));
+            assert_eq!(session.active_response_id, None);
+            assert_eq!(
+                session.response_state,
+                RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+            );
+
+            let old_done = || ServerEvent::ResponseDone {
+                event_id: "evt-old-done".to_string(),
+                response: fake_response("response-old", ResponseStatus::Completed),
+            };
+            let new_created = || ServerEvent::ResponseCreated {
+                event_id: "evt-new-created".to_string(),
+                response: fake_response("response-new", ResponseStatus::InProgress),
+            };
+            if old_terminal_first {
+                assert!(
+                    session
+                        .map_server_event(old_done())
+                        .expect("old done")
+                        .is_none()
+                );
+                assert_eq!(
+                    session.response_state,
+                    RealtimeResponseState::AwaitingProvider { nudge_attempts: 0 }
+                );
+                session
+                    .map_server_event(new_created())
+                    .expect("new response created");
+            } else {
+                session
+                    .map_server_event(new_created())
+                    .expect("new response created");
+                assert!(
+                    session
+                        .map_server_event(old_done())
+                        .expect("late old done")
+                        .is_none()
+                );
+            }
+            assert_eq!(session.active_response_id.as_deref(), Some("response-new"));
+            assert_eq!(
+                session.response_state,
+                RealtimeResponseState::Acknowledged { nudge_attempts: 0 }
+            );
+
+            let completed = session
+                .map_server_event(ServerEvent::ResponseDone {
+                    event_id: "evt-new-done".to_string(),
+                    response: fake_response("response-new", ResponseStatus::Completed),
+                })
+                .expect("current continuation done");
+            assert!(matches!(
+                completed,
+                Some(RealtimeSessionEvent::TurnCompleted { ref response_id, .. })
+                    if response_id == "response-new"
+            ));
+            assert_eq!(session.response_state, RealtimeResponseState::Idle);
+            assert_eq!(session.active_response_id, None);
+        }
     }
 
     #[tokio::test]
@@ -8199,6 +12172,90 @@ mod tests {
         assert_eq!(adapter.status(), LiveAdapterStatus::Closed);
     }
 
+    /// A provider-acknowledged image is staged context for the next command.
+    /// Adapter admission is enqueue-only, so a caller naturally awaits the
+    /// image enqueue and immediately enqueues text. The pump must retain that
+    /// FIFO command behind the image acknowledgement instead of converting a
+    /// successful enqueue into a later `CommandRejected` observation.
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_ack_defers_following_text_without_losing_fifo_order() {
+        use meerkat_core::live_adapter::LiveInputChunk;
+
+        let (server_tx, server_rx) =
+            mpsc::unbounded_channel::<Result<Option<ServerEvent>, LlmError>>();
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ChannelOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            rx: tokio::sync::Mutex::new(server_rx),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ProviderManaged);
+        session.set_current_identity(&sample_realtime_identity());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        let ready = tokio::time::timeout(Duration::from_secs(1), adapter.next_observation())
+            .await
+            .expect("Ready must arrive within 1s")
+            .expect("adapter must yield Ok");
+        assert!(matches!(ready, Some(LiveAdapterObservation::Ready)));
+
+        adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-fifo".to_string(),
+                    mime: "image/png".to_string(),
+                    data: b"\x89PNG\r\n\x1a\n".to_vec(),
+                },
+            })
+            .await
+            .expect("image command must enqueue");
+        wait_for_seen_count(&seen, 1).await;
+        let (image_item_id, image_item) = completed_last_image_item(&seen).await;
+
+        adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Text {
+                    text: "what is shown?".to_string(),
+                },
+            })
+            .await
+            .expect("dependent text command must enqueue");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            seen.lock().await.len(),
+            1,
+            "dependent text must remain queued until the image ACK"
+        );
+
+        server_tx
+            .send(Ok(Some(ServerEvent::ConversationItemAdded {
+                event_id: "evt_image_ack_before_text".to_string(),
+                previous_item_id: None,
+                item: image_item,
+            })))
+            .expect("provider ACK channel must remain open");
+        wait_for_seen_count(&seen, 2).await;
+
+        let seen = seen.lock().await;
+        assert!(seen.iter().any(|event| matches!(
+            event,
+            ClientEvent::ConversationItemCreate {
+                previous_item_id: Some(previous_item_id),
+                item,
+                ..
+            } if previous_item_id == &image_item_id
+                && matches!(
+                    item.as_ref(),
+                    Item::Message { content, .. }
+                        if matches!(content.as_slice(), [ContentPart::InputText { text }] if text == "what is shown?")
+                )
+        )));
+        drop(seen);
+
+        adapter.close().await.expect("close must succeed");
+    }
+
     /// A9: `LiveAdapterCommand::Open { snapshot }` seeds the OpenAI
     /// conversation with `snapshot.seed_messages` by minting
     /// `ConversationItemCreate` events on the sender side. We pre-load the
@@ -8241,7 +12298,8 @@ mod tests {
 
         // Pre-compute how many seed events `openai_realtime_history_events`
         // will produce so we can pre-stage the matching ack count.
-        let seed_event_count = openai_realtime_history_events(&seed_messages, &[]).len();
+        let seed_item_ids = expected_seed_item_ids(&seed_messages, &[]);
+        let seed_event_count = seed_item_ids.len();
         assert!(
             seed_event_count > 0,
             "test setup: seed messages must produce at least one ConversationItemCreate"
@@ -8251,12 +12309,12 @@ mod tests {
         // ConversationItemCreated; we shape one ack per seed event so
         // `seed_history_projection` can complete without timing out.
         let mut ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
-        for index in 0..seed_event_count {
+        for (index, item_id) in seed_item_ids.into_iter().enumerate() {
             ack_queue.push_back(Ok(Some(ServerEvent::ConversationItemCreated {
                 event_id: format!("evt_open_seed_ack_{index}"),
                 previous_item_id: None,
                 item: Item::Message {
-                    id: Some(format!("msg_open_seed_{index}")),
+                    id: Some(item_id),
                     status: None,
                     phase: None,
                     role: Role::System,
@@ -8298,6 +12356,9 @@ mod tests {
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         };
         adapter
             .send_command(LiveAdapterCommand::Open { snapshot })
@@ -8399,11 +12460,14 @@ mod tests {
                 created_at: types::message_timestamp_now(),
             }),
         ];
-        // Sanity check: this seed shape would produce > 0 mint events
-        // if the regression returned. Belt-and-braces against an empty
-        // seed accidentally passing the assertion below.
+        // Sanity check the history fixture independently. Refresh admission
+        // now requires an empty seed projection; the accepted commands below
+        // use that history-free shape, while the dedicated pre-queue test
+        // proves a caller cannot smuggle this non-empty history into Refresh.
         assert!(
-            !openai_realtime_history_events(&seed_messages, &[]).is_empty(),
+            !openai_realtime_history_events(&seed_messages, &[])
+                .expect("sample seed history must project")
+                .is_empty(),
             "test setup: seed messages must produce at least one history event \
              (otherwise the no-replay assertion below trivially holds)"
         );
@@ -8451,26 +12515,26 @@ mod tests {
             let snapshot = LiveProjectionSnapshot {
                 session_id: SessionId::new(),
                 snapshot_version: 9 + refresh_index as u64,
-                seed_messages: seed_messages.clone(),
+                seed_messages: Vec::new(),
                 visible_tools: Vec::new(),
                 system_prompt: Some(format!("instructions revision {refresh_index}")),
                 model_id: "gpt-realtime-2".to_string(),
                 provider_id: Provider::OpenAI,
                 audio_config: None,
                 runtime_system_context: runtime_system_context.clone(),
+                user_content_identities: Vec::new(),
+                user_content_tombstones: Vec::new(),
+                transcript_rewrite_generation: 0,
             };
             adapter
                 .send_command(LiveAdapterCommand::Refresh { snapshot })
                 .await
                 .expect("Refresh must dispatch");
 
-            // After dispatch, exactly ONE outbound event should land
-            // in `seen` per refresh: the `session.update`. If the
-            // regression returned, additional `conversation.item.create`
-            // events would land before / after the SessionUpdate; the
-            // final assertion below catches that. We push the matching
-            // ack AFTER the SessionUpdate is observed so the pump can
-            // return from `apply_refresh_session_update_from_snapshot`
+            // After dispatch, exactly ONE outbound event should land in
+            // `seen` per history-free refresh: the `session.update`. We push
+            // the matching ack AFTER the SessionUpdate is observed so the
+            // pump can return from `apply_refresh_session_update_from_snapshot`
             // and accept the next Refresh.
             wait_for_seen_count(&seen, refresh_index + 1).await;
             server_tx
@@ -8582,6 +12646,9 @@ mod tests {
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         };
         adapter
             .send_command(LiveAdapterCommand::Refresh { snapshot })
@@ -8697,6 +12764,9 @@ mod tests {
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         };
         adapter
             .send_command(LiveAdapterCommand::Refresh { snapshot })
@@ -8809,6 +12879,9 @@ mod tests {
             provider_id: Provider::OpenAI,
             audio_config: None,
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         };
         adapter
             .send_command(LiveAdapterCommand::Refresh { snapshot })
@@ -8882,6 +12955,9 @@ mod tests {
             provider_id: Provider::Anthropic,
             audio_config: None,
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         };
         adapter
             .send_command(LiveAdapterCommand::Refresh { snapshot })
@@ -8964,6 +13040,9 @@ mod tests {
                 output_channels: 2,
             }),
             runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
         };
         adapter
             .send_command(LiveAdapterCommand::Refresh { snapshot })
@@ -9067,14 +13146,18 @@ mod tests {
         ));
     }
 
-    /// T11: a `SendInput { LiveInputChunk::Image }` must be rejected with
-    /// the typed `LiveAdapterErrorCode::ConfigRejected` whose `reason` is
-    /// the documented `"image_input_not_implemented"` token. Routing this
-    /// onto the `ProviderError` path would force clients to parse English
-    /// to distinguish "OpenAI doesn't support image input on the realtime
-    /// surface" from a real provider outage.
+    /// T11 (updated for gpt-realtime-2 image support): a
+    /// `SendInput { LiveInputChunk::Image }` on a session whose bound model
+    /// lacks the Image capability (uncatalogued model → fail-closed base)
+    /// must be rejected with the typed
+    /// `LiveAdapterErrorCode::ConfigRejected` whose `reason` is the
+    /// documented `"image_input_not_implemented"` token. Routing this onto
+    /// the `ProviderError` path would force clients to parse English to
+    /// distinguish "this realtime binding doesn't support image input"
+    /// from a real provider outage. (Vision-capable bindings admit the
+    /// chunk — covered by the gate + encode tests above.)
     #[tokio::test(flavor = "current_thread")]
-    async fn send_input_image_chunk_is_rejected_as_config_rejected() {
+    async fn send_input_image_chunk_on_non_vision_model_is_rejected_as_config_rejected() {
         use meerkat_core::live_adapter::LiveInputChunk;
 
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
@@ -9084,7 +13167,13 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity(&sample_realtime_identity());
+        session.set_current_identity(&SessionLlmIdentity {
+            model: "totally-unknown-realtime-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        });
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -9099,6 +13188,7 @@ mod tests {
         adapter
             .send_command(LiveAdapterCommand::SendInput {
                 chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-dispatch".into(),
                     mime: "image/png".into(),
                     data: vec![0x89, 0x50, 0x4E, 0x47],
                 },
@@ -9463,8 +13553,9 @@ mod tests {
         assert!(caps.barge_in_supported);
         assert!(caps.transcript_supported);
         assert!(
-            !caps.image_in,
-            "OpenAI Realtime does not yet accept image input (gpt-realtime-2 reserved)"
+            caps.image_in,
+            "the canonical realtime model (gpt-realtime-2) accepts still-image \
+             input; image_in follows its catalog vision fact"
         );
         assert!(
             !caps.video_in,
@@ -9590,7 +13681,7 @@ mod tests {
             .pending_events
             .pop_front()
             .expect("done must queue the AssistantTranscriptFinal close");
-        let final_obs = translate_realtime_event(queued);
+        let final_obs = translate_realtime_event(queued.event);
         match final_obs {
             LiveAdapterObservation::AssistantTranscriptFinal {
                 text,
@@ -9739,7 +13830,7 @@ mod tests {
             usage: meerkat_core::types::Usage::default(),
         };
         control_tx
-            .send(critical.clone())
+            .send(critical.clone().into())
             .await
             .expect("control channel send must not fail with adapter live");
 
@@ -9806,11 +13897,14 @@ mod tests {
             .await
             .expect("audio send should succeed (channel empty)");
         control_tx
-            .send(LiveAdapterObservation::TurnCompleted {
-                response_id: None,
-                stop_reason: meerkat_core::types::StopReason::EndTurn,
-                usage: meerkat_core::types::Usage::default(),
-            })
+            .send(
+                LiveAdapterObservation::TurnCompleted {
+                    response_id: None,
+                    stop_reason: meerkat_core::types::StopReason::EndTurn,
+                    usage: meerkat_core::types::Usage::default(),
+                }
+                .into(),
+            )
             .await
             .expect("control send should succeed");
 
@@ -9835,6 +13929,663 @@ mod tests {
             LiveAdapterObservation::AssistantAudioChunk { .. } => {}
             other => unreachable!("expected audio chunk, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn image_command_queue_is_bounded_by_bytes_not_only_item_count() {
+        use meerkat_core::live_adapter::{LiveAdapter, LiveAdapterCommand, LiveInputChunk};
+
+        let (mut adapter, _control_tx, _audio_tx, mut cmd_rx) = OpenAiLiveAdapter::new_for_test();
+        let image_bytes = 2 * 1024 * 1024;
+        let one_image_charge = openai_live_image_command_memory_charge(
+            image_bytes,
+            "image-request-budget-1".len(),
+            "image/png".len(),
+        )
+        .max(meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES);
+        let payload_budget = Arc::new(Semaphore::new(one_image_charge));
+        adapter.command_budget = Arc::clone(&payload_budget);
+        adapter.control_budget = payload_budget;
+        let adapter = Arc::new(adapter);
+
+        adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-budget-1".to_string(),
+                    mime: "image/png".to_string(),
+                    data: vec![1; image_bytes],
+                },
+            })
+            .await
+            .expect("first image must fit the byte budget");
+
+        let second = adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-budget-2".to_string(),
+                    mime: "image/png".to_string(),
+                    data: vec![2; image_bytes],
+                },
+            })
+            .await
+            .expect_err("the byte budget must reject without retaining the caller payload");
+        assert!(matches!(
+            second,
+            LiveAdapterError::ProviderError {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::ImageInputBackpressured {
+                        max_pending_bytes,
+                    },
+                },
+                ..
+            } if max_pending_bytes == OPENAI_LIVE_COMMAND_BUDGET_BYTES as u64
+        ));
+
+        let first = cmd_rx.recv().await.expect("first queued command");
+        drop(first);
+        adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-budget-3".to_string(),
+                    mime: "image/png".to_string(),
+                    data: vec![2; image_bytes],
+                },
+            })
+            .await
+            .expect("second image must proceed after the first reservation is released");
+        assert!(
+            cmd_rx.recv().await.is_some(),
+            "second command must be queued"
+        );
+    }
+
+    #[test]
+    fn image_command_charge_covers_triple_encoded_provider_send_peak() {
+        let decoded_bytes = meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES;
+        let idempotency_key_bytes = "image-request-boundary".len();
+        let mime_bytes = "image/png".len();
+        let encoded_bytes = openai_live_base64_encoded_len(decoded_bytes);
+        let charge = openai_live_image_command_memory_charge(
+            decoded_bytes,
+            idempotency_key_bytes,
+            mime_bytes,
+        );
+        assert_eq!(
+            charge,
+            encoded_bytes
+                .saturating_mul(3)
+                .saturating_add(idempotency_key_bytes)
+                .saturating_add(mime_bytes),
+            "maximum image charge must cover encoded input + data URL + serialized WS frame"
+        );
+        let previous_heuristic = decoded_bytes
+            .max(encoded_bytes.saturating_mul(2))
+            .saturating_add(idempotency_key_bytes)
+            .saturating_add(mime_bytes);
+        assert!(charge > previous_heuristic);
+        assert!(
+            charge.saturating_mul(3) <= OPENAI_LIVE_COMMAND_BUDGET_BYTES,
+            "the process pool should admit three maximum images"
+        );
+        assert!(
+            charge.saturating_mul(4) > OPENAI_LIVE_COMMAND_BUDGET_BYTES,
+            "a fourth maximum image would exceed the true retained peak"
+        );
+
+        let budget = Arc::new(Semaphore::new(OPENAI_LIVE_COMMAND_BUDGET_BYTES));
+        let permits = u32::try_from(charge).expect("maximum image charge fits semaphore range");
+        let mut admitted = Vec::new();
+        for _ in 0..3 {
+            admitted.push(
+                Arc::clone(&budget)
+                    .try_acquire_many_owned(permits)
+                    .expect("three maximum image peaks should fit"),
+            );
+        }
+        assert!(
+            Arc::clone(&budget).try_acquire_many_owned(permits).is_err(),
+            "four concurrent maximum image peaks must fail closed"
+        );
+        drop(admitted);
+        assert_eq!(budget.available_permits(), OPENAI_LIVE_COMMAND_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn audio_command_charge_uses_larger_of_encode_and_wire_send_phases() {
+        for raw_bytes in [
+            1,
+            4096,
+            meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES,
+        ] {
+            let encoded_bytes = openai_live_base64_encoded_len(raw_bytes);
+            let encode_peak = raw_bytes.saturating_add(encoded_bytes);
+            let provider_send_peak = encoded_bytes.saturating_mul(2);
+            assert_eq!(
+                openai_live_audio_command_memory_charge(raw_bytes),
+                encode_peak.max(provider_send_peak)
+            );
+        }
+        let raw_bytes = meerkat_core::live_adapter::MAX_LIVE_INPUT_CHUNK_BYTES;
+        assert!(
+            openai_live_audio_command_memory_charge(raw_bytes)
+                > raw_bytes.saturating_add(openai_live_base64_encoded_len(raw_bytes)),
+            "maximum audio must account for encoded chunk + serialized frame coexistence"
+        );
+        assert!(
+            openai_live_audio_command_memory_charge(raw_bytes)
+                <= usize::try_from(u32::MAX).expect("u32 fits usize")
+        );
+    }
+
+    /// The command/control semaphore is process-wide, not adapter-owned.
+    /// Closing one adapter must release both queued and in-flight reservations
+    /// without closing or otherwise poisoning admission for another adapter.
+    #[tokio::test]
+    async fn closing_one_adapter_preserves_shared_payload_admission_for_another() {
+        use meerkat_core::live_adapter::{LiveAdapter, LiveAdapterCommand, LiveInputChunk};
+
+        let (mut adapter_a, control_a, _audio_a, _cmd_rx_a) = OpenAiLiveAdapter::new_for_test();
+        let (mut adapter_b, _control_b, _audio_b, mut cmd_rx_b) = OpenAiLiveAdapter::new_for_test();
+        let reservation_bytes = meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES;
+        let total_budget_bytes = 2 * reservation_bytes;
+        let shared_budget = Arc::new(Semaphore::new(total_budget_bytes));
+        adapter_a.command_budget = Arc::clone(&shared_budget);
+        adapter_a.control_budget = Arc::clone(&shared_budget);
+        adapter_b.command_budget = Arc::clone(&shared_budget);
+        adapter_b.control_budget = Arc::clone(&shared_budget);
+
+        send_control_observation(
+            &control_a,
+            &shared_budget,
+            LiveAdapterObservation::UserTranscriptFinal {
+                provider_item_id: Some("adapter-a-queued".to_string()),
+                previous_item_id: None,
+                content_index: Some(0),
+                text: "q".repeat(reservation_bytes),
+            },
+            None,
+        )
+        .await
+        .expect("adapter A must own one queued control reservation");
+        assert_eq!(shared_budget.available_permits(), reservation_bytes);
+        let adapter_a_reservation = Arc::clone(&shared_budget)
+            .try_acquire_many_owned(reservation_bytes as u32)
+            .expect("adapter A must own the remaining in-flight capacity before close");
+        *adapter_a.inflight_control_budget.lock().await = Some(adapter_a_reservation);
+        assert_eq!(shared_budget.available_permits(), 0);
+        assert!(!shared_budget.is_closed());
+
+        adapter_a
+            .close()
+            .await
+            .expect("adapter A close must succeed");
+        assert!(
+            !shared_budget.is_closed(),
+            "adapter close must never close the process-wide semaphore"
+        );
+        assert_eq!(
+            shared_budget.available_permits(),
+            total_budget_bytes,
+            "adapter A close must release its queued and in-flight custody"
+        );
+
+        adapter_b
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Text {
+                    text: "adapter B remains live".to_string(),
+                },
+            })
+            .await
+            .expect("adapter B must still admit after adapter A closes");
+        let queued = cmd_rx_b
+            .recv()
+            .await
+            .expect("adapter B command must reach its independent queue");
+        assert!(matches!(
+            queued.command,
+            LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Text { .. }
+            }
+        ));
+        assert_eq!(
+            queued
+                .memory_budget
+                .as_ref()
+                .expect("adapter B command must own shared-pool custody")
+                .num_permits(),
+            reservation_bytes
+        );
+        assert!(!shared_budget.is_closed());
+        drop(queued);
+        assert_eq!(shared_budget.available_permits(), total_budget_bytes);
+    }
+
+    #[tokio::test]
+    async fn oversized_direct_image_command_rejects_before_queueing() {
+        use meerkat_core::live_adapter::{LiveAdapter, LiveAdapterCommand, LiveInputChunk};
+
+        let (adapter, _control_tx, _audio_tx, mut cmd_rx) = OpenAiLiveAdapter::new_for_test();
+        let actual_bytes = meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES + 1;
+        let error = adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Image {
+                    idempotency_key: "image-request-too-large".to_string(),
+                    mime: "image/png".to_string(),
+                    data: vec![0; actual_bytes],
+                },
+            })
+            .await
+            .expect_err("direct Rust callers must hit the shared pre-queue image ceiling");
+
+        assert!(matches!(
+            error,
+            LiveAdapterError::ProviderError {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::ImageInputTooLarge {
+                        max_bytes,
+                        actual_bytes: rejected_bytes,
+                    },
+                },
+                ..
+            } if max_bytes == meerkat_core::live_adapter::MAX_LIVE_IMAGE_BYTES as u64
+                && rejected_bytes == actual_bytes as u64
+        ));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "oversized input must not enter the count-bounded queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_image_control_admission_never_retains_an_unbudgeted_waiter() {
+        let (control_tx, mut control_rx) = mpsc::channel(256);
+        let budget = Arc::new(Semaphore::new(3 * OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES));
+        let image_observation = |data: &str| LiveAdapterObservation::RealtimeTranscript {
+            event: RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: "image-request-control-budget".to_string(),
+                item_id: "image-item".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: data.to_string(),
+                    },
+                }],
+            },
+        };
+
+        let first_payload = "a".repeat(2 * OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES);
+        send_control_observation(
+            &control_tx,
+            &budget,
+            image_observation(&first_payload),
+            None,
+        )
+        .await
+        .expect("first canonical image observation must fit");
+
+        let second_sender = control_tx.clone();
+        let second_budget = Arc::clone(&budget);
+        let second = tokio::spawn(async move {
+            let second_payload = "b".repeat(2 * OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES);
+            send_control_observation(
+                &second_sender,
+                &second_budget,
+                image_observation(&second_payload),
+                None,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            second.is_finished(),
+            "global saturation must reject immediately, not retain a payload in a semaphore waiter"
+        );
+        assert!(
+            second
+                .await
+                .expect("second producer task must not panic")
+                .is_err(),
+            "the saturated control budget must fail closed"
+        );
+
+        drop(control_rx.recv().await.expect("first queued observation"));
+        let third_payload = "c".repeat(2 * OPENAI_LIVE_MIN_CONTROL_CHARGE_BYTES);
+        send_control_observation(
+            &control_tx,
+            &budget,
+            image_observation(&third_payload),
+            None,
+        )
+        .await
+        .expect("released capacity must admit the next observation");
+        assert!(control_rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn image_reservation_transfers_across_multiple_sessions_when_control_is_saturated() {
+        let reservation_bytes = meerkat_core::live_adapter::MIN_LIVE_INPUT_MEMORY_CHARGE_BYTES;
+        let payload_budget = Arc::new(Semaphore::new(2 * reservation_bytes));
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let mut sessions = Vec::new();
+
+        for index in 0..2 {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let next_events = Arc::new(Mutex::new(VecDeque::new()));
+            let mut session = OpenAiRealtimeSession::new(
+                Box::new(FakeOpenAiLiveSession {
+                    seen: Arc::clone(&seen),
+                    next_events: Arc::clone(&next_events),
+                }),
+                RealtimeTurningMode::ProviderManaged,
+            );
+            let permit = Arc::clone(&payload_budget)
+                .try_acquire_many_owned(reservation_bytes as u32)
+                .expect("each admitted session must own its command reservation");
+            session
+                .send_input_with_command_budget(
+                    RealtimeInputChunk::ImageChunk(meerkat_contracts::RealtimeImageChunk {
+                        idempotency_key: format!("image-transfer-{index}"),
+                        mime_type: "image/png".to_string(),
+                        data: "iVBORw0KGgo=".to_string(),
+                    }),
+                    Some(permit),
+                )
+                .await
+                .expect("budgeted image command must reach the provider");
+            let (_item_id, provider_item) = completed_last_image_item(&seen).await;
+            next_events
+                .lock()
+                .await
+                .push_back(Ok(Some(ServerEvent::ConversationItemCreated {
+                    event_id: format!("evt_image_transfer_{index}"),
+                    previous_item_id: None,
+                    item: provider_item,
+                })));
+            sessions.push(session);
+        }
+
+        assert_eq!(payload_budget.available_permits(), 0);
+        assert!(
+            Arc::clone(&payload_budget)
+                .try_acquire_many_owned(reservation_bytes as u32)
+                .is_err(),
+            "a third adapter payload must not exceed the process-wide retained capacity"
+        );
+
+        for session in &mut sessions {
+            let event = session
+                .next_event()
+                .await
+                .expect("provider ACK must be readable")
+                .expect("provider ACK must yield canonical user content");
+            let transferred = session
+                .take_outgoing_event_memory_budget()
+                .expect("the command reservation must follow the ACK event");
+            assert!(transferred.num_permits() >= reservation_bytes);
+            send_control_observation(
+                &control_tx,
+                &payload_budget,
+                translate_realtime_event(event),
+                Some(transferred),
+            )
+            .await
+            .expect("transferred admission must not reacquire saturated control capacity");
+        }
+
+        assert_eq!(payload_budget.available_permits(), 0);
+        assert!(
+            send_control_observation(
+                &control_tx,
+                &payload_budget,
+                LiveAdapterObservation::Ready,
+                None,
+            )
+            .await
+            .is_err(),
+            "an unreserved control payload must fail immediately under saturation"
+        );
+
+        drop(
+            control_rx
+                .recv()
+                .await
+                .expect("first transferred observation must be queued"),
+        );
+        let replacement = Arc::clone(&payload_budget)
+            .try_acquire_many_owned(reservation_bytes as u32)
+            .expect("dequeue must release exactly one adapter payload reservation");
+        assert_eq!(payload_budget.available_permits(), 0);
+        drop(replacement);
+        drop(
+            control_rx
+                .recv()
+                .await
+                .expect("second transferred observation must be queued"),
+        );
+        assert_eq!(payload_budget.available_permits(), 2 * reservation_bytes);
+    }
+
+    #[tokio::test]
+    async fn open_snapshot_queue_holds_process_projection_custody_before_enqueue() {
+        use base64::Engine as _;
+        use meerkat_core::live_adapter::{LiveAdapter, LiveProjectionSnapshot};
+        use meerkat_core::types::SessionId;
+
+        let admission = RealtimeOpenProjectionAdmission::new(1024, 1024)
+            .expect("isolated open projection admission");
+        let (adapter, _control_tx, _audio_tx, mut cmd_rx) =
+            OpenAiLiveAdapter::new_for_test_with_open_projection_admission(admission.clone());
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 1,
+            seed_messages: vec![Message::User(meerkat_core::UserMessage::with_blocks(vec![
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: base64::engine::general_purpose::STANDARD
+                            .encode(b"\x89PNG\r\n\x1a\n"),
+                    },
+                },
+            ]))],
+            visible_tools: Vec::new(),
+            system_prompt: None,
+            model_id: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+            provider_id: Provider::OpenAI,
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
+        };
+
+        adapter
+            .send_command(LiveAdapterCommand::Open {
+                snapshot: snapshot.clone(),
+            })
+            .await
+            .expect("first Open snapshot must acquire custody before enqueue");
+        let error = adapter
+            .send_command(LiveAdapterCommand::Open {
+                snapshot: snapshot.clone(),
+            })
+            .await
+            .expect_err("a second retained Open snapshot must fail before queueing");
+        assert!(matches!(
+            error,
+            LiveAdapterError::ProviderError {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::InputBackpressured { .. },
+                },
+                ..
+            }
+        ));
+
+        let queued = cmd_rx
+            .try_recv()
+            .expect("first Open command remains queued");
+        assert!(queued.open_projection_lease.is_some());
+        assert!(
+            queued.memory_budget.is_some(),
+            "the serialized Open snapshot must also own command-queue bytes"
+        );
+        drop(queued);
+        adapter
+            .send_command(LiveAdapterCommand::Open { snapshot })
+            .await
+            .expect("dropping the queued command must release projection custody");
+        assert!(cmd_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn oversized_non_image_open_snapshot_is_rejected_before_enqueue() {
+        use meerkat_core::live_adapter::LiveAdapter;
+
+        let admission = RealtimeOpenProjectionAdmission::new(1024, 1024)
+            .expect("isolated open projection admission");
+        let (mut adapter, _control_tx, _audio_tx, mut cmd_rx) =
+            OpenAiLiveAdapter::new_for_test_with_open_projection_admission(admission.clone());
+        adapter.projection_snapshot_max_bytes = 1024;
+        let mut snapshot = sample_projection_snapshot();
+        snapshot.system_prompt = Some("x".repeat(1024));
+
+        let error = adapter
+            .send_command(LiveAdapterCommand::Open { snapshot })
+            .await
+            .expect_err("a non-image snapshot larger than its lease must fail before enqueue");
+        assert!(matches!(
+            error,
+            LiveAdapterError::ProviderError {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::InputTooLarge {
+                        max_bytes: 1024,
+                        actual_bytes,
+                    },
+                },
+                ..
+            } if actual_bytes > 1024
+        ));
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(
+            admission.try_acquire().is_ok(),
+            "oversize rejection must release projection custody"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_snapshot_rejects_saturated_command_byte_custody_before_enqueue() {
+        use meerkat_core::live_adapter::LiveAdapter;
+
+        let admission = RealtimeOpenProjectionAdmission::new(1024, 1024)
+            .expect("isolated open projection admission");
+        let (adapter, _control_tx, _audio_tx, mut cmd_rx) =
+            OpenAiLiveAdapter::new_for_test_with_open_projection_admission(admission.clone());
+        let held = Arc::clone(&adapter.command_budget)
+            .try_acquire_many_owned(
+                u32::try_from(OPENAI_LIVE_COMMAND_BUDGET_BYTES)
+                    .expect("test command budget fits semaphore range"),
+            )
+            .expect("saturate the isolated command byte owner");
+
+        let error = adapter
+            .send_command(LiveAdapterCommand::Open {
+                snapshot: sample_projection_snapshot(),
+            })
+            .await
+            .expect_err("Open must fail closed when retained snapshot bytes are saturated");
+        assert!(matches!(
+            error,
+            LiveAdapterError::ProviderError {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::InputBackpressured { .. },
+                },
+                ..
+            }
+        ));
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(
+            admission.try_acquire().is_ok(),
+            "queue-byte backpressure must release projection custody"
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn refresh_snapshot_rejects_seed_history_before_queueing() {
+        use meerkat_core::live_adapter::{LiveAdapter, LiveProjectionSnapshot};
+        use meerkat_core::types::SessionId;
+
+        let (adapter, _control_tx, _audio_tx, mut cmd_rx) = OpenAiLiveAdapter::new_for_test();
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 1,
+            seed_messages: vec![Message::User(meerkat_core::UserMessage::text(
+                "must not be retained on refresh",
+            ))],
+            visible_tools: Vec::new(),
+            system_prompt: None,
+            model_id: OPENAI_CANONICAL_REALTIME_MODEL.to_string(),
+            provider_id: Provider::OpenAI,
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+            user_content_identities: Vec::new(),
+            user_content_tombstones: Vec::new(),
+            transcript_rewrite_generation: 0,
+        };
+        let error = adapter
+            .send_command(LiveAdapterCommand::Refresh {
+                snapshot: snapshot.clone(),
+            })
+            .await
+            .expect_err("refresh must never retain replay history");
+        assert!(matches!(
+            error,
+            LiveAdapterError::ProviderError {
+                code: LiveAdapterErrorCode::ConfigRejected {
+                    reason: LiveConfigRejectionReason::Other { ref detail },
+                },
+                ..
+            } if detail == "refresh_seed_history_must_be_empty"
+        ));
+        assert!(cmd_rx.try_recv().is_err());
+
+        let mut history_free_snapshot = snapshot;
+        history_free_snapshot.seed_messages.clear();
+        adapter
+            .send_command(LiveAdapterCommand::Refresh {
+                snapshot: history_free_snapshot,
+            })
+            .await
+            .expect("history-free Refresh must enqueue");
+        let queued = cmd_rx.try_recv().expect("Refresh remains queued");
+        assert!(queued.open_projection_lease.is_none());
+        assert!(
+            queued.memory_budget.is_some(),
+            "Refresh must retain command byte custody even without replay history"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_does_not_wait_to_enqueue_into_a_full_command_queue() {
+        use meerkat_core::live_adapter::LiveAdapter;
+
+        let (adapter, _control_tx, _audio_tx, _cmd_rx) = OpenAiLiveAdapter::new_for_test();
+        for _ in 0..64 {
+            adapter
+                .cmd_tx
+                .try_send(QueuedLiveCommand {
+                    command: LiveAdapterCommand::Interrupt,
+                    memory_budget: None,
+                    open_projection_lease: None,
+                })
+                .expect("test command queue must have the documented 64 slots");
+        }
+
+        tokio::time::timeout(Duration::from_millis(100), adapter.close())
+            .await
+            .expect("close must not await a slot before its bounded pump timeout")
+            .expect("close must succeed");
     }
 
     /// R5-3: `inject_observation` on the OpenAI adapter pushes the

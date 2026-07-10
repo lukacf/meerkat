@@ -10,9 +10,9 @@
 #[cfg(feature = "schema")]
 use meerkat_contracts::emit::emit_all_schemas;
 use meerkat_contracts::{
-    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeInputChunk,
-    WireError, WireEvent, WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage,
-    WireSessionSummary, WireUsage,
+    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeImageChunk,
+    RealtimeInputChunk, WireError, WireEvent, WireRunResult, WireSessionHistory, WireSessionInfo,
+    WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
@@ -1064,4 +1064,19 @@ fn realtime_input_chunk_audio_variant_kind_tag() {
         input_value.get("kind").and_then(|v| v.as_str()),
         Some("audio_chunk")
     );
+}
+
+#[test]
+fn realtime_image_chunk_is_a_named_public_contract() {
+    let input_chunk = RealtimeInputChunk::ImageChunk(RealtimeImageChunk {
+        idempotency_key: "image-request-1".to_string(),
+        mime_type: "image/png".to_string(),
+        data: "iVBORw0KGgo=".to_string(),
+    });
+    let input_value = serde_json::to_value(&input_chunk).unwrap();
+    assert_eq!(
+        input_value.get("kind").and_then(|value| value.as_str()),
+        Some("image_chunk")
+    );
+    assert_eq!(input_value["mime_type"], "image/png");
 }

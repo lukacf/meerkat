@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{StopReason, Usage};
+use crate::blob::BlobId;
+use crate::types::{ContentBlock, StopReason, Usage};
 
 /// Durable session metadata key for realtime transcript append state.
 pub const SESSION_REALTIME_TRANSCRIPT_STATE_KEY: &str = "realtime_transcript_state";
@@ -49,6 +50,87 @@ pub enum TranscriptLane {
     Spoken,
 }
 
+/// Durable identity binding for one committed non-text user input.
+///
+/// Live image callers retry with a session-scoped `idempotency_key`. The binding is
+/// persisted independently of provider connection state so receipt loss and
+/// reconnect cannot duplicate canonical content, while reuse with a different
+/// fingerprint can fail closed before provider send.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealtimeUserContentIdentity {
+    pub idempotency_key: String,
+    pub item_id: String,
+    pub previous_item_id: Option<String>,
+    pub content_index: u32,
+    pub blob_id: BlobId,
+    pub media_type: String,
+}
+
+/// One-slot durable recovery anchor for a non-text user input whose blob and
+/// reducer commit are not yet known to be jointly durable.
+///
+/// This record deliberately contains identity only. Inline bytes remain in
+/// the caller retry and realm blob store; they never enter session metadata.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRealtimeUserContentBlob {
+    pub idempotency_key: String,
+    pub item_id: String,
+    pub previous_item_id: Option<String>,
+    pub content_index: u32,
+    pub blob_id: BlobId,
+    pub media_type: String,
+}
+
+impl PendingRealtimeUserContentBlob {
+    #[must_use]
+    pub fn identity(&self) -> RealtimeUserContentIdentity {
+        RealtimeUserContentIdentity {
+            idempotency_key: self.idempotency_key.clone(),
+            item_id: self.item_id.clone(),
+            previous_item_id: self.previous_item_id.clone(),
+            content_index: self.content_index,
+            blob_id: self.blob_id.clone(),
+            media_type: self.media_type.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn canonical_event(&self) -> RealtimeTranscriptEvent {
+        RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: self.idempotency_key.clone(),
+            item_id: self.item_id.clone(),
+            previous_item_id: self.previous_item_id.clone(),
+            content_index: self.content_index,
+            content: vec![ContentBlock::Image {
+                media_type: self.media_type.clone(),
+                data: crate::types::ImageData::Blob {
+                    blob_id: self.blob_id.clone(),
+                },
+            }],
+        }
+    }
+
+    #[must_use]
+    pub fn matches_identity(&self, identity: &RealtimeUserContentIdentity) -> bool {
+        self.identity() == *identity
+    }
+}
+
+/// Durable rejection marker for a caller-stable user-content key whose
+/// canonical content was removed by a same-session transcript rewrite.
+///
+/// Tombstones are intentionally retained instead of deleting the old binding:
+/// a retry carrying the removed key must fail closed before provider send and
+/// must never manufacture an `AlreadyCommitted` receipt for content that is no
+/// longer present in the canonical message projection.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RealtimeUserContentTombstone {
+    pub idempotency_key: String,
+}
+
 /// A typed, identity-bearing realtime transcript event consumed by the session.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +156,25 @@ pub enum RealtimeTranscriptEvent {
         previous_item_id: Option<String>,
         content_index: u32,
         text: String,
+    },
+    /// Provider accepted a non-text user content segment into its
+    /// conversation. Unlike [`Self::ItemObserved`], this event carries the
+    /// canonical Meerkat content that must be durably materialized. The
+    /// identity-bearing realtime transcript authority owns deduplication and
+    /// causal ordering exactly as it does for [`Self::UserTranscriptFinal`].
+    ///
+    /// Image bytes may be inline at the live adapter seam; persistent session
+    /// services externalize them into the realm blob store before reducer
+    /// application so causally waiting segments never place bytes in durable
+    /// transcript metadata.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    UserContentFinal {
+        /// Caller-stable, session-scoped idempotency identity.
+        idempotency_key: String,
+        item_id: String,
+        previous_item_id: Option<String>,
+        content_index: u32,
+        content: Vec<ContentBlock>,
     },
     /// Provider emitted an assistant **display-text** delta for an output
     /// item — authored text the model writes (e.g. OpenAI realtime
@@ -199,11 +300,35 @@ pub enum RealtimeTranscriptMaterializedMessage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RealtimeTranscriptApplyOutcome {
     pub materialized_messages: Vec<RealtimeTranscriptMaterializedMessage>,
+    /// Persistence-backed user-content receipt authority. Present only after
+    /// canonical materialization or exact replay of an already committed key.
+    pub user_content: Option<RealtimeUserContentApplyOutcome>,
+}
+
+/// Canonical result of applying a caller-stable non-text user input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RealtimeUserContentApplyOutcome {
+    Committed(RealtimeUserContentIdentity),
+    AlreadyCommitted(RealtimeUserContentIdentity),
+    /// The caller identity is malformed. This is an expected typed rejection,
+    /// not durable-state corruption.
+    RejectedInvalidIdentity {
+        idempotency_key: String,
+    },
+    /// The provider item depends on a predecessor that is not canonical yet.
+    RejectedUnmaterializedPredecessor {
+        idempotency_key: String,
+        previous_item_id: Option<String>,
+    },
+    /// The key is already bound to a different canonical payload.
+    RejectedConflict {
+        idempotency_key: String,
+    },
 }
 
 impl RealtimeTranscriptApplyOutcome {
     #[must_use]
     pub fn is_inert(&self) -> bool {
-        self.materialized_messages.is_empty()
+        self.materialized_messages.is_empty() && self.user_content.is_none()
     }
 }

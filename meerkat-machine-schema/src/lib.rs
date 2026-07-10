@@ -26,6 +26,7 @@ pub use composition::{
     CompositionSchema, CompositionSchemaError, CompositionStateLimits, CompositionTransactionPlan,
     CompositionWitness, CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
     CompositionWitnessTransition, CompositionWitnessTransitionOrder, DriverDispatchRoute,
+    DriverRefusalClosure, DriverRefusalFieldBinding, DriverRefusalFieldSource,
     DurableMarkerFieldBinding, DurableMarkerProtocol, DurableMarkerRelationProtocol,
     EffectHandoffProtocol, EffectTeardownClass, EntryInput, FeedbackFieldBinding,
     FeedbackFieldSource, FeedbackInputRef, HandleBridgeFeedbackBinding, MachineInstance,

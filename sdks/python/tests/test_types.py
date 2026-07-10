@@ -107,6 +107,33 @@ def test_contract_version_matches_package_version():
     assert CONTRACT_VERSION == data["project"]["version"]
 
 
+def test_realtime_image_chunk_is_exported_from_public_types():
+    from meerkat import RealtimeInputChunk as RootRealtimeInputChunk
+    from meerkat import RealtimeInputKind as RootRealtimeInputKind
+    from meerkat import RealtimeImageChunk as RootRealtimeImageChunk
+    from meerkat.generated.types import (
+        RealtimeImageChunk as GeneratedRealtimeImageChunk,
+        RealtimeInputChunk as GeneratedRealtimeInputChunk,
+        RealtimeInputKind as GeneratedRealtimeInputKind,
+    )
+    from meerkat.types import RealtimeImageChunk, RealtimeInputChunk, RealtimeInputKind
+
+    assert RootRealtimeImageChunk is RealtimeImageChunk
+    assert RealtimeImageChunk is GeneratedRealtimeImageChunk
+    assert RootRealtimeInputChunk is RealtimeInputChunk
+    assert RealtimeInputChunk is GeneratedRealtimeInputChunk
+    assert RootRealtimeInputKind is RealtimeInputKind
+    assert RealtimeInputKind is GeneratedRealtimeInputKind
+    chunk = RealtimeImageChunk(
+        idempotency_key="image-turn-1",
+        mime_type="image/png",
+        data="iVBORw0KGgo=",
+    )
+    assert chunk.idempotency_key == "image-turn-1"
+    assert chunk.mime_type == "image/png"
+    assert chunk.data == "iVBORw0KGgo="
+
+
 def test_model_profile_type_uses_wire_web_search_key():
     from meerkat import ModelProfile
     from meerkat.types import ResolvedModelCapabilities
@@ -2732,6 +2759,36 @@ async def test_models_catalog_rejects_malformed_provider_shapes():
 async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_methods():
     client = MeerkatClient()
     calls = []
+    schedule = {
+        "schedule_id": "sch_1",
+        "phase": "active",
+        "revision": 1,
+        "trigger": {"type": "once", "due_at_utc": "2026-07-11T09:00:00Z"},
+        "target": {"target_kind": "host_runnable", "runnable": "test"},
+        "misfire_policy": {"type": "skip"},
+        "overlap_policy": "skip_if_running",
+        "missing_target_policy": "mark_misfired",
+        "next_occurrence_ordinal": 1,
+        "planning_horizon_days": 30,
+        "planning_horizon_occurrences": 64,
+        "created_at_utc": "2026-07-10T09:00:00Z",
+        "updated_at_utc": "2026-07-10T09:00:00Z",
+    }
+    occurrence = {
+        "occurrence_id": "occ_1",
+        "schedule_id": "sch_1",
+        "schedule_revision": 1,
+        "occurrence_ordinal": 0,
+        "phase": "pending",
+        "due_at_utc": "2026-07-11T09:00:00Z",
+        "trigger_snapshot": schedule["trigger"],
+        "target_snapshot": schedule["target"],
+        "misfire_policy": {"type": "skip"},
+        "overlap_policy": "skip_if_running",
+        "missing_target_policy": "mark_misfired",
+        "attempt_count": 0,
+        "created_at_utc": "2026-07-10T09:00:00Z",
+    }
 
     async def fake_request(method, params):
         calls.append((method, params))
@@ -2775,9 +2832,11 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
         if method == "schedule/list":
             return {"schedules": []}
         if method == "schedule/occurrences":
-            return {"occurrences": []}
+            return {"occurrences": [occurrence]}
         if method == "schedule/tools":
             return {"tools": [{"name": "meerkat_schedule_list"}]}
+        if method.startswith("schedule/") and method != "schedule/call":
+            return schedule
         return {"ok": True}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -2799,14 +2858,16 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
     assert "web_search" not in profile
     assert profile["image_generation"] is True
 
-    await client.create_schedule({"name": "test"})
+    created_schedule = await client.create_schedule({"name": "test"})
+    assert created_schedule["superseded_ack_ids"] == []
     await client.get_schedule("sch_1")
     await client.list_schedules(labels={"env": "test"}, limit=5, offset=2)
     await client.update_schedule({"schedule_id": "sch_1", "name": "updated"})
     await client.pause_schedule("sch_1")
     await client.resume_schedule("sch_1")
     await client.delete_schedule("sch_1")
-    await client.list_schedule_occurrences("sch_1")
+    occurrences = await client.list_schedule_occurrences("sch_1")
+    assert occurrences["occurrences"][0]["occurrence_id"] == "occ_1"
     tools = await client.list_schedule_tools()
     assert tools["tools"][0]["name"] == "meerkat_schedule_list"
     await client.call_schedule_tool({"name": "meerkat_schedule_list"})
@@ -2834,6 +2895,96 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
         "max_tokens": 512,
     }
     assert calls[4][1] == {"labels": {"env": "test"}, "limit": 5, "offset": 2}
+
+
+@pytest.mark.asyncio
+async def test_schedule_wrappers_reject_missing_or_malformed_required_results():
+    cases = [
+        ("schedule/get", None),
+        ("schedule/get", {"schedule_id": "sch_1"}),
+        ("schedule/list", []),
+        ("schedule/list", {}),
+        ("schedule/list", {"schedules": {}}),
+        ("schedule/list", {"schedules": [{"schedule_id": "sch_1"}]}),
+        (
+            "schedule/list",
+            {
+                "schedules": [
+                    {
+                        "schedule_id": "sch_1",
+                        "phase": "active",
+                        "revision": 1,
+                        "trigger": {},
+                        "target": {},
+                        "misfire_policy": {"type": "skip"},
+                        "overlap_policy": "skip_if_running",
+                        "missing_target_policy": "mark_misfired",
+                        "next_occurrence_ordinal": 0,
+                        "planning_horizon_days": 1,
+                        "planning_horizon_occurrences": 1,
+                        "created_at_utc": "2026-07-10T09:00:00Z",
+                        "updated_at_utc": "2026-07-10T09:00:00Z",
+                        "superseded_ack_ids": None,
+                    }
+                ]
+            },
+        ),
+        (
+            "schedule/list",
+            {
+                "schedules": [
+                    {
+                        "schedule_id": "sch_1",
+                        "phase": "active",
+                        "revision": 1,
+                        "trigger": {},
+                        "target": {},
+                        "misfire_policy": {"type": "skip"},
+                        "overlap_policy": "skip_if_running",
+                        "missing_target_policy": "mark_misfired",
+                        "next_occurrence_ordinal": 0,
+                        "planning_horizon_days": 1,
+                        "planning_horizon_occurrences": 1,
+                        "created_at_utc": "2026-07-10T09:00:00Z",
+                        "updated_at_utc": "2026-07-10T09:00:00Z",
+                        "labels": None,
+                    }
+                ]
+            },
+        ),
+        ("schedule/occurrences", "not-an-object"),
+        ("schedule/occurrences", {}),
+        ("schedule/occurrences", {"occurrences": {}}),
+        (
+            "schedule/occurrences",
+            {"occurrences": [{"occurrence_id": "occ_1"}]},
+        ),
+        ("schedule/tools", 1),
+        ("schedule/tools", {}),
+        ("schedule/tools", {"tools": {}}),
+        ("schedule/tools", {"tools": ["not-an-object"]}),
+    ]
+
+    for method, response in cases:
+        client = MeerkatClient()
+
+        async def fake_request(request_method, params, response=response, method=method):
+            assert request_method == method
+            return response
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        with pytest.raises(MeerkatError) as excinfo:
+            if method == "schedule/get":
+                await client.get_schedule("sch_1")
+            elif method == "schedule/list":
+                await client.list_schedules()
+            elif method == "schedule/occurrences":
+                await client.list_schedule_occurrences("sch_1")
+            else:
+                await client.list_schedule_tools()
+
+        assert excinfo.value.code == "INVALID_RESPONSE"
 
 
 @pytest.mark.asyncio
@@ -4432,7 +4583,10 @@ def test_generated_live_send_input_params_chunk_is_typed_union():
     )
     text = LiveInputChunkWireText(kind="text", text="hello")
     image = LiveInputChunkWireImage(
-        kind="image", mime="image/png", data="iVBORw0KGgo="
+        kind="image",
+        idempotency_key="image-turn-1",
+        mime="image/png",
+        data="iVBORw0KGgo=",
     )
     video_frame = LiveInputChunkWireVideoFrame(
         kind="video_frame", codec="vp8", data="AQID", timestamp_ms=1_234
@@ -4442,6 +4596,31 @@ def test_generated_live_send_input_params_chunk_is_typed_union():
         params = LiveSendInputParams(channel_id="live_1", chunk=chunk)
         assert params.channel_id == "live_1"
         assert params.chunk is chunk
+
+
+@pytest.mark.asyncio
+async def test_live_send_input_image_forwards_required_idempotency_key():
+    client = MeerkatClient()
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        assert method == "live/send_input"
+        assert params == {
+            "channel_id": "live_1",
+            "chunk": {
+                "kind": "image",
+                "idempotency_key": "image-turn-1",
+                "mime": "image/png",
+                "data": "iVBORw0KGgo=",
+            },
+        }
+        return {"status": "sent"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    result = await client.live_send_input_image(
+        "live_1", "image-turn-1", "image/png", "iVBORw0KGgo="
+    )
+    assert result == {"status": "sent"}
 
 
 def test_generated_wire_live_adapter_observation_is_typed_union():
@@ -4466,6 +4645,7 @@ def test_generated_wire_live_adapter_observation_is_typed_union():
         WireLiveAdapterObservationReady,
         WireLiveAdapterObservationStatusChanged,
         WireLiveAdapterObservationTurnInterrupted,
+        WireLiveAdapterObservationUserContentCommitted,
     )
 
     # The union must include every variant the adapter can emit.
@@ -4476,12 +4656,15 @@ def test_generated_wire_live_adapter_observation_is_typed_union():
     assert WireLiveAdapterObservationError in union_members
     assert WireLiveAdapterObservationStatusChanged in union_members
     assert WireLiveAdapterObservationTurnInterrupted in union_members
+    assert WireLiveAdapterObservationUserContentCommitted in union_members
     # Sanity: each variant is tagged on `observation` with the snake_case
     # discriminator value.
     audio_hints = get_type_hints(WireLiveAdapterObservationAssistantAudioChunk)
     assert get_args(audio_hints["observation"]) == ("assistant_audio_chunk",)
     rejected_hints = get_type_hints(WireLiveAdapterObservationCommandRejected)
     assert get_args(rejected_hints["observation"]) == ("command_rejected",)
+    receipt_hints = get_type_hints(WireLiveAdapterObservationUserContentCommitted)
+    assert receipt_hints["idempotency_key"] is str
     # R5-4: identity fields are visible (typed Optional[str] / int) at
     # the SDK boundary so browser clients can drive `live/truncate`.
     assert "item_id" in audio_hints
@@ -4490,6 +4673,128 @@ def test_generated_wire_live_adapter_observation_is_typed_union():
     # R5-9: typed `code` field on the rejection variant — not a free-form
     # blob.
     assert rejected_hints["code"] == WireLiveAdapterErrorCode
+
+
+def test_live_image_receipt_and_rejections_are_publicly_reexported():
+    from meerkat import (
+        LiveSendInputErrorData as RootSendInputErrorData,
+        WireLiveAdapterObservationUserContentCommitted as RootReceipt,
+        WireLiveConfigRejectionReasonImageInputContentMismatch as RootContentMismatch,
+        WireLiveConfigRejectionReasonImageInputInvalidBase64 as RootInvalidBase64,
+        WireLiveConfigRejectionReasonImageInputBackpressured as RootBackpressured,
+        WireLiveConfigRejectionReasonImageInputIdempotencyConflict as RootConflict,
+        WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid as RootInvalidKey,
+        WireLiveConfigRejectionReasonImageInputRequiresCommit as RootRequiresCommit,
+        WireLiveConfigRejectionReasonImageInputTooLarge as RootTooLarge,
+        WireLiveConfigRejectionReasonImageInputTransportUnsupported as RootTransportUnsupported,
+        WireLiveConfigRejectionReasonImageInputUnsupportedMime as RootUnsupportedMime,
+        WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen as RootRewriteRequiresReopen,
+        WireLiveConfigRejectionReasonInputBackpressured as RootInputBackpressured,
+        WireLiveConfigRejectionReasonInputTooLarge as RootInputTooLarge,
+    )
+    from meerkat.types import (
+        LiveSendInputErrorData as PublicSendInputErrorData,
+        WireLiveAdapterObservationUserContentCommitted as PublicReceipt,
+        WireLiveConfigRejectionReasonImageInputContentMismatch as PublicContentMismatch,
+        WireLiveConfigRejectionReasonImageInputInvalidBase64 as PublicInvalidBase64,
+        WireLiveConfigRejectionReasonImageInputBackpressured as PublicBackpressured,
+        WireLiveConfigRejectionReasonImageInputIdempotencyConflict as PublicConflict,
+        WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid as PublicInvalidKey,
+        WireLiveConfigRejectionReasonImageInputRequiresCommit as PublicRequiresCommit,
+        WireLiveConfigRejectionReasonImageInputTooLarge as PublicTooLarge,
+        WireLiveConfigRejectionReasonImageInputTransportUnsupported as PublicTransportUnsupported,
+        WireLiveConfigRejectionReasonImageInputUnsupportedMime as PublicUnsupportedMime,
+        WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen as PublicRewriteRequiresReopen,
+        WireLiveConfigRejectionReasonInputBackpressured as PublicInputBackpressured,
+        WireLiveConfigRejectionReasonInputTooLarge as PublicInputTooLarge,
+    )
+
+    assert RootSendInputErrorData is PublicSendInputErrorData
+    assert RootReceipt is PublicReceipt
+    assert RootUnsupportedMime is PublicUnsupportedMime
+    assert RootContentMismatch is PublicContentMismatch
+    assert RootInvalidBase64 is PublicInvalidBase64
+    assert RootTooLarge is PublicTooLarge
+    assert RootBackpressured is PublicBackpressured
+    assert RootInvalidKey is PublicInvalidKey
+    assert RootConflict is PublicConflict
+    assert RootRequiresCommit is PublicRequiresCommit
+    assert RootTransportUnsupported is PublicTransportUnsupported
+    assert RootInputTooLarge is PublicInputTooLarge
+    assert RootInputBackpressured is PublicInputBackpressured
+    assert RootRewriteRequiresReopen is PublicRewriteRequiresReopen
+
+    receipt = RootReceipt(
+        observation="user_content_committed",
+        idempotency_key="image-turn-1",
+        item_id="item_image",
+        content_index=0,
+        media_type="image/png",
+    )
+    unsupported = RootUnsupportedMime(
+        kind="image_input_unsupported_mime", mime_type="image/gif"
+    )
+    mismatch = RootContentMismatch(
+        kind="image_input_content_mismatch", mime_type="image/png"
+    )
+    invalid_base64 = RootInvalidBase64(kind="image_input_invalid_base64")
+    too_large = RootTooLarge(
+        kind="image_input_too_large", max_bytes=20, actual_bytes=21
+    )
+    backpressured = RootBackpressured(
+        kind="image_input_backpressured", max_pending_bytes=40
+    )
+    invalid_key = RootInvalidKey(
+        kind="image_input_idempotency_key_invalid", max_bytes=128, actual_bytes=129
+    )
+    conflict = RootConflict(kind="image_input_idempotency_conflict")
+    requires_commit = RootRequiresCommit(kind="image_input_requires_commit")
+    transport_unsupported = RootTransportUnsupported(
+        kind="image_input_transport_unsupported", transport="webrtc_data_channel"
+    )
+    input_too_large = RootInputTooLarge(
+        kind="input_too_large", max_bytes=256, actual_bytes=257
+    )
+    input_backpressured = RootInputBackpressured(
+        kind="input_backpressured", max_pending_bytes=1024
+    )
+    error_data = RootSendInputErrorData(
+        error_code={"code": "config_rejected", "reason": input_backpressured}
+    )
+
+    assert input_too_large["actual_bytes"] == 257
+    assert error_data.error_code["reason"]["kind"] == "input_backpressured"
+
+    assert receipt["item_id"] == "item_image"
+    assert receipt["idempotency_key"] == "image-turn-1"
+    assert unsupported["mime_type"] == "image/gif"
+    assert mismatch["kind"] == "image_input_content_mismatch"
+    assert invalid_base64["kind"] == "image_input_invalid_base64"
+    assert too_large["actual_bytes"] > too_large["max_bytes"]
+    assert backpressured["max_pending_bytes"] == 40
+    assert invalid_key["actual_bytes"] > invalid_key["max_bytes"]
+    assert conflict["kind"] == "image_input_idempotency_conflict"
+    assert requires_commit["kind"] == "image_input_requires_commit"
+    assert transport_unsupported["transport"] == "webrtc_data_channel"
+
+
+def test_public_realtime_transcript_event_union_excludes_internal_user_content():
+    from typing import get_args
+
+    from meerkat import (
+        RealtimeTranscriptEvent as RootEvent,
+        RealtimeTranscriptEventAssistantTextDelta as RootAssistantTextDelta,
+        RealtimeTranscriptEventItemObserved as RootItemObserved,
+        RealtimeTranscriptEventUserTranscriptFinal as RootUserTranscriptFinal,
+    )
+    from meerkat.types import RealtimeTranscriptEvent as PublicEvent
+
+    assert RootEvent == PublicEvent
+    members = set(get_args(RootEvent))
+    assert RootItemObserved in members
+    assert RootUserTranscriptFinal in members
+    assert RootAssistantTextDelta in members
+    assert all("UserContentFinal" not in member.__name__ for member in members)
 
 
 def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():

@@ -14,10 +14,11 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, OnceLock, RwLock as StdRwLock};
 
+use serde::Serialize;
 use serde_json::value::RawValue;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -28,7 +29,122 @@ use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigC
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 
-use crate::protocol::{RpcId, RpcRequest, RpcResponse};
+use crate::protocol::{RpcId, RpcOutboundAdmission, RpcOutboundPermit, RpcRequest, RpcResponse};
+
+const CALLBACK_REQUEST_MAX_PARAMS_BYTES: usize = 16 * 1024 * 1024;
+const CALLBACK_REQUEST_ENVELOPE_BYTES: usize = 4 * 1024;
+const CALLBACK_REQUEST_MAX_TOOL_USE_ID_BYTES: usize = 1024;
+const CALLBACK_REQUEST_MAX_TOOL_NAME_BYTES: usize = 256;
+pub(crate) const CALLBACK_PROCESS_MAX_PENDING: usize = 64;
+
+#[derive(Clone)]
+struct CallbackInvocationAdmission {
+    semaphore: Arc<Semaphore>,
+    max_pending: usize,
+}
+
+impl CallbackInvocationAdmission {
+    fn production() -> Self {
+        static PROCESS_ADMISSION: OnceLock<CallbackInvocationAdmission> = OnceLock::new();
+        PROCESS_ADMISSION
+            .get_or_init(|| Self::new(CALLBACK_PROCESS_MAX_PENDING))
+            .clone()
+    }
+
+    fn new(max_pending: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(max_pending)),
+            max_pending,
+        }
+    }
+
+    fn try_acquire(&self) -> Result<OwnedSemaphorePermit, ToolError> {
+        Arc::clone(&self.semaphore)
+            .try_acquire_owned()
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "callback request admission rejected at the {}-request process limit: {error}",
+                    self.max_pending
+                ))
+            })
+    }
+}
+
+/// Inbound callback response plus the process-memory/count reservations that
+/// remain live while the callback consumer parses and projects the payload.
+/// Rejected handoffs carry a bounded synthesized error and no reservation.
+pub struct CallbackResponseHandoff {
+    response: RpcResponse,
+    _memory_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    _count_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl CallbackResponseHandoff {
+    pub(crate) fn admitted(
+        response: RpcResponse,
+        memory_permit: tokio::sync::OwnedSemaphorePermit,
+        count_permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            response,
+            _memory_permit: Some(memory_permit),
+            _count_permit: Some(count_permit),
+        }
+    }
+
+    pub(crate) fn rejected(response: RpcResponse) -> Self {
+        Self {
+            response,
+            _memory_permit: None,
+            _count_permit: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn unmetered_for_test(response: RpcResponse) -> Self {
+        Self::rejected(response)
+    }
+
+    pub fn response(&self) -> &RpcResponse {
+        &self.response
+    }
+}
+
+/// Server→client callback request paired with the admitted response handoff.
+/// The outbound permit remains attached through queueing and socket write;
+/// callback invocation count admission is held separately by the dispatcher
+/// until the response or timeout resolves.
+pub struct CallbackRequestEnvelope {
+    request: RpcRequest,
+    response_tx: oneshot::Sender<CallbackResponseHandoff>,
+    outbound_permit: Arc<RpcOutboundPermit>,
+}
+
+impl CallbackRequestEnvelope {
+    fn new(
+        request: RpcRequest,
+        response_tx: oneshot::Sender<CallbackResponseHandoff>,
+        outbound_permit: Arc<RpcOutboundPermit>,
+    ) -> Self {
+        Self {
+            request,
+            response_tx,
+            outbound_permit,
+        }
+    }
+
+    /// Split at the server transport boundary. The third tuple element must
+    /// stay bound until `write_request` completes.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        RpcRequest,
+        oneshot::Sender<CallbackResponseHandoff>,
+        Arc<RpcOutboundPermit>,
+    ) {
+        (self.request, self.response_tx, self.outbound_permit)
+    }
+}
 
 /// Timeout for waiting on a client tool response.
 const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -49,7 +165,7 @@ pub struct CallbackToolDispatcher {
     inline_tools: Vec<ToolDef>,
     /// Inline tool names cached for fast collision lookup.
     inline_names: HashSet<String>,
-    callback_tx: mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>,
+    callback_tx: mpsc::Sender<CallbackRequestEnvelope>,
     id_counter: Arc<AtomicU64>,
     /// Snapshot of global tool names from the last `poll_external_updates` (or creation).
     /// Used to detect additions/removals between polls.
@@ -63,7 +179,7 @@ impl CallbackToolDispatcher {
     /// `external_tools` param). Pass empty vec for most sessions.
     pub fn new(
         registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
-        callback_tx: mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>,
+        callback_tx: mpsc::Sender<CallbackRequestEnvelope>,
         id_counter: Arc<AtomicU64>,
         inline_tools: Vec<ToolDef>,
     ) -> Self {
@@ -163,20 +279,59 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             return Err(ToolError::not_found(call.name));
         }
 
-        let request_id = self.next_id();
-        let arguments: serde_json::Value = serde_json::from_str(call.args.get()).map_err(|e| {
-            ToolError::invalid_arguments(call.name, format!("malformed tool-call arguments: {e}"))
-        })?;
-        let params = serde_json::json!({
-            "tool_use_id": call.id,
-            "name": call.name,
-            "arguments": arguments,
-        });
+        // This permit remains local across queueing and the response timeout,
+        // providing a process-global hard cap on both callback dispatch tasks
+        // and entries in the server's pending-callback map.
+        let _invocation_permit = CallbackInvocationAdmission::production().try_acquire()?;
+        if call.id.len() > CALLBACK_REQUEST_MAX_TOOL_USE_ID_BYTES {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                format!(
+                    "tool_use_id exceeds the {CALLBACK_REQUEST_MAX_TOOL_USE_ID_BYTES}-byte callback limit"
+                ),
+            ));
+        }
+        if call.name.len() > CALLBACK_REQUEST_MAX_TOOL_NAME_BYTES {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                format!(
+                    "tool name exceeds the {CALLBACK_REQUEST_MAX_TOOL_NAME_BYTES}-byte callback limit"
+                ),
+            ));
+        }
+        if call.args.get().len() > CALLBACK_REQUEST_MAX_PARAMS_BYTES {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                format!(
+                    "tool arguments exceed the {CALLBACK_REQUEST_MAX_PARAMS_BYTES}-byte callback limit"
+                ),
+            ));
+        }
 
-        let params_raw = RawValue::from_string(serde_json::to_string(&params).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to serialize callback params: {e}"))
-        })?)
-        .map_err(|e| ToolError::execution_failed(format!("Failed to create RawValue: {e}")))?;
+        #[derive(Serialize)]
+        struct CallbackParams<'a> {
+            tool_use_id: &'a str,
+            name: &'a str,
+            arguments: &'a RawValue,
+        }
+
+        let request_id = self.next_id();
+        let params = CallbackParams {
+            tool_use_id: call.id,
+            name: call.name,
+            arguments: call.args,
+        };
+        let (params_raw, outbound_permit) = RpcOutboundAdmission::production()
+            .admit_json(
+                &params,
+                CALLBACK_REQUEST_MAX_PARAMS_BYTES,
+                CALLBACK_REQUEST_ENVELOPE_BYTES,
+            )
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "callback request rejected by outbound admission: {error}"
+                ))
+            })?;
 
         let request = RpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -188,11 +343,15 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         let (response_tx, response_rx) = oneshot::channel();
 
         self.callback_tx
-            .send((request, response_tx))
+            .send(CallbackRequestEnvelope::new(
+                request,
+                response_tx,
+                outbound_permit,
+            ))
             .await
             .map_err(|_| ToolError::execution_failed("Callback channel closed".to_string()))?;
 
-        let response = tokio::time::timeout(CALLBACK_TIMEOUT, response_rx)
+        let response_handoff = tokio::time::timeout(CALLBACK_TIMEOUT, response_rx)
             .await
             .map_err(|_| {
                 ToolError::execution_failed(format!(
@@ -205,11 +364,15 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
                 ToolError::execution_failed("Callback response channel dropped".to_string())
             })?;
 
-        if let Some(error) = response.error {
-            return Err(ToolError::execution_failed(error.message));
+        let response = response_handoff.response();
+
+        if let Some(error) = response.error.as_ref() {
+            let message = error.message.clone();
+            drop(response_handoff);
+            return Err(ToolError::execution_failed(message));
         }
 
-        let result_raw = response.result.ok_or_else(|| {
+        let result_raw = response.result.as_deref().ok_or_else(|| {
             ToolError::execution_failed("Callback response missing result".to_string())
         })?;
 
@@ -224,8 +387,9 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         let parsed: CallbackResult = serde_json::from_str(result_raw.get()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to parse callback result: {e}"))
         })?;
-
-        Ok(ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error).into())
+        let outcome = ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error).into();
+        drop(response_handoff);
+        Ok(outcome)
     }
 
     /// Detect global tools added/removed since last poll and emit deltas.
@@ -327,23 +491,26 @@ mod tests {
             dispatcher.dispatch(call).await
         });
 
-        let (request, response_tx) = callback_rx.recv().await.unwrap();
+        let (request, response_tx, _outbound_permit) =
+            callback_rx.recv().await.unwrap().into_parts();
         assert_eq!(request.method, "tool/execute");
         assert_eq!(request.id, Some(RpcId::Str("srv-0".to_string())));
+        let params: serde_json::Value =
+            serde_json::from_str(request.params.as_deref().unwrap().get()).unwrap();
+        assert_eq!(params["tool_use_id"], "tc-1");
+        assert_eq!(params["name"], "search");
+        assert_eq!(params["arguments"], serde_json::json!({"q": "test"}));
 
-        let result_raw = RawValue::from_string(
-            serde_json::to_string(&serde_json::json!({"content":"results here","is_error":false}))
-                .unwrap(),
-        )
-        .unwrap();
-        response_tx
-            .send(RpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id,
-                result: Some(result_raw),
-                error: None,
-            })
-            .unwrap();
+        assert!(
+            response_tx
+                .send(CallbackResponseHandoff::unmetered_for_test(
+                    RpcResponse::success(
+                        request.id,
+                        serde_json::json!({"content":"results here","is_error":false}),
+                    )
+                ))
+                .is_ok()
+        );
 
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result.result.text_content(), "results here");
@@ -372,6 +539,44 @@ mod tests {
         .await;
 
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[test]
+    fn callback_invocation_admission_caps_pending_work_process_wide() {
+        let admission = CallbackInvocationAdmission::new(1);
+        let held = admission.try_acquire().expect("first callback is admitted");
+        assert!(
+            admission.try_acquire().is_err(),
+            "a second pending callback must fail closed"
+        );
+        drop(held);
+        assert!(admission.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn oversized_callback_arguments_never_enter_the_request_queue() {
+        let (callback_tx, mut callback_rx) = mpsc::channel(1);
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("search")]));
+        let dispatcher =
+            CallbackToolDispatcher::new(tools, callback_tx, Arc::new(AtomicU64::new(0)), vec![]);
+        let args = RawValue::from_string(format!(
+            "\"{}\"",
+            "x".repeat(CALLBACK_REQUEST_MAX_PARAMS_BYTES)
+        ))
+        .unwrap();
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "tc-oversized",
+                name: "search",
+                args: &args,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            callback_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

@@ -30,14 +30,15 @@ async fn embedded_skill_names_with_capabilities(caps: &[&str]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn base_crate_registers_mob_communication_for_cross_surface_resume() {
+async fn skills_feature_links_comms_owned_mob_communication_for_cross_surface_resume() {
     let _ = meerkat::SESSION_VERSION;
     let source = EmbeddedSkillSource::new();
     let key = builtin_skill_key("mob-communication");
     let result = source.load(&key).await;
     assert!(
         result.is_ok(),
-        "mob-communication should be registered from the base crate"
+        "the skills facade feature must mechanically link the comms-owned \
+         mob-communication declaration"
     );
     let Ok(skill) = result else {
         unreachable!("asserted embedded mob communication skill is available above");
@@ -52,10 +53,8 @@ async fn base_crate_registers_mob_communication_for_cross_surface_resume() {
         skill.descriptor.description,
         "How to communicate with peers in a collaborative mob"
     );
-    // Content pin against dead-copy swaps (the PR-853 hazard: meerkat-mob
-    // once carried an unreferenced, drifted duplicate whose body dropped
-    // the concrete tool-kind guidance). The load-bearing operating rules
-    // must be present in whatever body actually registered.
+    // Content pin against dead-copy swaps: the load-bearing operating rules
+    // must be present in the feature-owned body that the facade links.
     assert!(
         skill.body.contains("peer_request")
             && skill.body.contains("peer_message")
@@ -131,6 +130,7 @@ async fn companion_skills_are_listed_only_when_capabilities_are_available() {
     let without_caps = embedded_skill_names_with_capabilities(&[]).await;
     assert!(!without_caps.iter().any(|name| name == "workgraph-workflow"));
     assert!(!without_caps.iter().any(|name| name == "schedule-workflow"));
+    assert!(!without_caps.iter().any(|name| name == "mob-communication"));
 
     let workgraph_caps = embedded_skill_names_with_capabilities(&["work_graph"]).await;
     assert!(
@@ -151,6 +151,42 @@ async fn companion_skills_are_listed_only_when_capabilities_are_available() {
             .iter()
             .any(|name| name == "workgraph-workflow")
     );
+
+    let comms_caps = embedded_skill_names_with_capabilities(&["comms"]).await;
+    assert!(comms_caps.iter().any(|name| name == "mob-communication"));
+}
+
+#[cfg(not(feature = "comms"))]
+#[test]
+fn skills_only_linkage_keeps_comms_capability_not_compiled() {
+    let config = meerkat_core::Config::default();
+    let (registration, status) = resolve_capabilities(&config)
+        .into_iter()
+        .find(|(registration, _)| registration.id == meerkat_contracts::CapabilityId::Comms)
+        .expect("the linked comms owner must declare its capability metadata");
+
+    assert_eq!(registration.requires_feature, Some("comms"));
+    assert!(matches!(
+        status,
+        CapabilityStatus::NotCompiled { ref feature } if feature.as_ref() == "comms"
+    ));
+    assert!(
+        !available_capabilities(&config).contains(&meerkat_contracts::CapabilityId::Comms),
+        "skills-only linkage must not advertise comms as publicly available"
+    );
+}
+
+#[cfg(feature = "comms")]
+#[test]
+fn comms_feature_enables_comms_capability_registration() {
+    let config = meerkat_core::Config::default();
+    let (_, status) = resolve_capabilities(&config)
+        .into_iter()
+        .find(|(registration, _)| registration.id == meerkat_contracts::CapabilityId::Comms)
+        .expect("comms feature must link the owner capability registration");
+
+    assert!(matches!(status, CapabilityStatus::Available));
+    assert!(available_capabilities(&config).contains(&meerkat_contracts::CapabilityId::Comms));
 }
 
 #[test]

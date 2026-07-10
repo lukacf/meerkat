@@ -64,7 +64,8 @@ ciborium = "0.2"
 meerkat-runtime = { workspace = true, features = ["test-support"] }
 
 [features]
-default = []
+default = ["capability"]
+capability = []
 integration-real-tests = []
 
 [[test]]

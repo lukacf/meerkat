@@ -29,6 +29,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Initialize`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `PrepareTerminalSupervisorCleanupBindings`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterSessionIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -578,6 +581,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetPeerIngressContextStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `SetPeerIngressContextTerminalSupervisorCleanup`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveClosedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -593,6 +599,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolvePeerIngressReceiveClosedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolvePeerIngressReceiveClosedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveFullIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -606,6 +615,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveFullStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePeerIngressReceiveFullDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolvePeerIngressReceivePlainEventIdle`
@@ -638,6 +650,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolvePeerIngressReceiveTrustedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolvePeerIngressReceiveTrustedTerminalSupervisorCleanup`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePeerIngressReceiveTerminalOrdinaryDrop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthExemptUntrustedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -651,6 +669,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthExemptUntrustedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePeerIngressReceiveAuthExemptUntrustedTerminalSupervisorCleanup`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolvePeerIngressReceiveAuthOpenUntrustedIdle`
@@ -728,6 +749,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolvePeerIngressDequeueAuthExemptExternalStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolvePeerIngressDequeueAuthExemptExternalDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolvePeerIngressDequeueRequiredRemainingIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -771,6 +795,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `NotifyDrainExitedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NotifyDrainExitedTerminalSupervisorCleanup`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `InterruptCurrentRunAttached`
@@ -1344,6 +1371,111 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorBindingInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorBindingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorBindingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorBindingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorBindingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorBindingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorBindingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRevokedSupervisorReceiptInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRevokedSupervisorReceiptIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRevokedSupervisorReceiptAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRevokedSupervisorReceiptRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRevokedSupervisorReceiptRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRevokedSupervisorReceiptStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRevokedSupervisorReceiptDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRevocationPendingInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRevocationPendingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRevocationPendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRevocationPendingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRevocationPendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRevocationPendingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationOperationInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationOperationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationOperationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationOperationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationOperationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationOperationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationOperationDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationTerminalReceiptInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationTerminalReceiptIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationTerminalReceiptAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationTerminalReceiptRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationTerminalReceiptRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationTerminalReceiptStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSupervisorRotationTerminalReceiptDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `EnsureSessionWithExecutorIdle`
@@ -2015,6 +2147,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeRequestSupervisorSilentRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeRequestSupervisorSilentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeRequestSupervisorSilentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSilentAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2028,6 +2169,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestSupervisorRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeRequestSupervisorRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeRequestSupervisorStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyExternalEnvelopeRequestSupervisorDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyExternalEnvelopeRequestActionableAttached`
@@ -3962,6 +4112,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SpawnDrainStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `SpawnTerminalSupervisorCleanupDrain`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StopDrainIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3976,6 +4129,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `StopDrainStopped`
   - anchors: `meerkat_machine`
+  - scenarios: (unclaimed)
+- `StopTerminalSupervisorCleanupDrain`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `StageVisibilityFilterIdle`
   - anchors: (unclaimed)
@@ -4307,6 +4463,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PeerRequestReceivedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `PeerRequestReceivedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PeerResponseRepliedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4320,6 +4479,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PeerResponseRepliedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PeerResponseRepliedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AdvanceSessionContextIdle`
@@ -4484,6 +4646,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AttachSessionIngressStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AttachSessionIngressTerminalSupervisorCleanup`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AttachMobIngressIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4499,6 +4664,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AttachMobIngressStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AttachMobIngressTerminalSupervisorCleanup`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DetachIngressIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4512,6 +4680,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: `session_registration_and_binding`
 - `DetachIngressStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DetachIngressTerminalSupervisorCleanup`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionBootstrapIdle`
@@ -4548,6 +4719,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorBindAdmissionAlreadyBoundRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorBindAdmissionRevocationPendingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorBindAdmissionRevocationPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorBindAdmissionRevocationPendingRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorBindMaterialAdmissionAddressMismatchIdle`
@@ -4622,6 +4802,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSupervisorAuthorizeAdmissionNotBoundRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionNotBoundRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionNotBoundStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionNotBoundDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionStaleSupervisorIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4629,6 +4818,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionStaleSupervisorRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionStaleSupervisorRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionStaleSupervisorStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionStaleSupervisorDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionSenderMismatchIdle`
@@ -4640,6 +4838,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSupervisorAuthorizeAdmissionSenderMismatchRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionSenderMismatchRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionSenderMismatchStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionSenderMismatchDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionIdempotentAckIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4647,6 +4854,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionIdempotentAckRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionIdempotentAckRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionIdempotentAckStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionIdempotentAckDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionRotationNotAllowedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionRotationNotAllowedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorAuthorizeAdmissionRotationNotAllowedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorAuthorizeAdmissionProceedIdle`
@@ -4688,6 +4922,330 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeSupervisorStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RefreshSupervisorBindingRouteIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefreshSupervisorBindingRouteAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefreshSupervisorBindingRouteRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefreshSupervisorBindingRouteRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefreshSupervisorBindingRouteStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefreshSupervisorBindingRouteDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationNewIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationNewAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationNewRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationAdoptCurrentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationAdoptCurrentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationAdoptCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationPersistPreflightRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationPersistPreflightRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationPersistPreflightRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationPersistRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationPersistRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationPersistRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingPendingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingPendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingPendingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingPendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingPendingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingCompletedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingCompletedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingCompletedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingCompletedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingCompletedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingCompletedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingRejectedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingRejectedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationExistingRejectedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationConflictIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationConflictAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationConflictRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationConflictStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationConflictDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationUnavailableIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationUnavailableAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationUnavailableRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationUnavailableRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationUnavailableStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubmitSupervisorRotationUnavailableDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationPreviousRevokeIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationPreviousRevokeAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationPreviousRevokeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationPreviousRevokeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationPreviousRevokeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationPreviousRevokeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationPreviousRevokedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationPreviousRevokedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationPreviousRevokedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationPreviousRevokedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationPreviousRevokedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationPreviousRevokedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationNextPublishIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationNextPublishAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationNextPublishRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationNextPublishRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationNextPublishStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationNextPublishDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationNextPublishedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationNextPublishedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationNextPublishedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationNextPublishedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationNextPublishedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationNextPublishedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationCompletedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationCompletedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationCompletedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationCompletedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationCompletedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeSupervisorRotationCompletedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationPreviousRevokePendingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationPreviousRevokePendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationPreviousRevokePendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationPreviousRevokePendingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationPreviousRevokePendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationPreviousRevokePendingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNextPublishPendingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNextPublishPendingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNextPublishPendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNextPublishPendingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNextPublishPendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNextPublishPendingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationCompletedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationCompletedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationCompletedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationCompletedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationCompletedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationCompletedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationRejectedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationRejectedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationRejectedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNotFoundIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNotFoundAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNotFoundRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNotFoundRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNotFoundStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveSupervisorRotationNotFoundDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestSupervisorTrustPublishIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4703,6 +5261,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestSupervisorTrustPublishStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
+- `RequestSupervisorTrustPublishDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RevokeSupervisorIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4716,6 +5277,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RevokeSupervisorStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeSupervisorDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryPendingSupervisorRevokeIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryPendingSupervisorRevokeAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryPendingSupervisorRevokeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryPendingSupervisorRevokeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryPendingSupervisorRevokeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetryPendingSupervisorRevokeDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishedIdle`
@@ -4733,6 +5315,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SupervisorTrustEdgePublishedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SupervisorTrustEdgePublishedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishFailedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4746,6 +5331,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SupervisorTrustEdgePublishFailedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorTrustEdgePublishFailedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokedIdle`
@@ -4763,6 +5351,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SupervisorTrustEdgeRevokedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SupervisorTrustEdgeRevokedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorTrustEdgeRevokeFailedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4778,6 +5369,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SupervisorTrustEdgeRevokeFailedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SupervisorTrustEdgeRevokeFailedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PublishLocalEndpointIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4785,6 +5379,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PublishLocalEndpointRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PublishLocalEndpointTerminalSupervisorCleanupRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PublishLocalEndpointTerminalSupervisorCleanupDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClearLocalEndpointIdle`
@@ -4866,6 +5466,135 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSupervisorBridgeCommandAdmissionSenderMismatchRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionNotBoundIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionNotBoundAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionNotBoundRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionNotBoundRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionNotBoundStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionNotBoundDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionStaleSupervisorDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionSenderMismatchIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionSenderMismatchAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionSenderMismatchRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionSenderMismatchRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionSenderMismatchStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionSenderMismatchDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSupervisorCleanupCommandAdmissionCommandNotAllowed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeSupervisorMobPeerOverlayIdle`
@@ -5485,6 +6214,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SupervisorAuthorizeAdmissionResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SupervisorRotationSubmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupervisorRotationObservationResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SupervisorBridgeCommandAdmissionResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -5556,7 +6291,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `supervisor_revoke_pending_consistency`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `supervisor_revoked_receipt_consistency`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `supervisor_live_binding_excludes_revoked_receipt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `supervisor_authority_is_closed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `supervisor_publish_pending_consistency`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `supervisor_rotation_receipt_consistency`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `supervisor_rotation_terminal_receipts_closed_shape`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `supervisor_rotation_phase_shape`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

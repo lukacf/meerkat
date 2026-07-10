@@ -523,6 +523,242 @@ impl std::fmt::Display for RealtimeTranscriptStopReasonKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RealtimeUserContentBlobFinalizeDisposition {
+    #[default]
+    #[serde(rename = "RejectMismatch")]
+    RejectMismatch,
+    #[serde(rename = "NoPending")]
+    NoPending,
+    #[serde(rename = "ClearCommitted")]
+    ClearCommitted,
+}
+impl RealtimeUserContentBlobFinalizeDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RejectMismatch => "RejectMismatch",
+            Self::NoPending => "NoPending",
+            Self::ClearCommitted => "ClearCommitted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeUserContentBlobFinalizeDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RejectMismatch" => Ok(Self::RejectMismatch),
+            "NoPending" => Ok(Self::NoPending),
+            "ClearCommitted" => Ok(Self::ClearCommitted),
+            other => Err(format!(
+                "invalid RealtimeUserContentBlobFinalizeDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeUserContentBlobFinalizeDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeUserContentBlobFinalizeDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeUserContentBlobRecoveryDisposition {
+    #[default]
+    #[serde(rename = "NoPending")]
+    NoPending,
+    #[serde(rename = "RetryExact")]
+    RetryExact,
+    #[serde(rename = "CommitVerifiedBeforeCurrent")]
+    CommitVerifiedBeforeCurrent,
+    #[serde(rename = "ClearInvalidBeforeCurrent")]
+    ClearInvalidBeforeCurrent,
+}
+impl RealtimeUserContentBlobRecoveryDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoPending => "NoPending",
+            Self::RetryExact => "RetryExact",
+            Self::CommitVerifiedBeforeCurrent => "CommitVerifiedBeforeCurrent",
+            Self::ClearInvalidBeforeCurrent => "ClearInvalidBeforeCurrent",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeUserContentBlobRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoPending" => Ok(Self::NoPending),
+            "RetryExact" => Ok(Self::RetryExact),
+            "CommitVerifiedBeforeCurrent" => Ok(Self::CommitVerifiedBeforeCurrent),
+            "ClearInvalidBeforeCurrent" => Ok(Self::ClearInvalidBeforeCurrent),
+            other => Err(format!(
+                "invalid RealtimeUserContentBlobRecoveryDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeUserContentBlobRecoveryDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeUserContentBlobRecoveryDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeUserContentBlobStageDisposition {
+    #[default]
+    #[serde(rename = "RejectOccupied")]
+    RejectOccupied,
+    #[serde(rename = "StageNew")]
+    StageNew,
+    #[serde(rename = "ReuseExact")]
+    ReuseExact,
+}
+impl RealtimeUserContentBlobStageDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RejectOccupied => "RejectOccupied",
+            Self::StageNew => "StageNew",
+            Self::ReuseExact => "ReuseExact",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeUserContentBlobStageDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RejectOccupied" => Ok(Self::RejectOccupied),
+            "StageNew" => Ok(Self::StageNew),
+            "ReuseExact" => Ok(Self::ReuseExact),
+            other => Err(format!(
+                "invalid RealtimeUserContentBlobStageDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeUserContentBlobStageDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeUserContentBlobStageDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeUserContentIdentityDisposition {
+    #[default]
+    #[serde(rename = "RejectInvalidIdentity")]
+    RejectInvalidIdentity,
+    #[serde(rename = "RejectUnmaterializedPredecessor")]
+    RejectUnmaterializedPredecessor,
+    #[serde(rename = "RejectConflict")]
+    RejectConflict,
+    #[serde(rename = "AlreadyCommitted")]
+    AlreadyCommitted,
+    #[serde(rename = "CommitNew")]
+    CommitNew,
+}
+impl RealtimeUserContentIdentityDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RejectInvalidIdentity => "RejectInvalidIdentity",
+            Self::RejectUnmaterializedPredecessor => "RejectUnmaterializedPredecessor",
+            Self::RejectConflict => "RejectConflict",
+            Self::AlreadyCommitted => "AlreadyCommitted",
+            Self::CommitNew => "CommitNew",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeUserContentIdentityDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RejectInvalidIdentity" => Ok(Self::RejectInvalidIdentity),
+            "RejectUnmaterializedPredecessor" => Ok(Self::RejectUnmaterializedPredecessor),
+            "RejectConflict" => Ok(Self::RejectConflict),
+            "AlreadyCommitted" => Ok(Self::AlreadyCommitted),
+            "CommitNew" => Ok(Self::CommitNew),
+            other => Err(format!(
+                "invalid RealtimeUserContentIdentityDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeUserContentIdentityDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeUserContentIdentityDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ResumeOverrideRejection {
     #[default]
     #[serde(rename = "ProviderRequiresModel")]
@@ -761,6 +997,62 @@ impl std::convert::TryFrom<String> for SessionArchiveDisposition {
     }
 }
 impl std::fmt::Display for SessionArchiveDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SessionArchiveRuntimeObservation {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "RetirementRequired")]
+    RetirementRequired,
+    #[serde(rename = "QuiescentTerminal")]
+    QuiescentTerminal,
+}
+impl SessionArchiveRuntimeObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::RetirementRequired => "RetirementRequired",
+            Self::QuiescentTerminal => "QuiescentTerminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionArchiveRuntimeObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "RetirementRequired" => Ok(Self::RetirementRequired),
+            "QuiescentTerminal" => Ok(Self::QuiescentTerminal),
+            other => Err(format!(
+                "invalid SessionArchiveRuntimeObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionArchiveRuntimeObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionArchiveRuntimeObservation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1338,6 +1630,39 @@ pub mod inputs {
         pub segment_matches: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeUserContentFinal {
+        pub content_present: bool,
+        pub segment_empty: bool,
+        pub segment_matches: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeUserContentIdentity {
+        pub identity_fields_valid: bool,
+        pub key_tombstoned: bool,
+        pub predecessor_materialized: bool,
+        pub existing_identity_present: bool,
+        pub existing_payload_matches: bool,
+        pub target_item_id_available: bool,
+        pub reducer_commit_proof_required: bool,
+        pub reducer_commit_proof_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeUserContentBlobStage {
+        pub pending_present: bool,
+        pub pending_matches_request: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeUserContentBlobRecovery {
+        pub pending_present: bool,
+        pub request_matches_pending: bool,
+        pub pending_blob_valid: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRealtimeUserContentBlobFinalize {
+        pub pending_present: bool,
+        pub pending_matches_committed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRealtimeAssistantDelta {
         pub response_id_valid: bool,
         pub response_discarded: bool,
@@ -1389,7 +1714,19 @@ pub mod inputs {
         pub first_seen_unique_count: u64,
         pub every_item_has_order_entry: bool,
         pub every_order_entry_has_item: bool,
+        pub all_materialized_predecessor_references_exist: bool,
+        pub no_self_predecessor_references: bool,
+        pub causal_graph_acyclic: bool,
+        pub all_materialized_items_have_materialized_ancestry: bool,
         pub all_identity_fields_valid: bool,
+        pub all_user_content_identity_keys_match: bool,
+        pub all_user_content_identity_fields_valid: bool,
+        pub all_user_content_identity_item_ids_unique: bool,
+        pub all_user_content_identities_reference_materialized_user_items: bool,
+        pub all_user_content_tombstones_valid: bool,
+        pub user_content_identities_and_tombstones_disjoint: bool,
+        pub pending_user_content_blob_fields_valid: bool,
+        pub pending_user_content_blob_uncommitted: bool,
         pub all_delta_ids_valid: bool,
         pub all_completion_response_ids_valid: bool,
         pub all_discarded_response_ids_valid: bool,
@@ -1477,8 +1814,8 @@ pub mod inputs {
     pub struct ArchiveSessionDocument {
         pub session_id: SessionId,
         pub runtime_backed: bool,
-        pub durable_snapshot_present: bool,
-        pub runtime_session_registered: bool,
+        pub durable_document_present: bool,
+        pub runtime_observation: SessionArchiveRuntimeObservation,
     }
 }
 
@@ -1500,6 +1837,11 @@ pub enum Input {
     ResolveRealtimeItemObserved(inputs::ResolveRealtimeItemObserved),
     ResolveRealtimeItemSkipped(inputs::ResolveRealtimeItemSkipped),
     ResolveRealtimeUserTranscriptFinal(inputs::ResolveRealtimeUserTranscriptFinal),
+    ResolveRealtimeUserContentFinal(inputs::ResolveRealtimeUserContentFinal),
+    ResolveRealtimeUserContentIdentity(inputs::ResolveRealtimeUserContentIdentity),
+    ResolveRealtimeUserContentBlobStage(inputs::ResolveRealtimeUserContentBlobStage),
+    ResolveRealtimeUserContentBlobRecovery(inputs::ResolveRealtimeUserContentBlobRecovery),
+    ResolveRealtimeUserContentBlobFinalize(inputs::ResolveRealtimeUserContentBlobFinalize),
     ResolveRealtimeAssistantDelta(inputs::ResolveRealtimeAssistantDelta),
     ResolveRealtimeAssistantTextReplacement(inputs::ResolveRealtimeAssistantTextReplacement),
     ResolveRealtimeAssistantTurnCompleted(inputs::ResolveRealtimeAssistantTurnCompleted),
@@ -1549,6 +1891,19 @@ impl Input {
             Self::ResolveRealtimeItemSkipped(_) => InputKind::ResolveRealtimeItemSkipped,
             Self::ResolveRealtimeUserTranscriptFinal(_) => {
                 InputKind::ResolveRealtimeUserTranscriptFinal
+            }
+            Self::ResolveRealtimeUserContentFinal(_) => InputKind::ResolveRealtimeUserContentFinal,
+            Self::ResolveRealtimeUserContentIdentity(_) => {
+                InputKind::ResolveRealtimeUserContentIdentity
+            }
+            Self::ResolveRealtimeUserContentBlobStage(_) => {
+                InputKind::ResolveRealtimeUserContentBlobStage
+            }
+            Self::ResolveRealtimeUserContentBlobRecovery(_) => {
+                InputKind::ResolveRealtimeUserContentBlobRecovery
+            }
+            Self::ResolveRealtimeUserContentBlobFinalize(_) => {
+                InputKind::ResolveRealtimeUserContentBlobFinalize
             }
             Self::ResolveRealtimeAssistantDelta(_) => InputKind::ResolveRealtimeAssistantDelta,
             Self::ResolveRealtimeAssistantTextReplacement(_) => {
@@ -1605,6 +1960,11 @@ pub enum InputKind {
     ResolveRealtimeItemObserved,
     ResolveRealtimeItemSkipped,
     ResolveRealtimeUserTranscriptFinal,
+    ResolveRealtimeUserContentFinal,
+    ResolveRealtimeUserContentIdentity,
+    ResolveRealtimeUserContentBlobStage,
+    ResolveRealtimeUserContentBlobRecovery,
+    ResolveRealtimeUserContentBlobFinalize,
     ResolveRealtimeAssistantDelta,
     ResolveRealtimeAssistantTextReplacement,
     ResolveRealtimeAssistantTurnCompleted,
@@ -1699,6 +2059,22 @@ pub mod effects {
         pub consume_usage: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeUserContentIdentityResolved {
+        pub disposition: RealtimeUserContentIdentityDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeUserContentBlobStageResolved {
+        pub disposition: RealtimeUserContentBlobStageDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeUserContentBlobRecoveryResolved {
+        pub disposition: RealtimeUserContentBlobRecoveryDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeUserContentBlobFinalizeResolved {
+        pub disposition: RealtimeUserContentBlobFinalizeDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeTranscriptSnapshotRestoreAuthorized {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionMetadataPersistAuthorized {}
@@ -1780,6 +2156,10 @@ pub enum Effect {
     ),
     RealtimeTranscriptEventResolved(effects::RealtimeTranscriptEventResolved),
     RealtimeMaterializeCandidateResolved(effects::RealtimeMaterializeCandidateResolved),
+    RealtimeUserContentIdentityResolved(effects::RealtimeUserContentIdentityResolved),
+    RealtimeUserContentBlobStageResolved(effects::RealtimeUserContentBlobStageResolved),
+    RealtimeUserContentBlobRecoveryResolved(effects::RealtimeUserContentBlobRecoveryResolved),
+    RealtimeUserContentBlobFinalizeResolved(effects::RealtimeUserContentBlobFinalizeResolved),
     RealtimeTranscriptSnapshotRestoreAuthorized(
         effects::RealtimeTranscriptSnapshotRestoreAuthorized,
     ),
@@ -1815,6 +2195,10 @@ pub enum EffectKind {
     SystemContextPersistAppendAdmissionResolved,
     RealtimeTranscriptEventResolved,
     RealtimeMaterializeCandidateResolved,
+    RealtimeUserContentIdentityResolved,
+    RealtimeUserContentBlobStageResolved,
+    RealtimeUserContentBlobRecoveryResolved,
+    RealtimeUserContentBlobFinalizeResolved,
     RealtimeTranscriptSnapshotRestoreAuthorized,
     SessionMetadataPersistAuthorized,
     SessionBuildStatePersistAuthorized,
@@ -1870,6 +2254,24 @@ pub enum TransitionId {
     ResolveRealtimeUserTranscriptFinalEmpty,
     ResolveRealtimeUserTranscriptFinalStore,
     ResolveRealtimeUserTranscriptFinalReplayOrConflict,
+    ResolveRealtimeUserContentIdentityInvalid,
+    ResolveRealtimeUserContentIdentityUnmaterializedPredecessor,
+    ResolveRealtimeUserContentIdentityConflict,
+    ResolveRealtimeUserContentIdentityReplay,
+    ResolveRealtimeUserContentIdentityCommitNew,
+    ResolveRealtimeUserContentBlobStageNew,
+    ResolveRealtimeUserContentBlobStageReuseExact,
+    ResolveRealtimeUserContentBlobStageRejectOccupied,
+    ResolveRealtimeUserContentBlobRecoveryNone,
+    ResolveRealtimeUserContentBlobRecoveryExact,
+    ResolveRealtimeUserContentBlobRecoveryCommitVerified,
+    ResolveRealtimeUserContentBlobRecoveryClearInvalid,
+    ResolveRealtimeUserContentBlobFinalizeNone,
+    ResolveRealtimeUserContentBlobFinalizeClearCommitted,
+    ResolveRealtimeUserContentBlobFinalizeRejectMismatch,
+    ResolveRealtimeUserContentFinalEmpty,
+    ResolveRealtimeUserContentFinalStore,
+    ResolveRealtimeUserContentFinalReplayOrConflict,
     ResolveRealtimeAssistantDeltaInvalidOrDuplicate,
     ResolveRealtimeAssistantDeltaDiscarded,
     ResolveRealtimeAssistantDeltaLaneConflict,

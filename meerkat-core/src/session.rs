@@ -14,7 +14,8 @@ use crate::generated::{session_document, session_persistence_version_authority};
 use crate::lifecycle::run_primitive::TurnMetadataOverride;
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
-    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeUserContentIdentity,
+    SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 use crate::realtime_transcript_revision::{self, SessionRealtimeTranscriptState};
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
@@ -3169,6 +3170,41 @@ impl Session {
         Ok(())
     }
 
+    /// Hydrate user-message images in-place for a realtime provider replay,
+    /// under an explicit cumulative decoded-byte budget.
+    ///
+    /// Realtime reconnect/open is an execution seam, not a historical display
+    /// read: missing or malformed blobs fail closed, repeated references count
+    /// independently, and image-bearing tool/system content that the realtime
+    /// history projector does not consume remains blob-backed.
+    pub async fn hydrate_realtime_user_images(
+        &mut self,
+        blob_store: &dyn crate::BlobStore,
+        max_decoded_bytes: usize,
+    ) -> Result<(), crate::image_content::RealtimeUserImageHydrationError> {
+        let previous_digest = if self
+            .metadata
+            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        {
+            transcript_messages_digest(self.messages()).ok()
+        } else {
+            None
+        };
+        let messages = Arc::make_mut(&mut self.messages);
+        crate::image_content::hydrate_user_images_for_realtime_projection(
+            blob_store,
+            messages,
+            max_decoded_bytes,
+        )
+        .await?;
+        if let Some(previous_digest) = previous_digest
+            && transcript_messages_digest(self.messages()).ok().as_ref() != Some(&previous_digest)
+        {
+            self.refresh_transcript_head_after_message_mutation();
+        }
+        Ok(())
+    }
+
     /// Explicitly update the timestamp
     ///
     /// Call this after bulk operations that don't update timestamps automatically.
@@ -3251,6 +3287,23 @@ impl Session {
         commit.outcome
     }
 
+    /// Preview replay/rejection for non-text realtime user content without
+    /// mutating session state. Used by persistence before blob writes.
+    #[must_use]
+    pub fn preflight_realtime_user_content_event(
+        &self,
+        event: &RealtimeTranscriptEvent,
+    ) -> Option<crate::RealtimeUserContentApplyOutcome> {
+        let state = self.realtime_transcript_state();
+        realtime_transcript_revision::preflight_realtime_user_content_event(&state, event)
+            .unwrap_or_else(|err| {
+                fail_closed_generated_restore(
+                    "realtime-user-content-preflight",
+                    <serde_json::Error as serde::de::Error>::custom(err),
+                )
+            })
+    }
+
     /// Return every distinct provider `response_id` currently staged in the
     /// realtime-transcript metadata that has at least one **unmaterialized**
     /// assistant item and is **not already discarded**.
@@ -3273,6 +3326,82 @@ impl Session {
     pub fn in_flight_realtime_assistant_response_ids(&self) -> Vec<String> {
         let state = self.realtime_transcript_state();
         realtime_transcript_revision::in_flight_realtime_assistant_response_ids(&state)
+    }
+
+    /// Durable session-scoped bindings used to make live non-text input retry
+    /// safe across provider reconnects and lost public receipts.
+    #[must_use]
+    pub fn realtime_user_content_identities(&self) -> Vec<RealtimeUserContentIdentity> {
+        let state = self.realtime_transcript_state();
+        realtime_transcript_revision::realtime_user_content_identities(&state)
+    }
+
+    /// Return the bounded metadata-only image-blob recovery anchor, if one is
+    /// durably staged ahead of reducer finalization.
+    #[must_use]
+    pub fn pending_realtime_user_content_blob(
+        &self,
+    ) -> Option<crate::PendingRealtimeUserContentBlob> {
+        let state = self.realtime_transcript_state();
+        realtime_transcript_revision::pending_realtime_user_content_blob(&state)
+    }
+
+    /// Stage or exactly reuse the one-slot durable image-blob recovery anchor
+    /// through generated SessionDocument authority.
+    pub fn stage_pending_realtime_user_content_blob(
+        &mut self,
+        pending: crate::PendingRealtimeUserContentBlob,
+    ) -> Result<
+        crate::generated::session_document::RealtimeUserContentBlobStageDisposition,
+        realtime_transcript_revision::RealtimeTranscriptShellError,
+    > {
+        let mut state = self.realtime_transcript_state();
+        let disposition = realtime_transcript_revision::stage_pending_realtime_user_content_blob(
+            &mut state, pending,
+        )?;
+        self.store_realtime_transcript_state(&state);
+        Ok(disposition)
+    }
+
+    pub fn resolve_pending_realtime_user_content_blob_recovery(
+        &self,
+        request: Option<&crate::PendingRealtimeUserContentBlob>,
+        pending_blob_valid: bool,
+    ) -> Result<
+        crate::generated::session_document::RealtimeUserContentBlobRecoveryDisposition,
+        realtime_transcript_revision::RealtimeTranscriptShellError,
+    > {
+        let state = self.realtime_transcript_state();
+        realtime_transcript_revision::resolve_pending_realtime_user_content_blob_recovery(
+            &state,
+            request,
+            pending_blob_valid,
+        )
+    }
+
+    /// Clear a missing/corrupt occupied anchor only after generated recovery
+    /// authority classifies a different request as `ClearInvalidBeforeCurrent`.
+    pub fn clear_invalid_pending_realtime_user_content_blob(
+        &mut self,
+        request: Option<&crate::PendingRealtimeUserContentBlob>,
+    ) -> Result<(), realtime_transcript_revision::RealtimeTranscriptShellError> {
+        let mut state = self.realtime_transcript_state();
+        realtime_transcript_revision::clear_invalid_pending_realtime_user_content_blob(
+            &mut state, request,
+        )?;
+        self.store_realtime_transcript_state(&state);
+        Ok(())
+    }
+
+    /// Durable caller keys whose canonical realtime image was removed by a
+    /// same-session transcript rewrite. Provider adapters consume these as a
+    /// pre-send conflict registry on open and refresh.
+    #[must_use]
+    pub fn realtime_user_content_tombstones(
+        &self,
+    ) -> Vec<crate::realtime_transcript::RealtimeUserContentTombstone> {
+        let state = self.realtime_transcript_state();
+        realtime_transcript_revision::realtime_user_content_tombstones(&state)
     }
 
     fn realtime_transcript_state(&self) -> SessionRealtimeTranscriptState {
@@ -3303,6 +3432,26 @@ impl Session {
                 tracing::warn!(error = %error, "failed to serialize realtime transcript state");
             }
         }
+    }
+
+    fn reconciled_realtime_transcript_metadata_after_rewrite(
+        &self,
+        messages: &[Message],
+    ) -> Result<Option<serde_json::Value>, TranscriptEditError> {
+        let Some(state) = self
+            .try_realtime_transcript_state()
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let state =
+            realtime_transcript_revision::reconcile_realtime_transcript_state_after_rewrite(
+                state, messages,
+            )
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        serde_json::to_value(state)
+            .map(Some)
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))
     }
 
     fn apply_authorized_system_prompt(
@@ -4132,9 +4281,14 @@ impl Session {
                 ))
             })?
             .clone();
+        let realtime_state =
+            self.reconciled_realtime_transcript_metadata_after_rewrite(&head_body.messages)?;
         let value = serde_json::to_value(&state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
         self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+        if let Some(value) = realtime_state {
+            self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
+        }
         let mut updated_at = head_body.created_at;
         for commit in &state.commits {
             if commit.committed_at > updated_at {
@@ -4154,6 +4308,16 @@ impl Session {
         } else {
             transcript_messages_digest(self.messages())
         }
+    }
+
+    /// Monotonic durable generation for same-session transcript rewrites.
+    /// Ordinary message appends advance the content revision but do not change
+    /// this value, allowing live config refresh after normal turns while still
+    /// forcing reopen after a rewrite.
+    pub fn transcript_rewrite_generation(&self) -> Result<u64, serde_json::Error> {
+        Ok(self.transcript_history_state()?.map_or(0, |state| {
+            u64::try_from(state.commits.len()).unwrap_or(u64::MAX)
+        }))
     }
 
     /// Commit a same-session transcript rewrite and advance the transcript head.
@@ -4208,6 +4372,8 @@ impl Session {
         if revision == parent_revision {
             return Err(TranscriptEditError::NoOpRewrite { revision });
         }
+        let realtime_state =
+            self.reconciled_realtime_transcript_metadata_after_rewrite(&rewritten)?;
 
         let commit = TranscriptRewriteCommit {
             parent_revision,
@@ -4259,6 +4425,9 @@ impl Session {
         let value = serde_json::to_value(state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
         self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+        if let Some(value) = realtime_state {
+            self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
+        }
 
         self.messages = Arc::new(rewritten);
         self.updated_at = SystemTime::now();
@@ -5002,6 +5171,51 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Reducer tests enter through the same proof shape as persistent
+    /// ingestion: a metadata-only anchor is staged first, then a canonical
+    /// blob-backed event is applied. Blob bytes are verified in
+    /// PersistentSessionService tests; this helper tests only reducer ownership.
+    fn append_staged_user_image(
+        session: &mut Session,
+        event: &RealtimeTranscriptEvent,
+    ) -> RealtimeTranscriptApplyOutcome {
+        let RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key,
+            item_id,
+            previous_item_id,
+            content_index,
+            content,
+        } = event
+        else {
+            panic!("test helper requires user content final")
+        };
+        let [ContentBlock::Image { media_type, data }] = content.as_slice() else {
+            panic!("test helper requires exactly one image")
+        };
+        let media_type = crate::image_generation::MediaType::canonical_str(media_type);
+        let blob_id = match data {
+            crate::types::ImageData::Inline { data } => {
+                crate::blob::content_blob_id(&media_type, data)
+            }
+            crate::types::ImageData::Blob { blob_id } => blob_id.clone(),
+        };
+        let pending = crate::PendingRealtimeUserContentBlob {
+            idempotency_key: idempotency_key.clone(),
+            item_id: item_id.clone(),
+            previous_item_id: previous_item_id.clone(),
+            content_index: *content_index,
+            blob_id,
+            media_type,
+        };
+        assert_eq!(
+            session
+                .stage_pending_realtime_user_content_blob(pending.clone())
+                .expect("test pending anchor should stage"),
+            crate::generated::session_document::RealtimeUserContentBlobStageDisposition::StageNew
+        );
+        session.append_realtime_transcript_event(pending.canonical_event())
     }
 
     #[test]
@@ -6260,6 +6474,596 @@ mod tests {
             &session.messages()[1],
             Message::BlockAssistant(assistant) if block_assistant_text(assistant) == "hi"
         ));
+    }
+
+    #[test]
+    fn realtime_user_image_materializes_once_and_unblocks_causal_assistant() {
+        let mut session = Session::new();
+        let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".to_string();
+        let image = RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "image-request-1".to_string(),
+            item_id: "item_image".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: crate::types::ImageData::Inline {
+                    data: image_data.clone(),
+                },
+            }],
+        };
+
+        assert!(
+            !append_staged_user_image(&mut session, &image).is_inert(),
+            "first image final must materialize canonical user content"
+        );
+        let replay = session
+            .preflight_realtime_user_content_event(&image)
+            .expect("exact retry should preflight as committed");
+        assert!(matches!(
+            replay,
+            crate::RealtimeUserContentApplyOutcome::AlreadyCommitted(_)
+        ));
+
+        let staged_state = session
+            .metadata
+            .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)
+            .expect("realtime state must be persisted");
+        assert!(
+            !staged_state.to_string().contains(&image_data),
+            "materialized image bytes must not remain duplicated in transcript metadata"
+        );
+
+        assert!(
+            session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::AssistantTextDelta {
+                    response_id: "resp_image".to_string(),
+                    delta_id: "delta_image".to_string(),
+                    item_id: "item_assistant".to_string(),
+                    previous_item_id: Some("item_image".to_string()),
+                    content_index: 0,
+                    delta: "I see red.".to_string(),
+                })
+                .is_inert()
+        );
+        assert!(
+            !session
+                .append_realtime_transcript_event(RealtimeTranscriptEvent::AssistantTurnCompleted {
+                    response_id: "resp_image".to_string(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                },)
+                .is_inert(),
+            "materialized image predecessor must unblock the assistant response"
+        );
+
+        assert_eq!(session.messages().len(), 2);
+        assert!(matches!(
+            &session.messages()[0],
+            Message::User(user)
+                if matches!(
+                    user.content.as_slice(),
+                    [ContentBlock::Image {
+                        media_type,
+                        data: crate::types::ImageData::Blob { blob_id },
+                    }] if media_type == "image/png"
+                        && blob_id == &crate::blob::content_blob_id("image/png", &image_data)
+                )
+        ));
+        assert!(matches!(
+            &session.messages()[1],
+            Message::BlockAssistant(assistant) if block_assistant_text(assistant) == "I see red."
+        ));
+    }
+
+    #[test]
+    fn realtime_user_image_identity_is_durable_canonical_and_conflict_safe() {
+        let mut session = Session::new();
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".to_string();
+        let initial = RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "stable-image-key".to_string(),
+            item_id: "canonical-image-item".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: " image/PNG; charset=binary ".to_string(),
+                data: crate::types::ImageData::Inline { data: data.clone() },
+            }],
+        };
+        let committed = append_staged_user_image(&mut session, &initial);
+        let Some(crate::RealtimeUserContentApplyOutcome::Committed(identity)) =
+            committed.user_content
+        else {
+            panic!("first image must commit its durable identity");
+        };
+        assert_eq!(identity.item_id, "canonical-image-item");
+        assert_eq!(identity.media_type, "image/png");
+
+        let encoded = serde_json::to_string(&session).expect("session should serialize");
+        let restored: Session =
+            serde_json::from_str(&encoded).expect("committed identity should restore");
+
+        let replay_event = RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "stable-image-key".to_string(),
+            item_id: "ignored-retry-item".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: crate::types::ImageData::Inline { data: data.clone() },
+            }],
+        };
+        let replay = restored
+            .preflight_realtime_user_content_event(&replay_event)
+            .expect("exact retry should preflight");
+        assert!(matches!(
+            replay,
+            crate::RealtimeUserContentApplyOutcome::AlreadyCommitted(
+                crate::RealtimeUserContentIdentity { ref item_id, .. }
+            ) if item_id == "canonical-image-item"
+        ));
+
+        let conflict = restored
+            .preflight_realtime_user_content_event(&RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: "stable-image-key".to_string(),
+                item_id: "conflicting-item".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: crate::types::ImageData::Inline {
+                        data: "different-payload".to_string(),
+                    },
+                }],
+            })
+            .expect("conflicting retry should preflight");
+        assert!(matches!(
+            conflict,
+            crate::RealtimeUserContentApplyOutcome::RejectedConflict { .. }
+        ));
+
+        let item_collision = restored
+            .preflight_realtime_user_content_event(&RealtimeTranscriptEvent::UserContentFinal {
+                idempotency_key: "another-key".to_string(),
+                item_id: "canonical-image-item".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: crate::types::ImageData::Inline { data },
+                }],
+            })
+            .expect("item collision should preflight");
+        assert!(matches!(
+            item_collision,
+            crate::RealtimeUserContentApplyOutcome::RejectedConflict { .. }
+        ));
+        assert_eq!(restored.messages().len(), 1);
+        serde_json::to_string(&restored).expect("rejections must not corrupt durable state");
+    }
+
+    #[test]
+    fn realtime_user_image_reducer_never_receipts_without_pending_blob_proof() {
+        for data in [
+            crate::types::ImageData::Inline {
+                data: "iVBORw0KGgo=".to_string(),
+            },
+            crate::types::ImageData::Blob {
+                blob_id: crate::blob::content_blob_id("image/png", "iVBORw0KGgo="),
+            },
+        ] {
+            let mut session = Session::new();
+            let outcome = session.append_realtime_transcript_event(
+                RealtimeTranscriptEvent::UserContentFinal {
+                    idempotency_key: "unstaged-image-key".to_string(),
+                    item_id: "unstaged-image-item".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    content: vec![ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data,
+                    }],
+                },
+            );
+            assert!(matches!(
+                outcome.user_content,
+                Some(crate::RealtimeUserContentApplyOutcome::RejectedInvalidIdentity { .. })
+            ));
+            assert!(session.messages().is_empty());
+            assert!(session.realtime_user_content_identities().is_empty());
+        }
+    }
+
+    #[test]
+    fn realtime_user_image_pending_slot_is_generated_bounded_and_recovery_typed() {
+        use crate::generated::session_document::{
+            RealtimeUserContentBlobRecoveryDisposition, RealtimeUserContentBlobStageDisposition,
+        };
+        let mut session = Session::new();
+        let pending = crate::PendingRealtimeUserContentBlob {
+            idempotency_key: "pending-key-a".to_string(),
+            item_id: "pending-item-a".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            blob_id: crate::blob::content_blob_id("image/png", "iVBORw0KGgo="),
+            media_type: "image/png".to_string(),
+        };
+        let different = crate::PendingRealtimeUserContentBlob {
+            idempotency_key: "pending-key-b".to_string(),
+            item_id: "pending-item-b".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            blob_id: crate::blob::content_blob_id("image/png", "iVBORw0KGgoB"),
+            media_type: "image/png".to_string(),
+        };
+        assert_eq!(
+            session
+                .stage_pending_realtime_user_content_blob(pending.clone())
+                .expect("empty slot stages"),
+            RealtimeUserContentBlobStageDisposition::StageNew
+        );
+        assert_eq!(
+            session
+                .stage_pending_realtime_user_content_blob(pending.clone())
+                .expect("exact stage retry is idempotent"),
+            RealtimeUserContentBlobStageDisposition::ReuseExact
+        );
+        assert_eq!(
+            session
+                .stage_pending_realtime_user_content_blob(different.clone())
+                .expect("occupied decision is typed"),
+            RealtimeUserContentBlobStageDisposition::RejectOccupied
+        );
+        assert_eq!(
+            session.pending_realtime_user_content_blob(),
+            Some(pending.clone())
+        );
+        assert_eq!(
+            session
+                .resolve_pending_realtime_user_content_blob_recovery(Some(&pending), false)
+                .expect("exact recovery decision"),
+            RealtimeUserContentBlobRecoveryDisposition::RetryExact
+        );
+        assert_eq!(
+            session
+                .resolve_pending_realtime_user_content_blob_recovery(Some(&different), true)
+                .expect("verified older recovery decision"),
+            RealtimeUserContentBlobRecoveryDisposition::CommitVerifiedBeforeCurrent
+        );
+        assert_eq!(
+            session
+                .resolve_pending_realtime_user_content_blob_recovery(Some(&different), false)
+                .expect("invalid older recovery decision"),
+            RealtimeUserContentBlobRecoveryDisposition::ClearInvalidBeforeCurrent
+        );
+        session
+            .clear_invalid_pending_realtime_user_content_blob(Some(&different))
+            .expect("generated clear-invalid disposition authorizes clear");
+        assert!(session.pending_realtime_user_content_blob().is_none());
+    }
+
+    #[test]
+    fn transcript_rewrite_tombstones_removed_image_key_and_accepts_new_key() {
+        let mut session = Session::new();
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".to_string();
+        let original = RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "removed-image-key".to_string(),
+            item_id: "removed-image-item".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: crate::types::ImageData::Inline { data: data.clone() },
+            }],
+        };
+        assert!(matches!(
+            append_staged_user_image(&mut session, &original).user_content,
+            Some(crate::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+
+        let parent = session.transcript_revision().expect("parent revision");
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("image removed"))],
+                TranscriptRewriteReason::new("remove-image"),
+                None,
+                Some(parent),
+            )
+            .expect("rewrite should tombstone removed image identity");
+
+        assert!(session.realtime_user_content_identities().is_empty());
+        assert_eq!(
+            session.realtime_user_content_tombstones(),
+            vec![crate::RealtimeUserContentTombstone {
+                idempotency_key: "removed-image-key".to_string(),
+            }]
+        );
+        assert!(matches!(
+            session.preflight_realtime_user_content_event(&original),
+            Some(crate::RealtimeUserContentApplyOutcome::RejectedConflict { .. })
+        ));
+        assert!(matches!(
+            session
+                .append_realtime_transcript_event(original)
+                .user_content,
+            Some(crate::RealtimeUserContentApplyOutcome::RejectedConflict { .. })
+        ));
+        assert_eq!(
+            session.messages().len(),
+            1,
+            "stale retry emits no receipt content"
+        );
+
+        let new_image = RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "new-image-key".to_string(),
+            item_id: "new-image-item".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: crate::types::ImageData::Inline { data },
+            }],
+        };
+        assert!(matches!(
+            append_staged_user_image(&mut session, &new_image).user_content,
+            Some(crate::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+        assert_eq!(session.messages().len(), 2);
+
+        let restored: Session = serde_json::from_str(
+            &serde_json::to_string(&session).expect("serialize rewritten session"),
+        )
+        .expect("cold restore rewritten session");
+        assert_eq!(restored.realtime_user_content_identities().len(), 1);
+        assert_eq!(restored.realtime_user_content_tombstones().len(), 1);
+    }
+
+    #[test]
+    fn transcript_rewrite_retains_only_canonical_image_occurrence_for_exact_replay() {
+        let mut session = Session::new();
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".to_string();
+        let original = RealtimeTranscriptEvent::UserContentFinal {
+            idempotency_key: "retained-image-key".to_string(),
+            item_id: "retained-image-item".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: crate::types::ImageData::Inline { data },
+            }],
+        };
+        assert!(matches!(
+            append_staged_user_image(&mut session, &original).user_content,
+            Some(crate::RealtimeUserContentApplyOutcome::Committed(_))
+        ));
+        let retained_message = session.messages()[0].clone();
+        let parent = session.transcript_revision().expect("parent revision");
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![
+                    retained_message,
+                    Message::User(UserMessage::text("new canonical neighbor")),
+                ],
+                TranscriptRewriteReason::new("retain-image"),
+                None,
+                Some(parent),
+            )
+            .expect("rewrite retaining exact inline image should reconcile");
+
+        assert!(session.realtime_user_content_tombstones().is_empty());
+        let replay = session
+            .preflight_realtime_user_content_event(&original)
+            .expect("retained image should preflight as exact replay");
+        assert!(matches!(
+            replay,
+            crate::RealtimeUserContentApplyOutcome::AlreadyCommitted(_)
+        ));
+        assert_eq!(session.messages().len(), 2);
+    }
+
+    #[test]
+    fn transcript_rewrite_rejects_atomically_while_image_blob_anchor_is_pending() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("before rewrite")));
+        let pending = crate::PendingRealtimeUserContentBlob {
+            idempotency_key: "pending-rewrite-key".to_string(),
+            item_id: "pending-rewrite-item".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            blob_id: crate::blob::content_blob_id("image/png", "pending-bytes"),
+            media_type: "image/png".to_string(),
+        };
+        session
+            .stage_pending_realtime_user_content_blob(pending.clone())
+            .expect("stage durable pending anchor");
+        let parent = session.transcript_revision().expect("parent revision");
+        let error = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("after rewrite"))],
+                TranscriptRewriteReason::new("blocked-pending-image"),
+                None,
+                Some(parent),
+            )
+            .expect_err("rewrite must not cross an unresolved image anchor");
+        assert!(
+            error
+                .to_string()
+                .contains("history_rewrite_pending_user_content_blob")
+        );
+        assert!(matches!(
+            &session.messages()[0],
+            Message::User(user) if user.text_content() == "before rewrite"
+        ));
+        assert_eq!(session.pending_realtime_user_content_blob(), Some(pending));
+    }
+
+    #[test]
+    fn realtime_user_image_rejects_noncanonical_blob_and_multiblock_shape() {
+        let mut session = Session::new();
+        for (key, content) in [
+            (
+                "invalid-blob",
+                vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: crate::types::ImageData::Blob {
+                        blob_id: crate::BlobId::new("sha256:not-a-digest"),
+                    },
+                }],
+            ),
+            (
+                "multi-block",
+                vec![
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: crate::types::ImageData::Inline {
+                            data: "payload".to_string(),
+                        },
+                    },
+                    ContentBlock::Text {
+                        text: "smuggled".to_string(),
+                    },
+                ],
+            ),
+        ] {
+            let outcome = session.append_realtime_transcript_event(
+                RealtimeTranscriptEvent::UserContentFinal {
+                    idempotency_key: key.to_string(),
+                    item_id: format!("item-{key}"),
+                    previous_item_id: None,
+                    content_index: 0,
+                    content,
+                },
+            );
+            assert!(matches!(
+                outcome.user_content,
+                Some(crate::RealtimeUserContentApplyOutcome::RejectedInvalidIdentity { .. })
+            ));
+        }
+        assert!(session.messages().is_empty());
+        let encoded = serde_json::to_string(&session).expect("session should serialize");
+        serde_json::from_str::<Session>(&encoded).expect("rejections must leave restorable state");
+    }
+
+    #[test]
+    fn realtime_restore_rejects_malformed_causal_graphs_and_accepts_waiting_dag() {
+        fn restore(
+            items: serde_json::Value,
+            first_seen_order: Vec<&str>,
+        ) -> Result<
+            crate::realtime_transcript_revision::SessionRealtimeTranscriptState,
+            crate::realtime_transcript_revision::RealtimeTranscriptShellError,
+        > {
+            let state = serde_json::from_value(serde_json::json!({
+                "items": items,
+                "first_seen_order": first_seen_order,
+            }))
+            .expect("test state shape should deserialize");
+            crate::realtime_transcript_revision::restore_realtime_transcript_state(state)
+        }
+
+        assert!(
+            restore(
+                serde_json::json!({
+                    "child": { "role": "user", "previous_item_id": "missing" }
+                }),
+                vec!["child"],
+            )
+            .is_ok(),
+            "an unmaterialized out-of-order item must survive cold restore until its predecessor arrives"
+        );
+        assert!(
+            restore(
+                serde_json::json!({
+                    "child": {
+                        "role": "user",
+                        "previous_item_id": "missing",
+                        "ready": true,
+                        "materialized": true
+                    }
+                }),
+                vec!["child"],
+            )
+            .is_err(),
+            "a materialized item cannot reference a missing predecessor"
+        );
+        assert!(
+            restore(
+                serde_json::json!({
+                    "self": { "role": "user", "previous_item_id": "self" }
+                }),
+                vec!["self"],
+            )
+            .is_err(),
+            "self edge must fail cold restore"
+        );
+        assert!(
+            restore(
+                serde_json::json!({
+                    "a": { "role": "user", "previous_item_id": "b" },
+                    "b": { "role": "user", "previous_item_id": "a" }
+                }),
+                vec!["a", "b"],
+            )
+            .is_err(),
+            "cycle must fail cold restore"
+        );
+        assert!(
+            restore(
+                serde_json::json!({
+                    "root": { "role": "user" },
+                    "materialized_child": {
+                        "role": "user",
+                        "previous_item_id": "root",
+                        "ready": true,
+                        "materialized": true
+                    }
+                }),
+                vec!["root", "materialized_child"],
+            )
+            .is_err(),
+            "materialized child cannot have unmaterialized ancestry"
+        );
+        assert!(
+            restore(
+                serde_json::json!({
+                    "root": { "role": "user" },
+                    "waiting_child": { "role": "user", "previous_item_id": "root" }
+                }),
+                vec!["waiting_child", "root"],
+            )
+            .is_ok(),
+            "valid acyclic waiting graph should restore even when first-seen order is child-first"
+        );
+    }
+
+    #[test]
+    fn realtime_restore_handles_long_waiting_chain_with_bounded_graph_walk() {
+        const ITEM_COUNT: usize = 4_096;
+        let mut items = serde_json::Map::new();
+        let mut order = Vec::with_capacity(ITEM_COUNT);
+        for index in 0..ITEM_COUNT {
+            let item_id = format!("item-{index:04}");
+            let value = if index == 0 {
+                serde_json::json!({ "role": "user" })
+            } else {
+                serde_json::json!({
+                    "role": "user",
+                    "previous_item_id": format!("item-{:04}", index - 1),
+                })
+            };
+            order.push(item_id.clone());
+            items.insert(item_id, value);
+        }
+        let state = serde_json::from_value(serde_json::json!({
+            "items": items,
+            "first_seen_order": order,
+        }))
+        .expect("long-chain fixture should deserialize");
+        crate::realtime_transcript_revision::restore_realtime_transcript_state(state)
+            .expect("long valid waiting DAG should restore in one bounded graph walk");
     }
 
     /// R5-7: `AssistantTranscriptFinalText` injects authoritative final text

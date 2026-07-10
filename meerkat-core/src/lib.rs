@@ -111,7 +111,11 @@ pub use auth::{
     PrincipalKind, PrincipalRef, VisibilityClass, can_observe_visibility,
     metadata_grants_no_visibility,
 };
-pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
+pub use blob::{
+    BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, ImageBlobIntegrityError,
+    VerifiedImageBlob, ensure_stored_image_blob, validate_image_blob_payload,
+    verify_stored_image_blob,
+};
 pub use budget::{
     Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,
 };
@@ -202,9 +206,11 @@ pub use hooks::{
     HookLlmResponse, HookOutcome, HookPoint, HookReasonCode, HookToolCall, HookToolResult,
 };
 pub use image_content::{
-    MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,
-    externalize_content_blocks, externalize_content_input, externalize_messages_from,
-    hydrate_content_blocks, hydrate_content_input, hydrate_messages_for_execution,
+    MissingBlobBehavior, RealtimeOpenProjectionAdmission, RealtimeOpenProjectionAdmissionError,
+    RealtimeOpenProjectionLease, RealtimeOpenProjectionLeaseSlot, collect_blob_ids_from_blocks,
+    collect_blob_ids_from_messages, externalize_content_blocks, externalize_content_input,
+    externalize_messages_from, hydrate_content_blocks, hydrate_content_input,
+    hydrate_messages_for_execution,
 };
 pub use image_generation::*;
 pub use interaction::{
@@ -250,8 +256,10 @@ pub use ops_lifecycle::{
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
 pub use realtime_transcript::{
-    RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
-    RealtimeTranscriptRole, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+    PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
+    RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole, RealtimeUserContentApplyOutcome,
+    RealtimeUserContentIdentity, RealtimeUserContentTombstone,
+    SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 pub use retry::{
     LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, RetryPolicy,
@@ -379,5 +387,5 @@ pub use connection::{
     PeerRole, ProfileId, ProviderBinding, ProviderBindingConfig, ProviderBindingError,
     RealmConfigSection, RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
     resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
-    resolve_realm_binding_target_for_provider,
+    resolve_explicit_auth_binding_target, resolve_realm_binding_target_for_provider,
 };

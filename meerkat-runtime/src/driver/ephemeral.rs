@@ -366,6 +366,281 @@ impl EphemeralRuntimeDriver {
         })
     }
 
+    fn supervisor_revocation_pending_receipt_from_state(
+        state: &mm_dsl::MeerkatMachineState,
+    ) -> Option<crate::store::SupervisorRevocationPendingReceipt> {
+        match (
+            state.supervisor_revoke_pending_name.as_ref(),
+            state.supervisor_revoke_pending_peer_id.as_ref(),
+            state.supervisor_revoke_pending_address.as_ref(),
+            state.supervisor_revoke_pending_signing_public_key.as_ref(),
+            state.supervisor_revoke_pending_epoch,
+        ) {
+            (Some(name), Some(peer_id), Some(address), Some(signing_public_key), Some(epoch)) => {
+                Some(crate::store::SupervisorRevocationPendingReceipt::new(
+                    name.clone(),
+                    peer_id.clone(),
+                    address.clone(),
+                    signing_public_key.clone(),
+                    epoch,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn supervisor_authority_snapshot_from_state(
+        state: &mm_dsl::MeerkatMachineState,
+    ) -> crate::store::SupervisorAuthoritySnapshot {
+        let current = if let (
+            Some(operation_id),
+            Some(phase),
+            Some(previous_name),
+            Some(previous_peer_id),
+            Some(previous_address),
+            Some(previous_signing_public_key),
+            Some(previous_epoch),
+            Some(next_name),
+            Some(next_peer_id),
+            Some(next_address),
+            Some(next_signing_public_key),
+            Some(next_epoch),
+        ) = (
+            state.supervisor_rotation_operation_id.as_ref(),
+            state.supervisor_rotation_phase,
+            state.supervisor_rotation_previous_name.as_ref(),
+            state.supervisor_rotation_previous_peer_id.as_ref(),
+            state.supervisor_rotation_previous_address.as_ref(),
+            state
+                .supervisor_rotation_previous_signing_public_key
+                .as_ref(),
+            state.supervisor_rotation_previous_epoch,
+            state.supervisor_rotation_next_name.as_ref(),
+            state.supervisor_rotation_next_peer_id.as_ref(),
+            state.supervisor_rotation_next_address.as_ref(),
+            state.supervisor_rotation_next_signing_public_key.as_ref(),
+            state.supervisor_rotation_next_epoch,
+        ) {
+            let phase = match phase {
+                mm_dsl::SupervisorRotationPhase::PreviousRevokePending => {
+                    crate::store::SupervisorRotationPersistencePhase::PreviousRevokePending
+                }
+                mm_dsl::SupervisorRotationPhase::NextPublishPending => {
+                    crate::store::SupervisorRotationPersistencePhase::NextPublishPending
+                }
+                mm_dsl::SupervisorRotationPhase::Completed => {
+                    crate::store::SupervisorRotationPersistencePhase::Completed
+                }
+                mm_dsl::SupervisorRotationPhase::Rejected => {
+                    crate::store::SupervisorRotationPersistencePhase::Rejected
+                }
+            };
+            let rejection = state
+                .supervisor_rotation_rejection
+                .map(|rejection| match rejection {
+                    mm_dsl::SupervisorRotationRejectionKind::OperationConflict => {
+                        crate::store::SupervisorRotationRejection::OperationConflict
+                    }
+                    mm_dsl::SupervisorRotationRejectionKind::NotBound => {
+                        crate::store::SupervisorRotationRejection::NotBound
+                    }
+                    mm_dsl::SupervisorRotationRejectionKind::SenderMismatch => {
+                        crate::store::SupervisorRotationRejection::SenderMismatch
+                    }
+                    mm_dsl::SupervisorRotationRejectionKind::TargetEpochNotAdvanced => {
+                        crate::store::SupervisorRotationRejection::TargetEpochNotAdvanced
+                    }
+                    mm_dsl::SupervisorRotationRejectionKind::InvalidTarget => {
+                        crate::store::SupervisorRotationRejection::InvalidTarget
+                    }
+                    mm_dsl::SupervisorRotationRejectionKind::UnsupportedProtocolVersion => {
+                        crate::store::SupervisorRotationRejection::UnsupportedProtocolVersion
+                    }
+                });
+            let Ok(operation_id) = operation_id.parse() else {
+                return crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt;
+            };
+            crate::store::SupervisorAuthoritySnapshot::RotationOperation(
+                crate::store::SupervisorRotationReceipt::new(
+                    operation_id,
+                    phase,
+                    rejection,
+                    crate::store::SupervisorBindingReceipt::new(
+                        previous_name.clone(),
+                        previous_peer_id.clone(),
+                        previous_address.clone(),
+                        previous_signing_public_key.clone(),
+                        previous_epoch,
+                    ),
+                    crate::store::SupervisorBindingReceipt::new(
+                        next_name.clone(),
+                        next_peer_id.clone(),
+                        next_address.clone(),
+                        next_signing_public_key.clone(),
+                        next_epoch,
+                    ),
+                ),
+            )
+        } else if state.supervisor_binding_kind == mm_dsl::SupervisorBindingKind::Bound {
+            match (
+                state.supervisor_bound_name.as_ref(),
+                state.supervisor_bound_peer_id.as_ref(),
+                state.supervisor_bound_address.as_ref(),
+                state.supervisor_bound_signing_public_key.as_ref(),
+                state.supervisor_bound_epoch,
+            ) {
+                (
+                    Some(name),
+                    Some(peer_id),
+                    Some(address),
+                    Some(signing_public_key),
+                    Some(epoch),
+                ) => crate::store::SupervisorAuthoritySnapshot::Bound(
+                    crate::store::SupervisorBindingReceipt::new(
+                        name.clone(),
+                        peer_id.clone(),
+                        address.clone(),
+                        signing_public_key.clone(),
+                        epoch,
+                    ),
+                ),
+                _ => crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            }
+        } else if let Some(pending) = Self::supervisor_revocation_pending_receipt_from_state(state)
+        {
+            crate::store::SupervisorAuthoritySnapshot::RevocationPending(pending)
+        } else {
+            match (
+                state.supervisor_revoked_peer_id.as_ref(),
+                state.supervisor_revoked_signing_public_key.as_ref(),
+                state.supervisor_revoked_epoch,
+            ) {
+                (Some(peer_id), Some(signing_public_key), Some(epoch)) => {
+                    crate::store::SupervisorAuthoritySnapshot::RevokedReceipt(
+                        crate::store::RevokedSupervisorReceipt::new(
+                            peer_id.clone(),
+                            signing_public_key.clone(),
+                            epoch,
+                        ),
+                    )
+                }
+                _ => crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            }
+        };
+
+        let active_operation_id = state.supervisor_rotation_operation_id.as_deref();
+        let terminal_receipts = state
+            .supervisor_rotation_terminal_phases
+            .iter()
+            .filter(|(operation_id, _)| Some(operation_id.as_str()) != active_operation_id)
+            .filter_map(|(operation_id, phase)| {
+                let previous = crate::store::SupervisorBindingReceipt::new(
+                    state
+                        .supervisor_rotation_terminal_previous_names
+                        .get(operation_id)?
+                        .clone(),
+                    state
+                        .supervisor_rotation_terminal_previous_peer_ids
+                        .get(operation_id)?
+                        .clone(),
+                    state
+                        .supervisor_rotation_terminal_previous_addresses
+                        .get(operation_id)?
+                        .clone(),
+                    state
+                        .supervisor_rotation_terminal_previous_signing_public_keys
+                        .get(operation_id)?
+                        .clone(),
+                    *state
+                        .supervisor_rotation_terminal_previous_epochs
+                        .get(operation_id)?,
+                );
+                let next = crate::store::SupervisorBindingReceipt::new(
+                    state
+                        .supervisor_rotation_terminal_next_names
+                        .get(operation_id)?
+                        .clone(),
+                    state
+                        .supervisor_rotation_terminal_next_peer_ids
+                        .get(operation_id)?
+                        .clone(),
+                    state
+                        .supervisor_rotation_terminal_next_addresses
+                        .get(operation_id)?
+                        .clone(),
+                    state
+                        .supervisor_rotation_terminal_next_signing_public_keys
+                        .get(operation_id)?
+                        .clone(),
+                    *state
+                        .supervisor_rotation_terminal_next_epochs
+                        .get(operation_id)?,
+                );
+                let (phase, rejection) = match phase {
+                    mm_dsl::SupervisorRotationPhase::Completed => (
+                        crate::store::SupervisorRotationPersistencePhase::Completed,
+                        None,
+                    ),
+                    mm_dsl::SupervisorRotationPhase::Rejected => (
+                        crate::store::SupervisorRotationPersistencePhase::Rejected,
+                        Some(match state
+                            .supervisor_rotation_terminal_rejections
+                            .get(operation_id)?
+                        {
+                            mm_dsl::SupervisorRotationRejectionKind::OperationConflict => {
+                                crate::store::SupervisorRotationRejection::OperationConflict
+                            }
+                            mm_dsl::SupervisorRotationRejectionKind::NotBound => {
+                                crate::store::SupervisorRotationRejection::NotBound
+                            }
+                            mm_dsl::SupervisorRotationRejectionKind::SenderMismatch => {
+                                crate::store::SupervisorRotationRejection::SenderMismatch
+                            }
+                            mm_dsl::SupervisorRotationRejectionKind::TargetEpochNotAdvanced => {
+                                crate::store::SupervisorRotationRejection::TargetEpochNotAdvanced
+                            }
+                            mm_dsl::SupervisorRotationRejectionKind::InvalidTarget => {
+                                crate::store::SupervisorRotationRejection::InvalidTarget
+                            }
+                            mm_dsl::SupervisorRotationRejectionKind::UnsupportedProtocolVersion => {
+                                crate::store::SupervisorRotationRejection::UnsupportedProtocolVersion
+                            }
+                        }),
+                    ),
+                    mm_dsl::SupervisorRotationPhase::PreviousRevokePending
+                    | mm_dsl::SupervisorRotationPhase::NextPublishPending => return None,
+                };
+                let typed_operation_id = operation_id.parse().ok()?;
+                Some((typed_operation_id, crate::store::SupervisorRotationReceipt::new(
+                    typed_operation_id,
+                    phase,
+                    rejection,
+                    previous,
+                    next,
+                )))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        if terminal_receipts.is_empty() {
+            current
+        } else {
+            crate::store::SupervisorAuthoritySnapshot::WithRotationHistory {
+                current: Box::new(current),
+                terminal_receipts,
+            }
+        }
+    }
+
+    pub(crate) fn supervisor_authority_snapshot(
+        &self,
+    ) -> crate::store::SupervisorAuthoritySnapshot {
+        self.with_dsl_state(Self::supervisor_authority_snapshot_from_state)
+    }
+
+    // This is the typed recovery boundary for independently persisted runtime
+    // binding facts; keeping those observations explicit avoids hiding a
+    // missing authority fact inside a partially populated compatibility bag.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn recover_runtime_authority_from_binding_observation(
         &mut self,
         session_id: mm_dsl::SessionId,
@@ -374,6 +649,7 @@ impl EphemeralRuntimeDriver {
         active_fence_token: Option<u64>,
         active_runtime_generation: Option<mm_dsl::Generation>,
         active_runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
+        supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
     ) -> Result<(), RuntimeDriverError> {
         let silent_intent_overrides =
             self.with_dsl_state(|state| state.silent_intent_overrides.clone());
@@ -385,6 +661,7 @@ impl EphemeralRuntimeDriver {
             active_runtime_generation,
             active_runtime_epoch_id,
             silent_intent_overrides,
+            supervisor_authority,
         )
     }
 
@@ -398,10 +675,11 @@ impl EphemeralRuntimeDriver {
         active_runtime_generation: Option<mm_dsl::Generation>,
         active_runtime_epoch_id: Option<mm_dsl::RuntimeEpochId>,
         silent_intent_overrides: std::collections::BTreeSet<String>,
+        supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
     ) -> Result<(), RuntimeDriverError> {
         let current_run_id = self.current_run_id();
         let pre_run_phase = self.pre_run_phase();
-        let recovered =
+        let mut recovered =
             crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation_id(
                 session_id,
                 runtime_phase,
@@ -419,6 +697,95 @@ impl EphemeralRuntimeDriver {
                     "persistent runtime recovery authority",
                 ))
             })?;
+        let (supervisor_authority, terminal_rotation_receipts) = match supervisor_authority {
+            crate::store::SupervisorAuthoritySnapshot::WithRotationHistory {
+                current,
+                terminal_receipts,
+            } => (*current, terminal_receipts),
+            current => (current, std::collections::BTreeMap::new()),
+        };
+        match supervisor_authority {
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt => {}
+            crate::store::SupervisorAuthoritySnapshot::Bound(binding) => {
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut recovered,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::RecoverSupervisorBinding {
+                        name: binding.name().to_owned(),
+                        peer_id: binding.peer_id().to_owned(),
+                        address: binding.address().to_owned(),
+                        signing_public_key: binding.signing_public_key().to_owned(),
+                        epoch: binding.epoch(),
+                    },
+                )
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                        err,
+                        "persistent supervisor binding recovery authority",
+                    ))
+                })?;
+            }
+            crate::store::SupervisorAuthoritySnapshot::RevocationPending(pending) => {
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut recovered,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::RecoverSupervisorRevocationPending {
+                        name: pending.name().to_owned(),
+                        peer_id: pending.peer_id().to_owned(),
+                        address: pending.address().to_owned(),
+                        signing_public_key: pending.signing_public_key().to_owned(),
+                        epoch: pending.epoch(),
+                    },
+                )
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                        err,
+                        "persistent supervisor revocation-pending recovery authority",
+                    ))
+                })?;
+            }
+            crate::store::SupervisorAuthoritySnapshot::RotationOperation(rotation) => {
+                crate::meerkat_machine::dsl_authority::recover_supervisor_rotation_operation(
+                    &mut recovered,
+                    &rotation,
+                )
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                        err,
+                        "persistent supervisor rotation recovery authority",
+                    ))
+                })?;
+            }
+            crate::store::SupervisorAuthoritySnapshot::RevokedReceipt(receipt) => {
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut recovered,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::RecoverRevokedSupervisorReceipt {
+                        peer_id: receipt.peer_id().to_owned(),
+                        signing_public_key: receipt.signing_public_key().to_owned(),
+                        epoch: receipt.epoch(),
+                    },
+                )
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                        err,
+                        "persistent revoked supervisor receipt recovery authority",
+                    ))
+                })?;
+            }
+            crate::store::SupervisorAuthoritySnapshot::WithRotationHistory { .. } => {
+                unreachable!("rotation history wrapper was flattened before authority recovery")
+            }
+        }
+        for rotation in terminal_rotation_receipts.into_values() {
+            crate::meerkat_machine::dsl_authority::recover_supervisor_rotation_terminal_receipt(
+                &mut recovered,
+                &rotation,
+            )
+            .map_err(|err| {
+                RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                    err,
+                    "persistent supervisor rotation history recovery authority",
+                ))
+            })?;
+        }
         {
             let authority = self.shared_dsl_authority();
             let mut authority = authority
@@ -3635,6 +4002,133 @@ mod tests {
             driver.control_snapshot().phase,
             RuntimeState::Running,
             "the shell projection still records the mechanical projection",
+        );
+    }
+
+    #[test]
+    fn completed_rotation_recovery_retains_observable_operation_receipt() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("rotation-recovery"));
+        let previous = crate::store::SupervisorBindingReceipt::new(
+            "previous".into(),
+            "peer-previous".into(),
+            "inproc://previous".into(),
+            "11".repeat(32),
+            7,
+        );
+        let next = crate::store::SupervisorBindingReceipt::new(
+            "next".into(),
+            "peer-next".into(),
+            "inproc://next".into(),
+            "22".repeat(32),
+            8,
+        );
+        let operation_id =
+            meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId::from(
+                uuid::Uuid::new_v4(),
+            );
+        let expected = crate::store::SupervisorAuthoritySnapshot::RotationOperation(
+            crate::store::SupervisorRotationReceipt::new(
+                operation_id,
+                crate::store::SupervisorRotationPersistencePhase::Completed,
+                None,
+                previous,
+                next,
+            ),
+        );
+
+        driver
+            .recover_runtime_authority_from_binding_observation(
+                mm_dsl::SessionId::from("session-rotation-recovery".to_string()),
+                RuntimeState::Idle,
+                None,
+                None,
+                None,
+                None,
+                expected.clone(),
+            )
+            .expect("recover completed rotation receipt");
+
+        assert_eq!(driver.supervisor_authority_snapshot(), expected);
+        let authority = driver.shared_dsl_authority();
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let transition = mm_dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            mm_dsl::MeerkatMachineInput::ObserveSupervisorRotation {
+                operation_id: operation_id.to_string(),
+                observer_peer_id: Some("peer-next".into()),
+                observer_signing_public_key: Some("22".repeat(32)),
+                observer_epoch: 8,
+            },
+        )
+        .expect("current authority observes completed operation after cold recovery");
+        assert!(transition.effects().iter().any(|effect| matches!(
+            effect,
+            mm_dsl::MeerkatMachineEffect::SupervisorRotationObservationResolved {
+                status: mm_dsl::SupervisorRotationObservationStatusKind::Completed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn nonterminal_rotation_history_is_rejected_by_generated_authority() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("nonterminal-rotation-history"));
+        let previous = crate::store::SupervisorBindingReceipt::new(
+            "previous".into(),
+            "peer-previous".into(),
+            "inproc://previous".into(),
+            "11".repeat(32),
+            7,
+        );
+        let next = crate::store::SupervisorBindingReceipt::new(
+            "next".into(),
+            "peer-next".into(),
+            "inproc://next".into(),
+            "22".repeat(32),
+            8,
+        );
+        let operation_id =
+            meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId::from(
+                uuid::Uuid::new_v4(),
+            );
+        let authority = crate::store::SupervisorAuthoritySnapshot::WithRotationHistory {
+            current: Box::new(crate::store::SupervisorAuthoritySnapshot::Bound(
+                next.clone(),
+            )),
+            terminal_receipts: std::collections::BTreeMap::from([(
+                operation_id,
+                crate::store::SupervisorRotationReceipt::new(
+                    operation_id,
+                    crate::store::SupervisorRotationPersistencePhase::NextPublishPending,
+                    None,
+                    previous,
+                    next,
+                ),
+            )]),
+        };
+
+        let error = driver
+            .recover_runtime_authority_from_binding_observation(
+                mm_dsl::SessionId::from("session-nonterminal-rotation-history".to_string()),
+                RuntimeState::Idle,
+                None,
+                None,
+                None,
+                None,
+                authority,
+            )
+            .expect_err("generated terminal-phase guard must reject pending history");
+
+        let RuntimeDriverError::Internal(message) = error else {
+            panic!("rotation recovery must retain its typed Internal result: {error:?}");
+        };
+        assert!(
+            message.contains("persistent supervisor rotation history recovery authority")
+                && message.contains("guard rejected"),
+            "generated rejection must flow through the existing public error mapping: {message}",
         );
     }
 

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
 
@@ -180,6 +180,20 @@ pub trait EventStore: Send + Sync {
         session_id: &SessionId,
         from_seq: u64,
     ) -> Result<Vec<StoredEvent>, EventStoreError>;
+
+    /// Read at most `limit` events from a sequence onward. Stores should
+    /// override this to push the bound into their cursor/query; the default
+    /// preserves compatibility for small in-memory/test implementations.
+    async fn read_page(
+        &self,
+        session_id: &SessionId,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, EventStoreError> {
+        let mut events = self.read_from(session_id, from_seq).await?;
+        events.truncate(limit);
+        Ok(events)
+    }
 
     /// Get the latest sequence number for a session (0 if empty).
     async fn last_seq(&self, session_id: &SessionId) -> Result<u64, EventStoreError>;
@@ -515,12 +529,69 @@ impl EventStore for FileEventStore {
             .collect()
     }
 
+    async fn read_page(
+        &self,
+        session_id: &SessionId,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, EventStoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let path = self.log_path(session_id);
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(EventStoreError::Io(err)),
+        };
+        let mut lines = BufReader::new(file).lines();
+        let mut events = Vec::with_capacity(limit.min(1024));
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: StoredEvent = serde_json::from_str(&line)
+                .map_err(|err| EventStoreError::Serialization(err.to_string()))?;
+            if event.schema_version != EVENT_SCHEMA_VERSION {
+                return Err(EventStoreError::SchemaVersionMismatch {
+                    expected: EVENT_SCHEMA_VERSION,
+                    found: event.schema_version,
+                });
+            }
+            if event.seq >= from_seq {
+                events.push(event);
+                if events.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(events)
+    }
+
     async fn last_seq(&self, session_id: &SessionId) -> Result<u64, EventStoreError> {
-        Ok(self
-            .read_from(session_id, 1)
-            .await?
-            .last()
-            .map_or(0, |event| event.seq))
+        let path = self.log_path(session_id);
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => return Err(EventStoreError::Io(err)),
+        };
+        let mut lines = BufReader::new(file).lines();
+        let mut last_seq = 0;
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: StoredEvent = serde_json::from_str(&line)
+                .map_err(|err| EventStoreError::Serialization(err.to_string()))?;
+            if event.schema_version != EVENT_SCHEMA_VERSION {
+                return Err(EventStoreError::SchemaVersionMismatch {
+                    expected: EVENT_SCHEMA_VERSION,
+                    found: event.schema_version,
+                });
+            }
+            last_seq = event.seq;
+        }
+        Ok(last_seq)
     }
 }
 
@@ -553,6 +624,9 @@ mod tests {
         let events = store.read_from(&session_id, 2).await?;
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].event, AgentEvent::TextComplete { .. }));
+        let page = store.read_page(&session_id, 1, 1).await?;
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].seq, 1);
         assert!(store.root().join(format!("{session_id}.jsonl")).exists());
         Ok(())
     }

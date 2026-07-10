@@ -1109,10 +1109,8 @@ fn resolve_validation_identity(
     })
 }
 
-/// Resolve the create-session default model from the CURRENT durable config
-/// through the canonical [`meerkat::resolve_create_session_default_model`]
-/// ladder — the single owner of the create-time default-model fact across
-/// surfaces (RPC resolves through the same seam).
+/// Resolve the no-hint create-session model from the CURRENT durable config
+/// through the canonical typed facade resolver shared by every surface.
 ///
 /// Resolved at request time rather than cached at server construction: REST
 /// config is mutable for the server's lifetime (`PUT`/`PATCH /config` via
@@ -1127,7 +1125,48 @@ async fn resolve_default_model(state: &AppState) -> Result<String, ApiError> {
     let config = effective_config_for_state(state).await.map_err(|err| {
         ApiError::Internal(format!("failed to compose realm config chain: {err}"))
     })?;
-    Ok(meerkat::resolve_create_session_default_model(&config))
+    resolve_rest_create_session_model(&config, None, None, None)
+        .map(|resolution| resolution.model)
+        .map_err(|err| ApiError::Configuration(err.to_string()))
+}
+
+fn resolve_rest_create_session_model(
+    config: &Config,
+    model: Option<String>,
+    provider: Option<Provider>,
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+) -> Result<meerkat::CreateSessionModelResolution, meerkat::CreateSessionModelResolutionError> {
+    meerkat::resolve_create_session_model(
+        config,
+        meerkat::CreateSessionModelResolutionRequest {
+            model,
+            provider,
+            auth_binding,
+        },
+    )
+}
+
+fn create_session_model_resolution_error_to_api(
+    error: meerkat::CreateSessionModelResolutionError,
+) -> ApiError {
+    if error.is_configuration_fault() {
+        ApiError::Configuration(error.to_string())
+    } else {
+        ApiError::BadRequest(error.to_string())
+    }
+}
+
+async fn resolve_rest_create_session_model_for_state(
+    state: &AppState,
+    model: Option<String>,
+    provider: Option<Provider>,
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+) -> Result<meerkat::CreateSessionModelResolution, ApiError> {
+    let config = effective_config_for_state(state).await.map_err(|err| {
+        ApiError::Internal(format!("failed to compose realm config chain: {err}"))
+    })?;
+    resolve_rest_create_session_model(&config, model, provider, auth_binding)
+        .map_err(create_session_model_resolution_error_to_api)
 }
 
 #[derive(Debug, Clone)]
@@ -2013,15 +2052,8 @@ pub type UsageResponse = meerkat_contracts::WireUsage;
 /// Session details response — canonical wire contract (K20).
 pub use meerkat_contracts::wire::RestSessionDetailsResponse as SessionDetailsResponse;
 
-#[derive(Debug, Serialize)]
-pub struct ScheduleListResponse {
-    pub schedules: Vec<meerkat::Schedule>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ScheduleOccurrencesResponse {
-    pub occurrences: Vec<meerkat::Occurrence>,
-}
+pub type ScheduleListResponse = meerkat_contracts::wire::ScheduleListResult;
+pub type ScheduleOccurrencesResponse = meerkat_contracts::wire::ScheduleOccurrencesResult;
 
 /// API error response
 #[derive(Debug, Serialize)]
@@ -4266,19 +4298,19 @@ async fn create_session_inner(
     };
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
-    let model_was_explicit = req.model.is_some();
-    let provider_was_explicit = req.provider.is_some();
     let resume_override_mask = create_session_resume_override_mask(&req, keep_alive_override);
-    let model = match req.model {
-        Some(model) => model,
-        // No caller-pinned model: resolve through the canonical
-        // create-session default-model ladder over the CURRENT config —
-        // never a surface-cached copy of `config.agent.model`.
-        None => match resolve_default_model(state).await {
-            Ok(model) => model,
-            Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
-        },
+    let model_resolution = match resolve_rest_create_session_model_for_state(
+        state,
+        req.model.clone(),
+        req.provider,
+        req.auth_binding.clone().map(Into::into),
+    )
+    .await
+    {
+        Ok(resolution) => resolution,
+        Err(err) => return RequestTerminal::RespondWithoutPublish(Err(err)),
     };
+    let model = model_resolution.model.clone();
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
@@ -4418,7 +4450,9 @@ async fn create_session_inner(
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let initial_identity =
-        match resolve_validation_identity_for_state(state, &model, req.provider).await {
+        match resolve_validation_identity_for_state(state, &model, Some(model_resolution.provider))
+            .await
+        {
             Ok(identity) => identity,
             Err(err) => {
                 if let Err(error) = cleanup_archived_session_runtime(state, &session_id).await {
@@ -4438,8 +4472,7 @@ async fn create_session_inner(
         custom_models: std::collections::BTreeMap::new(),
         image_generation_provider: None,
         auto_compact_threshold_override: None,
-        provider: (provider_was_explicit || model_was_explicit)
-            .then_some(initial_identity.provider),
+        provider: Some(model_resolution.provider),
         override_comms: Default::default(),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
@@ -4474,7 +4507,7 @@ async fn create_session_inner(
         instance_id: state.instance_id.clone(),
         backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
         config_generation: current_generation,
-        auth_binding: req.auth_binding.map(Into::into),
+        auth_binding: model_resolution.auth_binding,
         // REST is not a mob runtime. On resume the factory preserves the
         // persisted mob_member_binding from the resumed session metadata.
         mob_member_binding: None,
@@ -4716,7 +4749,7 @@ fn parse_label_filters(
 async fn create_schedule(
     State(state): State<AppState>,
     Json(request): Json<meerkat::CreateScheduleRequest>,
-) -> Result<Json<meerkat::Schedule>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     state
         .ensure_schedule_host_started()
         .await
@@ -4725,6 +4758,7 @@ async fn create_schedule(
         .schedule_service
         .create(request)
         .await
+        .map(meerkat_contracts::wire::Schedule::from)
         .map(Json)
         .map_err(schedule_error_to_api)
 }
@@ -4845,19 +4879,21 @@ async fn list_schedules(
         .schedule_service
         .list()
         .await
-        .map(|schedules| Json(ScheduleListResponse { schedules }))
+        .map(meerkat_contracts::wire::ScheduleListResult::from_domain)
+        .map(Json)
         .map_err(schedule_error_to_api)
 }
 
 async fn get_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<meerkat::Schedule>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
         .schedule_service
         .get(&schedule_id)
         .await
+        .map(meerkat_contracts::wire::Schedule::from)
         .map(Json)
         .map_err(schedule_error_to_api)
 }
@@ -4866,7 +4902,7 @@ async fn update_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<meerkat::UpdateScheduleRequest>,
-) -> Result<Json<meerkat::Schedule>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
         .ensure_schedule_host_started()
@@ -4876,6 +4912,7 @@ async fn update_schedule(
         .schedule_service
         .update(&schedule_id, request)
         .await
+        .map(meerkat_contracts::wire::Schedule::from)
         .map(Json)
         .map_err(schedule_error_to_api)
 }
@@ -4883,7 +4920,7 @@ async fn update_schedule(
 async fn pause_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<meerkat::Schedule>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
         .ensure_schedule_host_started()
@@ -4893,6 +4930,7 @@ async fn pause_schedule(
         .schedule_service
         .pause(&schedule_id)
         .await
+        .map(meerkat_contracts::wire::Schedule::from)
         .map(Json)
         .map_err(schedule_error_to_api)
 }
@@ -4900,7 +4938,7 @@ async fn pause_schedule(
 async fn resume_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<meerkat::Schedule>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
         .ensure_schedule_host_started()
@@ -4910,6 +4948,7 @@ async fn resume_schedule(
         .schedule_service
         .resume(&schedule_id)
         .await
+        .map(meerkat_contracts::wire::Schedule::from)
         .map(Json)
         .map_err(schedule_error_to_api)
 }
@@ -4917,12 +4956,13 @@ async fn resume_schedule(
 async fn delete_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<meerkat::Schedule>, ApiError> {
+) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
         .schedule_service
         .delete(&schedule_id)
         .await
+        .map(meerkat_contracts::wire::Schedule::from)
         .map(Json)
         .map_err(schedule_error_to_api)
 }
@@ -4936,7 +4976,7 @@ async fn list_schedule_occurrences(
         .schedule_service
         .list_occurrences(&schedule_id)
         .await
-        .map(|occurrences| Json(ScheduleOccurrencesResponse { occurrences }))
+        .map(|occurrences| Json(ScheduleOccurrencesResponse::from_domain(occurrences)))
         .map_err(schedule_error_to_api)
 }
 
@@ -6919,7 +6959,15 @@ async fn archive_session_with_runtime_cleanup(
             }
         }
 
-        let result = service
+        #[cfg(feature = "mob")]
+        let had_cleanup_anchor = state
+            .mob_state
+            .has_bridge_session_scoped_mobs(&session_id.to_string())
+            .await;
+        #[cfg(not(feature = "mob"))]
+        let had_cleanup_anchor = false;
+
+        let mut result = service
             .archive_with_machine_protocol(
                 &session_id,
                 MachineSessionArchiveProtocol::from_machine(state.runtime_adapter.as_ref()),
@@ -6931,6 +6979,14 @@ async fn archive_session_with_runtime_cleanup(
         {
             let _ = result_tx.send(Err(error));
             return;
+        }
+        if not_found && had_cleanup_anchor {
+            // The durable session archive landed on an earlier attempt, but
+            // that caller failed while destroying session-owned mobs. This
+            // exact retry owns the retained cleanup work it just completed,
+            // so report convergence instead of laundering success into a
+            // stale public NotFound response.
+            result = Ok(());
         }
         let _ = result_tx.send(result);
     });
@@ -9310,6 +9366,135 @@ mod tests {
             meerkat::resolve_create_session_default_model(&config),
             "REST must serve exactly the canonical ladder over the current config"
         );
+    }
+
+    fn rest_inherited_gemini_binding() -> (Config, meerkat_core::AuthBindingRef) {
+        let mut config = Config::default();
+        let mut global = meerkat_core::RealmConfigSection::default();
+        global.backend.insert(
+            "google".to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "gemini".to_string(),
+                backend_kind: "google_code_assist".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        global.auth.insert(
+            "oauth".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "gemini".to_string(),
+                auth_method: "google_oauth".to_string(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        global.binding.insert(
+            "primary".to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "google".to_string(),
+                auth_profile: "oauth".to_string(),
+                default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        config.realm.insert("global".to_string(), global);
+        config.realm.insert(
+            "dev".to_string(),
+            meerkat_core::RealmConfigSection {
+                parent: Some(meerkat_core::RealmId::global()),
+                ..Default::default()
+            },
+        );
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm"),
+            binding: meerkat_core::BindingId::parse("primary").expect("binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        (config, binding)
+    }
+
+    #[test]
+    fn rest_create_session_resolution_preserves_supported_config_pin() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+        config.models.anthropic = "claude-sonnet-4-6".to_string();
+
+        let resolved = resolve_rest_create_session_model(&config, None, None, None)
+            .expect("REST lowers through shared resolver");
+        assert_eq!(resolved.model, "claude-opus-4-7");
+        assert_eq!(resolved.provider, Provider::Anthropic);
+    }
+
+    #[test]
+    fn rest_create_session_resolution_preserves_inherited_binding_owner() {
+        let (config, binding) = rest_inherited_gemini_binding();
+        let resolved = resolve_rest_create_session_model(&config, None, None, Some(binding))
+            .expect("REST resolves inherited binding");
+
+        assert_eq!(resolved.model, "gemini-3.1-flash-lite-preview");
+        assert_eq!(resolved.provider, Provider::Gemini);
+        assert_eq!(
+            resolved
+                .auth_binding
+                .expect("owner-stamped binding")
+                .realm
+                .as_str(),
+            "global"
+        );
+    }
+
+    #[test]
+    fn rest_create_session_resolution_rejects_explicit_model_binding_mismatch() {
+        let (config, binding) = rest_inherited_gemini_binding();
+        let err = resolve_rest_create_session_model(
+            &config,
+            Some("gpt-5.5".to_string()),
+            None,
+            Some(binding),
+        )
+        .expect_err("known model owner must match binding provider");
+
+        assert!(err.to_string().contains("registered for provider 'openai'"));
+    }
+
+    #[test]
+    fn rest_create_session_resolution_preserves_config_fault_ownership() {
+        let config_error = meerkat::CreateSessionModelResolutionError::Config(
+            meerkat_core::ConfigError::Validation("broken model registry".to_string()),
+        );
+        assert!(matches!(
+            create_session_model_resolution_error_to_api(config_error),
+            ApiError::Configuration(_)
+        ));
+        let binding_error =
+            meerkat::CreateSessionModelResolutionError::BindingMissingProviderDefault {
+                realm: meerkat_core::RealmId::parse("dev").expect("realm"),
+                binding: meerkat_core::BindingId::parse("primary").expect("binding"),
+                provider: meerkat_core::Provider::SelfHosted,
+            };
+        assert!(matches!(
+            create_session_model_resolution_error_to_api(binding_error),
+            ApiError::Configuration(_)
+        ));
+
+        assert!(matches!(
+            create_session_model_resolution_error_to_api(
+                meerkat::CreateSessionModelResolutionError::EmptyExplicitModel,
+            ),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            create_session_model_resolution_error_to_api(
+                meerkat::CreateSessionModelResolutionError::MissingProviderDefault {
+                    provider: meerkat_core::Provider::SelfHosted,
+                },
+            ),
+            ApiError::BadRequest(_)
+        ));
     }
 
     #[tokio::test]

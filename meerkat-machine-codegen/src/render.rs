@@ -183,6 +183,15 @@ pub fn render_composition_module(schema: &CompositionSchema) -> String {
                     dispatch.target_kind
                 );
             }
+            for closure in &driver.refusal_closures {
+                pushln!(
+                    &mut out,
+                    "    closes refusal {} -> {}::{}",
+                    closure.dispatch_route,
+                    closure.feedback_instance,
+                    closure.feedback_input
+                );
+            }
         }
         None => pushln!(&mut out, "  (none)"),
     }

@@ -392,6 +392,7 @@ test_suite(
         "//meerkat-cli:sqlite_tools_full_reuse_test",
         "//meerkat-client:meerkat_client_unit_test",
         "//meerkat-client:rct_contracts_test",
+        "//meerkat-comms:embedded_skill_registration_test",
         "//meerkat-comms:inbox_admission_toctou_test",
         "//meerkat-comms:inproc_canonical_peer_routing_test",
         "//meerkat-comms:meerkat_comms_unit_test",

@@ -98,10 +98,12 @@ multi-process use. JSONL remains available as an explicit inspectable backend.
 
 ## Live Channels
 
-Live audio/text channels are caller-initiated through the `live/*` JSON-RPC
-method family. `ModelCapabilities.realtime` gates whether `live/open` can
-attach to a session. The `--live-ws <addr>` flag on `rkat-rpc` enables the
-WebSocket listener used for audio transport bootstrap.
+Live audio/text channels with model-gated image input are caller-initiated
+through the `live/*` JSON-RPC method family. `ModelCapabilities.realtime`
+gates whether `live/open` can attach to a session; the returned `image_in`
+capability gates still-image input for that binding. The `--live-ws <addr>`
+flag on `rkat-rpc` enables the WebSocket listener used for audio transport
+bootstrap.
 
 The live channel does not replace session history. It is a transport adapter for
 the same canonical conversation, tool, and turn-boundary semantics.

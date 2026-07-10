@@ -121,6 +121,60 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRealtimeUserTranscriptFinalReplayOrConflict`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`
+- `ResolveRealtimeUserContentIdentityInvalid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentIdentityUnmaterializedPredecessor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentIdentityConflict`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentIdentityReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentIdentityCommitNew`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobStageNew`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobStageReuseExact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobStageRejectOccupied`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobRecoveryNone`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobRecoveryExact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobRecoveryCommitVerified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobRecoveryClearInvalid`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobFinalizeNone`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobFinalizeClearCommitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentBlobFinalizeRejectMismatch`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentFinalEmpty`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentFinalStore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRealtimeUserContentFinalReplayOrConflict`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRealtimeAssistantDeltaInvalidOrDuplicate`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`
@@ -318,6 +372,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RealtimeMaterializeCandidateResolved`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_materialize_and_restore`
+- `RealtimeUserContentIdentityResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RealtimeUserContentBlobStageResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RealtimeUserContentBlobRecoveryResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RealtimeUserContentBlobFinalizeResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RealtimeTranscriptSnapshotRestoreAuthorized`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_materialize_and_restore`

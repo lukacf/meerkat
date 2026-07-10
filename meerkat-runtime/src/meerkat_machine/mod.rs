@@ -928,8 +928,10 @@ pub use comms_drain::{
     SupervisorBinding, SupervisorBindingStageError,
 };
 pub(crate) use comms_drain::{
-    CommsDrainSlot, SupervisorAuthorizeAdmission, SupervisorBindAdmission,
-    SupervisorBridgeCommandAdmission, abort_slot,
+    CommsDrainSlot, GeneratedSupervisorBinding, GeneratedSupervisorRotationReceipt,
+    GeneratedSupervisorRotationSubmit, SupervisorAuthorizeAdmission, SupervisorBindAdmission,
+    SupervisorBridgeCommandAdmission, SupervisorRotationObservation, SupervisorRotationSubmission,
+    SupervisorRotationTaskSlot,
 };
 pub(crate) use dsl_effects::{DslTransitionEffects, apply_dsl_transition_on_authority};
 pub(crate) use visibility::MachineToolVisibilityOwner;
@@ -981,6 +983,9 @@ struct RuntimeSessionEntry {
     /// it is an additional serialization point that spans the entire
     /// multi-step mutation window.
     mutation_gate: Arc<Mutex<()>>,
+    /// Session-owned liveness driver for the currently pending supervisor
+    /// rotation. Durable operation state remains in generated authority.
+    supervisor_rotation_task: Arc<SupervisorRotationTaskSlot>,
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
     driver: SharedDriver,
     /// Canonical coarse control projection for this session.

@@ -8646,6 +8646,8 @@ pub enum SupervisorAuthorizeRejectionKind {
     StaleSupervisor,
     #[serde(rename = "SenderMismatch")]
     SenderMismatch,
+    #[serde(rename = "RotationNotAllowed")]
+    RotationNotAllowed,
 }
 impl SupervisorAuthorizeRejectionKind {
     pub fn as_str(&self) -> &'static str {
@@ -8653,6 +8655,7 @@ impl SupervisorAuthorizeRejectionKind {
             Self::NotBound => "NotBound",
             Self::StaleSupervisor => "StaleSupervisor",
             Self::SenderMismatch => "SenderMismatch",
+            Self::RotationNotAllowed => "RotationNotAllowed",
         }
     }
 }
@@ -8663,6 +8666,7 @@ impl std::convert::TryFrom<&str> for SupervisorAuthorizeRejectionKind {
             "NotBound" => Ok(Self::NotBound),
             "StaleSupervisor" => Ok(Self::StaleSupervisor),
             "SenderMismatch" => Ok(Self::SenderMismatch),
+            "RotationNotAllowed" => Ok(Self::RotationNotAllowed),
             other => Err(format!(
                 "invalid SupervisorAuthorizeRejectionKind value `{other}`"
             )),
@@ -8820,12 +8824,15 @@ pub enum SupervisorBindRejectionKind {
     AlreadyBound,
     #[serde(rename = "SenderMismatch")]
     SenderMismatch,
+    #[serde(rename = "RevocationPending")]
+    RevocationPending,
 }
 impl SupervisorBindRejectionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AlreadyBound => "AlreadyBound",
             Self::SenderMismatch => "SenderMismatch",
+            Self::RevocationPending => "RevocationPending",
         }
     }
 }
@@ -8835,6 +8842,7 @@ impl std::convert::TryFrom<&str> for SupervisorBindRejectionKind {
         match value {
             "AlreadyBound" => Ok(Self::AlreadyBound),
             "SenderMismatch" => Ok(Self::SenderMismatch),
+            "RevocationPending" => Ok(Self::RevocationPending),
             other => Err(format!(
                 "invalid SupervisorBindRejectionKind value `{other}`"
             )),
@@ -8920,6 +8928,8 @@ pub enum SupervisorBridgeCommandAdmissionResultKind {
     #[default]
     #[serde(rename = "Accept")]
     Accept,
+    #[serde(rename = "ResumePendingRevoke")]
+    ResumePendingRevoke,
     #[serde(rename = "Reject")]
     Reject,
 }
@@ -8927,6 +8937,7 @@ impl SupervisorBridgeCommandAdmissionResultKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Accept => "Accept",
+            Self::ResumePendingRevoke => "ResumePendingRevoke",
             Self::Reject => "Reject",
         }
     }
@@ -8936,6 +8947,7 @@ impl std::convert::TryFrom<&str> for SupervisorBridgeCommandAdmissionResultKind 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Accept" => Ok(Self::Accept),
+            "ResumePendingRevoke" => Ok(Self::ResumePendingRevoke),
             "Reject" => Ok(Self::Reject),
             other => Err(format!(
                 "invalid SupervisorBridgeCommandAdmissionResultKind value `{other}`"
@@ -8976,6 +8988,8 @@ pub enum SupervisorBridgeCommandRejectionKind {
     StaleSupervisor,
     #[serde(rename = "SenderMismatch")]
     SenderMismatch,
+    #[serde(rename = "CommandNotAllowed")]
+    CommandNotAllowed,
 }
 impl SupervisorBridgeCommandRejectionKind {
     pub fn as_str(&self) -> &'static str {
@@ -8983,6 +8997,7 @@ impl SupervisorBridgeCommandRejectionKind {
             Self::NotBound => "NotBound",
             Self::StaleSupervisor => "StaleSupervisor",
             Self::SenderMismatch => "SenderMismatch",
+            Self::CommandNotAllowed => "CommandNotAllowed",
         }
     }
 }
@@ -8993,6 +9008,7 @@ impl std::convert::TryFrom<&str> for SupervisorBridgeCommandRejectionKind {
             "NotBound" => Ok(Self::NotBound),
             "StaleSupervisor" => Ok(Self::StaleSupervisor),
             "SenderMismatch" => Ok(Self::SenderMismatch),
+            "CommandNotAllowed" => Ok(Self::CommandNotAllowed),
             other => Err(format!(
                 "invalid SupervisorBridgeCommandRejectionKind value `{other}`"
             )),
@@ -9006,6 +9022,320 @@ impl std::convert::TryFrom<String> for SupervisorBridgeCommandRejectionKind {
     }
 }
 impl std::fmt::Display for SupervisorBridgeCommandRejectionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorCleanupCommandKind {
+    #[default]
+    #[serde(rename = "Retire")]
+    Retire,
+    #[serde(rename = "Observe")]
+    Observe,
+    #[serde(rename = "Destroy")]
+    Destroy,
+    #[serde(rename = "Revoke")]
+    Revoke,
+}
+impl SupervisorCleanupCommandKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retire => "Retire",
+            Self::Observe => "Observe",
+            Self::Destroy => "Destroy",
+            Self::Revoke => "Revoke",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorCleanupCommandKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retire" => Ok(Self::Retire),
+            "Observe" => Ok(Self::Observe),
+            "Destroy" => Ok(Self::Destroy),
+            "Revoke" => Ok(Self::Revoke),
+            other => Err(format!(
+                "invalid SupervisorCleanupCommandKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorCleanupCommandKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorCleanupCommandKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorRotationObservationStatusKind {
+    #[default]
+    #[serde(rename = "NotFound")]
+    NotFound,
+    #[serde(rename = "PreviousRevokePending")]
+    PreviousRevokePending,
+    #[serde(rename = "NextPublishPending")]
+    NextPublishPending,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Rejected")]
+    Rejected,
+}
+impl SupervisorRotationObservationStatusKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotFound => "NotFound",
+            Self::PreviousRevokePending => "PreviousRevokePending",
+            Self::NextPublishPending => "NextPublishPending",
+            Self::Completed => "Completed",
+            Self::Rejected => "Rejected",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorRotationObservationStatusKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotFound" => Ok(Self::NotFound),
+            "PreviousRevokePending" => Ok(Self::PreviousRevokePending),
+            "NextPublishPending" => Ok(Self::NextPublishPending),
+            "Completed" => Ok(Self::Completed),
+            "Rejected" => Ok(Self::Rejected),
+            other => Err(format!(
+                "invalid SupervisorRotationObservationStatusKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorRotationObservationStatusKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorRotationObservationStatusKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorRotationPhase {
+    #[default]
+    #[serde(rename = "PreviousRevokePending")]
+    PreviousRevokePending,
+    #[serde(rename = "NextPublishPending")]
+    NextPublishPending,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Rejected")]
+    Rejected,
+}
+impl SupervisorRotationPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PreviousRevokePending => "PreviousRevokePending",
+            Self::NextPublishPending => "NextPublishPending",
+            Self::Completed => "Completed",
+            Self::Rejected => "Rejected",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorRotationPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PreviousRevokePending" => Ok(Self::PreviousRevokePending),
+            "NextPublishPending" => Ok(Self::NextPublishPending),
+            "Completed" => Ok(Self::Completed),
+            "Rejected" => Ok(Self::Rejected),
+            other => Err(format!("invalid SupervisorRotationPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorRotationPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorRotationPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorRotationRejectionKind {
+    #[default]
+    #[serde(rename = "OperationConflict")]
+    OperationConflict,
+    #[serde(rename = "NotBound")]
+    NotBound,
+    #[serde(rename = "SenderMismatch")]
+    SenderMismatch,
+    #[serde(rename = "TargetEpochNotAdvanced")]
+    TargetEpochNotAdvanced,
+    #[serde(rename = "InvalidTarget")]
+    InvalidTarget,
+    #[serde(rename = "UnsupportedProtocolVersion")]
+    UnsupportedProtocolVersion,
+}
+impl SupervisorRotationRejectionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OperationConflict => "OperationConflict",
+            Self::NotBound => "NotBound",
+            Self::SenderMismatch => "SenderMismatch",
+            Self::TargetEpochNotAdvanced => "TargetEpochNotAdvanced",
+            Self::InvalidTarget => "InvalidTarget",
+            Self::UnsupportedProtocolVersion => "UnsupportedProtocolVersion",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorRotationRejectionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OperationConflict" => Ok(Self::OperationConflict),
+            "NotBound" => Ok(Self::NotBound),
+            "SenderMismatch" => Ok(Self::SenderMismatch),
+            "TargetEpochNotAdvanced" => Ok(Self::TargetEpochNotAdvanced),
+            "InvalidTarget" => Ok(Self::InvalidTarget),
+            "UnsupportedProtocolVersion" => Ok(Self::UnsupportedProtocolVersion),
+            other => Err(format!(
+                "invalid SupervisorRotationRejectionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorRotationRejectionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorRotationRejectionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SupervisorRotationSubmissionResultKind {
+    #[default]
+    #[serde(rename = "New")]
+    New,
+    #[serde(rename = "ExistingPending")]
+    ExistingPending,
+    #[serde(rename = "ExistingTerminal")]
+    ExistingTerminal,
+    #[serde(rename = "Rejected")]
+    Rejected,
+    #[serde(rename = "Conflict")]
+    Conflict,
+}
+impl SupervisorRotationSubmissionResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::New => "New",
+            Self::ExistingPending => "ExistingPending",
+            Self::ExistingTerminal => "ExistingTerminal",
+            Self::Rejected => "Rejected",
+            Self::Conflict => "Conflict",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SupervisorRotationSubmissionResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "New" => Ok(Self::New),
+            "ExistingPending" => Ok(Self::ExistingPending),
+            "ExistingTerminal" => Ok(Self::ExistingTerminal),
+            "Rejected" => Ok(Self::Rejected),
+            "Conflict" => Ok(Self::Conflict),
+            other => Err(format!(
+                "invalid SupervisorRotationSubmissionResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorRotationSubmissionResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorRotationSubmissionResultKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -10474,6 +10804,38 @@ pub struct State {
     pub supervisor_revoke_pending_address: Option<String>,
     pub supervisor_revoke_pending_signing_public_key: Option<String>,
     pub supervisor_revoke_pending_epoch: Option<u64>,
+    pub supervisor_revoked_peer_id: Option<String>,
+    pub supervisor_revoked_signing_public_key: Option<String>,
+    pub supervisor_revoked_epoch: Option<u64>,
+    pub supervisor_rotation_operation_id: Option<String>,
+    pub supervisor_rotation_phase: Option<SupervisorRotationPhase>,
+    pub supervisor_rotation_rejection: Option<SupervisorRotationRejectionKind>,
+    pub supervisor_rotation_previous_name: Option<String>,
+    pub supervisor_rotation_previous_peer_id: Option<String>,
+    pub supervisor_rotation_previous_address: Option<String>,
+    pub supervisor_rotation_previous_signing_public_key: Option<String>,
+    pub supervisor_rotation_previous_epoch: Option<u64>,
+    pub supervisor_rotation_next_name: Option<String>,
+    pub supervisor_rotation_next_peer_id: Option<String>,
+    pub supervisor_rotation_next_address: Option<String>,
+    pub supervisor_rotation_next_signing_public_key: Option<String>,
+    pub supervisor_rotation_next_epoch: Option<u64>,
+    pub supervisor_rotation_terminal_phases:
+        std::collections::BTreeMap<String, SupervisorRotationPhase>,
+    pub supervisor_rotation_terminal_rejections:
+        std::collections::BTreeMap<String, SupervisorRotationRejectionKind>,
+    pub supervisor_rotation_terminal_previous_names: std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_previous_peer_ids: std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_previous_addresses: std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_previous_signing_public_keys:
+        std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_previous_epochs: std::collections::BTreeMap<String, u64>,
+    pub supervisor_rotation_terminal_next_names: std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_next_peer_ids: std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_next_addresses: std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_next_signing_public_keys:
+        std::collections::BTreeMap<String, String>,
+    pub supervisor_rotation_terminal_next_epochs: std::collections::BTreeMap<String, u64>,
     pub local_endpoint: Option<PeerEndpoint>,
     pub direct_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
@@ -10491,6 +10853,10 @@ pub mod inputs {
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterSession {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PrepareTerminalSupervisorCleanupBindings {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10763,6 +11129,60 @@ pub mod inputs {
         pub current_run_id: Option<RunId>,
         pub pre_run_phase: Option<PreRunPhase>,
         pub silent_intent_overrides: std::collections::BTreeSet<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSupervisorBinding {
+        pub name: String,
+        pub peer_id: String,
+        pub address: String,
+        pub signing_public_key: String,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSupervisorRevocationPending {
+        pub name: String,
+        pub peer_id: String,
+        pub address: String,
+        pub signing_public_key: String,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSupervisorRotationOperation {
+        pub operation_id: String,
+        pub phase: SupervisorRotationPhase,
+        pub rejection: Option<SupervisorRotationRejectionKind>,
+        pub previous_name: String,
+        pub previous_peer_id: String,
+        pub previous_address: String,
+        pub previous_signing_public_key: String,
+        pub previous_epoch: u64,
+        pub next_name: String,
+        pub next_peer_id: String,
+        pub next_address: String,
+        pub next_signing_public_key: String,
+        pub next_epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSupervisorRotationTerminalReceipt {
+        pub operation_id: String,
+        pub phase: SupervisorRotationPhase,
+        pub rejection: Option<SupervisorRotationRejectionKind>,
+        pub previous_name: String,
+        pub previous_peer_id: String,
+        pub previous_address: String,
+        pub previous_signing_public_key: String,
+        pub previous_epoch: u64,
+        pub next_name: String,
+        pub next_peer_id: String,
+        pub next_address: String,
+        pub next_signing_public_key: String,
+        pub next_epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRevokedSupervisorReceipt {
+        pub peer_id: String,
+        pub signing_public_key: String,
+        pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureSessionWithExecutor {
@@ -11892,9 +12312,13 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSupervisorAuthorizeAdmission {
+        pub supervisor_name: String,
         pub supervisor_peer_id: String,
+        pub supervisor_address: String,
+        pub supervisor_signing_public_key: String,
         pub supervisor_epoch: u64,
         pub sender_peer_id: Option<String>,
+        pub sender_signing_public_key: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BindSupervisor {
@@ -11911,6 +12335,50 @@ pub mod inputs {
         pub address: String,
         pub signing_public_key: String,
         pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RefreshSupervisorBindingRoute {
+        pub name: String,
+        pub peer_id: String,
+        pub address: String,
+        pub signing_public_key: String,
+        pub epoch: u64,
+        pub sender_peer_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SubmitSupervisorRotation {
+        pub operation_id: String,
+        pub next_name: String,
+        pub next_peer_id: String,
+        pub next_address: String,
+        pub next_signing_public_key: String,
+        pub next_epoch: u64,
+        pub preflight_rejection: Option<SupervisorRotationRejectionKind>,
+        pub sender_peer_id: Option<String>,
+        pub sender_signing_public_key: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumeSupervisorRotation {
+        pub operation_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorRotationPreviousRevoked {
+        pub operation_id: String,
+        pub peer_id: String,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorRotationNextPublished {
+        pub operation_id: String,
+        pub peer_id: String,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveSupervisorRotation {
+        pub operation_id: String,
+        pub observer_peer_id: Option<String>,
+        pub observer_signing_public_key: Option<String>,
+        pub observer_epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestSupervisorTrustPublish {
@@ -11968,6 +12436,13 @@ pub mod inputs {
         pub sender_peer_id: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSupervisorCleanupCommandAdmission {
+        pub command_kind: SupervisorCleanupCommandKind,
+        pub supervisor_peer_id: String,
+        pub supervisor_epoch: u64,
+        pub sender_peer_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeSupervisorMobPeerOverlay {
         pub supervisor_peer_id: String,
         pub supervisor_epoch: u64,
@@ -11989,6 +12464,7 @@ pub mod inputs {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
     RegisterSession(inputs::RegisterSession),
+    PrepareTerminalSupervisorCleanupBindings(inputs::PrepareTerminalSupervisorCleanupBindings),
     BeginUnregisterSession(inputs::BeginUnregisterSession),
     RuntimeLoopStoppedForUnregister(inputs::RuntimeLoopStoppedForUnregister),
     CommsDrainExitedForUnregister(inputs::CommsDrainExitedForUnregister),
@@ -12040,6 +12516,11 @@ pub enum Input {
     ResolveRuntimeCompletionWaitFailure(inputs::ResolveRuntimeCompletionWaitFailure),
     Destroy(inputs::Destroy),
     RecoverRuntimeAuthority(inputs::RecoverRuntimeAuthority),
+    RecoverSupervisorBinding(inputs::RecoverSupervisorBinding),
+    RecoverSupervisorRevocationPending(inputs::RecoverSupervisorRevocationPending),
+    RecoverSupervisorRotationOperation(inputs::RecoverSupervisorRotationOperation),
+    RecoverSupervisorRotationTerminalReceipt(inputs::RecoverSupervisorRotationTerminalReceipt),
+    RecoverRevokedSupervisorReceipt(inputs::RecoverRevokedSupervisorReceipt),
     EnsureSessionWithExecutor(inputs::EnsureSessionWithExecutor),
     SetSilentIntents(inputs::SetSilentIntents),
     ContainsSession(inputs::ContainsSession),
@@ -12257,6 +12738,12 @@ pub enum Input {
     ResolveSupervisorAuthorizeAdmission(inputs::ResolveSupervisorAuthorizeAdmission),
     BindSupervisor(inputs::BindSupervisor),
     AuthorizeSupervisor(inputs::AuthorizeSupervisor),
+    RefreshSupervisorBindingRoute(inputs::RefreshSupervisorBindingRoute),
+    SubmitSupervisorRotation(inputs::SubmitSupervisorRotation),
+    ResumeSupervisorRotation(inputs::ResumeSupervisorRotation),
+    SupervisorRotationPreviousRevoked(inputs::SupervisorRotationPreviousRevoked),
+    SupervisorRotationNextPublished(inputs::SupervisorRotationNextPublished),
+    ObserveSupervisorRotation(inputs::ObserveSupervisorRotation),
     RequestSupervisorTrustPublish(inputs::RequestSupervisorTrustPublish),
     RevokeSupervisor(inputs::RevokeSupervisor),
     SupervisorTrustEdgePublished(inputs::SupervisorTrustEdgePublished),
@@ -12268,6 +12755,7 @@ pub enum Input {
     AddDirectPeerEndpoint(inputs::AddDirectPeerEndpoint),
     RemoveDirectPeerEndpoint(inputs::RemoveDirectPeerEndpoint),
     ResolveSupervisorBridgeCommandAdmission(inputs::ResolveSupervisorBridgeCommandAdmission),
+    ResolveSupervisorCleanupCommandAdmission(inputs::ResolveSupervisorCleanupCommandAdmission),
     AuthorizeSupervisorMobPeerOverlay(inputs::AuthorizeSupervisorMobPeerOverlay),
     ApplyMobPeerOverlay(inputs::ApplyMobPeerOverlay),
 }
@@ -12275,6 +12763,9 @@ impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
             Self::RegisterSession(_) => InputKind::RegisterSession,
+            Self::PrepareTerminalSupervisorCleanupBindings(_) => {
+                InputKind::PrepareTerminalSupervisorCleanupBindings
+            }
             Self::BeginUnregisterSession(_) => InputKind::BeginUnregisterSession,
             Self::RuntimeLoopStoppedForUnregister(_) => InputKind::RuntimeLoopStoppedForUnregister,
             Self::CommsDrainExitedForUnregister(_) => InputKind::CommsDrainExitedForUnregister,
@@ -12340,6 +12831,17 @@ impl Input {
             }
             Self::Destroy(_) => InputKind::Destroy,
             Self::RecoverRuntimeAuthority(_) => InputKind::RecoverRuntimeAuthority,
+            Self::RecoverSupervisorBinding(_) => InputKind::RecoverSupervisorBinding,
+            Self::RecoverSupervisorRevocationPending(_) => {
+                InputKind::RecoverSupervisorRevocationPending
+            }
+            Self::RecoverSupervisorRotationOperation(_) => {
+                InputKind::RecoverSupervisorRotationOperation
+            }
+            Self::RecoverSupervisorRotationTerminalReceipt(_) => {
+                InputKind::RecoverSupervisorRotationTerminalReceipt
+            }
+            Self::RecoverRevokedSupervisorReceipt(_) => InputKind::RecoverRevokedSupervisorReceipt,
             Self::EnsureSessionWithExecutor(_) => InputKind::EnsureSessionWithExecutor,
             Self::SetSilentIntents(_) => InputKind::SetSilentIntents,
             Self::ContainsSession(_) => InputKind::ContainsSession,
@@ -12599,6 +13101,14 @@ impl Input {
             }
             Self::BindSupervisor(_) => InputKind::BindSupervisor,
             Self::AuthorizeSupervisor(_) => InputKind::AuthorizeSupervisor,
+            Self::RefreshSupervisorBindingRoute(_) => InputKind::RefreshSupervisorBindingRoute,
+            Self::SubmitSupervisorRotation(_) => InputKind::SubmitSupervisorRotation,
+            Self::ResumeSupervisorRotation(_) => InputKind::ResumeSupervisorRotation,
+            Self::SupervisorRotationPreviousRevoked(_) => {
+                InputKind::SupervisorRotationPreviousRevoked
+            }
+            Self::SupervisorRotationNextPublished(_) => InputKind::SupervisorRotationNextPublished,
+            Self::ObserveSupervisorRotation(_) => InputKind::ObserveSupervisorRotation,
             Self::RequestSupervisorTrustPublish(_) => InputKind::RequestSupervisorTrustPublish,
             Self::RevokeSupervisor(_) => InputKind::RevokeSupervisor,
             Self::SupervisorTrustEdgePublished(_) => InputKind::SupervisorTrustEdgePublished,
@@ -12614,6 +13124,9 @@ impl Input {
             Self::ResolveSupervisorBridgeCommandAdmission(_) => {
                 InputKind::ResolveSupervisorBridgeCommandAdmission
             }
+            Self::ResolveSupervisorCleanupCommandAdmission(_) => {
+                InputKind::ResolveSupervisorCleanupCommandAdmission
+            }
             Self::AuthorizeSupervisorMobPeerOverlay(_) => {
                 InputKind::AuthorizeSupervisorMobPeerOverlay
             }
@@ -12624,6 +13137,7 @@ impl Input {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
     RegisterSession,
+    PrepareTerminalSupervisorCleanupBindings,
     BeginUnregisterSession,
     RuntimeLoopStoppedForUnregister,
     CommsDrainExitedForUnregister,
@@ -12671,6 +13185,11 @@ pub enum InputKind {
     ResolveRuntimeCompletionWaitFailure,
     Destroy,
     RecoverRuntimeAuthority,
+    RecoverSupervisorBinding,
+    RecoverSupervisorRevocationPending,
+    RecoverSupervisorRotationOperation,
+    RecoverSupervisorRotationTerminalReceipt,
+    RecoverRevokedSupervisorReceipt,
     EnsureSessionWithExecutor,
     SetSilentIntents,
     ContainsSession,
@@ -12888,6 +13407,12 @@ pub enum InputKind {
     ResolveSupervisorAuthorizeAdmission,
     BindSupervisor,
     AuthorizeSupervisor,
+    RefreshSupervisorBindingRoute,
+    SubmitSupervisorRotation,
+    ResumeSupervisorRotation,
+    SupervisorRotationPreviousRevoked,
+    SupervisorRotationNextPublished,
+    ObserveSupervisorRotation,
     RequestSupervisorTrustPublish,
     RevokeSupervisor,
     SupervisorTrustEdgePublished,
@@ -12899,6 +13424,7 @@ pub enum InputKind {
     AddDirectPeerEndpoint,
     RemoveDirectPeerEndpoint,
     ResolveSupervisorBridgeCommandAdmission,
+    ResolveSupervisorCleanupCommandAdmission,
     AuthorizeSupervisorMobPeerOverlay,
     ApplyMobPeerOverlay,
 }
@@ -13765,6 +14291,33 @@ pub mod effects {
         pub previous_epoch: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorRotationSubmissionResolved {
+        pub operation_id: String,
+        pub result: SupervisorRotationSubmissionResultKind,
+        pub rejection: Option<SupervisorRotationRejectionKind>,
+        pub previous_name: Option<String>,
+        pub previous_peer_id: Option<String>,
+        pub previous_address: Option<String>,
+        pub previous_signing_public_key: Option<String>,
+        pub previous_epoch: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SupervisorRotationObservationResolved {
+        pub operation_id: String,
+        pub status: SupervisorRotationObservationStatusKind,
+        pub rejection: Option<SupervisorRotationRejectionKind>,
+        pub previous_name: Option<String>,
+        pub previous_peer_id: Option<String>,
+        pub previous_address: Option<String>,
+        pub previous_signing_public_key: Option<String>,
+        pub previous_epoch: Option<u64>,
+        pub next_name: Option<String>,
+        pub next_peer_id: Option<String>,
+        pub next_address: Option<String>,
+        pub next_signing_public_key: Option<String>,
+        pub next_epoch: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SupervisorBridgeCommandAdmissionResolved {
         pub result: SupervisorBridgeCommandAdmissionResultKind,
         pub rejection: Option<SupervisorBridgeCommandRejectionKind>,
@@ -13958,6 +14511,8 @@ pub enum Effect {
     SupervisorBindMaterialAdmissionResolved(effects::SupervisorBindMaterialAdmissionResolved),
     TranscriptEditAdmissionResolved(effects::TranscriptEditAdmissionResolved),
     SupervisorAuthorizeAdmissionResolved(effects::SupervisorAuthorizeAdmissionResolved),
+    SupervisorRotationSubmissionResolved(effects::SupervisorRotationSubmissionResolved),
+    SupervisorRotationObservationResolved(effects::SupervisorRotationObservationResolved),
     SupervisorBridgeCommandAdmissionResolved(effects::SupervisorBridgeCommandAdmissionResolved),
     SessionLlmReconfigurePlanResolved(effects::SessionLlmReconfigurePlanResolved),
     PeerProjectionChanged(effects::PeerProjectionChanged),
@@ -14119,6 +14674,8 @@ pub enum EffectKind {
     SupervisorBindMaterialAdmissionResolved,
     TranscriptEditAdmissionResolved,
     SupervisorAuthorizeAdmissionResolved,
+    SupervisorRotationSubmissionResolved,
+    SupervisorRotationObservationResolved,
     SupervisorBridgeCommandAdmissionResolved,
     SessionLlmReconfigurePlanResolved,
     PeerProjectionChanged,
@@ -14509,6 +15066,7 @@ pub mod command_capabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransitionId {
     Initialize,
+    PrepareTerminalSupervisorCleanupBindings,
     RegisterSessionIdle,
     RegisterSessionAttached,
     RegisterSessionRunning,
@@ -14692,16 +15250,19 @@ pub enum TransitionId {
     SetPeerIngressContextRunning,
     SetPeerIngressContextRetired,
     SetPeerIngressContextStopped,
+    SetPeerIngressContextTerminalSupervisorCleanup,
     ResolvePeerIngressReceiveClosedIdle,
     ResolvePeerIngressReceiveClosedAttached,
     ResolvePeerIngressReceiveClosedRunning,
     ResolvePeerIngressReceiveClosedRetired,
     ResolvePeerIngressReceiveClosedStopped,
+    ResolvePeerIngressReceiveClosedDestroyed,
     ResolvePeerIngressReceiveFullIdle,
     ResolvePeerIngressReceiveFullAttached,
     ResolvePeerIngressReceiveFullRunning,
     ResolvePeerIngressReceiveFullRetired,
     ResolvePeerIngressReceiveFullStopped,
+    ResolvePeerIngressReceiveFullDestroyed,
     ResolvePeerIngressReceivePlainEventIdle,
     ResolvePeerIngressReceivePlainEventAttached,
     ResolvePeerIngressReceivePlainEventRunning,
@@ -14712,11 +15273,14 @@ pub enum TransitionId {
     ResolvePeerIngressReceiveTrustedRunning,
     ResolvePeerIngressReceiveTrustedRetired,
     ResolvePeerIngressReceiveTrustedStopped,
+    ResolvePeerIngressReceiveTrustedTerminalSupervisorCleanup,
+    ResolvePeerIngressReceiveTerminalOrdinaryDrop,
     ResolvePeerIngressReceiveAuthExemptUntrustedIdle,
     ResolvePeerIngressReceiveAuthExemptUntrustedAttached,
     ResolvePeerIngressReceiveAuthExemptUntrustedRunning,
     ResolvePeerIngressReceiveAuthExemptUntrustedRetired,
     ResolvePeerIngressReceiveAuthExemptUntrustedStopped,
+    ResolvePeerIngressReceiveAuthExemptUntrustedTerminalSupervisorCleanup,
     ResolvePeerIngressReceiveAuthOpenUntrustedIdle,
     ResolvePeerIngressReceiveAuthOpenUntrustedAttached,
     ResolvePeerIngressReceiveAuthOpenUntrustedRunning,
@@ -14742,6 +15306,7 @@ pub enum TransitionId {
     ResolvePeerIngressDequeueAuthExemptExternalRunning,
     ResolvePeerIngressDequeueAuthExemptExternalRetired,
     ResolvePeerIngressDequeueAuthExemptExternalStopped,
+    ResolvePeerIngressDequeueAuthExemptExternalDestroyed,
     ResolvePeerIngressDequeueRequiredRemainingIdle,
     ResolvePeerIngressDequeueRequiredRemainingAttached,
     ResolvePeerIngressDequeueRequiredRemainingRunning,
@@ -14757,6 +15322,7 @@ pub enum TransitionId {
     NotifyDrainExitedRunning,
     NotifyDrainExitedRetired,
     NotifyDrainExitedStopped,
+    NotifyDrainExitedTerminalSupervisorCleanup,
     InterruptCurrentRunAttached,
     InterruptCurrentRun,
     ResolveUserInterruptPublicResultAcceptedInitializing,
@@ -14948,6 +15514,41 @@ pub enum TransitionId {
     RecoverRuntimeAuthorityRetired,
     RecoverRuntimeAuthorityStopped,
     RecoverRuntimeAuthorityDestroyed,
+    RecoverSupervisorBindingInitializing,
+    RecoverSupervisorBindingIdle,
+    RecoverSupervisorBindingAttached,
+    RecoverSupervisorBindingRunning,
+    RecoverSupervisorBindingRetired,
+    RecoverSupervisorBindingStopped,
+    RecoverSupervisorBindingDestroyed,
+    RecoverRevokedSupervisorReceiptInitializing,
+    RecoverRevokedSupervisorReceiptIdle,
+    RecoverRevokedSupervisorReceiptAttached,
+    RecoverRevokedSupervisorReceiptRunning,
+    RecoverRevokedSupervisorReceiptRetired,
+    RecoverRevokedSupervisorReceiptStopped,
+    RecoverRevokedSupervisorReceiptDestroyed,
+    RecoverSupervisorRevocationPendingInitializing,
+    RecoverSupervisorRevocationPendingIdle,
+    RecoverSupervisorRevocationPendingAttached,
+    RecoverSupervisorRevocationPendingRunning,
+    RecoverSupervisorRevocationPendingRetired,
+    RecoverSupervisorRevocationPendingStopped,
+    RecoverSupervisorRevocationPendingDestroyed,
+    RecoverSupervisorRotationOperationInitializing,
+    RecoverSupervisorRotationOperationIdle,
+    RecoverSupervisorRotationOperationAttached,
+    RecoverSupervisorRotationOperationRunning,
+    RecoverSupervisorRotationOperationRetired,
+    RecoverSupervisorRotationOperationStopped,
+    RecoverSupervisorRotationOperationDestroyed,
+    RecoverSupervisorRotationTerminalReceiptInitializing,
+    RecoverSupervisorRotationTerminalReceiptIdle,
+    RecoverSupervisorRotationTerminalReceiptAttached,
+    RecoverSupervisorRotationTerminalReceiptRunning,
+    RecoverSupervisorRotationTerminalReceiptRetired,
+    RecoverSupervisorRotationTerminalReceiptStopped,
+    RecoverSupervisorRotationTerminalReceiptDestroyed,
     EnsureSessionWithExecutorIdle,
     EnsureSessionWithExecutorAttached,
     EnsureSessionWithExecutorRunning,
@@ -15171,11 +15772,17 @@ pub enum TransitionId {
     ClassifyExternalEnvelopeRequestSupervisorSilentAttached,
     ClassifyExternalEnvelopeRequestSupervisorSilentIdle,
     ClassifyExternalEnvelopeRequestSupervisorSilentRunning,
+    ClassifyExternalEnvelopeRequestSupervisorSilentRetired,
+    ClassifyExternalEnvelopeRequestSupervisorSilentStopped,
+    ClassifyExternalEnvelopeRequestSupervisorSilentDestroyed,
     ClassifyExternalEnvelopeRequestSilentAttached,
     ClassifyExternalEnvelopeRequestSilentRunning,
     ClassifyExternalEnvelopeRequestSupervisorAttached,
     ClassifyExternalEnvelopeRequestSupervisorIdle,
     ClassifyExternalEnvelopeRequestSupervisorRunning,
+    ClassifyExternalEnvelopeRequestSupervisorRetired,
+    ClassifyExternalEnvelopeRequestSupervisorStopped,
+    ClassifyExternalEnvelopeRequestSupervisorDestroyed,
     ClassifyExternalEnvelopeRequestActionableAttached,
     ClassifyExternalEnvelopeRequestActionableRunning,
     ClassifyExternalEnvelopeLifecycleAddedIdle,
@@ -15820,11 +16427,13 @@ pub enum TransitionId {
     SpawnDrainRunning,
     SpawnDrainRetired,
     SpawnDrainStopped,
+    SpawnTerminalSupervisorCleanupDrain,
     StopDrainIdle,
     StopDrainAttached,
     StopDrainRunning,
     StopDrainRetired,
     StopDrainStopped,
+    StopTerminalSupervisorCleanupDrain,
     StageVisibilityFilterIdle,
     StageVisibilityFilterAttached,
     StageVisibilityFilterRunning,
@@ -15935,11 +16544,13 @@ pub enum TransitionId {
     PeerRequestReceivedRunning,
     PeerRequestReceivedRetired,
     PeerRequestReceivedStopped,
+    PeerRequestReceivedDestroyed,
     PeerResponseRepliedIdle,
     PeerResponseRepliedAttached,
     PeerResponseRepliedRunning,
     PeerResponseRepliedRetired,
     PeerResponseRepliedStopped,
+    PeerResponseRepliedDestroyed,
     AdvanceSessionContextIdle,
     AdvanceSessionContextAttached,
     AdvanceSessionContextRunning,
@@ -15994,16 +16605,19 @@ pub enum TransitionId {
     AttachSessionIngressRunning,
     AttachSessionIngressRetired,
     AttachSessionIngressStopped,
+    AttachSessionIngressTerminalSupervisorCleanup,
     AttachMobIngressIdle,
     AttachMobIngressAttached,
     AttachMobIngressRunning,
     AttachMobIngressRetired,
     AttachMobIngressStopped,
+    AttachMobIngressTerminalSupervisorCleanup,
     DetachIngressIdle,
     DetachIngressAttached,
     DetachIngressRunning,
     DetachIngressRetired,
     DetachIngressStopped,
+    DetachIngressTerminalSupervisorCleanup,
     ResolveSupervisorBindAdmissionBootstrapIdle,
     ResolveSupervisorBindAdmissionBootstrapAttached,
     ResolveSupervisorBindAdmissionBootstrapRunning,
@@ -16016,6 +16630,9 @@ pub enum TransitionId {
     ResolveSupervisorBindAdmissionAlreadyBoundIdle,
     ResolveSupervisorBindAdmissionAlreadyBoundAttached,
     ResolveSupervisorBindAdmissionAlreadyBoundRunning,
+    ResolveSupervisorBindAdmissionRevocationPendingIdle,
+    ResolveSupervisorBindAdmissionRevocationPendingAttached,
+    ResolveSupervisorBindAdmissionRevocationPendingRunning,
     ResolveSupervisorBindMaterialAdmissionAddressMismatchIdle,
     ResolveSupervisorBindMaterialAdmissionAddressMismatchAttached,
     ResolveSupervisorBindMaterialAdmissionAddressMismatchRunning,
@@ -16040,15 +16657,33 @@ pub enum TransitionId {
     ResolveSupervisorAuthorizeAdmissionNotBoundIdle,
     ResolveSupervisorAuthorizeAdmissionNotBoundAttached,
     ResolveSupervisorAuthorizeAdmissionNotBoundRunning,
+    ResolveSupervisorAuthorizeAdmissionNotBoundRetired,
+    ResolveSupervisorAuthorizeAdmissionNotBoundStopped,
+    ResolveSupervisorAuthorizeAdmissionNotBoundDestroyed,
     ResolveSupervisorAuthorizeAdmissionStaleSupervisorIdle,
     ResolveSupervisorAuthorizeAdmissionStaleSupervisorAttached,
     ResolveSupervisorAuthorizeAdmissionStaleSupervisorRunning,
+    ResolveSupervisorAuthorizeAdmissionStaleSupervisorRetired,
+    ResolveSupervisorAuthorizeAdmissionStaleSupervisorStopped,
+    ResolveSupervisorAuthorizeAdmissionStaleSupervisorDestroyed,
     ResolveSupervisorAuthorizeAdmissionSenderMismatchIdle,
     ResolveSupervisorAuthorizeAdmissionSenderMismatchAttached,
     ResolveSupervisorAuthorizeAdmissionSenderMismatchRunning,
+    ResolveSupervisorAuthorizeAdmissionSenderMismatchRetired,
+    ResolveSupervisorAuthorizeAdmissionSenderMismatchStopped,
+    ResolveSupervisorAuthorizeAdmissionSenderMismatchDestroyed,
     ResolveSupervisorAuthorizeAdmissionIdempotentAckIdle,
     ResolveSupervisorAuthorizeAdmissionIdempotentAckAttached,
     ResolveSupervisorAuthorizeAdmissionIdempotentAckRunning,
+    ResolveSupervisorAuthorizeAdmissionIdempotentAckRetired,
+    ResolveSupervisorAuthorizeAdmissionIdempotentAckStopped,
+    ResolveSupervisorAuthorizeAdmissionIdempotentAckDestroyed,
+    ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedIdle,
+    ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedAttached,
+    ResolveSupervisorAuthorizeAdmissionIdentityChangeRejectedRunning,
+    ResolveSupervisorAuthorizeAdmissionRotationNotAllowedRetired,
+    ResolveSupervisorAuthorizeAdmissionRotationNotAllowedStopped,
+    ResolveSupervisorAuthorizeAdmissionRotationNotAllowedDestroyed,
     ResolveSupervisorAuthorizeAdmissionProceedIdle,
     ResolveSupervisorAuthorizeAdmissionProceedAttached,
     ResolveSupervisorAuthorizeAdmissionProceedRunning,
@@ -16062,39 +16697,161 @@ pub enum TransitionId {
     AuthorizeSupervisorRunning,
     AuthorizeSupervisorRetired,
     AuthorizeSupervisorStopped,
+    RefreshSupervisorBindingRouteIdle,
+    RefreshSupervisorBindingRouteAttached,
+    RefreshSupervisorBindingRouteRunning,
+    RefreshSupervisorBindingRouteRetired,
+    RefreshSupervisorBindingRouteStopped,
+    RefreshSupervisorBindingRouteDestroyed,
+    SubmitSupervisorRotationNewIdle,
+    SubmitSupervisorRotationNewAttached,
+    SubmitSupervisorRotationNewRunning,
+    SubmitSupervisorRotationAdoptCurrentIdle,
+    SubmitSupervisorRotationAdoptCurrentAttached,
+    SubmitSupervisorRotationAdoptCurrentRunning,
+    SubmitSupervisorRotationPersistPreflightRejectedIdle,
+    SubmitSupervisorRotationPersistPreflightRejectedAttached,
+    SubmitSupervisorRotationPersistPreflightRejectedRunning,
+    SubmitSupervisorRotationPersistRejectedIdle,
+    SubmitSupervisorRotationPersistRejectedAttached,
+    SubmitSupervisorRotationPersistRejectedRunning,
+    SubmitSupervisorRotationExistingPendingIdle,
+    SubmitSupervisorRotationExistingPendingAttached,
+    SubmitSupervisorRotationExistingPendingRunning,
+    SubmitSupervisorRotationExistingPendingRetired,
+    SubmitSupervisorRotationExistingPendingStopped,
+    SubmitSupervisorRotationExistingPendingDestroyed,
+    SubmitSupervisorRotationExistingCompletedIdle,
+    SubmitSupervisorRotationExistingCompletedAttached,
+    SubmitSupervisorRotationExistingCompletedRunning,
+    SubmitSupervisorRotationExistingCompletedRetired,
+    SubmitSupervisorRotationExistingCompletedStopped,
+    SubmitSupervisorRotationExistingCompletedDestroyed,
+    SubmitSupervisorRotationExistingRejectedIdle,
+    SubmitSupervisorRotationExistingRejectedAttached,
+    SubmitSupervisorRotationExistingRejectedRunning,
+    SubmitSupervisorRotationExistingRejectedRetired,
+    SubmitSupervisorRotationExistingRejectedStopped,
+    SubmitSupervisorRotationExistingRejectedDestroyed,
+    SubmitSupervisorRotationConflictIdle,
+    SubmitSupervisorRotationConflictAttached,
+    SubmitSupervisorRotationConflictRunning,
+    SubmitSupervisorRotationConflictRetired,
+    SubmitSupervisorRotationConflictStopped,
+    SubmitSupervisorRotationConflictDestroyed,
+    SubmitSupervisorRotationUnavailableIdle,
+    SubmitSupervisorRotationUnavailableAttached,
+    SubmitSupervisorRotationUnavailableRunning,
+    SubmitSupervisorRotationUnavailableRetired,
+    SubmitSupervisorRotationUnavailableStopped,
+    SubmitSupervisorRotationUnavailableDestroyed,
+    ResumeSupervisorRotationPreviousRevokeIdle,
+    ResumeSupervisorRotationPreviousRevokeAttached,
+    ResumeSupervisorRotationPreviousRevokeRunning,
+    ResumeSupervisorRotationPreviousRevokeRetired,
+    ResumeSupervisorRotationPreviousRevokeStopped,
+    ResumeSupervisorRotationPreviousRevokeDestroyed,
+    SupervisorRotationPreviousRevokedIdle,
+    SupervisorRotationPreviousRevokedAttached,
+    SupervisorRotationPreviousRevokedRunning,
+    SupervisorRotationPreviousRevokedRetired,
+    SupervisorRotationPreviousRevokedStopped,
+    SupervisorRotationPreviousRevokedDestroyed,
+    ResumeSupervisorRotationNextPublishIdle,
+    ResumeSupervisorRotationNextPublishAttached,
+    ResumeSupervisorRotationNextPublishRunning,
+    ResumeSupervisorRotationNextPublishRetired,
+    ResumeSupervisorRotationNextPublishStopped,
+    ResumeSupervisorRotationNextPublishDestroyed,
+    SupervisorRotationNextPublishedIdle,
+    SupervisorRotationNextPublishedAttached,
+    SupervisorRotationNextPublishedRunning,
+    SupervisorRotationNextPublishedRetired,
+    SupervisorRotationNextPublishedStopped,
+    SupervisorRotationNextPublishedDestroyed,
+    ResumeSupervisorRotationCompletedIdle,
+    ResumeSupervisorRotationCompletedAttached,
+    ResumeSupervisorRotationCompletedRunning,
+    ResumeSupervisorRotationCompletedRetired,
+    ResumeSupervisorRotationCompletedStopped,
+    ResumeSupervisorRotationCompletedDestroyed,
+    ObserveSupervisorRotationPreviousRevokePendingIdle,
+    ObserveSupervisorRotationPreviousRevokePendingAttached,
+    ObserveSupervisorRotationPreviousRevokePendingRunning,
+    ObserveSupervisorRotationPreviousRevokePendingRetired,
+    ObserveSupervisorRotationPreviousRevokePendingStopped,
+    ObserveSupervisorRotationPreviousRevokePendingDestroyed,
+    ObserveSupervisorRotationNextPublishPendingIdle,
+    ObserveSupervisorRotationNextPublishPendingAttached,
+    ObserveSupervisorRotationNextPublishPendingRunning,
+    ObserveSupervisorRotationNextPublishPendingRetired,
+    ObserveSupervisorRotationNextPublishPendingStopped,
+    ObserveSupervisorRotationNextPublishPendingDestroyed,
+    ObserveSupervisorRotationCompletedIdle,
+    ObserveSupervisorRotationCompletedAttached,
+    ObserveSupervisorRotationCompletedRunning,
+    ObserveSupervisorRotationCompletedRetired,
+    ObserveSupervisorRotationCompletedStopped,
+    ObserveSupervisorRotationCompletedDestroyed,
+    ObserveSupervisorRotationRejectedIdle,
+    ObserveSupervisorRotationRejectedAttached,
+    ObserveSupervisorRotationRejectedRunning,
+    ObserveSupervisorRotationRejectedRetired,
+    ObserveSupervisorRotationRejectedStopped,
+    ObserveSupervisorRotationRejectedDestroyed,
+    ObserveSupervisorRotationNotFoundIdle,
+    ObserveSupervisorRotationNotFoundAttached,
+    ObserveSupervisorRotationNotFoundRunning,
+    ObserveSupervisorRotationNotFoundRetired,
+    ObserveSupervisorRotationNotFoundStopped,
+    ObserveSupervisorRotationNotFoundDestroyed,
     RequestSupervisorTrustPublishIdle,
     RequestSupervisorTrustPublishAttached,
     RequestSupervisorTrustPublishRunning,
     RequestSupervisorTrustPublishRetired,
     RequestSupervisorTrustPublishStopped,
+    RequestSupervisorTrustPublishDestroyed,
     RevokeSupervisorIdle,
     RevokeSupervisorAttached,
     RevokeSupervisorRunning,
     RevokeSupervisorRetired,
     RevokeSupervisorStopped,
+    RevokeSupervisorDestroyed,
+    RetryPendingSupervisorRevokeIdle,
+    RetryPendingSupervisorRevokeAttached,
+    RetryPendingSupervisorRevokeRunning,
+    RetryPendingSupervisorRevokeRetired,
+    RetryPendingSupervisorRevokeStopped,
+    RetryPendingSupervisorRevokeDestroyed,
     SupervisorTrustEdgePublishedIdle,
     SupervisorTrustEdgePublishedAttached,
     SupervisorTrustEdgePublishedRunning,
     SupervisorTrustEdgePublishedRetired,
     SupervisorTrustEdgePublishedStopped,
+    SupervisorTrustEdgePublishedDestroyed,
     SupervisorTrustEdgePublishFailedIdle,
     SupervisorTrustEdgePublishFailedAttached,
     SupervisorTrustEdgePublishFailedRunning,
     SupervisorTrustEdgePublishFailedRetired,
     SupervisorTrustEdgePublishFailedStopped,
+    SupervisorTrustEdgePublishFailedDestroyed,
     SupervisorTrustEdgeRevokedIdle,
     SupervisorTrustEdgeRevokedAttached,
     SupervisorTrustEdgeRevokedRunning,
     SupervisorTrustEdgeRevokedRetired,
     SupervisorTrustEdgeRevokedStopped,
+    SupervisorTrustEdgeRevokedDestroyed,
     SupervisorTrustEdgeRevokeFailedIdle,
     SupervisorTrustEdgeRevokeFailedAttached,
     SupervisorTrustEdgeRevokeFailedRunning,
     SupervisorTrustEdgeRevokeFailedRetired,
     SupervisorTrustEdgeRevokeFailedStopped,
+    SupervisorTrustEdgeRevokeFailedDestroyed,
     PublishLocalEndpointIdle,
     PublishLocalEndpointAttached,
     PublishLocalEndpointRunning,
+    PublishLocalEndpointTerminalSupervisorCleanupRetired,
+    PublishLocalEndpointTerminalSupervisorCleanupDestroyed,
     ClearLocalEndpointIdle,
     ClearLocalEndpointAttached,
     ClearLocalEndpointRunning,
@@ -16122,6 +16879,49 @@ pub enum TransitionId {
     ResolveSupervisorBridgeCommandAdmissionSenderMismatchIdle,
     ResolveSupervisorBridgeCommandAdmissionSenderMismatchAttached,
     ResolveSupervisorBridgeCommandAdmissionSenderMismatchRunning,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedIdle,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedAttached,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedRunning,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedRetired,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedStopped,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedDestroyed,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeIdle,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeAttached,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeRunning,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeRetired,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeStopped,
+    ResolveSupervisorCleanupCommandAdmissionAcceptedPendingRevokeDestroyed,
+    ResolveSupervisorCleanupCommandAdmissionNotBoundIdle,
+    ResolveSupervisorCleanupCommandAdmissionNotBoundAttached,
+    ResolveSupervisorCleanupCommandAdmissionNotBoundRunning,
+    ResolveSupervisorCleanupCommandAdmissionNotBoundRetired,
+    ResolveSupervisorCleanupCommandAdmissionNotBoundStopped,
+    ResolveSupervisorCleanupCommandAdmissionNotBoundDestroyed,
+    ResolveSupervisorCleanupCommandAdmissionStaleSupervisorIdle,
+    ResolveSupervisorCleanupCommandAdmissionStaleSupervisorAttached,
+    ResolveSupervisorCleanupCommandAdmissionStaleSupervisorRunning,
+    ResolveSupervisorCleanupCommandAdmissionStaleSupervisorRetired,
+    ResolveSupervisorCleanupCommandAdmissionStaleSupervisorStopped,
+    ResolveSupervisorCleanupCommandAdmissionStaleSupervisorDestroyed,
+    ResolveSupervisorCleanupCommandAdmissionSenderMismatchIdle,
+    ResolveSupervisorCleanupCommandAdmissionSenderMismatchAttached,
+    ResolveSupervisorCleanupCommandAdmissionSenderMismatchRunning,
+    ResolveSupervisorCleanupCommandAdmissionSenderMismatchRetired,
+    ResolveSupervisorCleanupCommandAdmissionSenderMismatchStopped,
+    ResolveSupervisorCleanupCommandAdmissionSenderMismatchDestroyed,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorIdle,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorAttached,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorRunning,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorRetired,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorStopped,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeStaleSupervisorDestroyed,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchIdle,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchAttached,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchRunning,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchRetired,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchStopped,
+    ResolveSupervisorCleanupCommandAdmissionPendingRevokeSenderMismatchDestroyed,
+    ResolveSupervisorCleanupCommandAdmissionCommandNotAllowed,
     AuthorizeSupervisorMobPeerOverlayIdle,
     AuthorizeSupervisorMobPeerOverlayAttached,
     AuthorizeSupervisorMobPeerOverlayRunning,
@@ -16515,6 +17315,34 @@ pub fn initial_state() -> State {
         supervisor_revoke_pending_address: None,
         supervisor_revoke_pending_signing_public_key: None,
         supervisor_revoke_pending_epoch: None,
+        supervisor_revoked_peer_id: None,
+        supervisor_revoked_signing_public_key: None,
+        supervisor_revoked_epoch: None,
+        supervisor_rotation_operation_id: None,
+        supervisor_rotation_phase: None,
+        supervisor_rotation_rejection: None,
+        supervisor_rotation_previous_name: None,
+        supervisor_rotation_previous_peer_id: None,
+        supervisor_rotation_previous_address: None,
+        supervisor_rotation_previous_signing_public_key: None,
+        supervisor_rotation_previous_epoch: None,
+        supervisor_rotation_next_name: None,
+        supervisor_rotation_next_peer_id: None,
+        supervisor_rotation_next_address: None,
+        supervisor_rotation_next_signing_public_key: None,
+        supervisor_rotation_next_epoch: None,
+        supervisor_rotation_terminal_phases: Default::default(),
+        supervisor_rotation_terminal_rejections: Default::default(),
+        supervisor_rotation_terminal_previous_names: Default::default(),
+        supervisor_rotation_terminal_previous_peer_ids: Default::default(),
+        supervisor_rotation_terminal_previous_addresses: Default::default(),
+        supervisor_rotation_terminal_previous_signing_public_keys: Default::default(),
+        supervisor_rotation_terminal_previous_epochs: Default::default(),
+        supervisor_rotation_terminal_next_names: Default::default(),
+        supervisor_rotation_terminal_next_peer_ids: Default::default(),
+        supervisor_rotation_terminal_next_addresses: Default::default(),
+        supervisor_rotation_terminal_next_signing_public_keys: Default::default(),
+        supervisor_rotation_terminal_next_epochs: Default::default(),
         local_endpoint: None,
         direct_peer_endpoints: Default::default(),
         mob_overlay_peer_endpoints: Default::default(),

@@ -7,8 +7,8 @@ use meerkat::{
     handle_schedule_tools_call, schedule_tools_list,
 };
 use meerkat_contracts::{
-    ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,
-    ScheduleOccurrencesResult, UpdateScheduleParams,
+    ListSchedulesParams, Schedule as WireSchedule, ScheduleIdParams, ScheduleListResult,
+    ScheduleOccurrencesParams, ScheduleOccurrencesResult, UpdateScheduleParams,
 };
 // `schedule/tools` + `schedule/call` request/response types are canonical
 // contracts wire types (single source of truth, schema-emitted).
@@ -70,7 +70,7 @@ pub async fn handle_create(
     }
 
     match schedule_service(&runtime).create(request).await {
-        Ok(schedule) => RpcResponse::success(id, schedule),
+        Ok(schedule) => RpcResponse::success(id, WireSchedule::from(schedule)),
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -90,7 +90,7 @@ pub async fn handle_get(
     };
 
     match schedule_service(&runtime).get(&schedule_id).await {
-        Ok(schedule) => RpcResponse::success(id, schedule),
+        Ok(schedule) => RpcResponse::success(id, WireSchedule::from(schedule)),
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -132,7 +132,7 @@ pub async fn handle_list(
                 schedules.truncate(limit);
             }
 
-            RpcResponse::success(id, ScheduleListResult { schedules })
+            RpcResponse::success(id, ScheduleListResult::from_domain(schedules))
         }
         Err(error) => map_schedule_error(id, error),
     }
@@ -160,7 +160,7 @@ pub async fn handle_update(
         .update(&schedule_id, params.update)
         .await
     {
-        Ok(schedule) => RpcResponse::success(id, schedule),
+        Ok(schedule) => RpcResponse::success(id, WireSchedule::from(schedule)),
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -184,7 +184,7 @@ pub async fn handle_pause(
     }
 
     match schedule_service(&runtime).pause(&schedule_id).await {
-        Ok(schedule) => RpcResponse::success(id, schedule),
+        Ok(schedule) => RpcResponse::success(id, WireSchedule::from(schedule)),
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -208,7 +208,7 @@ pub async fn handle_resume(
     }
 
     match schedule_service(&runtime).resume(&schedule_id).await {
-        Ok(schedule) => RpcResponse::success(id, schedule),
+        Ok(schedule) => RpcResponse::success(id, WireSchedule::from(schedule)),
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -228,7 +228,7 @@ pub async fn handle_delete(
     };
 
     match schedule_service(&runtime).delete(&schedule_id).await {
-        Ok(schedule) => RpcResponse::success(id, schedule),
+        Ok(schedule) => RpcResponse::success(id, WireSchedule::from(schedule)),
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -251,7 +251,9 @@ pub async fn handle_occurrences(
         .list_occurrences_filtered(&schedule_id, params.include_terminal.unwrap_or(true))
         .await
     {
-        Ok(occurrences) => RpcResponse::success(id, ScheduleOccurrencesResult { occurrences }),
+        Ok(occurrences) => {
+            RpcResponse::success(id, ScheduleOccurrencesResult::from_domain(occurrences))
+        }
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -634,6 +636,12 @@ mod tests {
         };
         assert_eq!(schedules.len(), 1);
         assert_eq!(schedules[0]["name"], "prod");
+        assert!(schedules[0].get("config").is_none());
+        assert!(schedules[0].get("machine_state").is_none());
+        assert!(schedules[0]["planning_horizon_days"].is_u64());
+        assert!(schedules[0]["planning_horizon_occurrences"].is_u64());
+        assert!(schedules[0]["created_at_utc"].is_string());
+        assert!(schedules[0]["updated_at_utc"].is_string());
     }
 
     #[tokio::test]

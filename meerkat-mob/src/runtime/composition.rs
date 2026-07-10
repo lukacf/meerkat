@@ -37,9 +37,9 @@ use meerkat_machine_schema::identity::{
     CompositionId, EffectVariantId, FieldId, MachineId, MachineInstanceId, SignalVariantId,
 };
 use meerkat_runtime::composition::{
-    CatalogCompositionSignalDispatcher, CompositionBinding, CompositionDispatcher, DispatchOutcome,
-    DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect, ProducerInstance,
-    RouteTable, SignalConsumerSurface,
+    CatalogCompositionSignalDispatcher, CompositionBinding, CompositionDispatcher, ConsumerError,
+    DispatchOutcome, DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect,
+    ProducerInstance, RouteTable, SignalConsumerSurface,
 };
 use meerkat_runtime::generated::meerkat_mob_seam as seam_facts;
 use meerkat_runtime::meerkat_machine::dsl as meerkat_dsl;
@@ -169,13 +169,15 @@ impl MobSeamEffect {
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
         match self.body() {
             mob_dsl::MobMachineEffect::RequestRuntimeBinding {
-                agent_identity: _,
+                agent_identity,
                 agent_runtime_id,
                 fence_token,
                 generation,
                 session_id,
             } => {
-                if id == &seam_facts::fields::agent_runtime_id() {
+                if id == &seam_facts::fields::agent_identity() {
+                    Some(FieldValue::Str(agent_identity.0.as_str()))
+                } else if id == &seam_facts::fields::agent_runtime_id() {
                     Some(FieldValue::Str(agent_runtime_id.as_str()))
                 } else if id == &seam_facts::fields::fence_token() {
                     Some(FieldValue::U64(fence_token.0))
@@ -211,8 +213,16 @@ impl MobSeamEffect {
                     None
                 }
             }
-            mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id } => {
-                if id == &seam_facts::fields::session_id() {
+            mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                agent_identity,
+                agent_runtime_id,
+                session_id,
+            } => {
+                if id == &seam_facts::fields::agent_identity() {
+                    Some(FieldValue::Str(agent_identity.0.as_str()))
+                } else if id == &seam_facts::fields::agent_runtime_id() {
+                    Some(FieldValue::Str(agent_runtime_id.as_str()))
+                } else if id == &seam_facts::fields::session_id() {
                     Some(FieldValue::Str(session_id.0.as_str()))
                 } else {
                     None
@@ -464,7 +474,7 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
 pub async fn dispatch_routed_effect(
     binding: &MobCompositionBinding,
     effect: MobSeamEffect,
-) -> Result<Option<DispatchOutcome>, MobError> {
+) -> Result<Option<DispatchOutcome>, DispatchRefusal> {
     let Some(dispatcher) = binding.wired() else {
         return Ok(None);
     };
@@ -477,10 +487,9 @@ pub async fn dispatch_routed_effect(
         .dispatch(mob_producer_instance(), payload)
         .await
         .map(Some)
-        .map_err(dispatch_refusal_to_mob_error)
 }
 
-fn dispatch_refusal_to_mob_error(refusal: DispatchRefusal) -> MobError {
+pub(super) fn dispatch_refusal_to_mob_error(refusal: DispatchRefusal) -> MobError {
     match refusal {
         // UnwiredConsumer is the expected intermediate-state shape during
         // wave-c spine (C-6p landed, C-6c pending). Surface as the explicit
@@ -523,6 +532,126 @@ fn dispatch_refusal_to_mob_error(refusal: DispatchRefusal) -> MobError {
             error.message(),
             error.error_code()
         )),
+    }
+}
+
+/// Build the producer feedback input authorized by the generated refusal
+/// closure for `effect`.
+///
+/// The schema/codegen owns which route may close into which MobMachine input
+/// and exactly which effect fields + consumer context feed it. This function
+/// is a mechanical lowering from the generated descriptor into the canonical
+/// DSL enum; it makes no lifecycle/terminality decision.
+pub(super) fn refusal_feedback_input(
+    effect: &MobSeamEffect,
+    error: &ConsumerError,
+) -> Result<mob_dsl::MobMachineInput, MobError> {
+    let route = effect.generated_input_route().ok_or_else(|| {
+        MobError::WiringError(format!(
+            "routed effect `{}` has no generated input route",
+            effect.variant_id()
+        ))
+    })?;
+    let closure = seam_facts::refusal_closure_for_route(&route.route_id).ok_or_else(|| {
+        MobError::WiringError(format!(
+            "route `{}` has no generated consumer-refusal closure",
+            route.route_id
+        ))
+    })?;
+    if closure.producer_instance != mob_producer_instance_id()
+        || closure.effect_variant != effect.variant_id()
+        || closure.feedback_instance != mob_producer_instance_id()
+    {
+        return Err(MobError::WiringError(format!(
+            "generated refusal closure for route `{}` does not correlate the mob producer/effect",
+            route.route_id
+        )));
+    }
+
+    let mut saw_code = false;
+    let mut saw_message = false;
+    for (source, target) in &closure.field_bindings {
+        match source {
+            seam_facts::GeneratedRefusalFieldSource::EffectField(field) => {
+                if effect.field(field).is_none() {
+                    return Err(MobError::WiringError(format!(
+                        "generated refusal closure for route `{}` requires missing effect field `{}` (feedback field `{}`)",
+                        route.route_id, field, target
+                    )));
+                }
+            }
+            seam_facts::GeneratedRefusalFieldSource::ConsumerErrorCode => saw_code = true,
+            seam_facts::GeneratedRefusalFieldSource::ConsumerErrorMessage => saw_message = true,
+        }
+    }
+    if !saw_code || !saw_message {
+        return Err(MobError::WiringError(format!(
+            "generated refusal closure for route `{}` does not preserve consumer code + message",
+            route.route_id
+        )));
+    }
+
+    let refusal_code = error.error_code().to_owned();
+    let reason = error.message().to_owned();
+    match (closure.feedback_input, effect.body()) {
+        (
+            input,
+            mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                agent_identity,
+                agent_runtime_id,
+                session_id,
+                ..
+            },
+        ) if input == seam_facts::inputs::resolve_runtime_binding_refusal() => {
+            Ok(mob_dsl::MobMachineInput::ResolveRuntimeBindingRefusal {
+                agent_identity: agent_identity.clone(),
+                agent_runtime_id: agent_runtime_id.clone(),
+                session_id: session_id.clone(),
+                refusal_code,
+                reason,
+            })
+        }
+        (
+            input,
+            mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+                agent_runtime_id,
+                fence_token,
+                session_id,
+                work_id,
+                origin,
+                ..
+            },
+        ) if input == seam_facts::inputs::resolve_runtime_ingress_refusal() => {
+            Ok(mob_dsl::MobMachineInput::ResolveRuntimeIngressRefusal {
+                agent_runtime_id: agent_runtime_id.clone(),
+                fence_token: *fence_token,
+                session_id: session_id.clone(),
+                work_id: work_id.clone(),
+                origin: *origin,
+                refusal_code,
+                reason,
+            })
+        }
+        (
+            input,
+            mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                agent_identity,
+                agent_runtime_id,
+                session_id,
+            },
+        ) if input == seam_facts::inputs::resolve_runtime_retire_refusal() => {
+            Ok(mob_dsl::MobMachineInput::ResolveRuntimeRetireRefusal {
+                agent_identity: agent_identity.clone(),
+                agent_runtime_id: agent_runtime_id.clone(),
+                session_id: session_id.clone(),
+                refusal_code,
+                reason,
+            })
+        }
+        (_, body) => Err(MobError::WiringError(format!(
+            "generated refusal closure for route `{}` does not match effect body `{body:?}`",
+            route.route_id
+        ))),
     }
 }
 
@@ -611,6 +740,8 @@ mod tests {
             ),
             (
                 seam(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                    agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
                     session_id: mob_dsl::SessionId::from("session-1"),
                 }),
                 seam_facts::route_retire_request_reaches_meerkat(),
@@ -638,8 +769,10 @@ mod tests {
     }
 
     #[test]
-    fn retire_and_destroy_have_no_fields() {
+    fn retire_exposes_refusal_correlation_while_destroy_exposes_only_session() {
         let retire = seam(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+            agent_identity: mob_dsl::AgentIdentity::from("agent"),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
         let destroy = seam(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
@@ -647,8 +780,74 @@ mod tests {
         });
         assert_eq!(retire.variant_id(), ev("RequestRuntimeRetire"));
         assert_eq!(destroy.variant_id(), ev("RequestRuntimeDestroy"));
-        assert!(retire.field(&fid("agent_runtime_id")).is_none());
+        assert!(matches!(
+            retire.field(&fid("agent_runtime_id")),
+            Some(FieldValue::Str("rt-1"))
+        ));
+        assert!(matches!(
+            retire.field(&fid("agent_identity")),
+            Some(FieldValue::Str("agent"))
+        ));
         assert!(destroy.field(&fid("agent_runtime_id")).is_none());
+    }
+
+    #[test]
+    fn generated_refusal_closure_preserves_effect_kind_and_stable_code() {
+        let error = ConsumerError::new("dsl_guard_rejected", "typed consumer detail");
+
+        let binding = seam(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+            agent_identity: mob_dsl::AgentIdentity::from("agent"),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+            fence_token: mob_dsl::FenceToken(7),
+            generation: Some(mob_dsl::Generation(3)),
+            session_id: mob_dsl::SessionId::from("session-1"),
+        });
+        assert!(matches!(
+            refusal_feedback_input(&binding, &error).expect("binding closure"),
+            mob_dsl::MobMachineInput::ResolveRuntimeBindingRefusal {
+                refusal_code,
+                reason,
+                ..
+            } if refusal_code == "dsl_guard_rejected" && reason == "typed consumer detail"
+        ));
+
+        let ingress = seam(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+            fence_token: mob_dsl::FenceToken(7),
+            generation: Some(mob_dsl::Generation(3)),
+            session_id: mob_dsl::SessionId::from("session-1"),
+            work_id: mob_dsl::WorkId::from("work-1"),
+            origin: mob_dsl::WorkOrigin::External,
+        });
+        assert!(matches!(
+            refusal_feedback_input(&ingress, &error).expect("ingress closure"),
+            mob_dsl::MobMachineInput::ResolveRuntimeIngressRefusal {
+                work_id,
+                refusal_code,
+                ..
+            } if work_id.0 == "work-1" && refusal_code == "dsl_guard_rejected"
+        ));
+
+        let retire = seam(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+            agent_identity: mob_dsl::AgentIdentity::from("agent"),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+            session_id: mob_dsl::SessionId::from("session-1"),
+        });
+        assert!(matches!(
+            refusal_feedback_input(&retire, &error).expect("retire closure"),
+            mob_dsl::MobMachineInput::ResolveRuntimeRetireRefusal {
+                refusal_code,
+                ..
+            } if refusal_code == "dsl_guard_rejected"
+        ));
+
+        let destroy = seam(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+            session_id: mob_dsl::SessionId::from("session-1"),
+        });
+        assert!(
+            refusal_feedback_input(&destroy, &error).is_err(),
+            "destroy cleanup intentionally retains its existing incomplete-destroy retry contract"
+        );
     }
 
     #[test]
@@ -711,6 +910,8 @@ mod tests {
         ));
 
         let retire_in = DslEffect::RequestRuntimeRetire {
+            agent_identity: mob_dsl::AgentIdentity::from("agent"),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         };
         assert!(matches!(
@@ -760,6 +961,8 @@ mod tests {
                 origin: mob_dsl::WorkOrigin::External,
             },
             DslEffect::RequestRuntimeRetire {
+                agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
                 session_id: mob_dsl::SessionId::from("session-1"),
             },
             DslEffect::RequestRuntimeDestroy {
@@ -848,6 +1051,8 @@ mod tests {
                 origin: mob_dsl::WorkOrigin::External,
             },
             mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
                 session_id: mob_dsl::SessionId::from("session-1"),
             },
             mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
@@ -877,6 +1082,8 @@ mod tests {
     async fn standalone_binding_skips_dispatch_without_error() {
         let binding: MobCompositionBinding = CompositionBinding::Standalone;
         let effect = seam(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+            agent_identity: mob_dsl::AgentIdentity::from("agent"),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
             session_id: mob_dsl::SessionId::from("019dbd3d-d7ad-75a1-96d0-8013927e78f8"),
         });
         let outcome = dispatch_routed_effect(&binding, effect)

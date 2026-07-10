@@ -158,6 +158,18 @@ impl InMemoryMobRuntimeMetadataStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_legacy_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        record: SupervisorAuthorityRecord,
+    ) {
+        self.supervisor_records
+            .write()
+            .await
+            .insert(mob_id.clone(), record);
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

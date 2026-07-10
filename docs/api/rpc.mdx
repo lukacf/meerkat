@@ -1,10 +1,10 @@
 ---
 title: "JSON-RPC stdio server"
-description: "Stateful JSON-RPC 2.0 interface for stdio, TCP, and optional live audio WebSocket hosting."
+description: "Stateful JSON-RPC 2.0 interface for stdio, TCP, and optional live-channel WebSocket hosting."
 icon: "terminal"
 ---
 
-Meerkat exposes a JSON-RPC 2.0 surface for IDE integration, desktop apps, and automation tools. Stdio is the default, and the binary also supports TCP plus an optional live audio WebSocket listener (`--live-ws`). Unlike REST and MCP, the RPC server keeps agents alive between turns for fast multi-turn conversations.
+Meerkat exposes a JSON-RPC 2.0 surface for IDE integration, desktop apps, and automation tools. Stdio is the default, and the binary also supports TCP plus an optional live-channel WebSocket listener (`--live-ws`). Unlike REST and MCP, the RPC server keeps agents alive between turns for fast multi-turn conversations.
 
 The RPC surface is fully runtime-backed:
 
@@ -112,11 +112,11 @@ subset.
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
-| `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live audio/text channel for a session |
+| `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live audio/text channel with model-gated image input |
 | `live/webrtc/answer` | Live | `LiveWebrtcAnswerParams` | `LiveWebrtcAnswerResult` | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Live | `LiveChannelParams` | `LiveStatusResult` | Get the status of a live channel |
 | `live/close` | Live | `LiveChannelParams` | `LiveCloseResult` | Close a live channel |
-| `live/send_input` | Live | `LiveSendInputParams` | `LiveSendInputResult` | Send an input chunk (audio/text) to a live channel |
+| `live/send_input` | Live | `LiveSendInputParams` | `LiveSendInputResult` | Send an audio, text, or model-supported image chunk to a live channel |
 | `live/commit_input` | Live | `LiveCommitInputParams` | `LiveCommitInputResult` | Commit pending input on a live channel (turn boundary) |
 | `live/interrupt` | Live | `LiveChannelParams` | `LiveInterruptResult` | Interrupt the assistant turn on a live channel (barge-in) |
 | `live/truncate` | Live | `LiveTruncateParams` | `LiveTruncateResult` | Truncate assistant output at a client-tracked playback cursor |
@@ -210,6 +210,13 @@ subset.
 | `realm/list` | Realm | — | `WireRealmList` | List realm summaries |
 | `realm/get` | Realm | `RealmIdParams` | `WireRealmConnectionSet` | Get full realm connection set |
 
+<Note>
+Every `Schedule` result is one flattened public object. Configuration fields
+including `planning_horizon_days`, `planning_horizon_occurrences`, `labels`,
+`created_at_utc`, and `updated_at_utc` are top-level; there is no nested
+`config` and persisted machine authority is not exposed as `machine_state`.
+</Note>
+
 WorkGraph goal and attention mutation methods require trusted host/session
 authority. JSON-RPC exposes observability reads; goal creation, reassignment,
 policy escalation, confirmation, and closure stay on trusted in-process host and
@@ -220,11 +227,12 @@ Generated assistant images use the same surface-neutral history and blob APIs as
 </Note>
 
 <Note>
-Live channels provide low-latency audio/text streaming. Create a session
+Live channels provide low-latency audio/text streaming with model-gated image input. Create a session
 with a realtime-capable model (e.g. `gpt-realtime-2`), then call
 `live/open` to start the channel. The `--live-ws <addr>` flag on
 `rkat-rpc` enables the WebSocket listener required for audio transport.
-Use `live/status` to observe channel state.
+Use `live/status` to observe channel state and check
+`live/open`'s `capabilities.image_in` before sending image context.
 </Note>
 
 <Note>
@@ -525,6 +533,9 @@ Read committed transcript history for an existing session.
 ```
 
 Returns oldest-to-newest committed messages plus pagination metadata. This method follows the same owner-resolution rules as `session/read`, including mob-owned session IDs when mob support is enabled.
+When `limit` is omitted, the server returns at most 100 messages. The maximum
+accepted `limit` is 1,000 and the maximum `offset` is 1,000,000; larger values
+fail with `INVALID_PARAMS` before the session store is queried.
 
 ### session/rewrite_transcript
 
@@ -725,6 +736,18 @@ List active sessions.
 }
 ```
 </CodeGroup>
+
+`session/list` is owner-paginated rather than load-all/truncate: omitted
+`limit` defaults to 100, the maximum is 1,000, and `offset` is capped at
+1,000,000. The same 100/1,000 collection limits apply to
+`events/list_since`, `workgraph/list`, `workgraph/ready`,
+`workgraph/snapshot`, and `workgraph/events`.
+
+WorkGraph ready-set and snapshot projections are atomic only within explicit
+process bounds. A projection that would need to scan more than 1,000 items,
+1,000 edges, or 1,000 attention bindings fails closed with
+`INVALID_PARAMS`; narrow the realm/namespace/filter and retry. The store does
+not materialize an oversized graph and truncate it after the fact.
 
 ### session/read
 
@@ -988,8 +1011,36 @@ List discoverable peers from configured `TrustedPeers` and active in-process reg
   "id": 9,
   "result": {
     "peers": [
-      {"name": "reviewer", "address": "127.0.0.1:4201"},
-      {"name": "coordinator", "address": "inproc"}
+      {
+        "peer_id": "550e8400-e29b-41d4-a716-446655440001",
+        "name": "reviewer",
+        "address": {
+          "transport": "tcp",
+          "endpoint": "127.0.0.1:4201"
+        },
+        "source": "trusted",
+        "sendable_kinds": ["peer_message", "peer_request", "peer_response"],
+        "capabilities": {
+          "version": 1,
+          "extensions": {"review": true}
+        },
+        "meta": {
+          "description": "Reviews pull requests",
+          "labels": {"role": "reviewer"}
+        }
+      },
+      {
+        "peer_id": "550e8400-e29b-41d4-a716-446655440002",
+        "name": "coordinator",
+        "address": {
+          "transport": "inproc",
+          "endpoint": "coordinator"
+        },
+        "source": "inproc",
+        "sendable_kinds": ["peer_message", "peer_request", "peer_response"],
+        "capabilities": {"version": 1, "extensions": {}},
+        "meta": {}
+      }
     ]
   }
 }
@@ -999,6 +1050,13 @@ List discoverable peers from configured `TrustedPeers` and active in-process reg
 <ParamField body="session_id" type="string" required>
   Session ID to query peers for.
 </ParamField>
+
+Use `peer_id` as the `to` value for `comms/send`; `name` is display-only and
+may collide. Each entry uses the canonical typed `PeerDirectoryEntry` shape:
+`address` is `{transport, endpoint}`, `source` records discovery provenance,
+`sendable_kinds` states supported comms operations, `capabilities` carries the
+versioned capability envelope, and `meta` contains supplementary description
+and labels.
 
 ### skills/list
 
@@ -1082,7 +1140,7 @@ Returns error `-32603` if skills are not enabled.
 
 ## Live channel methods
 
-Live channels provide low-latency audio and text streaming on sessions that use a realtime-capable model. Create a session with a model like `gpt-realtime-2`, then call `live/open` to start the channel explicitly. The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket listener required for audio transport. See the [Live Channels guide](/guides/realtime) for the full flow.
+Live channels provide low-latency audio and text streaming plus model-gated still-image input on sessions that use a realtime-capable model. Create a session with a model like `gpt-realtime-2`, then call `live/open` to start the channel explicitly. The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket listener required for audio transport. See the [Live Channels guide](/guides/realtime) for the full flow.
 
 ### Opening a live channel
 
@@ -1131,19 +1189,85 @@ Read the current state of a live channel.
 ```
 </CodeGroup>
 
+### live/send_input
+
+Send one typed input chunk. Image input is available only when
+`LiveOpenResult.capabilities.image_in` is `true`; an image is staged as context
+for the next text, audio, or explicitly committed response. Every image must
+carry a caller-stable, session-scoped `idempotency_key`.
+
+The JSON-RPC JSONL transport accepts frames up to 64 MiB, excluding the
+trailing newline. Direct live WebSocket frames are a different input path:
+they support JSON text chunks and negotiated raw PCM audio only, with a 2 MiB
+aggregate/per-frame ceiling. Images always use this JSON-RPC method, even when
+the channel's observation/audio transport is WebSocket or WebRTC.
+
+Server-originated JSON-RPC responses are capped at 32 MiB and queued
+notifications at 8 MiB. Their byte/count reservations are process-wide and
+remain owned through the bounded transport write; oversized collection reads
+must use pagination instead of relying on socket buffering.
+
+<CodeGroup>
+```json Image input
+{
+  "jsonrpc": "2.0",
+  "id": 23,
+  "method": "live/send_input",
+  "params": {
+    "channel_id": "ch_01936f8a-...",
+    "chunk": {
+      "kind": "image",
+      "idempotency_key": "turn-42-diagram",
+      "mime": "image/png",
+      "data": "iVBORw0KGgo..."
+    }
+  }
+}
+```
+</CodeGroup>
+
+The key must be non-empty, no more than 128 UTF-8 bytes, contain no control
+characters, and have no leading or trailing whitespace. Replay the same key
+with the same canonical MIME and bytes after a lost receipt: Meerkat does not
+resend it to the provider and emits the existing durable identity again.
+Reusing a key for different content is rejected as
+`image_input_idempotency_conflict`. If text or audio is already staged, commit
+it before submitting an image; otherwise the image is rejected as
+`image_input_requires_commit`.
+
+`{ "status": "sent" }` proves only that the adapter queue accepted the
+command. Wire validation and queue admission can instead fail immediately with
+typed `LiveSendInputErrorData`. A check that fails after acceptance is emitted
+as a typed `command_rejected` observation. Only a
+`user_content_committed` observation carrying the same `idempotency_key`
+proves the provider-acknowledged image reached durable canonical session
+history. The receipt is redacted: it contains identity, ordering, media type,
+and the key, never image bytes.
+
+Each image is limited to 20 MiB decoded, and canonical live image history is
+limited to 40 MiB decoded in aggregate, counting repeated references as
+separate occurrences. `live/send_input` rejects a new image that would cross
+the aggregate ceiling as `image_input_history_budget_exceeded` before provider
+send or persistence. That keeps every successfully committed live image
+reopenable. Legacy or out-of-band history already above the ceiling, missing
+blobs, and content-address mismatches fail `live/open` rather than trimming,
+substituting, or changing image context. See the
+[Live Channels guide](/guides/realtime#sending-image-input) for retry and
+transport details.
+
 ### Live channel lifecycle methods (`live/*`)
 
 | Method | Purpose |
 |--------|---------|
-| `live/open` | Open a live audio/text channel for a session |
+| `live/open` | Open a live audio/text channel with model-gated image input |
 | `live/webrtc/answer` | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Get the status of a live channel |
 | `live/close` | Close a live channel |
-| `live/send_input` | Send an input chunk (audio/text) to a live channel |
+| `live/send_input` | Send an audio, text, or model-supported image chunk to a live channel |
 | `live/commit_input` | Commit pending input on a live channel (turn boundary) |
 | `live/interrupt` | Interrupt the assistant turn on a live channel (barge-in) |
 | `live/truncate` | Truncate assistant output at a client-tracked playback cursor |
-| `live/refresh` | Apply mutable session config (instructions/tools/audio) to an open channel; config-only, does not replay history; identity swaps (model/provider) require close + reopen |
+| `live/refresh` | Apply mutable session config (instructions/tools/audio) to an open channel; config-only, does not replay history; identity swaps and canonical transcript/user-content rewrites return typed reopen-required errors |
 
 These require `rkat-rpc` to be started with `--live-ws <addr>` for WebSocket transport.
 

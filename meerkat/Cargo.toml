@@ -109,12 +109,21 @@ session-compaction = ["meerkat-session/session-compaction"]
 memory-store-session = ["dep:meerkat-memory"]
 
 # Optional subsystems
-comms = ["dep:meerkat-comms", "dep:parking_lot", "meerkat-tools/comms"]
+comms = [
+    "dep:meerkat-comms",
+    "meerkat-comms/capability",
+    "dep:parking_lot",
+    "meerkat-tools/comms",
+]
 mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
 schedule = []
 workgraph = []
 skills = [
     "dep:meerkat-skills",
+    # Durable builtin SkillKeys must resolve after cross-surface resume even
+    # when the facade's comms tool surface is disabled. This links only the
+    # feature-owned declarations; `comms` still owns tool/runtime enablement.
+    "dep:meerkat-comms",
     "meerkat-skills/capability",
     "meerkat-skills/skills-http",
     "meerkat-tools/skills",

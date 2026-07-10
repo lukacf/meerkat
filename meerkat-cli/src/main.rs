@@ -3450,22 +3450,16 @@ async fn handle_run_command(
 
     let model_was_explicit = model.is_some();
     let provider_was_explicit = provider.is_some();
-    let auth_binding_selection = auth_binding
-        .as_ref()
-        .map(|binding| resolve_cli_auth_binding_selection(&config, binding))
-        .transpose()?;
-    let model =
-        resolve_cli_effective_model(&config, model, provider, auth_binding_selection.as_ref());
+    let resolution = resolve_cli_create_session_model(&config, model, provider, auth_binding)?;
+    let model = resolution.model;
+    let resolved_provider = Provider::from_core(resolution.provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "create-session model resolution selected unsupported provider '{}'",
+            resolution.provider.as_str()
+        )
+    })?;
+    let auth_binding = resolution.auth_binding;
     let max_tokens = max_tokens.unwrap_or_else(|| config.agent.resolved_max_tokens_per_turn());
-    let resolved_provider = resolve_cli_provider_with_auth_binding(
-        &config,
-        &model,
-        provider,
-        auth_binding_selection.as_ref(),
-    )?;
-    let build_provider_override =
-        (provider.is_some() || auth_binding.is_some() || model_was_explicit)
-            .then_some(resolved_provider);
 
     let duration = max_duration.map(|s| parse_duration(&s)).transpose();
     let provider_params = parse_provider_params(&params);
@@ -3521,7 +3515,6 @@ async fn handle_run_command(
                 system_prompt,
                 &model,
                 resolved_provider,
-                build_provider_override,
                 model_was_explicit,
                 provider_was_explicit,
                 max_tokens,
@@ -4150,65 +4143,21 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     Ok((config, paths.root))
 }
 
-fn model_provider(config: &Config, model: &str) -> Option<Provider> {
-    config
-        .model_registry(meerkat_models::canonical())
-        .ok()
-        .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
-        .and_then(Provider::from_core)
-}
-
-fn provider_default_model(config: &Config, provider: Provider) -> Option<String> {
-    let model = match provider {
-        Provider::Anthropic => &config.models.anthropic,
-        Provider::Openai => &config.models.openai,
-        Provider::Gemini => &config.models.gemini,
-        Provider::SelfHosted => return None,
-    };
-    if model.is_empty() {
-        // No operator override: fall through to the catalog-owned
-        // per-provider default (core's `ModelDefaults::default` is empty).
-        return meerkat_models::default_model(provider.as_core()).map(str::to_string);
-    }
-    Some(model.clone())
-}
-
-fn resolve_provider_constrained_default_model(config: &Config, provider: Provider) -> String {
-    if config.agent.model.is_empty() {
-        return provider_default_model(config, provider).unwrap_or_default();
-    }
-    match model_provider(config, &config.agent.model) {
-        Some(model_provider) if model_provider == provider => config.agent.model.clone(),
-        Some(_) => {
-            provider_default_model(config, provider).unwrap_or_else(|| config.agent.model.clone())
-        }
-        None => config.agent.model.clone(),
-    }
-}
-
-fn resolve_cli_effective_model(
+fn resolve_cli_create_session_model(
     config: &Config,
     explicit_model: Option<String>,
     explicit_provider: Option<Provider>,
-    auth_binding: Option<&CliAuthBindingSelection>,
-) -> String {
-    if let Some(model) = explicit_model {
-        return model;
-    }
-
-    if let Some(model) = auth_binding.and_then(|selection| selection.default_model.clone()) {
-        return model;
-    }
-
-    if let Some(provider) =
-        explicit_provider.or_else(|| auth_binding.map(|selection| selection.provider))
-    {
-        return resolve_provider_constrained_default_model(config, provider);
-    }
-
-    // Canonical ladder: shared create-session default resolution owns operator
-    // defaults, stale built-in default healing, and provider/catalog fallback.
-    meerkat::resolve_create_session_default_model(config)
+    auth_binding: Option<AuthBindingRef>,
+) -> anyhow::Result<meerkat::CreateSessionModelResolution> {
+    meerkat::resolve_create_session_model(
+        config,
+        meerkat::CreateSessionModelResolutionRequest {
+            model: explicit_model,
+            provider: explicit_provider.map(Provider::as_core),
+            auth_binding,
+        },
+    )
+    .map_err(anyhow::Error::new)
 }
 
 async fn handle_config_get(
@@ -9097,7 +9046,6 @@ async fn run_agent(
     system_prompt: Option<String>,
     model: &str,
     provider: Provider,
-    build_provider_override: Option<Provider>,
     model_was_explicit: bool,
     provider_was_explicit: bool,
     max_tokens: u32,
@@ -9140,7 +9088,6 @@ async fn run_agent(
             system_prompt,
             model,
             provider,
-            build_provider_override,
             model_was_explicit,
             provider_was_explicit,
             max_tokens,
@@ -9368,7 +9315,7 @@ async fn run_agent(
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,
-            provider: build_provider_override.map(Provider::as_core),
+            provider: Some(provider.as_core()),
             override_comms: Default::default(),
             self_hosted_server_id: None,
             output_schema,
@@ -14676,115 +14623,6 @@ impl Provider {
             _ => None,
         }
     }
-}
-
-fn resolve_cli_provider(
-    config: &Config,
-    model: &str,
-    explicit: Option<Provider>,
-) -> anyhow::Result<Provider> {
-    if let Some(provider) = explicit {
-        if let Some(reason) = config
-            .model_registry(meerkat_models::canonical())
-            .ok()
-            .and_then(|registry| {
-                registry.provider_override_mismatch_reason(provider.as_core(), model)
-            })
-        {
-            anyhow::bail!(reason);
-        }
-        return Ok(provider);
-    }
-
-    if let Some(provider) = config
-        .model_registry(meerkat_models::canonical())
-        .ok()
-        .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
-        .and_then(Provider::from_core)
-        .or_else(|| Provider::infer_from_model(model))
-    {
-        return Ok(provider);
-    }
-
-    Err(anyhow::anyhow!(
-        "Cannot infer provider from model '{model}'. Use --provider or register a self-hosted model alias."
-    ))
-}
-
-struct CliAuthBindingSelection {
-    provider: Provider,
-    default_model: Option<String>,
-}
-
-fn resolve_cli_auth_binding_selection(
-    config: &Config,
-    auth_binding: &AuthBindingRef,
-) -> anyhow::Result<CliAuthBindingSelection> {
-    let realm_id = auth_binding.realm.as_str();
-    let section = config
-        .realm
-        .get(realm_id)
-        .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm_id}'"))?;
-    let realm_set = meerkat_core::RealmConnectionSet::from_config(realm_id, section)
-        .map_err(|e| anyhow::anyhow!("Realm config invalid for '{realm_id}': {e}"))?;
-    let (binding, backend, _auth) = realm_set.lookup_auth_binding(auth_binding).map_err(|e| {
-        anyhow::anyhow!(
-            "Auth binding '{}:{}' invalid: {e}",
-            auth_binding.realm.as_str(),
-            auth_binding.binding.as_str()
-        )
-    })?;
-    let provider = Provider::from_core(backend.provider).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Auth binding '{}:{}' resolves unsupported provider '{}'",
-            auth_binding.realm.as_str(),
-            auth_binding.binding.as_str(),
-            backend.provider.as_str()
-        )
-    })?;
-    Ok(CliAuthBindingSelection {
-        provider,
-        default_model: binding.default_model.clone(),
-    })
-}
-
-fn resolve_cli_provider_with_auth_binding(
-    config: &Config,
-    model: &str,
-    explicit: Option<Provider>,
-    auth_binding: Option<&CliAuthBindingSelection>,
-) -> anyhow::Result<Provider> {
-    if let Some(provider) = explicit {
-        let resolved = resolve_cli_provider(config, model, Some(provider))?;
-        if let Some(selection) = auth_binding
-            && selection.provider != resolved
-        {
-            anyhow::bail!(
-                "--auth-binding selects provider '{}', but --provider selected '{}'",
-                selection.provider.as_str(),
-                resolved.as_str()
-            );
-        }
-        return Ok(resolved);
-    }
-
-    if let Some(selection) = auth_binding {
-        if let Some(reason) = config
-            .model_registry(meerkat_models::canonical())
-            .ok()
-            .and_then(|registry| {
-                registry.provider_override_mismatch_reason(selection.provider.as_core(), model)
-            })
-        {
-            anyhow::bail!(
-                "--auth-binding selects provider '{}', but {reason}",
-                selection.provider.as_str()
-            );
-        }
-        return Ok(selection.provider);
-    }
-
-    resolve_cli_provider(config, model, None)
 }
 
 #[cfg(test)]
@@ -22081,108 +21919,26 @@ capabilities = ["rpc"]
     }
 
     #[test]
-    fn test_resolve_cli_effective_model_uses_shared_legacy_default_heal() {
+    fn test_resolve_cli_create_session_model_preserves_explicit_config_pin() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
         config.models.anthropic = "custom-anthropic".to_string();
-        config.models.openai = "gpt-5.5-custom".to_string();
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, None, None),
-            meerkat::resolve_create_session_default_model(&config)
-        );
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, None, None),
-            "custom-anthropic"
-        );
+        let resolved = resolve_cli_create_session_model(&config, None, None, None)
+            .expect("CLI lowers through shared resolver");
+        assert_eq!(resolved.model, "claude-opus-4-7");
+        assert_eq!(resolved.provider, meerkat_core::Provider::Anthropic);
     }
 
     #[test]
-    fn test_resolve_cli_effective_model_uses_shared_default_when_unset() {
-        let config = Config::default();
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, None, None),
-            meerkat::resolve_create_session_default_model(&config)
-        );
-    }
-
-    #[test]
-    fn test_resolve_cli_effective_model_preserves_custom_model() {
+    fn test_resolve_cli_create_session_model_provider_mismatch_uses_provider_default() {
         let mut config = Config::default();
-        config.agent.model = "claude-sonnet-4-6".to_string();
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, None, None),
-            "claude-sonnet-4-6"
-        );
-    }
-
-    #[test]
-    fn test_resolve_cli_effective_model_keeps_legacy_default_when_provider_matches() {
-        let mut config = Config::default();
-        config.agent.model = "claude-opus-4-7".to_string();
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, Some(Provider::Anthropic), None),
-            "claude-opus-4-7"
-        );
-    }
-
-    #[test]
-    fn test_resolve_cli_effective_model_uses_constrained_provider_default_on_mismatch() {
-        let config = Config::default();
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, Some(Provider::Anthropic), None),
-            meerkat_models::default_model(meerkat_core::Provider::Anthropic)
-                .expect("anthropic catalog default")
-        );
-    }
-
-    #[test]
-    fn test_resolve_cli_effective_model_uses_auth_binding_provider_without_binding_default() {
-        let mut config = Config::default();
-        config.agent.model = "claude-opus-4-7".to_string();
-        let selection = CliAuthBindingSelection {
-            provider: Provider::Anthropic,
-            default_model: None,
-        };
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, None, Some(&selection)),
-            "claude-opus-4-7"
-        );
-    }
-
-    #[test]
-    fn test_resolve_cli_effective_model_uses_binding_default_before_provider_default() {
-        let config = Config::default();
-        let selection = CliAuthBindingSelection {
-            provider: Provider::Anthropic,
-            default_model: Some("claude-sonnet-4-6".to_string()),
-        };
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, None, Some(&selection)),
-            "claude-sonnet-4-6"
-        );
-    }
-
-    #[test]
-    fn test_resolve_cli_effective_model_uses_gemini_default_for_gemini_binding_mismatch() {
-        let mut config = Config::default();
-        config.agent.model = "claude-opus-4-7".to_string();
-        let selection = CliAuthBindingSelection {
-            provider: Provider::Gemini,
-            default_model: None,
-        };
-
-        assert_eq!(
-            resolve_cli_effective_model(&config, None, None, Some(&selection)),
-            meerkat_models::default_model(meerkat_core::Provider::Gemini)
-                .expect("gemini catalog default")
-        );
+        config.agent.model = "gpt-5.5".to_string();
+        config.models.anthropic = "claude-sonnet-4-6".to_string();
+        let resolved =
+            resolve_cli_create_session_model(&config, None, Some(Provider::Anthropic), None)
+                .expect("CLI provider constraint resolves");
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
+        assert_eq!(resolved.provider, meerkat_core::Provider::Anthropic);
     }
 
     #[test]
@@ -22259,7 +22015,7 @@ capabilities = ["rpc"]
     }
 
     #[test]
-    fn test_resolve_cli_provider_prefers_self_hosted_registry_alias() {
+    fn test_resolve_cli_create_session_model_prefers_self_hosted_registry_alias() {
         let mut config = Config::default();
         config
             .merge_toml_str(
@@ -22287,25 +22043,32 @@ supports_reasoning = true
             )
             .expect("valid self-hosted config");
 
-        assert_eq!(
-            resolve_cli_provider(&config, "gemma-4-e2b", None).expect("self-hosted alias resolves"),
-            Provider::SelfHosted
-        );
+        let resolved =
+            resolve_cli_create_session_model(&config, Some("gemma-4-e2b".to_string()), None, None)
+                .expect("self-hosted alias resolves");
+        assert_eq!(resolved.provider, meerkat_core::Provider::SelfHosted);
     }
 
     #[test]
-    fn test_resolve_cli_provider_rejects_uncatalogued_model_without_provider() {
+    fn test_resolve_cli_create_session_model_rejects_uncatalogued_model_without_provider() {
         let config = Config::default();
-        let error = resolve_cli_provider(&config, "gpt-4", None)
-            .expect_err("uncatalogued model must not silently choose a provider");
-        assert!(error.to_string().contains("Cannot infer provider"));
+        let error =
+            resolve_cli_create_session_model(&config, Some("gpt-4".to_string()), None, None)
+                .expect_err("uncatalogued model must not silently choose a provider");
+        assert!(error.to_string().contains("cannot infer provider"));
     }
 
     #[test]
-    fn test_resolve_cli_provider_rejects_explicit_provider_contradicting_catalog_owner() {
+    fn test_resolve_cli_create_session_model_rejects_explicit_provider_contradicting_catalog_owner()
+    {
         let config = Config::default();
-        let error = resolve_cli_provider(&config, "gpt-5.4", Some(Provider::Anthropic))
-            .expect_err("explicit provider must match catalog ownership");
+        let error = resolve_cli_create_session_model(
+            &config,
+            Some("gpt-5.4".to_string()),
+            Some(Provider::Anthropic),
+            None,
+        )
+        .expect_err("explicit provider must match catalog ownership");
         assert!(
             error
                 .to_string()
@@ -22317,7 +22080,7 @@ supports_reasoning = true
     }
 
     #[test]
-    fn test_resolve_cli_provider_uses_auth_binding_provider() {
+    fn test_resolve_cli_create_session_model_uses_inherited_binding_default_and_owner_stamp() {
         let mut config = Config::default();
         config.agent.model = "claude-opus-4-7".to_string();
         let mut section = meerkat_core::RealmConfigSection::default();
@@ -22350,51 +22113,82 @@ supports_reasoning = true
                 provider_default: false,
             },
         );
-        config.realm.insert("dev".to_string(), section);
+        config.realm.insert("global".to_string(), section);
+        config.realm.insert(
+            "dev".to_string(),
+            meerkat_core::RealmConfigSection {
+                parent: Some(meerkat_core::RealmId::global()),
+                ..Default::default()
+            },
+        );
         let auth_binding = AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::BindingId::parse("google_oauth").expect("valid binding"),
             profile: None,
             origin: meerkat_core::connection::BindingOrigin::Configured,
         };
-        let selection = resolve_cli_auth_binding_selection(&config, &auth_binding)
-            .expect("auth binding resolves");
+        let resolved = resolve_cli_create_session_model(&config, None, None, Some(auth_binding))
+            .expect("inherited auth binding resolves");
 
-        assert_eq!(selection.provider, Provider::Gemini);
-        assert_eq!(
-            selection.default_model.as_deref(),
-            Some("gemini-3.1-flash-lite-preview")
-        );
-        assert_eq!(
-            resolve_cli_provider_with_auth_binding(
-                &config,
-                selection.default_model.as_deref().unwrap(),
-                None,
-                Some(&selection),
-            )
-            .expect("binding provider wins"),
-            Provider::Gemini
-        );
+        assert_eq!(resolved.provider, meerkat_core::Provider::Gemini);
+        assert_eq!(resolved.model, "gemini-3.1-flash-lite-preview");
+        let owner = resolved.auth_binding.expect("owner-stamped binding");
+        assert_eq!(owner.realm.as_str(), "global");
+        assert_eq!(owner.binding.as_str(), "google_oauth");
     }
 
     #[test]
-    fn test_resolve_cli_provider_rejects_explicit_provider_mismatching_auth_binding() {
-        let selection = CliAuthBindingSelection {
-            provider: Provider::Gemini,
-            default_model: Some("gemini-3.1-flash-lite-preview".to_string()),
+    fn test_resolve_cli_create_session_model_rejects_explicit_model_mismatching_binding() {
+        let mut config = Config::default();
+        let mut section = meerkat_core::RealmConfigSection::default();
+        section.backend.insert(
+            "google".to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "gemini".to_string(),
+                backend_kind: "google_code_assist".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "oauth".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "gemini".to_string(),
+                auth_method: "google_oauth".to_string(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "google".to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "google".to_string(),
+                auth_profile: "oauth".to_string(),
+                default_model: None,
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+        let auth_binding = AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm"),
+            binding: meerkat_core::BindingId::parse("google").expect("binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
         };
-        let error = resolve_cli_provider_with_auth_binding(
-            &Config::default(),
-            "custom-provider-model",
-            Some(Provider::Anthropic),
-            Some(&selection),
+        let error = resolve_cli_create_session_model(
+            &config,
+            Some("gpt-5.5".to_string()),
+            None,
+            Some(auth_binding),
         )
-        .expect_err("explicit provider must match auth binding provider");
+        .expect_err("explicit model/provider must match auth binding provider");
 
         assert!(
             error
                 .to_string()
-                .contains("--auth-binding selects provider")
+                .contains("registered for provider 'openai'")
         );
     }
 

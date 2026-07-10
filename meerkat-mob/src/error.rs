@@ -18,6 +18,25 @@ pub enum MobMemberCapability {
     OutboundCommsRuntime,
 }
 
+/// Typed MobMachine routed-effect kind whose runtime consumer refused the
+/// generated composition input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeEffectKind {
+    RuntimeBinding,
+    RuntimeIngress,
+    RuntimeRetire,
+}
+
+impl std::fmt::Display for RuntimeEffectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RuntimeBinding => f.write_str("runtime_binding"),
+            Self::RuntimeIngress => f.write_str("runtime_ingress"),
+            Self::RuntimeRetire => f.write_str("runtime_retire"),
+        }
+    }
+}
+
 /// Mob-owned classification of why a mob operation failed.
 ///
 /// This is the typed owner of "what class of failure does this `MobError`
@@ -87,6 +106,12 @@ pub enum MobError {
     #[error("wiring error: {0}")]
     WiringError(String),
 
+    /// Retirement could not converge machine topology and reciprocal trust.
+    /// The durable retiring roster anchor must be retained so the exact
+    /// cleanup can be retried instead of publishing a false terminal event.
+    #[error("retirement topology cleanup incomplete: {0}")]
+    RetirementTopologyIncomplete(String),
+
     /// Supervisor rotation reached one or more remote members but did not
     /// complete, so local supervisor authority stayed at the pre-rotation
     /// epoch.
@@ -119,6 +144,18 @@ pub enum MobError {
     MemberRestoreFailed {
         member_id: AgentIdentity,
         session_id: Option<meerkat_core::types::SessionId>,
+        reason: String,
+    },
+
+    /// A generated MobMachine -> runtime route reached its consumer, which
+    /// rejected the typed input. The MobMachine has already absorbed the
+    /// generated refusal closure before this error is returned; `kind` and
+    /// `refusal_code` are typed/stable and `reason` is display detail only.
+    #[error("{kind} consumer refused bridge session {session_id} [{refusal_code}]: {reason}")]
+    RuntimeEffectRefused {
+        kind: RuntimeEffectKind,
+        session_id: meerkat_core::types::SessionId,
+        refusal_code: String,
         reason: String,
     },
 
@@ -400,6 +437,13 @@ impl MobError {
         }
     }
 
+    /// True only after a consumer refusal has been closed through the
+    /// generated producer-feedback input. Actor-loop callers may continue;
+    /// operation-scoped callers still return the typed failure to their user.
+    pub(crate) fn is_closed_runtime_effect_refusal(&self) -> bool {
+        matches!(self, Self::RuntimeEffectRefused { .. })
+    }
+
     /// Whether this error means the addressed target (mob, profile, member,
     /// flow, run, or work unit) does not exist.
     ///
@@ -426,12 +470,15 @@ impl MobError {
             Self::StorageError(_)
             | Self::SessionError(_)
             | Self::CommsError(_)
+            | Self::RetirementTopologyIncomplete(_)
             | Self::MemberRestoreFailed { .. }
             | Self::KickoffWaitTimedOut { .. }
             | Self::ReadyWaitTimedOut { .. }
             | Self::FlowTurnTimedOut => MobFailureClass::Transport,
             Self::Internal(_) => MobFailureClass::Internal,
-            Self::CallbackPending { .. } => MobFailureClass::RuntimeRejected,
+            Self::CallbackPending { .. } | Self::RuntimeEffectRefused { .. } => {
+                MobFailureClass::RuntimeRejected
+            }
             _ => MobFailureClass::MobRejected,
         }
     }

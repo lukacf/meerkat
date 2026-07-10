@@ -33,6 +33,25 @@ pub struct TypedRoutedSignal {
     pub bindings: Vec<(FieldId, FieldId)>,
 }
 
+/// Generated source for one consumer-refusal feedback field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedRefusalFieldSource {
+    EffectField(FieldId),
+    ConsumerErrorCode,
+    ConsumerErrorMessage,
+}
+
+/// Generated feedback closure for a consumer-refused dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedDispatchRefusalClosure {
+    pub route_id: RouteId,
+    pub producer_instance: MachineInstanceId,
+    pub effect_variant: EffectVariantId,
+    pub feedback_instance: MachineInstanceId,
+    pub feedback_input: InputVariantId,
+    pub field_bindings: Vec<(GeneratedRefusalFieldSource, FieldId)>,
+}
+
 /// Generated producer identity declared by this composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerFacts {
@@ -154,6 +173,11 @@ pub fn route_layer_terminal_reaches_adaptive_kernel() -> TypedRoutedInput {
             FieldId::parse("result_class").expect("route consumer field slug"),
         )],
     }
+}
+
+/// Resolve a generated route to its consumer-refusal feedback closure.
+pub fn refusal_closure_for_route(route_id: &RouteId) -> Option<TypedDispatchRefusalClosure> {
+    None
 }
 
 /// Resolve a producer `(instance, effect_variant)` to generated input-route facts.

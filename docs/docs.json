@@ -182,6 +182,7 @@
               "architecture/multi-host-mobs-plan",
               "architecture/stopped-phase-revival-plan",
               "architecture/workgraph-attention-goals",
+              "architecture/delivery-interaction-operations",
               "reference/mob-architecture",
               "reference/design-philosophy"
             ]

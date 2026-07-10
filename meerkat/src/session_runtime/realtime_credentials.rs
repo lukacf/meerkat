@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_client::{FactoryError, LlmError};
-use meerkat_contracts::{RealtimeCapabilities, RealtimeTurningMode};
+use meerkat_contracts::RealtimeCapabilities;
 use meerkat_core::{Config, ConfigError, ConfigStore, Provider, SessionLlmIdentity};
 use meerkat_llm_core::realtime_session::{
     RealtimeExternalSessionTarget, RealtimeSession, RealtimeSessionFactory,
@@ -161,12 +161,13 @@ impl RealtimeSessionFactory for PerOpenCredentialRealtimeSessionFactory {
     async fn attach_external_session(
         &self,
         target: &RealtimeExternalSessionTarget,
-        identity: &SessionLlmIdentity,
-        turning_mode: RealtimeTurningMode,
+        open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
-        let provider_factory = self.resolve_provider_factory(identity).await?;
+        let provider_factory = self
+            .resolve_provider_factory(&open_config.llm_identity)
+            .await?;
         provider_factory
-            .attach_external_session(target, identity, turning_mode)
+            .attach_external_session(target, open_config)
             .await
     }
 

@@ -155,6 +155,8 @@ test-feature-matrix-lib:
 	$(CARGO) check -p meerkat-tools --no-default-features --features comms,mcp
 	$(CARGO) check -p meerkat --no-default-features --features openai,memory-store
 	$(CARGO) check -p meerkat --no-default-features --features gemini,jsonl-store
+	$(CARGO) check -p meerkat --no-default-features --features skills
+	$(CARGO) check -p meerkat --no-default-features --features skills,comms
 	$(CARGO) check -p meerkat --features all-providers,comms,mcp
 	$(CARGO) check -p meerkat-mob --no-default-features
 	$(CARGO) check -p meerkat-mob --no-default-features --features runtime-adapter

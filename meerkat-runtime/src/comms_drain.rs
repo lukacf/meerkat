@@ -29,8 +29,11 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
     BridgeObservationResponse, BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec,
     BridgeProtocolVersion, BridgeRejectionCause, BridgeReply, BridgeRetireResponse,
-    BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT, canonicalize_bridge_address,
-    decode_bridge_command,
+    BridgeSupervisorPayload, BridgeSupervisorRotationObservation,
+    BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
+    BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
+    BridgeSupervisorRotationState, BridgeSupervisorRotationTargetReceipt, SUPERVISOR_BRIDGE_INTENT,
+    SupervisorRotationOperationId, canonicalize_bridge_address, decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -48,8 +51,9 @@ use crate::input::{
 
 use crate::meerkat_machine::SupervisorBinding;
 use crate::meerkat_machine::{
-    DrainExitReason, MeerkatMachine, SupervisorAuthorizeAdmission, SupervisorBindAdmission,
-    SupervisorBindingStageError,
+    DrainExitReason, GeneratedSupervisorBinding, GeneratedSupervisorRotationSubmit, MeerkatMachine,
+    SupervisorAuthorizeAdmission, SupervisorBindAdmission, SupervisorBindingStageError,
+    SupervisorRotationObservation, SupervisorRotationSubmission,
 };
 use crate::service_ext::SessionServiceRuntimeExt as _;
 use crate::tokio::sync::mpsc;
@@ -57,6 +61,7 @@ use crate::traits::RuntimeControlPlane;
 
 /// Default idle timeout for session-backed comms drains.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const SUPERVISOR_RESPONSE_ROUTE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn a background task that drains the comms inbox and routes
 /// classified interactions through the runtime adapter.
@@ -82,6 +87,32 @@ pub fn spawn_comms_drain(
             );
         }
         let inbox_notify = comms_runtime.inbox_notify();
+        match adapter
+            .peer_ingress_runtime_is_current(&session_id, &comms_runtime)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(%session_id, "stale comms drain refused startup");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%session_id, %error, "comms drain lost session before startup");
+                return;
+            }
+        }
+        if let Err(error) = async {
+            adapter
+                .stage_local_endpoint_for_comms_runtime(&session_id, comms_runtime.as_ref())
+                .await
+                .map_err(|error| error.to_string())?;
+            hydrate_or_resume_supervisor_rotation_runtime(&adapter, &session_id, &comms_runtime)
+                .await
+        }
+        .await
+        {
+            tracing::warn!(%session_id, %error, "unable to hydrate supervisor authority on comms runtime");
+        }
         // Supervisor authorization is DSL-owned (Wave 3 D Row 21).
         // Bridge-command dispatch resolves binding-sensitive admission
         // through generated MeerkatMachine feedback before staging DSL
@@ -568,6 +599,12 @@ fn generated_sender_peer_id(sender: &PeerIngressFact) -> Option<String> {
     sender.canonical_peer_id.map(|peer_id| peer_id.as_str())
 }
 
+fn generated_sender_signing_public_key(sender: &PeerIngressFact) -> Option<String> {
+    sender
+        .signing_pubkey
+        .map(encode_supervisor_signing_public_key)
+}
+
 fn supervisor_bind_admission_rejection_cause(
     rejection: crate::meerkat_machine::dsl::SupervisorBindRejectionKind,
 ) -> BridgeRejectionCause {
@@ -577,6 +614,9 @@ fn supervisor_bind_admission_rejection_cause(
         }
         crate::meerkat_machine::dsl::SupervisorBindRejectionKind::SenderMismatch => {
             BridgeRejectionCause::SenderMismatch
+        }
+        crate::meerkat_machine::dsl::SupervisorBindRejectionKind::RevocationPending => {
+            BridgeRejectionCause::AlreadyBound
         }
     }
 }
@@ -598,6 +638,10 @@ fn supervisor_bind_admission_rejection_reason(
                 supervisor.peer_id
             )
         }
+        crate::meerkat_machine::dsl::SupervisorBindRejectionKind::RevocationPending => {
+            "bind member admission rejected by MeerkatMachine: prior supervisor revocation is still pending; retry revoke_supervisor before binding"
+                .to_string()
+        }
     }
 }
 
@@ -613,6 +657,9 @@ fn supervisor_authorize_admission_rejection_cause(
         }
         crate::meerkat_machine::dsl::SupervisorAuthorizeRejectionKind::SenderMismatch => {
             BridgeRejectionCause::SenderMismatch
+        }
+        crate::meerkat_machine::dsl::SupervisorAuthorizeRejectionKind::RotationNotAllowed => {
+            BridgeRejectionCause::Unsupported
         }
     }
 }
@@ -638,6 +685,10 @@ fn supervisor_authorize_admission_rejection_reason(
                 supervisor.peer_id
             )
         }
+        crate::meerkat_machine::dsl::SupervisorAuthorizeRejectionKind::RotationNotAllowed => {
+            "authorize supervisor admission rejected by MeerkatMachine: supervisor rotation is not allowed after the member runtime has stopped accepting ordinary commands"
+                .to_string()
+        }
     }
 }
 
@@ -653,6 +704,9 @@ fn supervisor_bridge_admission_rejection_cause(
         }
         crate::meerkat_machine::dsl::SupervisorBridgeCommandRejectionKind::SenderMismatch => {
             BridgeRejectionCause::SenderMismatch
+        }
+        crate::meerkat_machine::dsl::SupervisorBridgeCommandRejectionKind::CommandNotAllowed => {
+            BridgeRejectionCause::Unsupported
         }
     }
 }
@@ -677,6 +731,10 @@ fn supervisor_bridge_admission_rejection_reason(
                 "supervisor bridge admission rejected by MeerkatMachine: request sender '{sender_label}' does not match authorized supervisor '{}'",
                 supervisor.peer_id
             )
+        }
+        crate::meerkat_machine::dsl::SupervisorBridgeCommandRejectionKind::CommandNotAllowed => {
+            "supervisor bridge admission rejected by MeerkatMachine: command is not allowed in the current runtime phase"
+                .to_string()
         }
     }
 }
@@ -727,6 +785,11 @@ async fn resolve_authorized_supervisor(
         .await
     {
         Ok(crate::meerkat_machine::SupervisorBridgeCommandAdmission::Accepted) => Ok(supervisor),
+        Ok(crate::meerkat_machine::SupervisorBridgeCommandAdmission::ResumePendingRevoke) => Err((
+            BridgeRejectionCause::Internal,
+            "ordinary supervisor admission returned a cleanup-only pending-revoke disposition"
+                .to_string(),
+        )),
         Ok(crate::meerkat_machine::SupervisorBridgeCommandAdmission::Rejected(rejection)) => Err((
             supervisor_bridge_admission_rejection_cause(rejection),
             supervisor_bridge_admission_rejection_reason(rejection, sender, &supervisor),
@@ -734,6 +797,84 @@ async fn resolve_authorized_supervisor(
         Err(error) => Err((
             BridgeRejectionCause::Internal,
             format!("supervisor bridge admission failed: {error}"),
+        )),
+    }
+}
+
+fn supervisor_cleanup_command_label(
+    command_kind: crate::meerkat_machine::dsl::SupervisorCleanupCommandKind,
+) -> &'static str {
+    match command_kind {
+        crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Retire => "retire_member",
+        crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Observe => "observe_member",
+        crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Destroy => "destroy_member",
+        crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Revoke => "revoke_supervisor",
+    }
+}
+
+/// Resolve one of the four lifecycle cleanup commands through the dedicated
+/// generated phase policy. Ordinary bridge commands continue to use
+/// `resolve_authorized_supervisor` and therefore remain active-phase-only.
+struct AuthorizedSupervisorCleanup {
+    supervisor: BridgePeerIdentity,
+    resume_pending_revoke: bool,
+}
+
+async fn resolve_authorized_supervisor_cleanup(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    sender: &PeerIngressFact,
+    payload: &BridgeSupervisorPayload,
+    command_kind: crate::meerkat_machine::dsl::SupervisorCleanupCommandKind,
+) -> Result<AuthorizedSupervisorCleanup, (BridgeRejectionCause, String)> {
+    let supervisor = bridge_peer_identity(&payload.supervisor, "supervisor cleanup request")?;
+    let sender_peer_id = sender
+        .canonical_peer_id
+        .map(|sender_peer_id| sender_peer_id.to_string());
+    match adapter
+        .resolve_supervisor_cleanup_command_admission(
+            session_id,
+            command_kind,
+            supervisor.peer_id.to_string(),
+            payload.epoch,
+            sender_peer_id,
+        )
+        .await
+    {
+        Ok((crate::meerkat_machine::SupervisorBridgeCommandAdmission::Accepted, _)) => {
+            Ok(AuthorizedSupervisorCleanup {
+                supervisor,
+                resume_pending_revoke: false,
+            })
+        }
+        Ok((crate::meerkat_machine::SupervisorBridgeCommandAdmission::ResumePendingRevoke, _)) => {
+            Ok(AuthorizedSupervisorCleanup {
+                supervisor,
+                resume_pending_revoke: true,
+            })
+        }
+        Ok((
+            crate::meerkat_machine::SupervisorBridgeCommandAdmission::Rejected(rejection),
+            phase,
+        )) => {
+            let reason = if rejection
+                == crate::meerkat_machine::dsl::SupervisorBridgeCommandRejectionKind::CommandNotAllowed
+            {
+                format!(
+                    "supervisor cleanup command '{}' is not allowed while the member runtime is {phase:?}",
+                    supervisor_cleanup_command_label(command_kind)
+                )
+            } else {
+                supervisor_bridge_admission_rejection_reason(rejection, sender, &supervisor)
+            };
+            Err((
+                supervisor_bridge_admission_rejection_cause(rejection),
+                reason,
+            ))
+        }
+        Err(error) => Err((
+            BridgeRejectionCause::Internal,
+            format!("supervisor cleanup admission failed: {error}"),
         )),
     }
 }
@@ -751,23 +892,52 @@ async fn resolve_authorized_supervisor_with_response_route(
     context: &str,
 ) -> Result<BridgePeerIdentity, (BridgeRejectionCause, String)> {
     let supervisor = resolve_authorized_supervisor(adapter, session_id, sender, payload).await?;
-    let current = adapter.supervisor_binding(session_id).await;
-    let binding = BoundSupervisorState::from_binding(&current).ok_or_else(|| {
-        (
-            BridgeRejectionCause::Internal,
-            format!("{context}: missing bound supervisor response state"),
-        )
-    })?;
-    let response_peer = bound_supervisor_response_descriptor(sender, &binding, context)?;
-    ensure_bridge_response_route_for_descriptor(
+    let response_peer = supervisor.clone().into_trusted_peer_descriptor();
+    refresh_and_publish_bound_supervisor_route(
         adapter,
         session_id,
         comms_runtime,
-        response_peer,
+        &response_peer,
+        payload.epoch,
+        generated_sender_peer_id(sender),
         context,
     )
-    .await?;
+    .await
+    .map_err(|reason| (BridgeRejectionCause::Internal, reason))?;
     Ok(supervisor)
+}
+
+async fn resolve_authorized_supervisor_cleanup_with_response_route(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    sender: &PeerIngressFact,
+    payload: &BridgeSupervisorPayload,
+    command_kind: crate::meerkat_machine::dsl::SupervisorCleanupCommandKind,
+    context: &str,
+) -> Result<BridgePeerIdentity, (BridgeRejectionCause, String)> {
+    let supervisor =
+        resolve_authorized_supervisor_cleanup(adapter, session_id, sender, payload, command_kind)
+            .await?;
+    if supervisor.resume_pending_revoke {
+        return Err((
+            BridgeRejectionCause::Internal,
+            format!("{context}: pending revoke disposition is invalid for this command"),
+        ));
+    }
+    let response_peer = supervisor.supervisor.clone().into_trusted_peer_descriptor();
+    refresh_and_publish_bound_supervisor_route(
+        adapter,
+        session_id,
+        comms_runtime,
+        &response_peer,
+        payload.epoch,
+        generated_sender_peer_id(sender),
+        context,
+    )
+    .await
+    .map_err(|reason| (BridgeRejectionCause::Internal, reason))?;
+    Ok(supervisor.supervisor)
 }
 
 fn bridge_capabilities() -> BridgeCapabilities {
@@ -1224,12 +1394,13 @@ async fn publish_supervisor_trust_from_generated_obligation(
     Ok(())
 }
 
-async fn bind_and_publish_supervisor_trust(
+async fn refresh_and_publish_bound_supervisor_route(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
     comms_runtime: &Arc<dyn CommsRuntime>,
-    supervisor: &TrustedPeerDescriptor,
+    descriptor: &TrustedPeerDescriptor,
     epoch: u64,
+    sender_peer_id: Option<String>,
     context: &str,
 ) -> Result<(), String> {
     adapter
@@ -1237,19 +1408,22 @@ async fn bind_and_publish_supervisor_trust(
         .await
         .map_err(|error| format!("{context}: local endpoint rejected: {error}"))?;
     let transition = adapter
-        .stage_supervisor_bind(
+        .stage_supervisor_binding_route_refresh(
             session_id,
-            supervisor.name.as_str().to_owned(),
-            supervisor.peer_id.as_str(),
-            supervisor.address.to_string(),
-            encode_supervisor_signing_public_key(supervisor.pubkey),
-            epoch,
+            GeneratedSupervisorBinding {
+                name: descriptor.name.as_str().to_owned(),
+                peer_id: descriptor.peer_id.as_str(),
+                address: descriptor.address.to_string(),
+                signing_public_key: encode_supervisor_signing_public_key(descriptor.pubkey),
+                epoch,
+            },
+            sender_peer_id,
         )
         .await
-        .map_err(|error| format!("{context}: DSL rejected bind: {error}"))?;
+        .map_err(|error| format!("{context}: route refresh rejected: {error}"))?;
     let obligation =
         single_supervisor_publish_obligation(adapter, session_id, &transition, context).await?;
-    validate_supervisor_publish_obligation(&obligation, supervisor, epoch, context)?;
+    validate_supervisor_publish_obligation(&obligation, descriptor, epoch, context)?;
     publish_supervisor_trust_from_generated_obligation(
         adapter,
         session_id,
@@ -1257,7 +1431,6 @@ async fn bind_and_publish_supervisor_trust(
         &obligation,
     )
     .await
-    .map_err(|error| format!("{context}: trust publication failed: {error}"))
 }
 
 /// Re-install the PRIVATE supervisor admission trust edge for the current
@@ -1275,37 +1448,19 @@ async fn republish_private_supervisor_trust(
     session_id: &SessionId,
     comms_runtime: &Arc<dyn CommsRuntime>,
     supervisor: &TrustedPeerDescriptor,
+    epoch: u64,
+    sender_peer_id: Option<String>,
 ) -> Result<(), String> {
-    adapter
-        .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
-        .await
-        .map_err(|error| format!("local endpoint rejected: {error}"))?;
-    let obligation = supervisor_route_publish_obligation(
-        adapter,
-        session_id,
-        supervisor,
-        "bind member idempotent ack trust repair",
-    )
-    .await?;
-    publish_supervisor_trust_from_generated_obligation(
+    refresh_and_publish_bound_supervisor_route(
         adapter,
         session_id,
         comms_runtime,
-        &obligation,
+        supervisor,
+        epoch,
+        sender_peer_id,
+        "bind member idempotent ack trust repair",
     )
     .await
-}
-
-fn trusted_peer_descriptor_from_bound_supervisor_state(
-    previous: &BoundSupervisorState,
-) -> Result<TrustedPeerDescriptor, String> {
-    let pubkey = decode_supervisor_signing_public_key(&previous.signing_public_key)?;
-    TrustedPeerDescriptor::unsigned_with_pubkey(
-        previous.name.clone(),
-        previous.peer_id.clone(),
-        pubkey,
-        previous.address.clone(),
-    )
 }
 
 async fn rollback_bind_after_trust_publication_failure(
@@ -1333,24 +1488,6 @@ async fn rollback_bind_after_trust_publication_failure(
             .await?;
     }
     Ok(())
-}
-
-async fn rollback_authorize_after_trust_publication_failure(
-    adapter: &Arc<MeerkatMachine>,
-    session_id: &SessionId,
-    previous: &BoundSupervisorState,
-) -> Result<(), SupervisorBindingStageError> {
-    adapter
-        .stage_supervisor_authorize(
-            session_id,
-            previous.name.clone(),
-            previous.peer_id.clone(),
-            previous.address.clone(),
-            previous.signing_public_key.clone(),
-            previous.epoch,
-        )
-        .await
-        .map(|_| ())
 }
 
 async fn send_bridge_response(
@@ -1521,80 +1658,6 @@ async fn ensure_bridge_response_route_for_descriptor(
         })
 }
 
-fn bound_supervisor_response_descriptor(
-    sender: &PeerIngressFact,
-    binding: &BoundSupervisorState,
-    context: &str,
-) -> Result<TrustedPeerDescriptor, (BridgeRejectionCause, String)> {
-    let pubkey = sender.signing_pubkey.ok_or_else(|| {
-        (
-            BridgeRejectionCause::Internal,
-            format!("{context}: authenticated supervisor sender pubkey unavailable"),
-        )
-    })?;
-    TrustedPeerDescriptor::unsigned_with_pubkey(
-        binding.name.clone(),
-        &binding.peer_id,
-        pubkey,
-        &binding.address,
-    )
-    .map_err(|error| {
-        (
-            BridgeRejectionCause::Internal,
-            format!("{context}: invalid supervisor response route: {error}"),
-        )
-    })
-}
-
-/// Install a temporary PRIVATE supervisor response route, send the reply over
-/// it, then remove it.
-///
-/// The supervisor's trust edge was revoked before the reply (revoke /
-/// rotation-to-a-new-supervisor), so the router can no longer dial the original
-/// supervisor. The caller captures a generated (add, remove) authority pair
-/// from a single supervisor-publish obligation WHILE THE BINDING WAS STILL
-/// PRESENT (the obligation's owner token derives from the session dsl
-/// authority). This reinstalls the private admission edge just long enough to
-/// route the terminal ack, then removes it so no stale control-plane edge
-/// survives the reply.
-async fn send_bridge_response_with_temporary_supervisor_route(
-    comms_runtime: &Arc<dyn CommsRuntime>,
-    candidate: &PeerInputCandidate,
-    status: meerkat_core::interaction::ResponseStatus,
-    reply: BridgeReply,
-    response_peer: TrustedPeerDescriptor,
-    add_authority: CommsTrustMutationAuthority,
-    remove_authority: CommsTrustMutationAuthority,
-) {
-    let removal_key = response_peer.peer_id.to_string();
-    match apply_generated_private_trust_add(comms_runtime, response_peer, add_authority).await {
-        Ok(()) => {
-            send_bridge_response(comms_runtime, candidate, status, reply).await;
-            if let Err(error) = apply_generated_private_trust_remove(
-                comms_runtime,
-                removal_key.clone(),
-                remove_authority,
-            )
-            .await
-            {
-                tracing::warn!(
-                    error = %error,
-                    peer_id = %removal_key,
-                    "comms_drain: failed to remove temporary supervisor response route"
-                );
-            }
-        }
-        Err(reason) => {
-            tracing::warn!(
-                reason = %reason,
-                peer_id = %removal_key,
-                "comms_drain: failed to install temporary supervisor response route"
-            );
-            comms_runtime.mark_interaction_complete(&candidate.interaction.id);
-        }
-    }
-}
-
 /// Stage a generated `RequestSupervisorTrustPublish` restating the CURRENT
 /// binding and return the single publish obligation it emits. The obligation's
 /// authority owner token derives from the session dsl authority, so a
@@ -1633,20 +1696,833 @@ async fn supervisor_route_publish_obligation(
     Ok(obligation)
 }
 
-/// Mint a PRIVATE (add, remove) authority pair for a temporary supervisor
-/// response route from a single generated publish obligation restating the
-/// current binding. Must be called WHILE the binding is still present.
-async fn generated_temporary_supervisor_route_authority_pair(
+struct SupervisorRotationDriveContext<'a> {
+    operation_id: &'a str,
+    previous: &'a BoundSupervisorState,
+    next: &'a TrustedPeerDescriptor,
+    next_epoch: u64,
+    phase: crate::meerkat_machine::dsl::SupervisorRotationPhase,
+}
+
+async fn drive_supervisor_rotation(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
-    descriptor: &TrustedPeerDescriptor,
-    context: &str,
-) -> Result<(CommsTrustMutationAuthority, CommsTrustMutationAuthority), String> {
-    let obligation =
-        supervisor_route_publish_obligation(adapter, session_id, descriptor, context).await?;
-    let add = supervisor_publish_authority(&obligation)?;
-    let remove = supervisor_publish_cleanup_authority(&obligation)?;
-    Ok((add, remove))
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    context: SupervisorRotationDriveContext<'_>,
+) -> Result<(), String> {
+    use crate::meerkat_machine::dsl::SupervisorRotationPhase;
+    let SupervisorRotationDriveContext {
+        operation_id,
+        previous,
+        next,
+        next_epoch,
+        mut phase,
+    } = context;
+
+    if matches!(
+        phase,
+        SupervisorRotationPhase::Completed | SupervisorRotationPhase::Rejected
+    ) {
+        return Ok(());
+    }
+    let mut transition = adapter
+        .stage_supervisor_rotation_resume(session_id, operation_id.to_string())
+        .await
+        .map_err(|error| format!("rotation resume rejected: {error}"))?;
+
+    loop {
+        match phase {
+            SupervisorRotationPhase::PreviousRevokePending => {
+                let obligation = matching_supervisor_revoke_obligation(
+                    adapter,
+                    session_id,
+                    &transition,
+                    &previous.peer_id,
+                    previous.epoch,
+                    "supervisor rotation operation",
+                )
+                .await?;
+                let authority = supervisor_revoke_authority(&obligation)?;
+                let removal = crate::tokio::time::timeout(
+                    SUPERVISOR_RESPONSE_ROUTE_IO_TIMEOUT,
+                    apply_generated_private_trust_remove(
+                        comms_runtime,
+                        obligation.peer_id().clone(),
+                        authority,
+                    ),
+                )
+                .await;
+                if let Err(error) = match removal {
+                    Ok(result) => result.map(|_| ()),
+                    Err(_) => Err("previous supervisor trust removal timed out".to_string()),
+                } {
+                    let _ = adapter
+                        .stage_supervisor_trust_revoke_failed(
+                            session_id,
+                            obligation.peer_id().clone(),
+                            obligation.epoch(),
+                            error.clone(),
+                        )
+                        .await;
+                    return Err(format!(
+                        "supervisor rotation operation left previous revoke pending: {error}"
+                    ));
+                }
+                transition = adapter
+                    .stage_supervisor_rotation_previous_revoked(
+                        session_id,
+                        operation_id.to_string(),
+                        obligation.peer_id().clone(),
+                        obligation.epoch(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "previous supervisor route is absent but rotation checkpoint persistence failed: {error}"
+                        )
+                    })?;
+                phase = SupervisorRotationPhase::NextPublishPending;
+            }
+            SupervisorRotationPhase::NextPublishPending => {
+                let obligation = single_supervisor_publish_obligation(
+                    adapter,
+                    session_id,
+                    &transition,
+                    "supervisor rotation operation",
+                )
+                .await?;
+                validate_supervisor_publish_obligation(
+                    &obligation,
+                    next,
+                    next_epoch,
+                    "supervisor rotation operation",
+                )?;
+                let authority = supervisor_publish_authority(&obligation)?;
+                let publication = crate::tokio::time::timeout(
+                    SUPERVISOR_RESPONSE_ROUTE_IO_TIMEOUT,
+                    apply_generated_private_trust_add(comms_runtime, next.clone(), authority),
+                )
+                .await;
+                if let Err(error) = match publication {
+                    Ok(result) => result,
+                    Err(_) => Err("next supervisor trust publication timed out".to_string()),
+                } {
+                    let _ = adapter
+                        .stage_supervisor_trust_publish_failed(
+                            session_id,
+                            obligation.peer_id().clone(),
+                            obligation.epoch(),
+                            error.clone(),
+                        )
+                        .await;
+                    return Err(format!(
+                        "supervisor rotation operation left next publication pending: {error}"
+                    ));
+                }
+                // Do not compensate the live add if this durable checkpoint
+                // fails. Recovery resumes NextPublishPending and idempotently
+                // republishes the same generated source before retrying the
+                // checkpoint.
+                adapter
+                    .stage_supervisor_rotation_next_published(
+                        session_id,
+                        operation_id.to_string(),
+                        obligation.peer_id().clone(),
+                        obligation.epoch(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "next supervisor route is live but rotation checkpoint persistence failed: {error}"
+                        )
+                    })?;
+                phase = SupervisorRotationPhase::Completed;
+            }
+            SupervisorRotationPhase::Completed | SupervisorRotationPhase::Rejected => return Ok(()),
+        }
+    }
+}
+
+fn trusted_peer_from_generated_binding(
+    binding: &crate::meerkat_machine::GeneratedSupervisorBinding,
+) -> Result<TrustedPeerDescriptor, String> {
+    TrustedPeerDescriptor::unsigned_with_pubkey(
+        binding.name.clone(),
+        &binding.peer_id,
+        decode_supervisor_signing_public_key(&binding.signing_public_key)?,
+        &binding.address,
+    )
+}
+
+async fn start_supervisor_rotation_worker_if_pending(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+) -> Result<bool, String> {
+    let Some(receipt) = adapter
+        .active_supervisor_rotation(session_id)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    if matches!(
+        receipt.phase,
+        crate::meerkat_machine::dsl::SupervisorRotationPhase::Completed
+            | crate::meerkat_machine::dsl::SupervisorRotationPhase::Rejected
+    ) {
+        return Ok(false);
+    }
+    let operation_id = receipt.operation_id.clone();
+    let worker_adapter = Arc::clone(adapter);
+    let worker_session_id = session_id.clone();
+    let worker_runtime = Arc::clone(comms_runtime);
+    let slot_runtime = Arc::clone(comms_runtime);
+    let task_operation_id = operation_id.clone();
+    let (start_tx, start_rx) = crate::tokio::sync::oneshot::channel::<()>();
+    let task = crate::tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return;
+        }
+        let mut retry_delay = std::time::Duration::from_millis(25);
+        loop {
+            match worker_adapter
+                .peer_ingress_runtime_is_current(&worker_session_id, &worker_runtime)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        session_id = %worker_session_id,
+                        operation_id = %task_operation_id,
+                        "supervisor rotation worker refused stale runtime retry"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %worker_session_id,
+                        operation_id = %task_operation_id,
+                        %error,
+                        "supervisor rotation worker lost runtime authority before retry"
+                    );
+                    return;
+                }
+            }
+            let receipt = match worker_adapter
+                .active_supervisor_rotation(&worker_session_id)
+                .await
+            {
+                Ok(Some(receipt)) if receipt.operation_id == task_operation_id => receipt,
+                Ok(_) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %worker_session_id,
+                        operation_id = %task_operation_id,
+                        %error,
+                        "supervisor rotation worker lost its registered session"
+                    );
+                    return;
+                }
+            };
+            if matches!(
+                receipt.phase,
+                crate::meerkat_machine::dsl::SupervisorRotationPhase::Completed
+                    | crate::meerkat_machine::dsl::SupervisorRotationPhase::Rejected
+            ) {
+                return;
+            }
+            let next = match trusted_peer_from_generated_binding(&receipt.next) {
+                Ok(next) => next,
+                Err(error) => {
+                    tracing::error!(
+                        session_id = %worker_session_id,
+                        operation_id = %task_operation_id,
+                        %error,
+                        "supervisor rotation receipt carried an invalid target"
+                    );
+                    return;
+                }
+            };
+            let previous = BoundSupervisorState {
+                name: receipt.previous.name,
+                peer_id: receipt.previous.peer_id,
+                address: receipt.previous.address,
+                signing_public_key: receipt.previous.signing_public_key,
+                epoch: receipt.previous.epoch,
+            };
+            match drive_supervisor_rotation(
+                &worker_adapter,
+                &worker_session_id,
+                &worker_runtime,
+                SupervisorRotationDriveContext {
+                    operation_id: &task_operation_id,
+                    previous: &previous,
+                    next: &next,
+                    next_epoch: receipt.next.epoch,
+                    phase: receipt.phase,
+                },
+            )
+            .await
+            {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %worker_session_id,
+                        operation_id = %task_operation_id,
+                        %error,
+                        ?retry_delay,
+                        "supervisor rotation remains pending; session-owned worker will retry"
+                    );
+                    crate::tokio::time::sleep(retry_delay).await;
+                    retry_delay = std::cmp::min(
+                        retry_delay.saturating_mul(2),
+                        std::time::Duration::from_secs(1),
+                    );
+                }
+            }
+        }
+    });
+    let installed = adapter
+        .install_supervisor_rotation_task_if_current(session_id, operation_id, slot_runtime, task)
+        .await
+        .map_err(|error| error.to_string())?;
+    if installed {
+        start_tx
+            .send(())
+            .map_err(|()| "supervisor rotation worker exited before start".to_string())?;
+    }
+    Ok(installed)
+}
+
+async fn hydrate_current_bound_supervisor_route(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+) -> Result<bool, String> {
+    let binding = adapter.supervisor_binding(session_id).await;
+    let Some(bound) = BoundSupervisorState::from_binding(&binding) else {
+        return Ok(false);
+    };
+    let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+        bound.name,
+        &bound.peer_id,
+        decode_supervisor_signing_public_key(&bound.signing_public_key)?,
+        &bound.address,
+    )?;
+    ensure_bridge_response_route_for_descriptor(
+        adapter,
+        session_id,
+        comms_runtime,
+        descriptor,
+        "supervisor runtime hydration",
+    )
+    .await
+    .map_err(|(_, reason)| reason)?;
+    Ok(true)
+}
+
+async fn hydrate_or_resume_supervisor_rotation_runtime(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+) -> Result<(), String> {
+    match adapter
+        .active_supervisor_rotation(session_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|receipt| receipt.phase)
+    {
+        Some(
+            crate::meerkat_machine::dsl::SupervisorRotationPhase::PreviousRevokePending
+            | crate::meerkat_machine::dsl::SupervisorRotationPhase::NextPublishPending,
+        ) => {
+            start_supervisor_rotation_worker_if_pending(adapter, session_id, comms_runtime).await?;
+        }
+        Some(
+            crate::meerkat_machine::dsl::SupervisorRotationPhase::Completed
+            | crate::meerkat_machine::dsl::SupervisorRotationPhase::Rejected,
+        )
+        | None => {
+            // Terminal receipts retain a Bound authority (next on Completed,
+            // previous on Rejected). A replacement CommsRuntime has an empty
+            // mechanical trust store, so hydrate that generated current route.
+            // Pending phases are deliberately excluded: their binding is
+            // Unbound and only the existing rotation obligation may publish.
+            let _ =
+                hydrate_current_bound_supervisor_route(adapter, session_id, comms_runtime).await?;
+        }
+    }
+    Ok(())
+}
+
+fn bridge_supervisor_rotation_state(
+    receipt: crate::meerkat_machine::GeneratedSupervisorRotationReceipt,
+) -> Result<BridgeSupervisorRotationState, String> {
+    let operation_id = receipt
+        .operation_id
+        .parse()
+        .map_err(|error| format!("stored supervisor rotation operation id is invalid: {error}"))?;
+    let target = BridgePeerSpec {
+        name: receipt.next.name,
+        peer_id: receipt.next.peer_id,
+        address: receipt.next.address,
+        pubkey: decode_supervisor_signing_public_key(&receipt.next.signing_public_key)?,
+    };
+    let operation = BridgeSupervisorRotationOperationReceipt {
+        operation_id,
+        target: BridgeSupervisorRotationTargetReceipt {
+            target,
+            target_epoch: receipt.next.epoch,
+        },
+    };
+    match receipt.phase {
+        crate::meerkat_machine::dsl::SupervisorRotationPhase::PreviousRevokePending => {
+            Ok(BridgeSupervisorRotationState::Pending {
+                operation,
+                phase: BridgeSupervisorRotationPendingPhase::PreviousRevokePending,
+            })
+        }
+        crate::meerkat_machine::dsl::SupervisorRotationPhase::NextPublishPending => {
+            Ok(BridgeSupervisorRotationState::Pending {
+                operation,
+                phase: BridgeSupervisorRotationPendingPhase::NextPublishPending,
+            })
+        }
+        crate::meerkat_machine::dsl::SupervisorRotationPhase::Completed => {
+            Ok(BridgeSupervisorRotationState::Completed { receipt: operation })
+        }
+        crate::meerkat_machine::dsl::SupervisorRotationPhase::Rejected => {
+            let rejection = receipt.rejection.ok_or_else(|| {
+                "stored rejected supervisor rotation omitted its typed cause".to_string()
+            })?;
+            let cause = match rejection {
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::OperationConflict => {
+                    BridgeSupervisorRotationRejectionCause::OperationConflict
+                }
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::NotBound => {
+                    BridgeSupervisorRotationRejectionCause::Internal
+                }
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::SenderMismatch => {
+                    BridgeSupervisorRotationRejectionCause::SenderMismatch
+                }
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::TargetEpochNotAdvanced => {
+                    BridgeSupervisorRotationRejectionCause::StaleTargetEpoch
+                }
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::InvalidTarget => {
+                    BridgeSupervisorRotationRejectionCause::InvalidTarget
+                }
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::UnsupportedProtocolVersion => {
+                    BridgeSupervisorRotationRejectionCause::UnsupportedProtocolVersion
+                }
+            };
+            Ok(BridgeSupervisorRotationState::Rejected {
+                receipt: BridgeSupervisorRotationRejectionReceipt {
+                    operation,
+                    cause,
+                    reason: format!("supervisor rotation rejected: {rejection:?}"),
+                },
+            })
+        }
+    }
+}
+
+async fn handle_authorize_supervisor_command(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    candidate: &PeerInputCandidate,
+    sender: &PeerIngressFact,
+    payload: BridgeSupervisorPayload,
+) -> bool {
+    let supervisor = match bridge_peer_identity(&payload.supervisor, "authorize supervisor failed")
+    {
+        Ok(supervisor) => supervisor,
+        Err((cause, reason)) => {
+            send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+            return true;
+        }
+    };
+    let supervisor_spec = match TrustedPeerDescriptor::try_from(payload.supervisor.clone()) {
+        Ok(supervisor_spec) => supervisor_spec,
+        Err(error) => {
+            send_bridge_failure(
+                comms_runtime,
+                candidate,
+                BridgeRejectionCause::InvalidSupervisorSpec,
+                format!("authorize supervisor failed: invalid supervisor peer spec: {error}"),
+            )
+            .await;
+            return true;
+        }
+    };
+    if let Err(error) = adapter
+        .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
+        .await
+    {
+        send_bridge_failure(
+            comms_runtime,
+            candidate,
+            BridgeRejectionCause::Internal,
+            format!("authorize supervisor failed: local endpoint rejected: {error}"),
+        )
+        .await;
+        return true;
+    }
+
+    let admission = match adapter
+        .resolve_supervisor_authorize_admission(
+            session_id,
+            GeneratedSupervisorBinding {
+                name: supervisor.name.as_str().to_owned(),
+                peer_id: supervisor.peer_id.as_str(),
+                address: supervisor.address.to_string(),
+                signing_public_key: encode_supervisor_signing_public_key(
+                    supervisor.pubkey.into_bytes(),
+                ),
+                epoch: payload.epoch,
+            },
+            generated_sender_peer_id(sender),
+            generated_sender_signing_public_key(sender),
+        )
+        .await
+    {
+        Ok(admission) => admission,
+        Err(error) => {
+            send_bridge_failure(
+                comms_runtime,
+                candidate,
+                BridgeRejectionCause::Internal,
+                format!("authorize supervisor admission failed: {error}"),
+            )
+            .await;
+            return true;
+        }
+    };
+
+    match admission {
+        SupervisorAuthorizeAdmission::IdempotentAck => {
+            if let Err(error) = refresh_and_publish_bound_supervisor_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                &supervisor_spec,
+                payload.epoch,
+                generated_sender_peer_id(sender),
+                "authorize supervisor idempotent route refresh",
+            )
+            .await
+            {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    error,
+                )
+                .await;
+                return true;
+            }
+            if crate::tokio::time::timeout(
+                SUPERVISOR_RESPONSE_ROUTE_IO_TIMEOUT,
+                send_bridge_response(
+                    comms_runtime,
+                    candidate,
+                    meerkat_core::interaction::ResponseStatus::Completed,
+                    BridgeReply::Ack(BridgeAck { ok: true }),
+                ),
+            )
+            .await
+            .is_err()
+            {
+                comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+            }
+            true
+        }
+        SupervisorAuthorizeAdmission::Proceed(_) => {
+            let transition = match adapter
+                .stage_supervisor_authorize(
+                    session_id,
+                    supervisor_spec.name.as_str().to_owned(),
+                    supervisor_spec.peer_id.as_str(),
+                    supervisor_spec.address.to_string(),
+                    encode_supervisor_signing_public_key(supervisor_spec.pubkey),
+                    payload.epoch,
+                )
+                .await
+            {
+                Ok(transition) => transition,
+                Err(error) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!("authorize supervisor version advance failed: {error}"),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            let obligation = match single_supervisor_publish_obligation(
+                adapter,
+                session_id,
+                &transition,
+                "authorize supervisor version advance",
+            )
+            .await
+            {
+                Ok(obligation) => obligation,
+                Err(error) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        error,
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            if let Err(error) = validate_supervisor_publish_obligation(
+                &obligation,
+                &supervisor_spec,
+                payload.epoch,
+                "authorize supervisor version advance",
+            ) {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    error,
+                )
+                .await;
+                return true;
+            }
+            if let Err(error) = publish_supervisor_trust_from_generated_obligation(
+                adapter,
+                session_id,
+                comms_runtime,
+                &obligation,
+            )
+            .await
+            {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    format!("authorize supervisor version publish failed: {error}"),
+                )
+                .await;
+                return true;
+            }
+            send_bridge_response(
+                comms_runtime,
+                candidate,
+                meerkat_core::interaction::ResponseStatus::Completed,
+                BridgeReply::Ack(BridgeAck { ok: true }),
+            )
+            .await;
+            true
+        }
+        SupervisorAuthorizeAdmission::Rejected(rejection) => {
+            send_bridge_failure(
+                comms_runtime,
+                candidate,
+                supervisor_authorize_admission_rejection_cause(rejection),
+                supervisor_authorize_admission_rejection_reason(rejection, sender, &supervisor),
+            )
+            .await;
+            true
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SupervisorDeliveryMarker {
+    SubmitSupervisorRotation,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSupervisorRotationSubmitDelivery {
+    #[serde(rename = "delivery")]
+    _delivery: SupervisorDeliveryMarker,
+    operation_id: SupervisorRotationOperationId,
+    target: BridgePeerSpec,
+    target_epoch: u64,
+    protocol_version: u32,
+}
+
+#[derive(Default)]
+struct SupervisorDeliveryMarkerProbe {
+    delivery_key_count: usize,
+    reserved_rotation_marker_seen: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for SupervisorDeliveryMarkerProbe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ProbeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ProbeVisitor {
+            type Value = SupervisorDeliveryMarkerProbe;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a supervisor delivery JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut probe = SupervisorDeliveryMarkerProbe::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "delivery" {
+                        probe.delivery_key_count += 1;
+                        let value = map.next_value::<serde_json::Value>()?;
+                        if value.as_str() == Some("submit_supervisor_rotation") {
+                            probe.reserved_rotation_marker_seen = true;
+                        }
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(probe)
+            }
+        }
+
+        deserializer.deserialize_map(ProbeVisitor)
+    }
+}
+
+async fn try_handle_supervisor_bridge_delivery(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    candidate: &PeerInputCandidate,
+) -> bool {
+    let InteractionContent::Message { body, .. } = &candidate.interaction.content else {
+        return false;
+    };
+    let Ok(marker_probe) = serde_json::from_str::<SupervisorDeliveryMarkerProbe>(body) else {
+        return false;
+    };
+    if !marker_probe.reserved_rotation_marker_seen {
+        return false;
+    }
+    if marker_probe.delivery_key_count != 1 {
+        tracing::warn!(
+            %session_id,
+            delivery_key_count = marker_probe.delivery_key_count,
+            "duplicate/conflicting supervisor rotation delivery markers consumed fail-closed"
+        );
+        comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+        return true;
+    }
+    let delivery = match serde_json::from_str::<RawSupervisorRotationSubmitDelivery>(body) {
+        Ok(delivery) => delivery,
+        Err(error) => {
+            tracing::warn!(%session_id, %error, "malformed supervisor rotation delivery consumed fail-closed");
+            comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+            return true;
+        }
+    };
+    let sender_peer_id = generated_sender_peer_id(&candidate.ingress);
+    let sender_signing_public_key = generated_sender_signing_public_key(&candidate.ingress);
+    let raw_target = delivery.target;
+    let (next, preflight_rejection) = if BridgeProtocolVersion::try_from(delivery.protocol_version)
+        .ok()
+        == Some(BridgeProtocolVersion::V4)
+    {
+        match TrustedPeerDescriptor::try_from(raw_target.clone()) {
+            Ok(target) => (
+                GeneratedSupervisorBinding {
+                    name: target.name.as_str().to_owned(),
+                    peer_id: target.peer_id.as_str(),
+                    address: target.address.to_string(),
+                    signing_public_key: encode_supervisor_signing_public_key(target.pubkey),
+                    epoch: delivery.target_epoch,
+                },
+                None,
+            ),
+            Err(error) => {
+                tracing::warn!(%session_id, %error, "durably rejecting one-way supervisor rotation with invalid target");
+                (
+                    GeneratedSupervisorBinding {
+                        name: raw_target.name,
+                        peer_id: raw_target.peer_id,
+                        address: raw_target.address,
+                        signing_public_key: encode_supervisor_signing_public_key(raw_target.pubkey),
+                        epoch: delivery.target_epoch,
+                    },
+                    Some(
+                        crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::InvalidTarget,
+                    ),
+                )
+            }
+        }
+    } else {
+        (
+            GeneratedSupervisorBinding {
+                name: raw_target.name,
+                peer_id: raw_target.peer_id,
+                address: raw_target.address,
+                signing_public_key: encode_supervisor_signing_public_key(raw_target.pubkey),
+                epoch: delivery.target_epoch,
+            },
+            Some(
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::UnsupportedProtocolVersion,
+            ),
+        )
+    };
+    if preflight_rejection.is_none()
+        && let Err(error) = adapter
+            .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
+            .await
+    {
+        tracing::warn!(%session_id, %error, "unable to stage local endpoint for supervisor rotation submission");
+        comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+        return true;
+    }
+    let submission = GeneratedSupervisorRotationSubmit {
+        operation_id: delivery.operation_id.to_string(),
+        next,
+        preflight_rejection,
+        sender_peer_id,
+        sender_signing_public_key,
+    };
+    match adapter
+        .submit_supervisor_rotation(session_id, submission)
+        .await
+    {
+        Ok(
+            SupervisorRotationSubmission::New(_) | SupervisorRotationSubmission::ExistingPending(_),
+        ) => {
+            if let Err(error) =
+                start_supervisor_rotation_worker_if_pending(adapter, session_id, comms_runtime)
+                    .await
+            {
+                tracing::warn!(%session_id, %error, "supervisor rotation was durably accepted but worker start failed");
+            }
+        }
+        Ok(SupervisorRotationSubmission::ExistingTerminal) => {}
+        Ok(
+            SupervisorRotationSubmission::Rejected(rejection)
+            | SupervisorRotationSubmission::Conflict(rejection),
+        ) => {
+            tracing::warn!(%session_id, ?rejection, "one-way supervisor rotation submission rejected");
+        }
+        Err(error) => {
+            tracing::warn!(%session_id, %error, "one-way supervisor rotation submission failed");
+        }
+    }
+    // Submission acceptance is one-way. Completing local ingress is not a
+    // semantic supervisor response and cannot be observed as an operation
+    // terminal; callers use ObserveSupervisorRotation.
+    comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+    true
 }
 
 /// Try to handle a supervisor bridge command from an incoming comms request.
@@ -1664,6 +2540,9 @@ async fn try_handle_supervisor_bridge_command(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
 ) -> bool {
+    if try_handle_supervisor_bridge_delivery(adapter, session_id, comms_runtime, candidate).await {
+        return true;
+    }
     let InteractionContent::Request { intent, params, .. } = &candidate.interaction.content else {
         return false;
     };
@@ -1788,6 +2667,8 @@ async fn try_handle_supervisor_bridge_command(
                         session_id,
                         comms_runtime,
                         &supervisor_spec,
+                        payload.epoch,
+                        generated_sender_peer_id(sender),
                     )
                     .await
                     {
@@ -2003,480 +2884,44 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::AuthorizeSupervisor(payload) => {
-            let supervisor =
-                match bridge_peer_identity(&payload.supervisor, "authorize supervisor failed") {
-                    Ok(supervisor) => supervisor,
-                    Err((cause, reason)) => {
-                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                        return true;
-                    }
-                };
-            let previous_binding = match adapter
-                .resolve_supervisor_authorize_admission(
-                    session_id,
-                    supervisor.peer_id.as_str().clone(),
-                    payload.epoch,
-                    generated_sender_peer_id(sender),
-                )
-                .await
-            {
-                Ok(SupervisorAuthorizeAdmission::IdempotentAck) => {
-                    // PR #750 response-route fix grafted onto gen-authority admission:
-                    // install the supervisor response route before acking so the
-                    // PeerResponse can be routed back to the bound supervisor.
-                    if let Err((cause, reason)) = ensure_bridge_response_route_for_supervisor(
-                        adapter,
-                        session_id,
-                        comms_runtime,
-                        &supervisor,
-                        "authorize supervisor failed",
-                    )
-                    .await
-                    {
-                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                        return true;
-                    }
-                    send_bridge_response(
-                        comms_runtime,
-                        candidate,
-                        meerkat_core::interaction::ResponseStatus::Completed,
-                        BridgeReply::Ack(BridgeAck { ok: true }),
-                    )
-                    .await;
-                    return true;
-                }
-                Ok(SupervisorAuthorizeAdmission::Proceed(previous)) => BoundSupervisorState {
-                    name: previous.name,
-                    peer_id: previous.peer_id,
-                    address: previous.address,
-                    signing_public_key: previous.signing_public_key,
-                    epoch: previous.epoch,
-                },
-                Ok(SupervisorAuthorizeAdmission::Rejected(rejection)) => {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        supervisor_authorize_admission_rejection_cause(rejection),
-                        supervisor_authorize_admission_rejection_reason(
-                            rejection,
-                            sender,
-                            &supervisor,
-                        ),
-                    )
-                    .await;
-                    return true;
-                }
-                Err(error) => {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        format!("authorize supervisor admission failed: {error}"),
-                    )
-                    .await;
-                    return true;
-                }
-            };
-            let previous_response_peer = match bound_supervisor_response_descriptor(
+            handle_authorize_supervisor_command(
+                adapter,
+                session_id,
+                comms_runtime,
+                candidate,
                 sender,
-                &previous_binding,
-                "authorize supervisor failed",
-            ) {
-                Ok(descriptor) => descriptor,
+                payload,
+            )
+            .await
+        }
+        BridgeCommand::RevokeSupervisor(payload) => {
+            let authorized_supervisor = match resolve_authorized_supervisor_cleanup(
+                adapter,
+                session_id,
+                sender,
+                &payload,
+                crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Revoke,
+            )
+            .await
+            {
+                Ok(supervisor) => supervisor,
+                Err((BridgeRejectionCause::NotBound, reason)) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::NotBound,
+                        reason,
+                    )
+                    .await;
+                    return true;
+                }
                 Err((cause, reason)) => {
                     send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                     return true;
                 }
             };
-            let supervisor_spec = match TrustedPeerDescriptor::try_from(payload.supervisor.clone())
-            {
-                Ok(spec) => spec,
-                Err(error) => {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::InvalidSupervisorSpec,
-                        format!(
-                            "authorize supervisor failed: invalid supervisor peer spec: {error}"
-                        ),
-                    )
-                    .await;
-                    return true;
-                }
-            };
-            if let Err(error) = adapter
-                .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
-                .await
-            {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!("authorize supervisor failed: local endpoint rejected: {error}"),
-                )
-                .await;
-                return true;
-            }
-            let new_peer_id = supervisor_spec.peer_id.as_str();
-            // For a supervisor REPLACEMENT (different peer), capture the generated
-            // PRIVATE (add, remove) authority pair for the temporary reply route
-            // to the PREVIOUS supervisor BEFORE the rotation revokes it —
-            // `RequestSupervisorTrustPublish` requires a live binding, and the
-            // router can only dial a peer that holds a trust-store address entry.
-            // In-place rotation keeps the existing route, so no capture is needed.
-            let rotation_reply_route_authority = if previous_binding.peer_id == new_peer_id {
-                None
-            } else {
-                match generated_temporary_supervisor_route_authority_pair(
-                    adapter,
-                    session_id,
-                    &previous_response_peer,
-                    "authorize supervisor failed",
-                )
-                .await
-                {
-                    Ok(pair) => Some(pair),
-                    Err(reason) => {
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            reason,
-                        )
-                        .await;
-                        return true;
-                    }
-                }
-            };
-            if previous_binding.peer_id == new_peer_id {
-                let authorize_transition = match adapter
-                    .stage_supervisor_authorize(
-                        session_id,
-                        supervisor_spec.name.as_str().to_owned(),
-                        new_peer_id.clone(),
-                        supervisor_spec.address.to_string(),
-                        encode_supervisor_signing_public_key(supervisor_spec.pubkey),
-                        payload.epoch,
-                    )
-                    .await
-                {
-                    Ok(transition) => transition,
-                    Err(error) => {
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            format!("authorize supervisor failed: DSL rejected rotation: {error}"),
-                        )
-                        .await;
-                        return true;
-                    }
-                };
-                let publish_obligation = match single_supervisor_publish_obligation(
-                    adapter,
-                    session_id,
-                    &authorize_transition,
-                    "authorize supervisor",
-                )
-                .await
-                {
-                    Ok(obligation) => obligation,
-                    Err(error) => {
-                        let _ = rollback_authorize_after_trust_publication_failure(
-                            adapter,
-                            session_id,
-                            &previous_binding,
-                        )
-                        .await;
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            error,
-                        )
-                        .await;
-                        return true;
-                    }
-                };
-                if let Err(error) = validate_supervisor_publish_obligation(
-                    &publish_obligation,
-                    &supervisor_spec,
-                    payload.epoch,
-                    "authorize supervisor",
-                )
-                .and_then(|()| {
-                    trusted_peer_descriptor_from_supervisor_publish_obligation(&publish_obligation)
-                        .map(|_| ())
-                }) {
-                    let _ = rollback_authorize_after_trust_publication_failure(
-                        adapter,
-                        session_id,
-                        &previous_binding,
-                    )
-                    .await;
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        error,
-                    )
-                    .await;
-                    return true;
-                }
-                if let Err(error) = publish_supervisor_trust_from_generated_obligation(
-                    adapter,
-                    session_id,
-                    comms_runtime,
-                    &publish_obligation,
-                )
-                .await
-                {
-                    let _ = adapter
-                        .stage_supervisor_trust_publish_failed(
-                            session_id,
-                            publish_obligation.peer_id().clone(),
-                            publish_obligation.epoch(),
-                            error.clone(),
-                        )
-                        .await;
-                    let rollback = rollback_authorize_after_trust_publication_failure(
-                        adapter,
-                        session_id,
-                        &previous_binding,
-                    )
-                    .await;
-                    let mut reason =
-                        format!("authorize supervisor failed: trust publication failed: {error}");
-                    if let Err(rollback_error) = rollback {
-                        reason.push_str(&format!("; rollback failed: {rollback_error}"));
-                    }
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        reason,
-                    )
-                    .await;
-                    return true;
-                }
-            } else {
-                let revoke_transition = match adapter
-                    .stage_supervisor_revoke(
-                        session_id,
-                        previous_binding.peer_id.clone(),
-                        previous_binding.epoch,
-                    )
-                    .await
-                {
-                    Ok(transition) => transition,
-                    Err(error) => {
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            format!("authorize supervisor failed: DSL rejected previous supervisor revoke: {error}"),
-                        )
-                        .await;
-                        return true;
-                    }
-                };
-                let revoke_obligation = match matching_supervisor_revoke_obligation(
-                    adapter,
-                    session_id,
-                    &revoke_transition,
-                    &previous_binding.peer_id,
-                    previous_binding.epoch,
-                    "authorize supervisor",
-                )
-                .await
-                {
-                    Ok(obligation) => obligation,
-                    Err(error) => {
-                        let _ = adapter
-                            .stage_supervisor_trust_revoke_failed(
-                                session_id,
-                                previous_binding.peer_id.clone(),
-                                previous_binding.epoch,
-                                error.clone(),
-                            )
-                            .await;
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            error,
-                        )
-                        .await;
-                        return true;
-                    }
-                };
-                if let Err(error) = apply_generated_private_trust_remove(
-                    comms_runtime,
-                    revoke_obligation.peer_id().clone(),
-                    match supervisor_revoke_authority(&revoke_obligation) {
-                        Ok(authority) => authority,
-                        Err(error) => {
-                            let _ = adapter
-                                .stage_supervisor_trust_revoke_failed(
-                                    session_id,
-                                    revoke_obligation.peer_id().clone(),
-                                    revoke_obligation.epoch(),
-                                    error.clone(),
-                                )
-                                .await;
-                            send_bridge_failure(
-                                comms_runtime,
-                                candidate,
-                                BridgeRejectionCause::Internal,
-                                error,
-                            )
-                            .await;
-                            return true;
-                        }
-                    },
-                )
-                .await
-                {
-                    let feedback = adapter
-                        .stage_supervisor_trust_revoke_failed(
-                            session_id,
-                            revoke_obligation.peer_id().clone(),
-                            revoke_obligation.epoch(),
-                            error.clone(),
-                        )
-                        .await;
-                    let mut reason = format!(
-                        "authorize supervisor failed: previous supervisor trust removal failed: {error}"
-                    );
-                    if let Err(feedback_error) = feedback {
-                        reason.push_str(&format!("; revoke feedback failed: {feedback_error}"));
-                    }
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        reason,
-                    )
-                    .await;
-                    return true;
-                }
-                if let Err(error) = adapter
-                    .stage_supervisor_trust_revoked(
-                        session_id,
-                        revoke_obligation.peer_id().clone(),
-                        revoke_obligation.epoch(),
-                    )
-                    .await
-                {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        format!("authorize supervisor failed: generated revoke feedback rejected: {error}"),
-                    )
-                    .await;
-                    return true;
-                }
-                if let Err(error) = bind_and_publish_supervisor_trust(
-                    adapter,
-                    session_id,
-                    comms_runtime,
-                    &supervisor_spec,
-                    payload.epoch,
-                    "authorize supervisor",
-                )
-                .await
-                {
-                    let _ = rollback_bind_after_trust_publication_failure(
-                        adapter,
-                        session_id,
-                        &new_peer_id,
-                        payload.epoch,
-                    )
-                    .await;
-                    let restore = match trusted_peer_descriptor_from_bound_supervisor_state(
-                        &previous_binding,
-                    ) {
-                        Ok(previous_spec) => {
-                            bind_and_publish_supervisor_trust(
-                                adapter,
-                                session_id,
-                                comms_runtime,
-                                &previous_spec,
-                                previous_binding.epoch,
-                                "authorize supervisor rollback",
-                            )
-                            .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    let mut reason =
-                        format!("authorize supervisor failed: new supervisor bind failed: {error}");
-                    if let Err(restore_error) = restore {
-                        reason.push_str(&format!(
-                            "; previous supervisor restore failed: {restore_error}"
-                        ));
-                    }
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        reason,
-                    )
-                    .await;
-                    return true;
-                }
-            }
-            // PR #750 response-route fix grafted onto gen-authority rotation:
-            // reply over the same condition that drove the action. Rotating the
-            // supervisor in place leaves the (private) response route intact;
-            // replacing it revoked the previous route, so reply via a temporary
-            // PRIVATE route built from the authenticated sender + previous binding
-            // descriptor, using the authority pair captured before the revoke
-            // unbound the previous supervisor.
-            if previous_binding.peer_id == new_peer_id {
-                send_bridge_response(
-                    comms_runtime,
-                    candidate,
-                    meerkat_core::interaction::ResponseStatus::Completed,
-                    BridgeReply::Ack(BridgeAck { ok: true }),
-                )
-                .await;
-            } else {
-                let Some((add_authority, remove_authority)) = rotation_reply_route_authority else {
-                    // Unreachable: the authority pair is always captured for the
-                    // different-peer branch above. Fail closed rather than panic.
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        BridgeRejectionCause::Internal,
-                        "rotation reply route authority missing".to_string(),
-                    )
-                    .await;
-                    return true;
-                };
-                send_bridge_response_with_temporary_supervisor_route(
-                    comms_runtime,
-                    candidate,
-                    meerkat_core::interaction::ResponseStatus::Completed,
-                    BridgeReply::Ack(BridgeAck { ok: true }),
-                    previous_response_peer,
-                    add_authority,
-                    remove_authority,
-                )
-                .await;
-            }
-            true
-        }
-        BridgeCommand::RevokeSupervisor(payload) => {
-            let authorized_supervisor =
-                match resolve_authorized_supervisor(adapter, session_id, sender, &payload).await {
-                    Ok(supervisor) => supervisor,
-                    Err((cause, reason)) => {
-                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                        return true;
-                    }
-                };
+            let resume_pending_revoke = authorized_supervisor.resume_pending_revoke;
+            let authorized_supervisor = authorized_supervisor.supervisor;
             if let Err(error) = adapter
                 .stage_local_endpoint_for_comms_runtime(session_id, comms_runtime.as_ref())
                 .await
@@ -2491,34 +2936,6 @@ async fn try_handle_supervisor_bridge_command(
                 return true;
             }
             let supervisor_peer_id = authorized_supervisor.peer_id.as_str();
-            // Capture the generated PRIVATE (add, remove) authority pair for the
-            // temporary reply route BEFORE the revoke unbinds the supervisor —
-            // `RequestSupervisorTrustPublish` requires a live binding, and the
-            // router can only dial a peer with a trust-store address entry.
-            let revoke_reply_route_authority = {
-                let response_descriptor =
-                    authorized_supervisor.clone().into_trusted_peer_descriptor();
-                match generated_temporary_supervisor_route_authority_pair(
-                    adapter,
-                    session_id,
-                    &response_descriptor,
-                    "revoke supervisor failed",
-                )
-                .await
-                {
-                    Ok(pair) => pair,
-                    Err(reason) => {
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            reason,
-                        )
-                        .await;
-                        return true;
-                    }
-                }
-            };
             let revoke_transition = match adapter
                 .stage_supervisor_revoke(session_id, supervisor_peer_id.clone(), payload.epoch)
                 .await
@@ -2573,30 +2990,52 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
+            let revoke_authority = match supervisor_revoke_authority(&revoke_obligation) {
+                Ok(authority) => authority,
+                Err(error) => {
+                    let _ = adapter
+                        .stage_supervisor_trust_revoke_failed(
+                            session_id,
+                            revoke_obligation.peer_id().clone(),
+                            revoke_obligation.epoch(),
+                            error.clone(),
+                        )
+                        .await;
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        error,
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            // Revoke acknowledgement is acceptance of the durable cleanup,
+            // not proof that a reply route survived trust removal. Send it
+            // before spending the one-shot remove authority; never re-trust a
+            // revoked supervisor solely to deliver a terminal response.
+            if resume_pending_revoke {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::NotBound,
+                    "supervisor revoke cleanup was already pending".to_string(),
+                )
+                .await;
+            } else {
+                send_bridge_response(
+                    comms_runtime,
+                    candidate,
+                    meerkat_core::interaction::ResponseStatus::Completed,
+                    BridgeReply::Ack(BridgeAck { ok: true }),
+                )
+                .await;
+            }
             if let Err(error) = apply_generated_private_trust_remove(
                 comms_runtime,
                 revoke_obligation.peer_id().clone(),
-                match supervisor_revoke_authority(&revoke_obligation) {
-                    Ok(authority) => authority,
-                    Err(error) => {
-                        let _ = adapter
-                            .stage_supervisor_trust_revoke_failed(
-                                session_id,
-                                revoke_obligation.peer_id().clone(),
-                                revoke_obligation.epoch(),
-                                error.clone(),
-                            )
-                            .await;
-                        send_bridge_failure(
-                            comms_runtime,
-                            candidate,
-                            BridgeRejectionCause::Internal,
-                            error,
-                        )
-                        .await;
-                        return true;
-                    }
-                },
+                revoke_authority,
             )
             .await
             {
@@ -2614,20 +3053,9 @@ async fn try_handle_supervisor_bridge_command(
                 if let Err(feedback_error) = feedback_result {
                     reason.push_str(&format!("; feedback failed: {feedback_error}"));
                 }
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    reason,
-                )
-                .await;
+                tracing::warn!(%session_id, %reason, "accepted supervisor revoke remains pending");
                 return true;
             }
-            // Reply-route fix (PR #750): capture the supervisor descriptor before
-            // the generated revoke removes its trust, so the ack can be sent over
-            // a temporary route. `supervisor_peer_id` is already bound above.
-            let supervisor_response_peer =
-                authorized_supervisor.clone().into_trusted_peer_descriptor();
             // Wave-d D-d: close the `supervisor_trust_revoke` obligation
             // with the epoch observed on the generated producer effect.
             // `RevokeSupervisor` first records the pending trust revoke,
@@ -2641,28 +3069,9 @@ async fn try_handle_supervisor_bridge_command(
                 )
                 .await
             {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    BridgeRejectionCause::Internal,
-                    format!(
-                        "revoke supervisor failed: DSL rejected trust revoke feedback: {error}"
-                    ),
-                )
-                .await;
+                tracing::warn!(%session_id, %error, "accepted supervisor revoke cleanup checkpoint failed");
                 return true;
             }
-            let (add_authority, remove_authority) = revoke_reply_route_authority;
-            send_bridge_response_with_temporary_supervisor_route(
-                comms_runtime,
-                candidate,
-                meerkat_core::interaction::ResponseStatus::Completed,
-                BridgeReply::Ack(BridgeAck { ok: true }),
-                supervisor_response_peer,
-                add_authority,
-                remove_authority,
-            )
-            .await;
             true
         }
         BridgeCommand::DeliverMemberInput(payload) => {
@@ -2786,12 +3195,13 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::RetireMember(payload) => {
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+            if let Err((cause, reason)) = resolve_authorized_supervisor_cleanup_with_response_route(
                 adapter,
                 session_id,
                 comms_runtime,
                 sender,
                 &payload,
+                crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Retire,
                 "retire member failed",
             )
             .await
@@ -2825,12 +3235,13 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::DestroyMember(payload) => {
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+            if let Err((cause, reason)) = resolve_authorized_supervisor_cleanup_with_response_route(
                 adapter,
                 session_id,
                 comms_runtime,
                 sender,
                 &payload,
+                crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Destroy,
                 "destroy member failed",
             )
             .await
@@ -2864,12 +3275,13 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::ObserveMember(payload) => {
-            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+            if let Err((cause, reason)) = resolve_authorized_supervisor_cleanup_with_response_route(
                 adapter,
                 session_id,
                 comms_runtime,
                 sender,
                 &payload,
+                crate::meerkat_machine::dsl::SupervisorCleanupCommandKind::Observe,
                 "observe member failed",
             )
             .await
@@ -3263,6 +3675,106 @@ async fn try_handle_supervisor_bridge_command(
                     }
                 }
             }
+            true
+        }
+        BridgeCommand::ObserveSupervisorRotation(payload) => {
+            if payload.protocol_version != BridgeProtocolVersion::V4 {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::UnsupportedProtocolVersion,
+                    format!(
+                        "observe supervisor rotation requires protocol v4, received {:?}",
+                        payload.protocol_version
+                    ),
+                )
+                .await;
+                return true;
+            }
+            let observer =
+                match bridge_peer_identity(&payload.observer, "observe supervisor rotation failed")
+                {
+                    Ok(observer) => observer,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                        return true;
+                    }
+                };
+            let authenticated_peer_id = generated_sender_peer_id(sender);
+            let authenticated_key = generated_sender_signing_public_key(sender);
+            let observer_peer_id = observer.peer_id.as_str();
+            let observer_key = encode_supervisor_signing_public_key(observer.pubkey.into_bytes());
+            if authenticated_peer_id.as_deref() != Some(observer_peer_id.as_str())
+                || authenticated_key.as_deref() != Some(observer_key.as_str())
+            {
+                send_bridge_failure(
+                    comms_runtime,
+                    candidate,
+                    BridgeRejectionCause::SenderMismatch,
+                    "observe supervisor rotation failed: observer does not match authenticated sender"
+                        .to_string(),
+                )
+                .await;
+                return true;
+            }
+            let operation_id = payload.operation_id;
+            let observer = GeneratedSupervisorBinding {
+                name: observer.name.as_str().to_owned(),
+                peer_id: observer_peer_id,
+                address: observer.address.to_string(),
+                signing_public_key: observer_key,
+                epoch: payload.observer_epoch,
+            };
+            let reply =
+                match adapter
+                    .observe_supervisor_rotation(session_id, operation_id.to_string(), &observer)
+                    .await
+                {
+                    Ok(SupervisorRotationObservation::Found(receipt)) => {
+                        match bridge_supervisor_rotation_state(receipt) {
+                            Ok(state) => BridgeReply::SupervisorRotation(
+                                BridgeSupervisorRotationObservation::Found { state },
+                            ),
+                            Err(error) => {
+                                send_bridge_failure(
+                                    comms_runtime,
+                                    candidate,
+                                    BridgeRejectionCause::Internal,
+                                    error,
+                                )
+                                .await;
+                                return true;
+                            }
+                        }
+                    }
+                    Ok(SupervisorRotationObservation::NotFound) => BridgeReply::SupervisorRotation(
+                        BridgeSupervisorRotationObservation::NotFound { operation_id },
+                    ),
+                    Err(error) => {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            format!("observe supervisor rotation failed: {error}"),
+                        )
+                        .await;
+                        return true;
+                    }
+                };
+            // Observation reports machine-owned operation truth; it does not
+            // mint a temporary trust edge. During PreviousRevokePending after
+            // the old edge is gone, or NextPublishPending before the new edge
+            // exists, no participant may be routable yet. The response may
+            // therefore time out at the interaction layer until the existing
+            // rotation obligation publishes the next route. Never retrust the
+            // revoked supervisor merely to acknowledge or observe progress.
+            send_bridge_response(
+                comms_runtime,
+                candidate,
+                meerkat_core::interaction::ResponseStatus::Completed,
+                reply,
+            )
+            .await;
             true
         }
         BridgeCommand::DeclareMemberOutboundTaint(payload) => {
@@ -4174,6 +4686,24 @@ mod tests {
         }
     }
 
+    async fn spawn_authorized_test_comms_drain(
+        adapter: Arc<MeerkatMachine>,
+        session_id: SessionId,
+        runtime: Arc<dyn CommsRuntime>,
+        idle_timeout: Duration,
+    ) -> crate::tokio::task::JoinHandle<()> {
+        // Production launch publishes generated peer-ingress ownership and
+        // installs the task runtime before the spawned drain can acquire the
+        // session gate. Direct unit tests must establish the same fence; a
+        // finished placeholder handle supplies only the slot identity while
+        // the returned handle remains available to the assertion.
+        adapter
+            .test_authorize_direct_comms_drain_runtime(&session_id, Arc::clone(&runtime))
+            .await
+            .expect("direct-drain test authority should accept");
+        spawn_comms_drain(adapter, session_id, runtime, Some(idle_timeout))
+    }
+
     /// Regression for #341: a classified-drain ERROR must NOT be laundered into
     /// an empty inbox and routed to the idle/dismiss lifecycle branch. With the
     /// old `drain_peer_input_candidates().await.unwrap_or_default()` collapse,
@@ -4193,12 +4723,13 @@ mod tests {
         // Long idle timeout: if the error were laundered to empty, the drain
         // would block here for 60s instead of exiting.
         let runtime = Arc::new(ClassifiedDrainOutcomeRuntime::new(true));
-        let drain = spawn_comms_drain(
+        let drain = spawn_authorized_test_comms_drain(
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Some(Duration::from_secs(60)),
-        );
+            Duration::from_secs(60),
+        )
+        .await;
 
         tokio::time::timeout(Duration::from_secs(2), drain)
             .await
@@ -4222,12 +4753,13 @@ mod tests {
             .expect("register session");
 
         let runtime = Arc::new(ClassifiedDrainOutcomeRuntime::new(false));
-        let drain = spawn_comms_drain(
+        let drain = spawn_authorized_test_comms_drain(
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Some(Duration::from_secs(60)),
-        );
+            Duration::from_secs(60),
+        )
+        .await;
 
         // An idle (empty Ok) inbox must keep the drain alive: it should still be
         // running well within the 60s idle window.
@@ -4252,12 +4784,13 @@ mod tests {
             response_candidate(PeerInputClass::ResponseTerminal, None),
             None,
         ));
-        let drain = spawn_comms_drain(
+        let drain = spawn_authorized_test_comms_drain(
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Some(Duration::from_millis(10)),
-        );
+            Duration::from_millis(10),
+        )
+        .await;
 
         tokio::time::timeout(Duration::from_secs(1), drain)
             .await
@@ -4290,12 +4823,13 @@ mod tests {
             response_candidate(PeerInputClass::ResponseTerminal, None),
             Some(peer_authority),
         ));
-        let drain = spawn_comms_drain(
+        let drain = spawn_authorized_test_comms_drain(
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Some(Duration::from_millis(10)),
-        );
+            Duration::from_millis(10),
+        )
+        .await;
 
         tokio::time::timeout(Duration::from_secs(1), drain)
             .await
@@ -4348,12 +4882,13 @@ mod tests {
                 candidate,
                 Some(peer_handle.clone()),
             ));
-            let drain = spawn_comms_drain(
+            let drain = spawn_authorized_test_comms_drain(
                 adapter.clone(),
                 session_id.clone(),
                 runtime.clone(),
-                Some(Duration::from_millis(10)),
-            );
+                Duration::from_millis(10),
+            )
+            .await;
 
             tokio::time::timeout(Duration::from_secs(1), drain)
                 .await
@@ -4395,12 +4930,13 @@ mod tests {
                 inbound_peer_request_candidate(class),
                 peer_authority,
             ));
-            let drain = spawn_comms_drain(
+            let drain = spawn_authorized_test_comms_drain(
                 adapter.clone(),
                 session_id.clone(),
                 runtime.clone(),
-                Some(Duration::from_millis(10)),
-            );
+                Duration::from_millis(10),
+            )
+            .await;
 
             tokio::time::timeout(Duration::from_secs(1), drain)
                 .await
@@ -4443,12 +4979,13 @@ mod tests {
                 inbound_peer_request_candidate(class),
                 Some(peer_authority),
             ));
-            let drain = spawn_comms_drain(
+            let drain = spawn_authorized_test_comms_drain(
                 adapter.clone(),
                 session_id.clone(),
                 runtime.clone(),
-                Some(Duration::from_millis(10)),
-            );
+                Duration::from_millis(10),
+            )
+            .await;
 
             tokio::time::timeout(Duration::from_secs(1), drain)
                 .await
@@ -4493,12 +5030,13 @@ mod tests {
                 inbound_peer_request_candidate(class),
                 None,
             ));
-            let drain = spawn_comms_drain(
+            let drain = spawn_authorized_test_comms_drain(
                 adapter.clone(),
                 session_id.clone(),
                 runtime.clone(),
-                Some(Duration::from_millis(10)),
-            );
+                Duration::from_millis(10),
+            )
+            .await;
 
             tokio::time::timeout(Duration::from_secs(1), drain)
                 .await
@@ -5436,7 +5974,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn authorize_supervisor_rotation_replies_after_removing_previous_route() {
+    async fn supervisor_rotation_v4_is_one_way_then_observed_from_new_authority() {
         let suffix = Uuid::new_v4().simple().to_string();
         let member_name = format!("tcp-authorize-member-{suffix}");
         let old_supervisor_name = format!("tcp-authorize-old-supervisor-{suffix}");
@@ -5484,6 +6022,10 @@ mod tests {
             .await
             .expect("start new supervisor TCP listener");
         let new_supervisor_runtime = Arc::new(new_supervisor_runtime);
+        install_test_peer_request_response_authority(
+            &new_supervisor_runtime,
+            Arc::new(CountingPeerInteractionHandle::default()),
+        );
 
         let member_spec = trusted_tcp_peer_from_runtime(&member_name, &member_runtime);
         let old_supervisor_dsl =
@@ -5491,9 +6033,19 @@ mod tests {
         add_test_projection_trust_with_dsl(
             old_supervisor_runtime.as_ref(),
             Arc::clone(&old_supervisor_dsl),
-            member_spec,
+            member_spec.clone(),
             1,
             "old supervisor trusts member target",
+        )
+        .await;
+        let new_supervisor_dsl =
+            install_running_test_peer_comms_handle(new_supervisor_runtime.as_ref());
+        add_test_projection_trust_with_dsl(
+            new_supervisor_runtime.as_ref(),
+            Arc::clone(&new_supervisor_dsl),
+            member_spec,
+            1,
+            "new supervisor trusts member target",
         )
         .await;
         let old_supervisor_spec =
@@ -5526,6 +6078,13 @@ mod tests {
             .test_install_session_peer_comms_handle_on_runtime(&session_id, member_runtime.as_ref())
             .await
             .expect("install adapter session peer-comms handle on member runtime");
+        adapter
+            .test_authorize_direct_comms_drain_runtime(
+                &session_id,
+                member_runtime.clone() as Arc<dyn CommsRuntime>,
+            )
+            .await
+            .expect("install generated current member comms runtime fence");
         add_member_private_supervisor_trust_via_adapter(
             &adapter,
             &session_id,
@@ -5542,44 +6101,107 @@ mod tests {
             "member must start with a PRIVATE old supervisor route"
         );
 
-        let command = BridgeCommand::AuthorizeSupervisor(BridgeSupervisorPayload {
-            supervisor: BridgePeerSpec::from(new_supervisor_spec.clone()),
-            epoch: 2,
-            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-        });
+        let operation_id = SupervisorRotationOperationId::new();
+        let delivery = serde_json::to_value(
+            meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorDelivery::SubmitSupervisorRotation(
+                meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorRotationSubmit {
+                    operation_id,
+                    target: BridgePeerSpec::from(new_supervisor_spec.clone()),
+                    target_epoch: 2,
+                    protocol_version: BridgeProtocolVersion::V4,
+                },
+            ),
+        )
+        .expect("serialize supervisor rotation delivery");
         let interaction_id = InteractionId(Uuid::new_v4());
         let ingress = PeerIngressFact::peer(
             interaction_id,
-            PeerInputClass::ActionableRequest,
-            meerkat_core::PeerIngressKind::Request,
+            PeerInputClass::ActionableMessage,
+            meerkat_core::PeerIngressKind::Message,
             Some(meerkat_core::PeerIngressAuthDecision::Required),
             PeerIngressIdentity::new(
                 old_supervisor_spec.peer_id,
                 old_supervisor_spec.name.as_str(),
-                meerkat_core::PeerIngressConvention::Request {
-                    request_id: interaction_id.to_string(),
-                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
-                },
+                meerkat_core::PeerIngressConvention::Message,
             )
             .with_signing_pubkey(old_supervisor_spec.pubkey),
         );
-        let candidate =
-            bridge_candidate_with_ingress(old_supervisor_spec.name.as_str(), &command, ingress);
+        let candidate = bridge_delivery_candidate_with_ingress(
+            old_supervisor_spec.name.as_str(),
+            &delivery,
+            ingress,
+        );
 
         assert!(
-            try_handle_supervisor_bridge_command(
+            try_handle_supervisor_bridge_delivery(
                 &adapter,
                 &session_id,
                 &(member_runtime.clone() as Arc<dyn CommsRuntime>),
                 &candidate,
             )
             .await,
-            "bridge handler must own AuthorizeSupervisor"
+            "delivery handler must own SubmitSupervisorRotation"
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let receipt = adapter
+                    .active_supervisor_rotation(&session_id)
+                    .await
+                    .expect("read rotation receipt")
+                    .expect("rotation receipt exists");
+                if receipt.phase == crate::meerkat_machine::dsl::SupervisorRotationPhase::Completed
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rotation worker reaches terminal completion");
+
+        let observe = BridgeCommand::ObserveSupervisorRotation(
+            meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorRotationObserve {
+                operation_id,
+                observer: BridgePeerSpec::from(new_supervisor_spec.clone()),
+                observer_epoch: 2,
+                protocol_version: BridgeProtocolVersion::V4,
+            },
+        );
+        let observe_id = InteractionId(Uuid::new_v4());
+        let observe_ingress = PeerIngressFact::peer(
+            observe_id,
+            PeerInputClass::ActionableRequest,
+            meerkat_core::PeerIngressKind::Request,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                new_supervisor_spec.peer_id,
+                new_supervisor_spec.name.as_str(),
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id: observe_id.to_string(),
+                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                },
+            )
+            .with_signing_pubkey(new_supervisor_spec.pubkey),
+        );
+        let observe_candidate = bridge_candidate_with_ingress(
+            new_supervisor_spec.name.as_str(),
+            &observe,
+            observe_ingress,
+        );
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(member_runtime.clone() as Arc<dyn CommsRuntime>),
+                &observe_candidate,
+            )
+            .await,
+            "bridge handler must own ObserveSupervisorRotation"
         );
 
         let response = drain_one_candidate(
-            &old_supervisor_runtime,
-            "old supervisor AuthorizeSupervisor response",
+            &new_supervisor_runtime,
+            "new supervisor rotation observation",
         )
         .await;
         let InteractionContent::Response {
@@ -5594,11 +6216,16 @@ mod tests {
                 response.interaction.content
             );
         };
-        assert_eq!(in_reply_to, interaction_id);
+        assert_eq!(in_reply_to, observe_id);
         assert_eq!(status, meerkat_core::interaction::ResponseStatus::Completed);
         assert!(matches!(
             serde_json::from_value::<BridgeReply>(result).expect("typed bridge reply"),
-            BridgeReply::Ack(BridgeAck { ok: true })
+            BridgeReply::SupervisorRotation(
+                BridgeSupervisorRotationObservation::Found {
+                    state: BridgeSupervisorRotationState::Completed { receipt }
+                }
+            ) if receipt.operation_id == operation_id
+                && receipt.target.target.peer_id == new_supervisor_spec.peer_id.as_str()
         ));
         let peers = member_runtime.peers().await;
         // Supervisor trust is a PRIVATE control-plane edge: neither old nor new
@@ -5900,6 +6527,12 @@ mod tests {
         peer_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
         peer_request_response_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
         completed_count: Arc<std::sync::atomic::AtomicUsize>,
+        add_mutates_then_hangs: Arc<std::sync::atomic::AtomicBool>,
+        add_mutates_then_hangs_once_for: Arc<tokio::sync::Mutex<HashSet<String>>>,
+        remove_hangs_remaining: Arc<std::sync::atomic::AtomicUsize>,
+        remove_mutates_then_hangs_once_for: Arc<tokio::sync::Mutex<HashSet<String>>>,
+        remove_failures_remaining: Arc<std::sync::atomic::AtomicUsize>,
+        remove_attempts: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -5967,6 +6600,16 @@ mod tests {
                         return Err(SendError::Internal(message.clone()));
                     }
                     let created = self.trusted_peer_ids.lock().await.insert(peer_id_str);
+                    let mut mutate_then_hang = self.add_mutates_then_hangs_once_for.lock().await;
+                    let targeted_mutate_then_hang = mutate_then_hang.remove(&peer.peer_id.as_str());
+                    drop(mutate_then_hang);
+                    if self
+                        .add_mutates_then_hangs
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        || targeted_mutate_then_hang
+                    {
+                        std::future::pending::<()>().await;
+                    }
                     Ok(CommsTrustMutationResult::Added { created })
                 }
                 CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
@@ -5975,6 +6618,39 @@ mod tests {
                     authority
                         .validate_private_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
+                    self.remove_attempts
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut mutate_then_hang = self.remove_mutates_then_hangs_once_for.lock().await;
+                    let targeted_mutate_then_hang = mutate_then_hang.remove(&peer_id);
+                    drop(mutate_then_hang);
+                    if targeted_mutate_then_hang {
+                        self.trusted_peer_ids.lock().await.remove(&peer_id);
+                        std::future::pending::<()>().await;
+                    }
+                    if self
+                        .remove_hangs_remaining
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |remaining| remaining.checked_sub(1),
+                        )
+                        .is_ok()
+                    {
+                        std::future::pending::<()>().await;
+                    }
+                    if self
+                        .remove_failures_remaining
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |remaining| remaining.checked_sub(1),
+                        )
+                        .is_ok()
+                    {
+                        return Err(SendError::Internal(
+                            "synthetic one-shot remove failure".to_string(),
+                        ));
+                    }
                     match self.remove_trusted_peer_errors.get(&peer_id) {
                         Some(message) => Err(SendError::Internal(message.clone())),
                         None => Ok(CommsTrustMutationResult::Removed {
@@ -6046,7 +6722,80 @@ mod tests {
             peer_handle: Some(peer_handle.clone()),
             peer_request_response_handle: Some(peer_handle),
             completed_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            add_mutates_then_hangs: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            add_mutates_then_hangs_once_for: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            remove_hangs_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            remove_mutates_then_hangs_once_for: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            remove_failures_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            remove_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    #[tokio::test]
+    async fn supervisor_rotation_task_slot_rejects_live_replacement_carrier() {
+        struct DropSignal(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let slot = crate::meerkat_machine::SupervisorRotationTaskSlot::new();
+        let runtime_a: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://rotation-worker-a",
+            Some("token"),
+        ));
+        let runtime_b: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://rotation-worker-b",
+            Some("token"),
+        ));
+        let first_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let first = tokio::spawn({
+            let first_dropped = Arc::clone(&first_dropped);
+            let first_started = Arc::clone(&first_started);
+            async move {
+                let _drop_signal = DropSignal(first_dropped);
+                first_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        first_started.notified().await;
+        assert!(
+            slot.install("operation-a".to_string(), runtime_a, first)
+                .await
+        );
+
+        let replacement_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let replacement = tokio::spawn({
+            let drop_signal = DropSignal(Arc::clone(&replacement_dropped));
+            async move {
+                let _drop_signal = drop_signal;
+                std::future::pending::<()>().await;
+            }
+        });
+        assert!(
+            !slot
+                .install("operation-b".to_string(), runtime_b, replacement)
+                .await,
+            "a live carrier must never be displaced by last-writer-wins installation"
+        );
+        assert!(
+            !first_dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the incumbent carrier remains authoritative until its owning runtime is quiesced"
+        );
+        assert!(
+            replacement_dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the rejected candidate carrier must be aborted and joined"
+        );
+        slot.abort_and_wait().await;
+        assert!(
+            first_dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "explicit quiescence must abort and join the incumbent carrier"
+        );
     }
 
     fn lifecycle_candidate(
@@ -6954,6 +7703,55 @@ mod tests {
             .expect("supervisor bound");
     }
 
+    async fn stage_test_supervisor_rotation(
+        adapter: &MeerkatMachine,
+        session_id: &SessionId,
+        next: crate::meerkat_machine::GeneratedSupervisorBinding,
+    ) {
+        let SupervisorBinding::Bound {
+            peer_id: previous_peer_id,
+            signing_public_key: previous_signing_public_key,
+            epoch: previous_epoch,
+            ..
+        } = adapter.supervisor_binding(session_id).await
+        else {
+            panic!("test rotation requires a bound previous supervisor");
+        };
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let submission = adapter
+            .submit_supervisor_rotation(
+                session_id,
+                GeneratedSupervisorRotationSubmit {
+                    operation_id: operation_id.clone(),
+                    next: next.clone(),
+                    preflight_rejection: None,
+                    sender_peer_id: Some(previous_peer_id.clone()),
+                    sender_signing_public_key: Some(previous_signing_public_key),
+                },
+            )
+            .await
+            .expect("stage test rotation submit");
+        assert!(matches!(submission, SupervisorRotationSubmission::New(_)));
+        adapter
+            .stage_supervisor_rotation_previous_revoked(
+                session_id,
+                operation_id.clone(),
+                previous_peer_id,
+                previous_epoch,
+            )
+            .await
+            .expect("stage test rotation previous-revoked checkpoint");
+        adapter
+            .stage_supervisor_rotation_next_published(
+                session_id,
+                operation_id,
+                next.peer_id,
+                next.epoch,
+            )
+            .await
+            .expect("stage test rotation bound checkpoint");
+    }
+
     #[tokio::test]
     async fn generated_bind_admission_allows_bootstrap_when_unbound() {
         let payload = sample_bind_payload();
@@ -7743,9 +8541,17 @@ mod tests {
                 adapter
                     .resolve_supervisor_authorize_admission(
                         &session_id,
-                        supervisor.peer_id.as_str().clone(),
-                        payload.epoch,
+                        GeneratedSupervisorBinding {
+                            name: supervisor.name.to_string(),
+                            peer_id: supervisor.peer_id.as_str().clone(),
+                            address: supervisor.address.to_string(),
+                            signing_public_key: encode_supervisor_signing_public_key(
+                                *supervisor.pubkey.as_bytes(),
+                            ),
+                            epoch: payload.epoch,
+                        },
                         generated_sender_peer_id(&sender),
+                        generated_sender_signing_public_key(&sender),
                     )
                     .await
                     .expect("generated authorize admission"),
@@ -7783,9 +8589,17 @@ mod tests {
                 adapter
                     .resolve_supervisor_authorize_admission(
                         &session_id,
-                        supervisor.peer_id.as_str().clone(),
-                        payload.epoch,
+                        GeneratedSupervisorBinding {
+                            name: supervisor.name.to_string(),
+                            peer_id: supervisor.peer_id.as_str().clone(),
+                            address: supervisor.address.to_string(),
+                            signing_public_key: encode_supervisor_signing_public_key(
+                                *supervisor.pubkey.as_bytes(),
+                            ),
+                            epoch: payload.epoch,
+                        },
                         generated_sender_peer_id(&sender),
+                        generated_sender_signing_public_key(&sender),
                     )
                     .await
                     .expect("generated authorize admission"),
@@ -7947,6 +8761,534 @@ mod tests {
         }
     }
 
+    fn bridge_delivery_candidate_with_ingress(
+        sender: &str,
+        delivery: &serde_json::Value,
+        ingress: PeerIngressFact,
+    ) -> PeerInputCandidate {
+        bridge_delivery_raw_candidate_with_ingress(
+            sender,
+            serde_json::to_string(delivery).expect("serialize bridge delivery body"),
+            ingress,
+        )
+    }
+
+    fn bridge_delivery_raw_candidate_with_ingress(
+        sender: &str,
+        body: String,
+        ingress: PeerIngressFact,
+    ) -> PeerInputCandidate {
+        let id = ingress.interaction_id;
+        PeerInputCandidate {
+            interaction: InboxInteraction {
+                sender_taint: None,
+                id,
+                from_route: None,
+                from: sender.to_string(),
+                content: InteractionContent::Message { body, blocks: None },
+                rendered_text: String::new(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+            },
+            ingress,
+            lifecycle_peer: None,
+            response_terminality: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_rotation_marker_versions_reject_durably_and_malformed_markers_fail_closed() {
+        let current_spec = current_supervisor_bridge_spec();
+        let current = TrustedPeerDescriptor::try_from(current_spec.clone())
+            .expect("valid current supervisor");
+        let target = supervisor_bridge_spec();
+
+        let runtime_impl = bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://raw-rotation-version",
+            Some("token"),
+        );
+        let completed = Arc::clone(&runtime_impl.completed_count);
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                current.name.to_string(),
+                current.peer_id.as_str(),
+                current.address.to_string(),
+                signing_public_key_for_descriptor(&current),
+                1,
+            )
+            .await
+            .expect("bind current supervisor");
+
+        let operation_id = SupervisorRotationOperationId::new();
+        let raw_unsupported = json!({
+            "delivery": "submit_supervisor_rotation",
+            "operation_id": operation_id,
+            "target": target,
+            "target_epoch": 2,
+            "protocol_version": 99,
+        });
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let ingress = PeerIngressFact::peer(
+            interaction_id,
+            PeerInputClass::ActionableMessage,
+            meerkat_core::PeerIngressKind::Message,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                current.peer_id,
+                current.name.as_str(),
+                meerkat_core::PeerIngressConvention::Message,
+            )
+            .with_signing_pubkey(current.pubkey),
+        );
+        let candidate = bridge_delivery_candidate_with_ingress(
+            current.name.as_str(),
+            &raw_unsupported,
+            ingress,
+        );
+        assert!(
+            try_handle_supervisor_bridge_delivery(&adapter, &session_id, &runtime, &candidate,)
+                .await,
+            "exact delivery marker must be consumed before typed version decode"
+        );
+        let receipt = adapter
+            .active_supervisor_rotation(&session_id)
+            .await
+            .expect("read rejected rotation")
+            .expect("unsupported rotation is durably recorded");
+        assert_eq!(
+            receipt.phase,
+            crate::meerkat_machine::dsl::SupervisorRotationPhase::Rejected
+        );
+        assert_eq!(
+            receipt.rejection,
+            Some(
+                crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::UnsupportedProtocolVersion
+            )
+        );
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one-way unsupported submission must close local ingress"
+        );
+
+        let malformed_runtime_impl = bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://raw-rotation-malformed",
+            Some("token"),
+        );
+        let malformed_completed = Arc::clone(&malformed_runtime_impl.completed_count);
+        let malformed_runtime: Arc<dyn CommsRuntime> = Arc::new(malformed_runtime_impl);
+        let malformed_adapter = Arc::new(MeerkatMachine::ephemeral());
+        let malformed_session = SessionId::new();
+        malformed_adapter
+            .register_session(malformed_session.clone())
+            .await
+            .expect("register malformed-marker session");
+        let malformed_id = InteractionId(Uuid::new_v4());
+        let malformed_ingress = PeerIngressFact::peer(
+            malformed_id,
+            PeerInputClass::ActionableMessage,
+            meerkat_core::PeerIngressKind::Message,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                current.peer_id,
+                current.name.as_str(),
+                meerkat_core::PeerIngressConvention::Message,
+            )
+            .with_signing_pubkey(current.pubkey),
+        );
+        let malformed = json!({
+            "delivery": "submit_supervisor_rotation",
+            "protocol_version": 4,
+        });
+        let malformed_candidate = bridge_delivery_candidate_with_ingress(
+            current.name.as_str(),
+            &malformed,
+            malformed_ingress,
+        );
+        assert!(
+            try_handle_supervisor_bridge_delivery(
+                &malformed_adapter,
+                &malformed_session,
+                &malformed_runtime,
+                &malformed_candidate,
+            )
+            .await,
+            "malformed exact marker must be consumed fail-closed"
+        );
+        assert!(
+            malformed_adapter
+                .active_supervisor_rotation(&malformed_session)
+                .await
+                .expect("read malformed session")
+                .is_none(),
+            "malformed marker must not create partial durable operation state"
+        );
+        assert_eq!(
+            malformed_completed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "malformed marker must be completed locally instead of reaching the user prompt"
+        );
+
+        let duplicate_base = json!({
+            "delivery": "submit_supervisor_rotation",
+            "operation_id": SupervisorRotationOperationId::new(),
+            "target": supervisor_bridge_spec(),
+            "target_epoch": 2,
+            "protocol_version": 4,
+        })
+        .to_string();
+        let duplicate_body = format!(
+            "{},\"delivery\":\"chat\"}}",
+            duplicate_base
+                .strip_suffix('}')
+                .expect("delivery object has closing brace")
+        );
+        let duplicate_id = InteractionId(Uuid::new_v4());
+        let duplicate_ingress = PeerIngressFact::peer(
+            duplicate_id,
+            PeerInputClass::ActionableMessage,
+            meerkat_core::PeerIngressKind::Message,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                current.peer_id,
+                current.name.as_str(),
+                meerkat_core::PeerIngressConvention::Message,
+            )
+            .with_signing_pubkey(current.pubkey),
+        );
+        let duplicate_candidate = bridge_delivery_raw_candidate_with_ingress(
+            current.name.as_str(),
+            duplicate_body,
+            duplicate_ingress,
+        );
+        assert!(
+            try_handle_supervisor_bridge_delivery(
+                &malformed_adapter,
+                &malformed_session,
+                &malformed_runtime,
+                &duplicate_candidate,
+            )
+            .await,
+            "reserved-first duplicate delivery marker must remain reserved and fail closed"
+        );
+        assert_eq!(
+            malformed_completed.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "duplicate/conflicting delivery keys must be consumed instead of reaching the user prompt"
+        );
+        assert!(
+            malformed_adapter
+                .active_supervisor_rotation(&malformed_session)
+                .await
+                .expect("read duplicate-marker session")
+                .is_none(),
+            "duplicate marker must not create durable operation state"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_rotation_observe_does_not_mint_temporary_supervisor_trust() {
+        let previous_spec = current_supervisor_bridge_spec();
+        let previous = TrustedPeerDescriptor::try_from(previous_spec.clone())
+            .expect("valid previous supervisor");
+        let next_spec = supervisor_bridge_spec();
+        let runtime_impl = bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://pending-observe-no-retrust",
+            Some("token"),
+        );
+        let trusted_peer_ids = Arc::clone(&runtime_impl.trusted_peer_ids);
+        let sent_commands = Arc::clone(&runtime_impl.sent_commands);
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                previous.name.to_string(),
+                previous.peer_id.as_str(),
+                previous.address.to_string(),
+                signing_public_key_for_descriptor(&previous),
+                1,
+            )
+            .await
+            .expect("bind previous supervisor");
+
+        let operation_id = SupervisorRotationOperationId::new();
+        let next =
+            TrustedPeerDescriptor::try_from(next_spec.clone()).expect("valid next supervisor");
+        let submission = adapter
+            .submit_supervisor_rotation(
+                &session_id,
+                GeneratedSupervisorRotationSubmit {
+                    operation_id: operation_id.to_string(),
+                    next: GeneratedSupervisorBinding {
+                        name: next.name.to_string(),
+                        peer_id: next.peer_id.as_str(),
+                        address: next.address.to_string(),
+                        signing_public_key: signing_public_key_for_descriptor(&next),
+                        epoch: 2,
+                    },
+                    preflight_rejection: None,
+                    sender_peer_id: Some(previous.peer_id.as_str()),
+                    sender_signing_public_key: Some(signing_public_key_for_descriptor(&previous)),
+                },
+            )
+            .await
+            .expect("submit pending rotation");
+        assert!(matches!(submission, SupervisorRotationSubmission::New(_)));
+
+        let command = BridgeCommand::ObserveSupervisorRotation(
+            meerkat_contracts::wire::supervisor_bridge::BridgeSupervisorRotationObserve {
+                operation_id,
+                observer: previous_spec,
+                observer_epoch: 1,
+                protocol_version: BridgeProtocolVersion::V4,
+            },
+        );
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let ingress = PeerIngressFact::peer(
+            interaction_id,
+            PeerInputClass::ActionableRequest,
+            meerkat_core::PeerIngressKind::Request,
+            Some(meerkat_core::PeerIngressAuthDecision::Required),
+            PeerIngressIdentity::new(
+                previous.peer_id,
+                previous.name.as_str(),
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id: interaction_id.to_string(),
+                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                },
+            )
+            .with_signing_pubkey(previous.pubkey),
+        );
+        let candidate = bridge_candidate_with_ingress(previous.name.as_str(), &command, ingress);
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
+        );
+        assert!(
+            trusted_peer_ids.lock().await.is_empty(),
+            "pending observation must not temporarily retrust either rotation participant"
+        );
+        let replies = recorded_bridge_replies(&sent_commands).await;
+        assert!(matches!(
+            replies.as_slice(),
+            [(
+                meerkat_core::interaction::ResponseStatus::Completed,
+                BridgeReply::SupervisorRotation(BridgeSupervisorRotationObservation::Found {
+                    state: BridgeSupervisorRotationState::Pending { .. }
+                })
+            )]
+        ));
+    }
+
+    #[tokio::test]
+    async fn replacement_runtime_hydrates_completed_and_rejected_rotation_authority() {
+        let previous = trusted_supervisor_descriptor(0xcc);
+        let next = trusted_supervisor_descriptor(0xbb);
+
+        let completed_runtime_name = format!("completed-rotation-hydration-{}", Uuid::new_v4());
+        let completed_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only(&completed_runtime_name)
+                .expect("completed replacement runtime"),
+        );
+        let completed_runtime_dyn: Arc<dyn CommsRuntime> = completed_runtime.clone();
+        let completed_adapter = Arc::new(MeerkatMachine::ephemeral());
+        let completed_session = SessionId::new();
+        completed_adapter
+            .register_session(completed_session.clone())
+            .await
+            .expect("register completed session");
+        completed_adapter
+            .stage_supervisor_bind(
+                &completed_session,
+                previous.name.to_string(),
+                previous.peer_id.as_str(),
+                previous.address.to_string(),
+                signing_public_key_for_descriptor(&previous),
+                1,
+            )
+            .await
+            .expect("bind previous completed supervisor");
+        completed_adapter
+            .test_install_session_peer_comms_handle_on_runtime(
+                &completed_session,
+                completed_runtime.as_ref(),
+            )
+            .await
+            .expect("install completed runtime owner token");
+        completed_adapter
+            .stage_local_endpoint_for_comms_runtime(
+                &completed_session,
+                completed_runtime_dyn.as_ref(),
+            )
+            .await
+            .expect("stage completed runtime local endpoint");
+
+        let completed_operation = SupervisorRotationOperationId::new();
+        completed_adapter
+            .submit_supervisor_rotation(
+                &completed_session,
+                GeneratedSupervisorRotationSubmit {
+                    operation_id: completed_operation.to_string(),
+                    next: GeneratedSupervisorBinding {
+                        name: next.name.to_string(),
+                        peer_id: next.peer_id.as_str(),
+                        address: next.address.to_string(),
+                        signing_public_key: signing_public_key_for_descriptor(&next),
+                        epoch: 2,
+                    },
+                    preflight_rejection: None,
+                    sender_peer_id: Some(previous.peer_id.as_str()),
+                    sender_signing_public_key: Some(signing_public_key_for_descriptor(&previous)),
+                },
+            )
+            .await
+            .expect("submit completed rotation");
+        completed_adapter
+            .stage_supervisor_rotation_resume(&completed_session, completed_operation.to_string())
+            .await
+            .expect("resume completed rotation");
+        completed_adapter
+            .stage_supervisor_rotation_previous_revoked(
+                &completed_session,
+                completed_operation.to_string(),
+                previous.peer_id.as_str(),
+                1,
+            )
+            .await
+            .expect("checkpoint previous revoke");
+        completed_adapter
+            .stage_supervisor_rotation_next_published(
+                &completed_session,
+                completed_operation.to_string(),
+                next.peer_id.as_str(),
+                2,
+            )
+            .await
+            .expect("checkpoint next publish");
+        assert!(
+            !completed_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(next.pubkey))
+        );
+        assert!(
+            hydrate_current_bound_supervisor_route(
+                &completed_adapter,
+                &completed_session,
+                &completed_runtime_dyn,
+            )
+            .await
+            .expect("hydrate completed authority")
+        );
+        assert!(
+            completed_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(next.pubkey)),
+            "Completed replacement runtime must hydrate only the generated next authority"
+        );
+        assert!(
+            !completed_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(previous.pubkey)),
+            "Completed replacement runtime must not hydrate the revoked authority"
+        );
+
+        let rejected_runtime_name = format!("rejected-rotation-hydration-{}", Uuid::new_v4());
+        let rejected_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only(&rejected_runtime_name)
+                .expect("rejected replacement runtime"),
+        );
+        let rejected_runtime_dyn: Arc<dyn CommsRuntime> = rejected_runtime.clone();
+        let rejected_adapter = Arc::new(MeerkatMachine::ephemeral());
+        let rejected_session = SessionId::new();
+        rejected_adapter
+            .register_session(rejected_session.clone())
+            .await
+            .expect("register rejected session");
+        rejected_adapter
+            .stage_supervisor_bind(
+                &rejected_session,
+                previous.name.to_string(),
+                previous.peer_id.as_str(),
+                previous.address.to_string(),
+                signing_public_key_for_descriptor(&previous),
+                1,
+            )
+            .await
+            .expect("bind previous rejected supervisor");
+        rejected_adapter
+            .test_install_session_peer_comms_handle_on_runtime(
+                &rejected_session,
+                rejected_runtime.as_ref(),
+            )
+            .await
+            .expect("install rejected runtime owner token");
+        rejected_adapter
+            .stage_local_endpoint_for_comms_runtime(
+                &rejected_session,
+                rejected_runtime_dyn.as_ref(),
+            )
+            .await
+            .expect("stage rejected runtime local endpoint");
+        rejected_adapter
+            .submit_supervisor_rotation(
+                &rejected_session,
+                GeneratedSupervisorRotationSubmit {
+                    operation_id: SupervisorRotationOperationId::new().to_string(),
+                    next: GeneratedSupervisorBinding {
+                        name: next.name.to_string(),
+                        peer_id: next.peer_id.as_str(),
+                        address: next.address.to_string(),
+                        signing_public_key: signing_public_key_for_descriptor(&next),
+                        epoch: 2,
+                    },
+                    preflight_rejection: Some(
+                        crate::meerkat_machine::dsl::SupervisorRotationRejectionKind::UnsupportedProtocolVersion,
+                    ),
+                    sender_peer_id: Some(previous.peer_id.as_str()),
+                    sender_signing_public_key: Some(signing_public_key_for_descriptor(&previous)),
+                },
+            )
+            .await
+            .expect("durably reject rotation");
+        assert!(
+            hydrate_current_bound_supervisor_route(
+                &rejected_adapter,
+                &rejected_session,
+                &rejected_runtime_dyn,
+            )
+            .await
+            .expect("hydrate rejected authority")
+        );
+        assert!(
+            rejected_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(previous.pubkey)),
+            "Rejected replacement runtime must hydrate only the retained previous authority"
+        );
+        assert!(
+            !rejected_runtime
+                .router()
+                .is_private(&meerkat_comms::PubKey::new(next.pubkey)),
+            "Rejected replacement runtime must not hydrate the rejected target"
+        );
+    }
+
     #[tokio::test]
     async fn bind_member_rolls_back_binding_when_trust_publication_fails() {
         // DOGMA-19 defensive scan: a post-bind trust publication failure must
@@ -8024,210 +9366,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorize_supervisor_restores_old_binding_when_new_trust_publish_fails() {
-        // DOGMA-19 defensive scan: the old supervisor remains authoritative
-        // until the new supervisor trust publishes successfully.
-        let old_supervisor = trusted_supervisor_descriptor(0xbb);
-        let new_supervisor = current_supervisor_bridge_spec();
-        let payload = BridgeSupervisorPayload {
-            supervisor: new_supervisor.clone(),
-            epoch: 2,
-            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-        };
-        let mut runtime_impl = bootstrap_runtime(
-            PEER_ID_RECEIVER,
-            "inproc://receiver",
-            Some("expected-token"),
-        );
-        runtime_impl
-            .add_trusted_peer_errors
-            .insert(new_supervisor.peer_id.clone(), "boom".to_string());
-        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
-        trusted_peer_ids
-            .lock()
-            .await
-            .insert(old_supervisor.peer_id.as_str());
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
-        let adapter = Arc::new(MeerkatMachine::ephemeral());
-        let session_id = SessionId::new();
-        adapter
-            .register_session(session_id.clone())
-            .await
-            .expect("register session");
-        adapter
-            .stage_supervisor_bind(
-                &session_id,
-                old_supervisor.name.to_string(),
-                old_supervisor.peer_id.as_str(),
-                old_supervisor.address.to_string(),
-                signing_public_key_for_descriptor(&old_supervisor),
-                1,
-            )
-            .await
-            .expect("pre-bind old supervisor");
-        let candidate = bridge_candidate(
-            &old_supervisor.peer_id.as_str(),
-            &BridgeCommand::AuthorizeSupervisor(payload),
-        );
-
-        assert!(
-            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
-        );
-        match adapter.supervisor_binding(&session_id).await {
-            SupervisorBinding::Bound { peer_id, epoch, .. } => {
-                assert_eq!(peer_id, old_supervisor.peer_id.as_str());
-                assert_eq!(epoch, 1);
-            }
-            SupervisorBinding::Unbound => panic!("old supervisor must remain bound"),
-        }
-        let trusted = trusted_peer_ids.lock().await.clone();
-        assert!(
-            trusted.contains(&old_supervisor.peer_id.as_str()),
-            "old supervisor trust must stay active on failed rotation"
-        );
-        assert!(
-            !trusted.contains(&new_supervisor.peer_id),
-            "new supervisor trust must not publish on failed rotation"
-        );
-    }
-
-    #[tokio::test]
-    async fn authorize_supervisor_rolls_back_when_old_trust_removal_fails() {
-        // DOGMA-19 defensive scan: if the old trust cannot be retired after
-        // the DSL rotates, restore the old binding and clean the new trust up.
-        let old_supervisor = trusted_supervisor_descriptor(0xbb);
-        let new_supervisor = current_supervisor_bridge_spec();
-        let payload = BridgeSupervisorPayload {
-            supervisor: new_supervisor.clone(),
-            epoch: 2,
-            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-        };
-        let mut runtime_impl = bootstrap_runtime(
-            PEER_ID_RECEIVER,
-            "inproc://receiver",
-            Some("expected-token"),
-        );
-        runtime_impl
-            .remove_trusted_peer_errors
-            .insert(old_supervisor.peer_id.as_str(), "boom".to_string());
-        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
-        trusted_peer_ids
-            .lock()
-            .await
-            .insert(old_supervisor.peer_id.as_str());
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
-        let adapter = Arc::new(MeerkatMachine::ephemeral());
-        let session_id = SessionId::new();
-        adapter
-            .register_session(session_id.clone())
-            .await
-            .expect("register session");
-        adapter
-            .stage_supervisor_bind(
-                &session_id,
-                old_supervisor.name.to_string(),
-                old_supervisor.peer_id.as_str(),
-                old_supervisor.address.to_string(),
-                signing_public_key_for_descriptor(&old_supervisor),
-                1,
-            )
-            .await
-            .expect("pre-bind old supervisor");
-        let candidate = bridge_candidate(
-            &old_supervisor.peer_id.as_str(),
-            &BridgeCommand::AuthorizeSupervisor(payload),
-        );
-
-        assert!(
-            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
-        );
-        match adapter.supervisor_binding(&session_id).await {
-            SupervisorBinding::Bound { peer_id, epoch, .. } => {
-                assert_eq!(peer_id, old_supervisor.peer_id.as_str());
-                assert_eq!(epoch, 1);
-            }
-            SupervisorBinding::Unbound => panic!("old supervisor must be restored after rollback"),
-        }
-        let trusted = trusted_peer_ids.lock().await.clone();
-        assert!(
-            trusted.contains(&old_supervisor.peer_id.as_str()),
-            "old supervisor trust must remain after rollback"
-        );
-        assert!(
-            !trusted.contains(&new_supervisor.peer_id),
-            "new supervisor trust must be cleaned up after rollback"
-        );
-    }
-
-    #[tokio::test]
-    async fn authorize_supervisor_same_peer_higher_epoch_failure_keeps_existing_response_route() {
-        let supervisor = current_supervisor_bridge_spec();
-        let payload = BridgeSupervisorPayload {
-            supervisor: supervisor.clone(),
-            epoch: 2,
-            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-        };
-        let runtime_impl = bootstrap_runtime(
-            PEER_ID_RECEIVER,
-            "inproc://receiver",
-            Some("expected-token"),
-        );
-        let trusted_peer_ids = runtime_impl.trusted_peer_ids.clone();
-        trusted_peer_ids
-            .lock()
-            .await
-            .insert(supervisor.peer_id.clone());
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
-        let adapter = Arc::new(MeerkatMachine::ephemeral());
-        let session_id = SessionId::new();
-        adapter
-            .register_session(session_id.clone())
-            .await
-            .expect("register session");
-        adapter
-            .stage_supervisor_bind(
-                &session_id,
-                supervisor.name.clone(),
-                supervisor.peer_id.clone(),
-                supervisor.address.clone(),
-                encode_supervisor_signing_public_key(supervisor.pubkey),
-                1,
-            )
-            .await
-            .expect("pre-bind supervisor");
-        let candidate = bridge_candidate(
-            &supervisor.peer_id,
-            &BridgeCommand::AuthorizeSupervisor(payload),
-        );
-
-        assert!(
-            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await
-        );
-        match adapter.supervisor_binding(&session_id).await {
-            SupervisorBinding::Bound { peer_id, epoch, .. } => {
-                assert_eq!(peer_id, supervisor.peer_id);
-                assert_eq!(epoch, 1);
-            }
-            SupervisorBinding::Unbound => panic!("supervisor must remain bound"),
-        }
-        assert!(
-            trusted_peer_ids.lock().await.contains(&supervisor.peer_id),
-            "same-supervisor epoch update must keep the existing response route installed"
-        );
-    }
-
-    #[tokio::test]
-    async fn revoke_supervisor_keeps_authority_when_trust_removal_fails() {
+    async fn revoke_supervisor_failure_leaves_pending_checkpoint_and_retry_completes() {
         let supervisor = supervisor_bridge_spec();
-        let mut runtime_impl = bootstrap_runtime(
+        let runtime = Arc::new(bootstrap_runtime(
             PEER_ID_RECEIVER,
             "inproc://receiver",
             Some("expected-token"),
-        );
-        runtime_impl
-            .remove_trusted_peer_errors
-            .insert(supervisor.peer_id.clone(), "boom".to_string());
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        ));
+        runtime
+            .remove_failures_remaining
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let runtime_dyn: Arc<dyn CommsRuntime> = Arc::clone(&runtime) as Arc<dyn CommsRuntime>;
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter
@@ -8258,16 +9407,31 @@ mod tests {
             .expect("pre-bind supervisor");
 
         assert!(
-            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate,)
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime_dyn, &candidate,)
                 .await,
             "revoke command should be handled"
         );
         assert!(
             matches!(
                 adapter.supervisor_binding(&session_id).await,
-                SupervisorBinding::Bound { .. }
+                SupervisorBinding::Unbound
             ),
-            "failed revoke must preserve supervisor authority until trust removal succeeds"
+            "failed removal must leave durable revoke pending, not restore a live binding"
+        );
+        let retry = bridge_candidate(
+            &supervisor.peer_id,
+            &BridgeCommand::RevokeSupervisor(payload),
+        );
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime_dyn, &retry).await,
+            "exact revoke retry should complete the pending checkpoint"
+        );
+        assert!(
+            runtime
+                .remove_attempts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 2,
+            "retry must re-drive generated trust removal with fresh authority"
         );
     }
 
@@ -8300,7 +9464,8 @@ mod tests {
             .expect("initial bind");
 
         // Attempting a second `BindSupervisor` must be DSL-rejected — the
-        // guard requires `Unbound`. Rotation goes through AuthorizeSupervisor.
+        // guard requires `Unbound`. Identity rotation uses the durable
+        // supervisor-rotation operation.
         let rebind = adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -8334,23 +9499,23 @@ mod tests {
             "revoke with mismatched epoch must be DSL-rejected, got: {stale_epoch_revoke:?}"
         );
 
-        // Proper rotation via AuthorizeSupervisor must succeed.
+        // AuthorizeSupervisor may advance only the same authority's version.
         adapter
             .stage_supervisor_authorize(
                 &session_id,
-                "super-c".to_string(),
-                "ed25519:super-c".to_string(),
-                "inproc://super-c".to_string(),
-                test_supervisor_signing_public_key(0xcc),
+                "super-a-refreshed".to_string(),
+                "ed25519:super-a".to_string(),
+                "inproc://super-a-refreshed".to_string(),
+                test_supervisor_signing_public_key(0xaa),
                 2,
             )
             .await
-            .expect("rotation must succeed");
+            .expect("same-authority version advance must succeed");
 
-        // Read back: binding is `Bound { super-c, 2 }`.
+        // Read back: identity is unchanged and version advanced.
         match adapter.supervisor_binding(&session_id).await {
             SupervisorBinding::Bound { peer_id, epoch, .. } => {
-                assert_eq!(peer_id, "ed25519:super-c");
+                assert_eq!(peer_id, "ed25519:super-a");
                 assert_eq!(epoch, 2);
             }
             SupervisorBinding::Unbound => panic!("expected Bound after rotation"),
@@ -8359,7 +9524,7 @@ mod tests {
         // Proper revoke with matching identity + epoch must succeed and
         // return to Unbound.
         adapter
-            .stage_supervisor_revoke(&session_id, "ed25519:super-c".to_string(), 2)
+            .stage_supervisor_revoke(&session_id, "ed25519:super-a".to_string(), 2)
             .await
             .expect("matching revoke must succeed");
         assert!(
@@ -8478,16 +9643,19 @@ mod tests {
             .expect("generated publish obligation");
 
         adapter
-            .stage_supervisor_authorize(
+            .stage_supervisor_binding_route_refresh(
                 &session_id,
-                "super-a-renamed".to_string(),
-                supervisor_peer_id,
-                "inproc://super-new".to_string(),
-                test_supervisor_signing_public_key(0xbb),
-                7,
+                GeneratedSupervisorBinding {
+                    name: "super-a-renamed".to_string(),
+                    peer_id: supervisor_peer_id.clone(),
+                    address: "inproc://super-new".to_string(),
+                    signing_public_key: test_supervisor_signing_public_key(0xaa),
+                    epoch: 7,
+                },
+                Some(supervisor_peer_id),
             )
             .await
-            .expect("same-peer same-epoch descriptor rotation");
+            .expect("same-authority same-epoch route refresh");
 
         let stale_authority = crate::protocol_supervisor_trust_publish::publish_authority_for_peer(
             &stale_obligation,

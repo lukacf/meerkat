@@ -24,7 +24,7 @@ use meerkat_core::comms::{
     CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress,
     PeerLifecycleKind, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
 };
-use meerkat_core::time_compat::SystemTime;
+use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_machine_kernels::generated::mob::command_capabilities as generated_mob_command_capabilities;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -17591,12 +17591,12 @@ impl MobActor {
         // disposal steps are converted to `&self` so a shared actor reference
         // can be held across concurrent disposal futures.
         let deadline = Self::remote_destroy_cleanup_deadline(remote_entries.len());
-        let deadline_at = tokio::time::Instant::now() + deadline;
+        let deadline_at = Instant::now() + deadline;
         let mut remaining = VecDeque::from(remote_entries);
 
         while let Some(entry) = remaining.pop_front() {
             let identity = entry.agent_identity.clone();
-            if tokio::time::Instant::now() >= deadline_at {
+            if Instant::now() >= deadline_at {
                 report.remote_cleanup_deadline_exceeded = true;
                 Self::push_unique_identity(&mut report.orphaned_remote_members, identity);
                 for entry in remaining {
@@ -17633,7 +17633,7 @@ impl MobActor {
             for error in outcome.errors {
                 report.push_error(format!("{}: {error}", outcome.identity));
             }
-            if tokio::time::Instant::now() >= deadline_at && !remaining.is_empty() {
+            if Instant::now() >= deadline_at && !remaining.is_empty() {
                 report.remote_cleanup_deadline_exceeded = true;
                 for entry in remaining {
                     Self::push_unique_identity(
@@ -18233,14 +18233,14 @@ impl MobActor {
             } else {
                 std::time::Duration::from_secs(5)
             };
-            let deadline = tokio::time::Instant::now() + observation_window;
+            let deadline = Instant::now() + observation_window;
             let mut last_observation = submission_diagnostics.remove(&peer_id).map_or_else(
                 || "operation not yet observable".to_string(),
                 |error| format!("one-way submission was not delivered: {error}"),
             );
             let mut legacy_adoption_submitted = false;
             let completed = loop {
-                let now = tokio::time::Instant::now();
+                let now = Instant::now();
                 if now >= deadline {
                     break false;
                 }
@@ -18299,7 +18299,7 @@ impl MobActor {
                                     protocol_version: next.protocol_version,
                                 });
                             let refresh_timeout = std::cmp::min(
-                                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                                deadline.saturating_duration_since(Instant::now()),
                                 std::time::Duration::from_millis(500),
                             );
                             let refresh_value = match self

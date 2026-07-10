@@ -23,6 +23,12 @@ struct ResumeTrustMutation {
     authority: CommsTrustMutationAuthority,
 }
 
+struct ResumePeerOnlyTrustReconcile {
+    member_ref: MemberRef,
+    agent_identity: AgentIdentity,
+    desired_peer_trust: super::provisioner::PeerOnlyTrustOverlay,
+}
+
 enum ResumeTrustMutationOperation {
     Add(TrustedPeerDescriptor),
     Remove(String),
@@ -196,16 +202,118 @@ fn register_seeded_member_peer(
     peer_descriptor: &meerkat_core::comms::TrustedPeerDescriptor,
     context: &'static str,
 ) -> Result<(), MobError> {
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(agent_identity);
+    let candidate = crate::machines::mob_machine::MemberPeerEndpoint::from(peer_descriptor);
+    if let Some(existing) = authority.state().member_peer_endpoints.get(&dsl_identity) {
+        if existing == &candidate {
+            return Ok(());
+        }
+        return Err(MobError::WiringError(format!(
+            "{context}: live endpoint for '{agent_identity}' disagrees with its durable generation binding"
+        )));
+    }
     apply_seeded_mob_input(
         authority,
         crate::machines::mob_machine::MobMachineInput::RegisterMemberPeer {
-            agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(
-                agent_identity,
-            ),
-            peer_endpoint: crate::machines::mob_machine::MemberPeerEndpoint::from(peer_descriptor),
+            agent_identity: dsl_identity,
+            peer_endpoint: candidate,
         },
         context,
     )
+}
+
+fn recovered_session_bindings_without_endpoint(
+    events: &[crate::event::MobEvent],
+) -> HashMap<AgentIdentity, (AgentRuntimeId, SessionId)> {
+    let mut recovered = HashMap::new();
+    for event in events {
+        match &event.kind {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                recovered.remove(&member_spawned.agent_identity);
+            }
+            MobEventKind::MemberSessionBindingRecovered(binding) => {
+                if let Some(bridge_session_id) = binding.bridge_session_id() {
+                    if binding.member_peer_endpoint().is_none() {
+                        recovered.insert(
+                            binding.agent_identity.clone(),
+                            (binding.agent_runtime_id.clone(), bridge_session_id.clone()),
+                        );
+                    } else {
+                        recovered.remove(&binding.agent_identity);
+                    }
+                }
+            }
+            MobEventKind::MemberReset { agent_identity, .. }
+            | MobEventKind::MemberRetired { agent_identity, .. } => {
+                recovered.remove(agent_identity);
+            }
+            _ => {}
+        }
+    }
+    recovered
+}
+
+async fn append_recovered_session_binding(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    events: &Arc<dyn MobEventStore>,
+    mob_id: &MobId,
+    entry: &RosterEntry,
+    bridge_session_id: &SessionId,
+    member_peer_endpoint: Option<TrustedPeerDescriptor>,
+    context: &'static str,
+) -> Result<(), MobError> {
+    let dsl_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity);
+    let dsl_runtime_id =
+        crate::machines::mob_machine::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+    let dsl_session_id = crate::machines::mob_machine::SessionId::from_domain(bridge_session_id);
+    if authority.state().identity_to_runtime.get(&dsl_identity) != Some(&dsl_runtime_id)
+        || authority.state().member_session_bindings.get(&dsl_identity) != Some(&dsl_session_id)
+    {
+        return Err(MobError::WiringError(format!(
+            "{context}: recovered endpoint for '{}' does not match the current runtime/session binding",
+            entry.agent_identity
+        )));
+    }
+
+    let mut prepared = crate::machines::mob_machine::MobMachineAuthority::recover_from_state(
+        authority.state().clone(),
+    )
+    .map_err(|error| {
+        MobError::Internal(format!(
+            "{context}: failed to prepare recovered endpoint authority for '{}': {error}",
+            entry.agent_identity
+        ))
+    })?;
+    if let Some(endpoint) = member_peer_endpoint.as_ref() {
+        apply_seeded_mob_signal(
+            &mut prepared,
+            crate::machines::mob_machine::MobMachineSignal::RecoverMemberPeerEndpoint {
+                agent_identity: dsl_identity,
+                agent_runtime_id: dsl_runtime_id,
+                bridge_session_id: dsl_session_id,
+                peer_endpoint: crate::machines::mob_machine::MemberPeerEndpoint::from(endpoint),
+            },
+            context,
+        )?;
+    }
+
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MemberSessionBindingRecovered(
+                crate::event::MemberSessionBindingRecoveredEvent::new(
+                    entry.agent_identity.clone(),
+                    entry.agent_runtime_id.clone(),
+                    bridge_session_id.clone(),
+                )
+                .with_member_peer_endpoint(member_peer_endpoint),
+            ),
+        })
+        .await?;
+    *authority = prepared;
+    Ok(())
 }
 
 fn member_peer_rebind_endpoint_from_transition(
@@ -656,7 +764,7 @@ async fn preflight_resume_trust_mutations(
     mutations: &[ResumeTrustMutation],
     mob_owner_token: &Arc<dyn std::any::Any + Send + Sync>,
 ) -> Result<(), SendError> {
-    for mutation in mutations {
+    for (index, mutation) in mutations.iter().enumerate() {
         if mutation.authority.is_mob_machine_source() {
             mutation
                 .comms
@@ -665,12 +773,39 @@ async fn preflight_resume_trust_mutations(
         }
         match &mutation.operation {
             ResumeTrustMutationOperation::Add(peer) => {
+                for prior in &mutations[..index] {
+                    let ResumeTrustMutationOperation::Add(prior_peer) = &prior.operation else {
+                        continue;
+                    };
+                    if Arc::ptr_eq(&mutation.comms, &prior.comms)
+                        && prior_peer.peer_id == peer.peer_id
+                        && prior_peer != peer
+                    {
+                        return Err(SendError::Validation(format!(
+                            "resume trust repair carries conflicting descriptors for peer {} on the same runtime",
+                            peer.peer_id
+                        )));
+                    }
+                }
                 mutation
                     .authority
                     .preflight_public_add(mutation.comms.peer_id(), peer)
                     .map_err(SendError::Validation)?;
                 TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                     .map_err(SendError::Validation)?;
+                if let Some(existing) = mutation
+                    .comms
+                    .peers()
+                    .await
+                    .into_iter()
+                    .find(|existing| existing.peer_id == peer.peer_id)
+                    && (existing.name != peer.name || existing.address != peer.address)
+                {
+                    return Err(SendError::Validation(format!(
+                        "resume trust repair for peer {} conflicts with aggregate live descriptor name='{}' address='{}'",
+                        peer.peer_id, existing.name, existing.address
+                    )));
+                }
                 let owned_rows = mutation
                     .comms
                     .trusted_peer_projection_snapshot_for_source(
@@ -809,6 +944,51 @@ fn resume_member_observed_cleanup_authority(
     .ok_or_else(|| {
         MobError::WiringError(format!(
             "{context} produced no generated observed cleanup authority for peer '{peer_id}'"
+        ))
+    })
+}
+
+fn resume_member_endpoint_migration_cleanup_authority(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
+    edge: &crate::machines::mob_machine::WiringEdge,
+    migrated_identity: &crate::ids::AgentIdentity,
+    migrated_runtime_id: &AgentRuntimeId,
+    retained_peer_endpoint: &crate::machines::mob_machine::MemberPeerEndpoint,
+    context: &'static str,
+) -> Result<CommsTrustMutationAuthority, MobError> {
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(migrated_identity);
+    let transition = apply_seeded_mob_input_collect_transition(
+        authority,
+        crate::machines::mob_machine::MobMachineInput::AuthorizeMemberEndpointMigrationTrustCleanup {
+            edge: edge.clone(),
+            agent_identity: dsl_identity,
+            agent_runtime_id:
+                crate::machines::mob_machine::AgentRuntimeId::from_domain(migrated_runtime_id),
+            retained_peer_endpoint: retained_peer_endpoint.clone(),
+        },
+        context,
+    )?;
+    let retained_peer_id = retained_peer_endpoint.peer_id.0.as_str();
+    crate::generated::protocol_mob_member_trust_unwiring::extract_obligations_with_freshness(
+        &transition,
+        seeded_mob_topology_freshness_authority(authority, topology_epoch),
+    )
+    .into_iter()
+    .find_map(|obligation| {
+        if obligation.edge() != edge {
+            return None;
+        }
+        crate::generated::protocol_mob_member_trust_unwiring::unwiring_authority_for_identity(
+            &obligation,
+            migrated_identity.as_str(),
+            retained_peer_id,
+        )
+        .ok()
+    })
+    .ok_or_else(|| {
+        MobError::WiringError(format!(
+            "{context} produced no generated endpoint-migration cleanup authority for historical peer '{retained_peer_id}'"
         ))
     })
 }
@@ -1387,6 +1567,30 @@ fn seed_mob_authority_sync_from_events(
                     },
                     "recover_member_spawned",
                 )?;
+                if let Some(member_peer_endpoint) = member_spawned.member_peer_endpoint.as_ref() {
+                    // The endpoint is bound to this exact MemberSpawned
+                    // generation/fence/runtime tuple in the lifecycle journal.
+                    // Restore MobMachine's endpoint authority before any
+                    // wiring reconciliation; a broken session may have no live
+                    // comms or surviving trust projection to rediscover it.
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::RecoverSpawnedMemberPeerEndpoint {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &member_spawned.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &member_spawned.agent_runtime_id,
+                            ),
+                            fence_token: mob_dsl::FenceToken::from_domain(
+                                member_spawned.fence_token,
+                            ),
+                            generation: mob_dsl::Generation::from_domain(member_spawned.generation),
+                            peer_endpoint: mob_dsl::MemberPeerEndpoint::from(member_peer_endpoint),
+                        },
+                        "recover_member_spawned_peer_endpoint",
+                    )?;
+                }
                 if let Some(bridge_session_id) = member_spawned
                     .bridge_member_ref
                     .as_ref()
@@ -1456,6 +1660,26 @@ fn seed_mob_authority_sync_from_events(
                     bridge_session_id,
                     "recover_member_session_binding_recovered",
                 )?;
+                if let Some(member_peer_endpoint) = recovered.member_peer_endpoint.as_ref() {
+                    // This endpoint is authorized by the durable session-head
+                    // recovery for the exact runtime/session binding above.
+                    // Unlike an uncorrelated live observation, it may replace
+                    // the spawn endpoint without weakening mismatch checks.
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::RecoverMemberPeerEndpoint {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &recovered.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &recovered.agent_runtime_id,
+                            ),
+                            bridge_session_id: mob_dsl::SessionId::from_domain(bridge_session_id),
+                            peer_endpoint: mob_dsl::MemberPeerEndpoint::from(member_peer_endpoint),
+                        },
+                        "recover_member_session_binding_peer_endpoint",
+                    )?;
+                }
             }
             MobEventKind::MemberRetirementStarted {
                 agent_identity,
@@ -2542,6 +2766,7 @@ impl MobBuilder {
         if resumed_state == MobState::Running {
             Self::reconcile_resume(
                 &definition,
+                epoch_events,
                 &mut roster,
                 &session_service,
                 runtime_adapter.clone(),
@@ -2741,6 +2966,7 @@ impl MobBuilder {
     #[allow(clippy::too_many_arguments)]
     async fn reconcile_resume(
         definition: &Arc<MobDefinition>,
+        epoch_events: &[crate::event::MobEvent],
         roster: &mut Roster,
         session_service: &Arc<dyn MobSessionService>,
         runtime_adapter: RuntimeAdapterOption,
@@ -2758,6 +2984,9 @@ impl MobBuilder {
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
         per_spawn_external_tools_seed: &mut BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
     ) -> Result<(), MobError> {
+        let legacy_recovered_session_bindings =
+            recovered_session_bindings_without_endpoint(epoch_events);
+        let mut new_recovered_session_bindings_without_endpoint = HashSet::new();
         // Every exact operation target is potentially already complete even if
         // its observation checkpoint timed out. Resume must defer old-authority
         // authorization/trust reconciliation for the full target set, not only
@@ -2928,20 +3157,42 @@ impl MobBuilder {
                                 &replacement_session_id,
                                 "resume_repoint_missing_member_session_binding",
                             )?;
-                            tool_handle
-                                .events
-                                .append(crate::event::NewMobEvent {
-                                    mob_id: definition.id.clone(),
-                                    timestamp: None,
-                                    kind: MobEventKind::MemberSessionBindingRecovered(
-                                        crate::event::MemberSessionBindingRecoveredEvent::new(
-                                            entry.agent_identity.clone(),
-                                            entry.agent_runtime_id.clone(),
-                                            replacement_session_id.clone(),
-                                        ),
-                                    ),
-                                })
-                                .await?;
+                            let recovered_endpoint = if active_ids.contains(&replacement_session_id)
+                            {
+                                let member_ref = MemberRef::from_bridge_session_id(
+                                    replacement_session_id.clone(),
+                                );
+                                let fallback_name = super::actor::render_member_comms_name(
+                                    definition.id.as_str(),
+                                    entry.role.as_str(),
+                                    entry.agent_identity.as_str(),
+                                )?;
+                                match provisioner.comms_runtime(&member_ref).await {
+                                    Some(runtime) => super::provisioner::SessionBackend::
+                                        trusted_peer_spec_from_runtime(
+                                            &fallback_name,
+                                            runtime.as_ref(),
+                                        )?,
+                                    None => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let recovered_endpoint_missing = recovered_endpoint.is_none();
+                            append_recovered_session_binding(
+                                dsl_authority,
+                                &tool_handle.events,
+                                &definition.id,
+                                entry,
+                                &replacement_session_id,
+                                recovered_endpoint,
+                                "resume_repoint_missing_member_session_binding",
+                            )
+                            .await?;
+                            if recovered_endpoint_missing {
+                                new_recovered_session_bindings_without_endpoint
+                                    .insert(entry.agent_identity.clone());
+                            }
                             bridge_session_id = replacement_session_id;
                             let _ = roster.set_bridge_session_id(
                                 &entry.agent_identity,
@@ -3375,18 +3626,64 @@ impl MobBuilder {
                 let spec = provisioner
                     .trusted_peer_spec(&entry.member_ref, &name_a, &key_a)
                     .await?;
-                register_seeded_member_peer(
-                    dsl_authority,
-                    &entry.agent_identity,
-                    &spec,
-                    "resume_register_member_peer",
-                )?;
+                let recovered_binding_without_endpoint = entry
+                    .member_ref
+                    .bridge_session_id()
+                    .is_some_and(|bridge_session_id| {
+                        new_recovered_session_bindings_without_endpoint
+                            .contains(&entry.agent_identity)
+                            || legacy_recovered_session_bindings
+                                .get(&entry.agent_identity)
+                                .is_some_and(|(runtime_id, recovered_session_id)| {
+                                    runtime_id == &entry.agent_runtime_id
+                                        && recovered_session_id == bridge_session_id
+                                })
+                    });
+                if recovered_binding_without_endpoint {
+                    let bridge_session_id =
+                        entry.member_ref.bridge_session_id().ok_or_else(|| {
+                            MobError::Internal(format!(
+                                "recovered endpoint upgrade for '{}' lost its bridge session",
+                                entry.agent_identity
+                            ))
+                        })?;
+                    append_recovered_session_binding(
+                        dsl_authority,
+                        &tool_handle.events,
+                        &definition.id,
+                        entry,
+                        bridge_session_id,
+                        Some(spec),
+                        "resume_upgrade_recovered_member_peer_endpoint",
+                    )
+                    .await?;
+                } else {
+                    register_seeded_member_peer(
+                        dsl_authority,
+                        &entry.agent_identity,
+                        &spec,
+                        "resume_register_member_peer",
+                    )?;
+                }
             } else if let MemberRef::BackendPeer {
                 peer_id,
                 session_id: None,
                 ..
             } = &entry.member_ref
             {
+                // New journals already restored the exact backend endpoint
+                // from MemberSpawned. Keep that generation-bound descriptor:
+                // the peer-only provisioner may project a different display
+                // name while reconciling transport, but it is not a second
+                // endpoint authority. Legacy journals still fall through and
+                // recover from the live backend observation below.
+                if dsl_authority
+                    .state()
+                    .member_peer_endpoints
+                    .contains_key(&dsl_identity)
+                {
+                    continue;
+                }
                 let name = super::actor::render_member_comms_name(
                     definition.id.as_str(),
                     entry.role.as_str(),
@@ -3478,6 +3775,7 @@ impl MobBuilder {
         }
         entries = roster.list().cloned().collect::<Vec<_>>();
         let mut resume_trust_mutations = Vec::new();
+        let mut resume_peer_only_trust_reconciliations = Vec::new();
         for entry in &entries {
             if broken_members.contains(&entry.agent_identity) {
                 continue;
@@ -3500,15 +3798,6 @@ impl MobBuilder {
                 } else {
                     continue;
                 };
-                // A durable retirement-start marker means scoped topology
-                // cleanup may already have removed one side before the actor
-                // crashed. Recreating either side here would undo that
-                // machine-authorized cleanup. Existing trust is deliberately
-                // left untouched so the retirement retry can finish removing
-                // it through the same scoped path.
-                if !recovered_member_edge_allows_trust_repair(dsl_authority.state(), edge) {
-                    continue;
-                }
                 let peer_identity = AgentIdentity::from(peer_dsl_identity.0.as_str());
                 let peer_member_identity = AgentIdentity::from(peer_identity.as_str());
                 let peer_entry = roster.get(&peer_member_identity).cloned().ok_or_else(|| {
@@ -3522,6 +3811,45 @@ impl MobBuilder {
                     peer_entry.role.as_str(),
                     peer_entry.agent_identity.as_str(),
                 )?;
+                let retained_peer_endpoints = dsl_authority
+                    .state()
+                    .member_prior_peer_endpoints
+                    .get(peer_dsl_identity)
+                    .cloned()
+                    .unwrap_or_default();
+                let retained_peer_ids = retained_peer_endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.peer_id.0.clone())
+                    .collect::<Vec<_>>();
+                if let Some(comms_a) = local_comms.as_ref() {
+                    for retained_peer_endpoint in &retained_peer_endpoints {
+                        let retained_peer_id = retained_peer_endpoint.peer_id.0.as_str();
+                        let cleanup_authority = resume_member_endpoint_migration_cleanup_authority(
+                            dsl_authority,
+                            topology_epoch,
+                            edge,
+                            &peer_entry.agent_identity,
+                            &peer_entry.agent_runtime_id,
+                            retained_peer_endpoint,
+                            "resume_member_endpoint_migration_cleanup",
+                        )?;
+                        resume_trust_mutations.push(ResumeTrustMutation {
+                            comms: Arc::clone(comms_a),
+                            operation: ResumeTrustMutationOperation::Remove(
+                                retained_peer_id.to_string(),
+                            ),
+                            authority: cleanup_authority,
+                        });
+                    }
+                }
+                // A durable retirement-start marker blocks ordinary trust
+                // repair, but not exact historical cleanup. Sweep retained
+                // generation endpoints first; recreating either current side
+                // would undo scoped retirement cleanup, so current repair still
+                // remains deferred to the actor's idempotent retirement retry.
+                if !recovered_member_edge_allows_trust_repair(dsl_authority.state(), edge) {
+                    continue;
+                }
                 if broken_members.contains(&peer_member_identity) {
                     if let (Some(comms_a), Some(local_peer_id)) =
                         (local_comms.as_ref(), local_peer_id.as_ref())
@@ -3542,6 +3870,16 @@ impl MobBuilder {
                             .find(|peer| peer.name.as_str() == name_b)
                             .cloned()
                         {
+                            if retained_peer_ids
+                                .iter()
+                                .any(|peer_id| peer_id == &stale_peer.peer_id.to_string())
+                            {
+                                // The exact historical row is already covered
+                                // by the generated migration cleanup above.
+                                // Never reinterpret it as the broken member's
+                                // current endpoint.
+                                continue;
+                            }
                             let observed_endpoint =
                                 crate::machines::mob_machine::MemberPeerEndpoint::from(&stale_peer);
                             match dsl_authority
@@ -3659,33 +3997,19 @@ impl MobBuilder {
                     &entry.agent_identity,
                     "resume_peer_only_trust_overlay",
                 )?;
-                let report = provisioner
-                    .reconcile_peer_only_trust(&entry.member_ref, Some(&desired_peer_trust), None)
-                    .await?;
-                if let Some(rebind_observation) = report.rebind_required {
-                    // The rebind prepass already reconciled supervisor authority
-                    // for this member, so a rejection here is bubbled up with
-                    // its raw cause; the recoverable-vs-fatal verdict is
-                    // MobMachine-owned and not re-derived in this trust-overlay
-                    // reconcile path.
-                    return Err(MobError::BridgeCommandRejected {
-                        cause: rebind_observation.rejection_cause,
-                        reason: format!(
-                            "resume peer-only trust reconcile for '{}' was rejected after MobMachine rebind prepass",
-                            entry.agent_identity
-                        ),
-                    });
-                }
+                // This bridge call replaces remote trust state. Defer it until
+                // every local add/remove authority has passed preflight so a
+                // later deterministic local rejection cannot leave a mixed
+                // topology with only the peer-only side updated.
+                resume_peer_only_trust_reconciliations.push(ResumePeerOnlyTrustReconcile {
+                    member_ref: entry.member_ref.clone(),
+                    agent_identity: entry.agent_identity.clone(),
+                    desired_peer_trust,
+                });
                 continue;
             };
             for desired in &desired_trust {
                 let spec_peer_id = desired.spec.peer_id.to_string();
-                if current_peers
-                    .iter()
-                    .any(|entry| entry.peer_id.to_string() == spec_peer_id)
-                {
-                    continue;
-                }
                 let repair_authority = match &desired.source {
                     ResumeTrustSource::Member(edge) => {
                         let transition = apply_seeded_mob_input_collect_transition(
@@ -3740,6 +4064,28 @@ impl MobBuilder {
             apply_resume_trust_mutation(mutation)
                 .await
                 .map_err(MobError::from)?;
+        }
+        for reconcile in resume_peer_only_trust_reconciliations {
+            let report = provisioner
+                .reconcile_peer_only_trust(
+                    &reconcile.member_ref,
+                    Some(&reconcile.desired_peer_trust),
+                    None,
+                )
+                .await?;
+            if let Some(rebind_observation) = report.rebind_required {
+                // The rebind prepass already reconciled supervisor authority
+                // for this member, so a rejection here is bubbled up with its
+                // raw cause; MobMachine owns recoverable-vs-fatal
+                // classification and it is not re-derived here.
+                return Err(MobError::BridgeCommandRejected {
+                    cause: rebind_observation.rejection_cause,
+                    reason: format!(
+                        "resume peer-only trust reconcile for '{}' was rejected after MobMachine rebind prepass",
+                        reconcile.agent_identity
+                    ),
+                });
+            }
         }
         // Notify orchestrator that the mob resumed.
         if notify_orchestrator_on_resume

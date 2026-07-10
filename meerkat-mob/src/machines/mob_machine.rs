@@ -2856,6 +2856,17 @@ mod tests {
         }));
     }
 
+    fn test_member_peer_endpoint(name: &str, signing_key: [u8; 32]) -> MemberPeerEndpoint {
+        MemberPeerEndpoint {
+            name: PeerName(name.to_string()),
+            peer_id: PeerId(
+                meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
+            ),
+            address: PeerAddress(format!("inproc://{name}")),
+            signing_key: PeerSigningKey(signing_key),
+        }
+    }
+
     fn register_test_member_peer(
         authority: &mut MobMachineAuthority,
         identity: &AgentIdentity,
@@ -2866,14 +2877,7 @@ mod tests {
             authority,
             MobMachineInput::RegisterMemberPeer {
                 agent_identity: identity.clone(),
-                peer_endpoint: MemberPeerEndpoint {
-                    name: PeerName(name.to_string()),
-                    peer_id: PeerId(
-                        meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
-                    ),
-                    address: PeerAddress(format!("inproc://{name}")),
-                    signing_key: PeerSigningKey(signing_key),
-                },
+                peer_endpoint: test_member_peer_endpoint(name, signing_key),
             },
         )
         .expect("register test member peer endpoint");
@@ -3003,13 +3007,14 @@ mod tests {
     }
 
     #[test]
-    fn member_trust_handoff_rejects_live_peer_change_without_epoch_advance() {
+    fn member_trust_handoff_rejects_recovered_peer_rotation_after_epoch_advance() {
         let mut authority = MobMachineAuthority::new();
         let a = AgentIdentity::from("member-a");
         let b = AgentIdentity::from("member-b");
+        let b_runtime_id = AgentRuntimeId::from("member-b:1");
 
         seed_live_member(&mut authority, &a, &AgentRuntimeId::from("member-a:1"));
-        seed_live_member(&mut authority, &b, &AgentRuntimeId::from("member-b:1"));
+        let b_session_id = seed_live_member(&mut authority, &b, &b_runtime_id);
         register_test_member_peer(&mut authority, &a, "member-a", [1; 32]);
         register_test_member_peer(&mut authority, &b, "member-b", [2; 32]);
 
@@ -3037,12 +3042,48 @@ mod tests {
             .pop()
             .expect("live transition should carry member trust obligation");
         let expected_peer_id = obligation.b_peer_id().0.clone();
+        let bound_endpoint = authority
+            .state()
+            .member_peer_endpoints
+            .get(&b)
+            .cloned()
+            .expect("member-b endpoint should be registered");
+        let rebound_endpoint = test_member_peer_endpoint("member-b-rebound", [9; 32]);
 
-        register_test_member_peer(&mut authority, &b, "member-b-rebound", [9; 32]);
+        let unjournaled_rewrite = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RegisterMemberPeer {
+                agent_identity: b.clone(),
+                peer_endpoint: rebound_endpoint.clone(),
+            },
+        );
+        assert!(
+            unjournaled_rewrite.is_err(),
+            "RegisterMemberPeer must not rewrite an existing generation endpoint"
+        );
         assert_eq!(
             authority.state().topology_epoch,
             bound_epoch,
-            "member peer registration should not bump topology epoch in this regression"
+            "rejected unjournaled peer rewrite must not advance topology"
+        );
+        assert_eq!(
+            authority.state().member_peer_endpoints.get(&b),
+            Some(&bound_endpoint),
+            "rejected unjournaled peer rewrite must not replace the exact endpoint"
+        );
+
+        authority
+            .apply_signal(MobMachineSignal::RecoverMemberPeerEndpoint {
+                agent_identity: b.clone(),
+                agent_runtime_id: b_runtime_id,
+                bridge_session_id: b_session_id,
+                peer_endpoint: rebound_endpoint,
+            })
+            .expect("durable endpoint recovery should rotate through generated authority");
+        assert_eq!(
+            authority.state().topology_epoch,
+            bound_epoch + 1,
+            "generated endpoint recovery must invalidate prior trust authority"
         );
 
         let error = crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity_with_live_authority(
@@ -3051,7 +3092,7 @@ mod tests {
             &expected_peer_id,
             &authority,
         )
-        .expect_err("stale member peer facts must not mint trust at the same topology epoch");
+        .expect_err("pre-rotation member trust obligation must be stale after recovery");
         assert!(
             error.contains("stale"),
             "unexpected stale member peer fact error: {error}"

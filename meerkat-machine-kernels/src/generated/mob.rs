@@ -4869,6 +4869,8 @@ pub struct State {
     pub member_runtime_modes: std::collections::BTreeMap<AgentIdentity, SpawnPolicyRuntimeMode>,
     pub member_peer_ids: std::collections::BTreeMap<AgentIdentity, PeerId>,
     pub member_peer_endpoints: std::collections::BTreeMap<AgentIdentity, MemberPeerEndpoint>,
+    pub member_prior_peer_endpoints:
+        std::collections::BTreeMap<AgentIdentity, std::collections::BTreeSet<MemberPeerEndpoint>>,
     pub pending_session_ingress_detach_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub spawn_policy_enabled: bool,
     pub spawn_policy_revision: u64,
@@ -5308,6 +5310,13 @@ pub mod inputs {
     pub struct RegisterMemberPeer {
         pub agent_identity: AgentIdentity,
         pub peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeMemberEndpointMigrationTrustCleanup {
+        pub edge: WiringEdge,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub retained_peer_endpoint: MemberPeerEndpoint,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeMemberPeerRebind {
@@ -5963,6 +5972,9 @@ pub enum Input {
     RestoreRetiringMemberWiring(inputs::RestoreRetiringMemberWiring),
     WireExternalPeer(inputs::WireExternalPeer),
     RegisterMemberPeer(inputs::RegisterMemberPeer),
+    AuthorizeMemberEndpointMigrationTrustCleanup(
+        inputs::AuthorizeMemberEndpointMigrationTrustCleanup,
+    ),
     AuthorizeMemberPeerRebind(inputs::AuthorizeMemberPeerRebind),
     AuthorizeMemberPeerOverlay(inputs::AuthorizeMemberPeerOverlay),
     AuthorizeMemberTrustWiring(inputs::AuthorizeMemberTrustWiring),
@@ -6134,6 +6146,9 @@ impl Input {
             Self::RestoreRetiringMemberWiring(_) => InputKind::RestoreRetiringMemberWiring,
             Self::WireExternalPeer(_) => InputKind::WireExternalPeer,
             Self::RegisterMemberPeer(_) => InputKind::RegisterMemberPeer,
+            Self::AuthorizeMemberEndpointMigrationTrustCleanup(_) => {
+                InputKind::AuthorizeMemberEndpointMigrationTrustCleanup
+            }
             Self::AuthorizeMemberPeerRebind(_) => InputKind::AuthorizeMemberPeerRebind,
             Self::AuthorizeMemberPeerOverlay(_) => InputKind::AuthorizeMemberPeerOverlay,
             Self::AuthorizeMemberTrustWiring(_) => InputKind::AuthorizeMemberTrustWiring,
@@ -6324,6 +6339,7 @@ pub enum InputKind {
     RestoreRetiringMemberWiring,
     WireExternalPeer,
     RegisterMemberPeer,
+    AuthorizeMemberEndpointMigrationTrustCleanup,
     AuthorizeMemberPeerRebind,
     AuthorizeMemberPeerOverlay,
     AuthorizeMemberTrustWiring,
@@ -6526,6 +6542,21 @@ pub mod signals {
         pub replacing: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSpawnedMemberPeerEndpoint {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberPeerEndpoint {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub bridge_session_id: SessionId,
+        pub peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRosterMemberReset {
         pub agent_identity: AgentIdentity,
         pub previous_agent_runtime_id: AgentRuntimeId,
@@ -6701,6 +6732,8 @@ pub enum Signal {
     ObserveRuntimeDestroyed(signals::ObserveRuntimeDestroyed),
     RecoverRosterMember(signals::RecoverRosterMember),
     RecoverMemberSessionBinding(signals::RecoverMemberSessionBinding),
+    RecoverSpawnedMemberPeerEndpoint(signals::RecoverSpawnedMemberPeerEndpoint),
+    RecoverMemberPeerEndpoint(signals::RecoverMemberPeerEndpoint),
     RecoverRosterMemberReset(signals::RecoverRosterMemberReset),
     RecoverRosterMemberRetirementStarted(signals::RecoverRosterMemberRetirementStarted),
     RecoverRemoteMemberRuntimeRetired(signals::RecoverRemoteMemberRuntimeRetired),
@@ -6762,6 +6795,10 @@ impl Signal {
             Self::ObserveRuntimeDestroyed(_) => SignalKind::ObserveRuntimeDestroyed,
             Self::RecoverRosterMember(_) => SignalKind::RecoverRosterMember,
             Self::RecoverMemberSessionBinding(_) => SignalKind::RecoverMemberSessionBinding,
+            Self::RecoverSpawnedMemberPeerEndpoint(_) => {
+                SignalKind::RecoverSpawnedMemberPeerEndpoint
+            }
+            Self::RecoverMemberPeerEndpoint(_) => SignalKind::RecoverMemberPeerEndpoint,
             Self::RecoverRosterMemberReset(_) => SignalKind::RecoverRosterMemberReset,
             Self::RecoverRosterMemberRetirementStarted(_) => {
                 SignalKind::RecoverRosterMemberRetirementStarted
@@ -6828,6 +6865,8 @@ pub enum SignalKind {
     ObserveRuntimeDestroyed,
     RecoverRosterMember,
     RecoverMemberSessionBinding,
+    RecoverSpawnedMemberPeerEndpoint,
+    RecoverMemberPeerEndpoint,
     RecoverRosterMemberReset,
     RecoverRosterMemberRetirementStarted,
     RecoverRemoteMemberRuntimeRetired,
@@ -8176,6 +8215,11 @@ pub enum TransitionId {
     RecoverMemberSessionBindingFreshRunning,
     RecoverMemberSessionBindingReplacingRunning,
     RecoverMemberSessionBindingAlreadyCurrentRunning,
+    RecoverSpawnedMemberPeerEndpointFreshRunning,
+    RecoverSpawnedMemberPeerEndpointAlreadyCurrentRunning,
+    RecoverMemberPeerEndpointFreshRunning,
+    RecoverMemberPeerEndpointAlreadyCurrentRunning,
+    RecoverMemberPeerEndpointChangedRunning,
     RecoverRosterMemberResetRunning,
     RecoverRosterMemberRetirementStartedReleasing,
     RecoverRosterMemberRetirementStartedReleasingAlreadyApplied,
@@ -8430,6 +8474,9 @@ pub enum TransitionId {
     WireExternalPeerRunning,
     WireExternalPeerAlreadyWired,
     RegisterMemberPeerRunning,
+    RegisterMemberPeerAlreadyCurrentRunning,
+    AuthorizeMemberEndpointMigrationTrustCleanupRunningRunning,
+    AuthorizeMemberEndpointMigrationTrustCleanupRunningStopped,
     AuthorizeMemberPeerRebindRunning,
     AuthorizeMemberPeerOverlayRunning,
     AuthorizeMemberTrustWiringRunning,
@@ -8876,6 +8923,7 @@ pub fn initial_state() -> State {
         member_runtime_modes: Default::default(),
         member_peer_ids: Default::default(),
         member_peer_endpoints: Default::default(),
+        member_prior_peer_endpoints: Default::default(),
         pending_session_ingress_detach_runtime_ids: Default::default(),
         spawn_policy_enabled: false,
         spawn_policy_revision: 0,

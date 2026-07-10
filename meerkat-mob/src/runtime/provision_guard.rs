@@ -240,6 +240,15 @@ mod tests {
             Err(MobError::Internal("not implemented".into()))
         }
 
+        async fn publish_trusted_peer_spec_for_operation(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &OperationId,
+            _trusted_peer: TrustedPeerDescriptor,
+        ) -> Result<(), MobError> {
+            Ok(())
+        }
+
         async fn active_operation_id_for_member(
             &self,
             _member_ref: &MemberRef,

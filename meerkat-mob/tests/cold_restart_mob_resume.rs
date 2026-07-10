@@ -568,6 +568,144 @@ async fn mob_cold_restart_resume_autonomous_lead_durable_runtime_store() {
     run_cold_restart_scenario(true, MobRuntimeMode::AutonomousHost).await;
 }
 
+/// A broken wired member still needs its exact old-generation endpoint after
+/// a full service restart. The endpoint is required to retire reciprocal trust
+/// safely before spawning and wiring the replacement generation.
+#[tokio::test(flavor = "multi_thread")]
+async fn mob_cold_restart_partial_resume_respawns_wired_member() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store_1: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let (service_1, store_1) = persistent_service(&paths, runtime_store_1);
+    let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
+    let handle_1 = MobBuilder::new(mob_definition(MobRuntimeMode::TurnDriven), storage_1)
+        .with_session_service(service_1.clone())
+        .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .create()
+        .await
+        .expect("create persistent mob");
+
+    for (profile, identity) in [("lead", "lead-1"), ("worker", "w-1"), ("worker", "w-2")] {
+        handle_1
+            .spawn_spec(SpawnMemberSpec::new(profile, AgentIdentity::from(identity)))
+            .await
+            .unwrap_or_else(|error| panic!("spawn {identity}: {error}"));
+    }
+
+    let lead_sid = handle_1
+        .resolve_bridge_session_id(&AgentIdentity::from("lead-1"))
+        .await
+        .expect("lead session id");
+    let w1_sid = handle_1
+        .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+        .await
+        .expect("w1 session id");
+    let w2_sid = handle_1
+        .resolve_bridge_session_id(&AgentIdentity::from("w-2"))
+        .await
+        .expect("w2 session id");
+    let old_w2_peer_id = service_1
+        .comms_runtime(&w2_sid)
+        .await
+        .expect("w2 comms runtime")
+        .peer_id()
+        .expect("w2 peer id");
+
+    handle_1
+        .shutdown()
+        .await
+        .expect("shutdown mob before cold restart");
+    for session_id in [&lead_sid, &w1_sid, &w2_sid] {
+        service_1
+            .discard_live_session(session_id)
+            .await
+            .expect("discard live session before cold restart");
+    }
+    drop(handle_1);
+    drop(service_1);
+    store_1
+        .delete(&w2_sid)
+        .await
+        .expect("delete w2 durable session row");
+    drop(store_1);
+
+    let runtime_store_2: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let (service_2, _store_2) = persistent_service(&paths, runtime_store_2);
+    let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    let handle_2 = MobBuilder::for_resume(storage_2)
+        .with_session_service(service_2.clone())
+        .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("partial resume after cold restart");
+
+    assert_member_active(&member_entry(&handle_2, "lead-1").await, "partial resume");
+    assert_member_active(&member_entry(&handle_2, "w-1").await, "partial resume");
+    let broken_w2 = member_entry(&handle_2, "w-2").await;
+    assert_eq!(broken_w2.status, MobMemberStatus::Broken);
+
+    let lead_before_repair = service_2
+        .comms_runtime(&lead_sid)
+        .await
+        .expect("resumed lead comms runtime");
+    assert!(
+        lead_before_repair
+            .peers()
+            .await
+            .iter()
+            .all(|peer| peer.peer_id != old_w2_peer_id),
+        "cold resume must not retain live trust for the missing old generation"
+    );
+
+    let repair = handle_2
+        .respawn(AgentIdentity::from("w-2"), None)
+        .await
+        .expect("respawn broken wired w2");
+    assert_eq!(repair.identity, AgentIdentity::from("w-2"));
+    let new_w2_sid = handle_2
+        .resolve_bridge_session_id(&AgentIdentity::from("w-2"))
+        .await
+        .expect("replacement w2 session id");
+    assert_ne!(new_w2_sid, w2_sid);
+    assert_member_active(&member_entry(&handle_2, "w-2").await, "after repair");
+
+    let new_w2_runtime = service_2
+        .comms_runtime(&new_w2_sid)
+        .await
+        .expect("replacement w2 comms runtime");
+    let new_w2_peer_id = new_w2_runtime.peer_id().expect("replacement w2 peer id");
+    assert_ne!(
+        new_w2_peer_id, old_w2_peer_id,
+        "replacement generation must rotate its exact comms endpoint"
+    );
+    let lead_peers_after_repair = lead_before_repair.peers().await;
+    assert!(
+        lead_peers_after_repair
+            .iter()
+            .all(|peer| peer.peer_id != old_w2_peer_id),
+        "lead must not retain trust for the retired w2 generation"
+    );
+    assert!(
+        lead_peers_after_repair.iter().any(|peer| {
+            peer.peer_id == new_w2_peer_id && peer.name.as_str() == "restart-mob/worker/w-2"
+        }),
+        "lead must trust the exact replacement w2 endpoint"
+    );
+    assert!(
+        new_w2_runtime
+            .peers()
+            .await
+            .iter()
+            .any(|peer| peer.name.as_str() == "restart-mob/lead/lead-1"),
+        "replacement w2 must trust the resumed lead"
+    );
+
+    handle_2.shutdown().await.expect("final shutdown");
+}
+
 // ===========================================================================
 // Kill-window scenario: the host process dies BETWEEN the two non-atomic
 // commit points of a single member turn:

@@ -979,6 +979,10 @@ const reasonInvalidImageIdempotencyKey: WireLiveConfigRejectionReasonImageInputI
 const reasonImageIdempotencyConflict: WireLiveConfigRejectionReasonImageInputIdempotencyConflict = {
   kind: "image_input_idempotency_conflict",
 };
+const reasonImageHistoryBudgetExceeded: WireLiveConfigRejectionReason = {
+  kind: "image_input_history_budget_exceeded",
+  max_decoded_bytes: 8_388_608,
+};
 const reasonImageRequiresCommit: WireLiveConfigRejectionReasonImageInputRequiresCommit = {
   kind: "image_input_requires_commit",
 };
@@ -1068,6 +1072,8 @@ function readRejectionDetail(reason: WireLiveConfigRejectionReason): string {
     case "image_input_backpressured":
     case "input_backpressured":
       return `${reason.max_pending_bytes}`;
+    case "image_input_history_budget_exceeded":
+      return `${reason.max_decoded_bytes}`;
     case "image_input_transport_unsupported":
       return reason.transport;
     case "image_input_not_implemented":
@@ -1094,6 +1100,7 @@ void reasonImageContentMismatch;
 void reasonImageTooLarge;
 void reasonInvalidImageIdempotencyKey;
 void reasonImageIdempotencyConflict;
+void reasonImageHistoryBudgetExceeded;
 void reasonImageRequiresCommit;
 void reasonInputTooLarge;
 void reasonInputBackpressured;

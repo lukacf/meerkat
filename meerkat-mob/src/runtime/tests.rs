@@ -1442,6 +1442,26 @@ impl MockSessionService {
         self.persisted_sessions.write().await.remove(session_id);
     }
 
+    /// Construct a process-restart-faithful service around the same durable
+    /// session state. Live runtimes and their generated trust projections are
+    /// deliberately not copied: a cold service restart must rebuild those
+    /// from durable owners rather than inheriting warm in-memory evidence.
+    async fn cold_restart_preserving_durable_state(&self) -> Self {
+        let restarted = Self::new();
+        let persisted_sessions = self.persisted_sessions.read().await.clone();
+        let persisted_ids = persisted_sessions.keys().cloned().collect::<HashSet<_>>();
+        *restarted.persisted_sessions.write().await = persisted_sessions;
+        *restarted.session_comms_names.write().await = self
+            .session_comms_names
+            .read()
+            .await
+            .iter()
+            .filter(|(session_id, _)| persisted_ids.contains(*session_id))
+            .map(|(session_id, name)| (session_id.clone(), name.clone()))
+            .collect();
+        restarted
+    }
+
     fn enable_runtime_adapter(&self) -> Arc<meerkat_runtime::MeerkatMachine> {
         let mut guard = self.runtime_adapter.lock().expect("runtime_adapter mutex");
         if let Some(adapter) = guard.as_ref() {
@@ -15235,11 +15255,21 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
         .await
         .expect("wire");
 
+    // `for_resume` models a new MobMachine authority after process loss. Do
+    // not point it at the still-live runtimes owned by `handle`: generated
+    // trust ownership is intentionally non-transferable between concurrent
+    // authorities. Restart the service from durable session state so the new
+    // runtimes begin unowned, as they do after a real cold restart.
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let _ = restarted_service.enable_runtime_adapter();
+    drop(handle);
+    drop(service);
+
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events.clone(),
         runtime_metadata,
     ))
-    .with_session_service(service.clone())
+    .with_session_service(restarted_service)
     .resume()
     .await
     .expect("resume");
@@ -15817,6 +15847,20 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
         Some(&dsl_session_id),
         "snapshotless continuity heads should be repointed through MobMachine recovery"
     );
+    let replacement_peer_id = service
+        .comms_runtime(&replacement.session_id)
+        .await
+        .expect("replacement comms runtime")
+        .peer_id()
+        .expect("replacement peer id");
+    assert_eq!(
+        machine_state
+            .member_peer_endpoints
+            .get(&dsl_identity)
+            .map(|endpoint| endpoint.peer_id.0.clone()),
+        Some(replacement_peer_id.as_str()),
+        "snapshotless recovery must replace the old spawn endpoint with the exact recovered session endpoint"
+    );
 
     let resumed_again = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events.clone(),
@@ -15845,6 +15889,19 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
         1,
         "self-heal should persist exactly one recovered binding event"
     );
+    let recovered_endpoint = stored_events.iter().find_map(|event| match &event.kind {
+        MobEventKind::MemberSessionBindingRecovered(recovered)
+            if recovered.agent_identity == identity =>
+        {
+            recovered.member_peer_endpoint()
+        }
+        _ => None,
+    });
+    assert_eq!(
+        recovered_endpoint.map(|endpoint| endpoint.peer_id),
+        Some(replacement_peer_id),
+        "the recovered binding event must durably carry the replacement endpoint"
+    );
     assert_eq!(
         stored_events
             .iter()
@@ -15852,6 +15909,658 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
             .count(),
         1,
         "repeat resume should not fresh-spawn a replacement member"
+    );
+}
+
+#[tokio::test]
+async fn test_snapshotless_recovery_rejects_same_peer_id_descriptor_drift() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let identity = AgentIdentity::from("mk--rt_creview_csingleton_c0");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn member");
+    let old_sid = handle
+        .get_member(&identity)
+        .await
+        .expect("roster query")
+        .expect("spawned member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let old_runtime = service
+        .comms_runtime(&old_sid)
+        .await
+        .expect("old comms runtime");
+    let old_peer_id = old_runtime.peer_id().expect("old peer id");
+    let old_public_key_bytes = old_runtime
+        .public_key_bytes()
+        .expect("old public key bytes");
+    handle.stop().await.expect("stop before recovery");
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
+        .await
+        .expect("discard old live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let recovered_comms_name = "test-mob/worker/rt:review:singleton:0";
+    let replacement = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "replacement".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(recovered_comms_name.to_string()),
+                mob_member_binding: None,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create replacement session head");
+    let mut drifted_runtime = MockCommsRuntime::new(
+        recovered_comms_name,
+        MockCommsBehavior::default(),
+        replacement.session_id.clone(),
+        Some(service.enable_runtime_adapter()),
+    );
+    drifted_runtime.default_peer_id = old_peer_id;
+    drifted_runtime.default_public_key_bytes = old_public_key_bytes;
+    drifted_runtime.default_public_key =
+        meerkat_comms::PubKey::new(old_public_key_bytes).to_pubkey_string();
+    drifted_runtime.default_address = format!("inproc://{recovered_comms_name}/descriptor-drift");
+    assert_eq!(
+        drifted_runtime.peer_id(),
+        Some(old_peer_id),
+        "fixture must preserve the cryptographic peer identity"
+    );
+    service
+        .sessions
+        .write()
+        .await
+        .insert(replacement.session_id.clone(), Arc::new(drifted_runtime));
+    service
+        .session_comms_names
+        .write()
+        .await
+        .remove(&replacement.session_id);
+
+    let error = match MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    {
+        Ok(_) => panic!("same-PeerId endpoint material drift must fail closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("resume_repoint_missing_member_session_binding"),
+        "unexpected same-PeerId drift error: {error}"
+    );
+    assert_eq!(
+        events
+            .replay_all()
+            .await
+            .expect("replay events after rejected drift")
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::MemberSessionBindingRecovered(..)))
+            .count(),
+        0,
+        "rejected descriptor drift must not cross the write-ahead recovery boundary"
+    );
+}
+
+#[test]
+fn test_mob_machine_rejects_peer_id_reuse_across_generation_owners() {
+    use crate::machines::mob_machine as dsl;
+
+    fn recover_member(
+        authority: &mut dsl::MobMachineAuthority,
+        identity: &AgentIdentity,
+        session_id: &SessionId,
+    ) -> AgentRuntimeId {
+        let runtime_id = AgentRuntimeId::initial(identity.clone());
+        authority
+            .apply_signal(dsl::MobMachineSignal::RecoverRosterMember {
+                agent_identity: dsl::AgentIdentity::from_domain(identity),
+                agent_runtime_id: dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: dsl::FenceToken::from_domain(FenceToken::new(1)),
+                generation: dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
+                profile_name: "worker".to_string(),
+                runtime_mode: dsl::SpawnPolicyRuntimeMode::TurnDriven,
+                external_addressable: false,
+            })
+            .expect("recover roster member");
+        authority
+            .apply_signal(dsl::MobMachineSignal::RecoverMemberSessionBinding {
+                agent_identity: dsl::AgentIdentity::from_domain(identity),
+                agent_runtime_id: dsl::AgentRuntimeId::from_domain(&runtime_id),
+                bridge_session_id: dsl::SessionId::from_domain(session_id),
+                replacing: None,
+            })
+            .expect("recover member session binding");
+        runtime_id
+    }
+
+    fn endpoint(seed: u8, name: &str) -> TrustedPeerDescriptor {
+        let mut pubkey = [0; 32];
+        pubkey[0] = seed;
+        pubkey[31] = seed.wrapping_mul(7).max(1);
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            peer_id.to_string(),
+            pubkey,
+            format!("inproc://{name}"),
+        )
+        .expect("test endpoint")
+    }
+
+    let mut authority = dsl::MobMachineAuthority::new();
+    let first_identity = AgentIdentity::from("first");
+    let first_session = SessionId::new();
+    let first_runtime = recover_member(&mut authority, &first_identity, &first_session);
+    let first_old = endpoint(11, "first-old");
+    let first_current = endpoint(12, "first-current");
+    dsl::MobMachineMutator::apply(
+        &mut authority,
+        dsl::MobMachineInput::RegisterMemberPeer {
+            agent_identity: dsl::AgentIdentity::from_domain(&first_identity),
+            peer_endpoint: dsl::MemberPeerEndpoint::from(&first_old),
+        },
+    )
+    .expect("register first endpoint");
+    authority
+        .apply_signal(dsl::MobMachineSignal::RecoverMemberPeerEndpoint {
+            agent_identity: dsl::AgentIdentity::from_domain(&first_identity),
+            agent_runtime_id: dsl::AgentRuntimeId::from_domain(&first_runtime),
+            bridge_session_id: dsl::SessionId::from_domain(&first_session),
+            peer_endpoint: dsl::MemberPeerEndpoint::from(&first_current),
+        })
+        .expect("rotate first endpoint");
+
+    let second_identity = AgentIdentity::from("second");
+    let second_session = SessionId::new();
+    let second_runtime = recover_member(&mut authority, &second_identity, &second_session);
+    let second_current = endpoint(13, "second-current");
+    dsl::MobMachineMutator::apply(
+        &mut authority,
+        dsl::MobMachineInput::RegisterMemberPeer {
+            agent_identity: dsl::AgentIdentity::from_domain(&second_identity),
+            peer_endpoint: dsl::MemberPeerEndpoint::from(&second_current),
+        },
+    )
+    .expect("register second endpoint");
+
+    authority
+        .apply_signal(dsl::MobMachineSignal::RecoverMemberPeerEndpoint {
+            agent_identity: dsl::AgentIdentity::from_domain(&second_identity),
+            agent_runtime_id: dsl::AgentRuntimeId::from_domain(&second_runtime),
+            bridge_session_id: dsl::SessionId::from_domain(&second_session),
+            peer_endpoint: dsl::MemberPeerEndpoint::from(&first_old),
+        })
+        .expect_err("another identity must not claim a retained historical PeerId");
+    assert_eq!(
+        authority
+            .state()
+            .member_peer_endpoints
+            .get(&dsl::AgentIdentity::from_domain(&second_identity)),
+        Some(&dsl::MemberPeerEndpoint::from(&second_current)),
+        "rejected collision must leave the current endpoint unchanged"
+    );
+
+    let third_identity = AgentIdentity::from("third");
+    let third_session = SessionId::new();
+    let _third_runtime = recover_member(&mut authority, &third_identity, &third_session);
+    dsl::MobMachineMutator::apply(
+        &mut authority,
+        dsl::MobMachineInput::RegisterMemberPeer {
+            agent_identity: dsl::AgentIdentity::from_domain(&third_identity),
+            peer_endpoint: dsl::MemberPeerEndpoint::from(&first_current),
+        },
+    )
+    .expect_err("another identity must not claim a current PeerId");
+    assert!(
+        !authority
+            .state()
+            .member_peer_endpoints
+            .contains_key(&dsl::AgentIdentity::from_domain(&third_identity))
+    );
+
+    let edge = dsl::WiringEdge::new(
+        dsl::AgentIdentity::from_domain(&first_identity),
+        dsl::AgentIdentity::from_domain(&second_identity),
+    );
+    dsl::MobMachineMutator::apply(
+        &mut authority,
+        dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+    )
+    .expect("wire current member endpoints");
+    dsl::MobMachineMutator::apply(&mut authority, dsl::MobMachineInput::Stop)
+        .expect("stop machine");
+    dsl::MobMachineMutator::apply(
+        &mut authority,
+        dsl::MobMachineInput::Retire {
+            mob_id: dsl::MobId::from_domain(&MobId::from("test-mob")),
+            agent_runtime_id: dsl::AgentRuntimeId::from_domain(&first_runtime),
+            agent_identity: dsl::AgentIdentity::from_domain(&first_identity),
+            generation: dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
+            releasing: None,
+            session_id: Some(dsl::SessionId::from_domain(&first_session)),
+        },
+    )
+    .expect("admit stopped retirement");
+    authority
+        .apply_signal(dsl::MobMachineSignal::ObserveRuntimeRetired {
+            agent_runtime_id: dsl::AgentRuntimeId::from_domain(&first_runtime),
+            fence_token: dsl::FenceToken::from_domain(FenceToken::new(1)),
+        })
+        .expect("observe stopped retiring runtime gone");
+    dsl::MobMachineMutator::apply(
+        &mut authority,
+        dsl::MobMachineInput::AuthorizeMemberEndpointMigrationTrustCleanup {
+            edge,
+            agent_identity: dsl::AgentIdentity::from_domain(&first_identity),
+            agent_runtime_id: dsl::AgentRuntimeId::from_domain(&first_runtime),
+            retained_peer_endpoint: dsl::MemberPeerEndpoint::from(&first_old),
+        },
+    )
+    .expect("stopped Retiring tuple must retain historical cleanup authority");
+    assert_eq!(authority.state().lifecycle_phase, dsl::MobPhase::Stopped);
+
+    let mut legacy_authority = dsl::MobMachineAuthority::new();
+    let legacy_first = AgentIdentity::from("legacy-first");
+    let legacy_second = AgentIdentity::from("legacy-second");
+    let legacy_first_session = SessionId::new();
+    let legacy_second_session = SessionId::new();
+    let _legacy_first_runtime =
+        recover_member(&mut legacy_authority, &legacy_first, &legacy_first_session);
+    let _legacy_second_runtime = recover_member(
+        &mut legacy_authority,
+        &legacy_second,
+        &legacy_second_session,
+    );
+    let legacy_second_endpoint = endpoint(21, "legacy-second");
+    dsl::MobMachineMutator::apply(
+        &mut legacy_authority,
+        dsl::MobMachineInput::RegisterMemberPeer {
+            agent_identity: dsl::AgentIdentity::from_domain(&legacy_second),
+            peer_endpoint: dsl::MemberPeerEndpoint::from(&legacy_second_endpoint),
+        },
+    )
+    .expect("register one legacy endpoint");
+    legacy_authority
+        .apply_signal(dsl::MobMachineSignal::RecoverRosterWiring {
+            edge: dsl::WiringEdge::new(
+                dsl::AgentIdentity::from_domain(&legacy_first),
+                dsl::AgentIdentity::from_domain(&legacy_second),
+            ),
+        })
+        .expect("recover legacy topology before endpoint material");
+    dsl::MobMachineMutator::apply(
+        &mut legacy_authority,
+        dsl::MobMachineInput::RegisterMemberPeer {
+            agent_identity: dsl::AgentIdentity::from_domain(&legacy_first),
+            peer_endpoint: dsl::MemberPeerEndpoint::from(&endpoint(22, "legacy-first-live")),
+        },
+    )
+    .expect_err("legacy topology without a durable baseline endpoint must fail closed");
+}
+
+#[tokio::test]
+async fn test_resume_stamps_legacy_recovered_binding_endpoint_exactly_once() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let identity = AgentIdentity::from("legacy-recovered-worker");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn member");
+    let entry = handle
+        .get_member(&identity)
+        .await
+        .expect("roster query")
+        .expect("spawned member");
+    let bridge_session_id = entry
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let expected_peer_id = service
+        .comms_runtime(&bridge_session_id)
+        .await
+        .expect("member comms runtime")
+        .peer_id()
+        .expect("member peer id");
+    handle.stop().await.expect("stop before legacy replay");
+
+    // Journals written before endpoint persistence can contain a recovered
+    // binding for the current session without the exact endpoint. Even when
+    // the live observation equals the spawn endpoint, resume must consume that
+    // legacy exception with one durable enriched stamp so a later observation
+    // cannot silently authorize a migration.
+    events
+        .append(NewMobEvent {
+            mob_id: MobId::from("test-mob"),
+            timestamp: None,
+            kind: MobEventKind::MemberSessionBindingRecovered(
+                crate::event::MemberSessionBindingRecoveredEvent::new(
+                    identity.clone(),
+                    entry.agent_runtime_id.clone(),
+                    bridge_session_id.clone(),
+                ),
+            ),
+        })
+        .await
+        .expect("append legacy endpoint-less recovered binding");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should enrich the legacy recovered binding");
+    let first_state = resumed
+        .query_machine_state()
+        .await
+        .expect("query first resumed machine state");
+    drop(resumed);
+
+    let resumed_again = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("repeat resume should replay without another endpoint stamp");
+    let second_state = resumed_again
+        .query_machine_state()
+        .await
+        .expect("query second resumed machine state");
+    assert_eq!(
+        second_state.topology_epoch, first_state.topology_epoch,
+        "exact endpoint replay must not advance the topology epoch"
+    );
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&identity);
+    assert!(
+        !second_state
+            .member_prior_peer_endpoints
+            .contains_key(&dsl_identity),
+        "an equal legacy observation is an upgrade stamp, not an endpoint migration"
+    );
+
+    let stored_events = events.replay_all().await.expect("replay upgraded events");
+    let recovered = stored_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberSessionBindingRecovered(binding)
+                if binding.agent_identity == identity =>
+            {
+                Some(binding)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovered.len(),
+        2,
+        "the legacy record must be followed by exactly one enriched record"
+    );
+    let enriched = recovered
+        .iter()
+        .filter_map(|binding| binding.member_peer_endpoint())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        enriched.len(),
+        1,
+        "repeat resume must not append a second endpoint-bearing recovery stamp"
+    );
+    assert_eq!(
+        enriched[0].peer_id, expected_peer_id,
+        "the one-shot upgrade must persist the exact live endpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_retire_after_snapshotless_member_head_recovery_removes_old_and_new_peer_trust() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let retiring = AgentIdentity::from("mk--rt_creview_csingleton_c0");
+    let survivor = AgentIdentity::from("w-survivor");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let old_sid = handle
+        .spawn(ProfileName::from("worker"), retiring.clone(), None)
+        .await
+        .expect("spawn retiring member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed retiring member");
+    let survivor_sid = handle
+        .spawn(ProfileName::from("worker"), survivor.clone(), None)
+        .await
+        .expect("spawn surviving member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed surviving member");
+    handle
+        .wire(retiring.clone(), survivor.clone())
+        .await
+        .expect("wire members before snapshotless recovery");
+
+    let recovered_comms_name = "test-mob/worker/rt:review:singleton:0";
+    let old_runtime = service
+        .comms_runtime(&old_sid)
+        .await
+        .expect("old retiring comms runtime");
+    let old_peer_id = old_runtime.peer_id().expect("old retiring peer id");
+    let old_peer_endpoint = super::provisioner::SessionBackend::trusted_peer_spec_from_runtime(
+        recovered_comms_name,
+        old_runtime.as_ref(),
+    )
+    .expect("old peer endpoint material")
+    .expect("old peer endpoint");
+    let survivor_runtime = {
+        let sessions = service.sessions.read().await;
+        sessions
+            .get(&survivor_sid)
+            .cloned()
+            .expect("surviving comms runtime")
+    };
+    assert!(
+        survivor_runtime
+            .trusted_peers
+            .read()
+            .await
+            .contains_key(&old_peer_id.to_string()),
+        "setup must install the original retiring peer's trust"
+    );
+
+    handle
+        .stop()
+        .await
+        .expect("stop before snapshotless recovery");
+    service.clear_mob_machine_trust_owner(&survivor_sid).await;
+    MobSessionService::discard_live_session(service.as_ref(), &old_sid)
+        .await
+        .expect("discard old live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let replacement = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "replacement".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(recovered_comms_name.to_string()),
+                mob_member_binding: None,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create replacement session head");
+
+    // The mock normally derives a stable key from the comms name. Replace only
+    // this runtime with a rotated key while preserving its public name/address,
+    // matching a real replacement session head with fresh comms identity.
+    let mut replacement_runtime = MockCommsRuntime::new(
+        "test-mob/worker/rt:review:singleton:0#replacement-key",
+        MockCommsBehavior::default(),
+        replacement.session_id.clone(),
+        Some(service.enable_runtime_adapter()),
+    );
+    replacement_runtime.default_name = recovered_comms_name.to_string();
+    replacement_runtime.default_address = format!("inproc://{recovered_comms_name}");
+    let replacement_runtime = Arc::new(replacement_runtime);
+    let replacement_peer_id = replacement_runtime.peer_id().expect("replacement peer id");
+    let replacement_peer_endpoint =
+        super::provisioner::SessionBackend::trusted_peer_spec_from_runtime(
+            recovered_comms_name,
+            replacement_runtime.as_ref(),
+        )
+        .expect("replacement peer endpoint material")
+        .expect("replacement peer endpoint");
+    assert_ne!(
+        replacement_peer_id, old_peer_id,
+        "fixture must exercise peer-key rotation across the recovered session head"
+    );
+    service
+        .sessions
+        .write()
+        .await
+        .insert(replacement.session_id.clone(), replacement_runtime);
+    service
+        .session_comms_names
+        .write()
+        .await
+        .remove(&replacement.session_id);
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata.clone(),
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should recover the snapshotless session head");
+    assert_eq!(
+        resumed
+            .member_status(&retiring)
+            .await
+            .expect("recovered member status")
+            .current_session_id,
+        Some(replacement.session_id.clone())
+    );
+    assert!(
+        survivor_runtime
+            .trusted_peers
+            .read()
+            .await
+            .contains_key(&replacement_peer_id.to_string()),
+        "recovery must wire the survivor to the replacement peer identity"
+    );
+    let recovered_entry = resumed
+        .get_member(&retiring)
+        .await
+        .expect("recovered roster query")
+        .expect("recovered roster entry");
+    drop(resumed);
+
+    // Simulate a crash immediately after the durable retirement-start append.
+    // Replay must retain the historical endpoint cleanup anchor even though
+    // the runtime may already be gone and the member is already Retiring.
+    events
+        .append(NewMobEvent {
+            mob_id: MobId::from("test-mob"),
+            timestamp: None,
+            kind: MobEventKind::MemberRetirementStarted {
+                agent_identity: retiring.clone(),
+                agent_runtime_id: recovered_entry.agent_runtime_id.clone(),
+                generation: recovered_entry.generation,
+                role: recovered_entry.role.clone(),
+                releasing: Some(replacement.session_id.clone()),
+                session_id: Some(replacement.session_id.clone()),
+                retiring_peer_endpoint: Some(replacement_peer_endpoint),
+            },
+        })
+        .await
+        .expect("append crash-point retirement start");
+    service.clear_mob_machine_trust_owner(&survivor_sid).await;
+    service
+        .clear_mob_machine_trust_owner(&replacement.session_id)
+        .await;
+
+    let restarted = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("restart should replay recovered endpoint authority");
+
+    // Model a durable trust projection restoring the old generation row after
+    // retirement admission. The actor retry, not ordinary resume repair, must
+    // sweep it before terminal MemberRetired clears endpoint history.
+    survivor_runtime
+        .trusted_peers
+        .write()
+        .await
+        .insert(old_peer_id.to_string(), old_peer_endpoint);
+    restarted
+        .retire(retiring)
+        .await
+        .expect("retry retirement from durable start marker");
+
+    let trusted = survivor_runtime.trusted_peers.read().await;
+    let residual_peer_ids = [old_peer_id, replacement_peer_id]
+        .into_iter()
+        .map(|peer_id| peer_id.to_string())
+        .filter(|peer_id| trusted.contains_key(peer_id))
+        .collect::<Vec<_>>();
+    assert!(
+        residual_peer_ids.is_empty(),
+        "terminal retirement must remove both historical and current peer trust; old={old_peer_id}, current={replacement_peer_id}, residual={residual_peer_ids:?}"
     );
 }
 
@@ -16394,7 +17103,7 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
 }
 
 #[tokio::test]
-async fn test_respawn_broken_wired_member_uses_machine_peer_endpoint_without_live_comms() {
+async fn test_respawn_broken_wired_member_replays_peer_endpoint_after_cold_service_restart() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let mut definition = sample_definition();
@@ -16441,16 +17150,26 @@ async fn test_respawn_broken_wired_member_uses_machine_peer_endpoint_without_liv
         .await
         .expect("wire members before partial resume");
     handle.stop().await.expect("stop");
-    service.clear_mob_machine_trust_owner(&sid_w1).await;
-    service.clear_mob_machine_trust_owner(&sid_w2).await;
-    service.archive(&sid_w2).await.expect("archive w-2");
     service.delete_persisted_session(&sid_w2).await;
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let _ = restarted_service.enable_runtime_adapter();
+    assert_eq!(restarted_service.active_session_count().await, 0);
+    assert!(restarted_service.live_session_data.read().await.is_empty());
+    assert!(
+        restarted_service
+            .trusted_peer_names(&sid_w1)
+            .await
+            .is_empty(),
+        "cold restart must begin without stale generated trust evidence"
+    );
+    drop(handle);
+    drop(service);
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata,
     ))
-    .with_session_service(service.clone())
+    .with_session_service(restarted_service.clone())
     .resume()
     .await
     .expect("partial resume should succeed");
@@ -16497,12 +17216,12 @@ async fn test_respawn_broken_wired_member_uses_machine_peer_endpoint_without_liv
     assert_eq!(fence_token, receipt.fence_token);
     assert!(repaired.error.is_none());
 
-    let trusted_by_w1 = service.trusted_peer_names(&sid_w1).await;
+    let trusted_by_w1 = restarted_service.trusted_peer_names(&sid_w1).await;
     assert!(
         trusted_by_w1.contains(&test_comms_name("worker", "w-2")),
         "respawn should restore trust from healthy peer to repaired member"
     );
-    let trusted_by_w2 = service.trusted_peer_names(&new_sid).await;
+    let trusted_by_w2 = restarted_service.trusted_peer_names(&new_sid).await;
     assert!(
         trusted_by_w2.contains(&test_comms_name("worker", "w-1")),
         "respawn should restore trust from repaired member to healthy peer"
@@ -18532,11 +19251,16 @@ async fn test_resume_restores_external_wiring_from_event_log() {
         .expect("wire external");
     handle.stop().await.expect("stop");
 
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let _ = restarted_service.enable_runtime_adapter();
+    drop(handle);
+    drop(service);
+
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata,
     ))
-    .with_session_service(service.clone())
+    .with_session_service(restarted_service.clone())
     .resume()
     .await
     .expect("resume");
@@ -18548,7 +19272,7 @@ async fn test_resume_restores_external_wiring_from_event_log() {
         .bridge_session_id()
         .cloned()
         .expect("session-backed member");
-    let trusted = service.trusted_peer_names(&resumed_sid).await;
+    let trusted = restarted_service.trusted_peer_names(&resumed_sid).await;
     assert!(
         trusted.iter().any(|n| n == external.name.as_str()),
         "resume should restore external trusted peers from persisted wiring events"
@@ -21462,11 +22186,16 @@ async fn test_resume_seeds_mob_machine_topology_from_event_projection() {
         .expect("wire external peer");
     handle.stop().await.expect("stop before resume");
 
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let _ = restarted_service.enable_runtime_adapter();
+    drop(handle);
+    drop(service);
+
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata,
     ))
-    .with_session_service(service)
+    .with_session_service(restarted_service)
     .resume()
     .await
     .expect("resume mob");
@@ -21975,7 +22704,11 @@ async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_secon
         single_edge_events, 0,
         "dense topology materialization must not emit per-edge wire events"
     );
-    let max_wire_elapsed = std::time::Duration::from_secs(180);
+    // GitHub-hosted x86 runners are materially slower than the isolated
+    // BuildBuddy lane (observed at roughly 239s versus 145s). Keep the test
+    // isolated through nextest and allow a portable budget that still catches
+    // a greater-than-2x regression from the isolated baseline.
+    let max_wire_elapsed = std::time::Duration::from_secs(300);
     assert!(
         wire_elapsed < max_wire_elapsed,
         "300x150 topology materialization should stay inside the generated-authority stress budget of {max_wire_elapsed:?} (spawn={spawn_elapsed:?}, wire={wire_elapsed:?})"
@@ -31525,6 +32258,10 @@ async fn test_resume_skips_broken_autonomous_member_in_host_loop_startup() {
 /// actual PeerRequest delivery between wired meerkats.
 struct RealCommsSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<meerkat_comms::CommsRuntime>>>,
+    /// Production session-scoped comms reloads the persisted signing identity.
+    /// Keep the same invariant in this in-memory harness so restarting comms
+    /// does not silently create a new endpoint for the same member generation.
+    session_keypairs: RwLock<HashMap<SessionId, meerkat_comms::Keypair>>,
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     session_counter: AtomicU64,
@@ -31535,6 +32272,7 @@ impl RealCommsSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            session_keypairs: RwLock::new(HashMap::new()),
             keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
@@ -31560,9 +32298,21 @@ impl SessionService for RealCommsSessionService {
             .and_then(|b| b.comms_name.clone())
             .unwrap_or_else(|| format!("real-comms-session-{n}"));
 
+        let keypair = self
+            .session_keypairs
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_insert_with(meerkat_comms::Keypair::generate)
+            .clone();
         let comms = Arc::new(
-            meerkat_comms::CommsRuntime::inproc_only(&comms_name)
-                .expect("create inproc CommsRuntime"),
+            meerkat_comms::CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+                &comms_name,
+                None,
+                keypair,
+                Arc::new(HashSet::new()),
+            )
+            .expect("create inproc CommsRuntime"),
         );
         install_machine_peer_request_response_authority(&self.runtime_adapter, &comms, &session_id)
             .await?;
@@ -31784,9 +32534,21 @@ impl RealCommsSessionService {
         session_id: &SessionId,
         comms_name: &str,
     ) -> Arc<meerkat_comms::CommsRuntime> {
+        let keypair = self
+            .session_keypairs
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_insert_with(meerkat_comms::Keypair::generate)
+            .clone();
         let comms = Arc::new(
-            meerkat_comms::CommsRuntime::inproc_only(comms_name)
-                .expect("restart inproc CommsRuntime"),
+            meerkat_comms::CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+                comms_name,
+                None,
+                keypair,
+                Arc::new(HashSet::new()),
+            )
+            .expect("restart inproc CommsRuntime"),
         );
         install_machine_peer_request_response_authority(&self.runtime_adapter, &comms, session_id)
             .await
@@ -38495,22 +39257,38 @@ async fn test_external_tcp_bind_and_peer_turn_use_routable_supervisor_bridge() {
         "external-tcp-bind-route",
     );
     let mob_id = definition.id.clone();
-    let (handle, service) = create_test_mob(definition).await;
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let owner_bridge_session_id = SessionId::new();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
+        .create()
+        .await
+        .expect("create mob");
     let external_name = test_comms_name_for(&mob_id, "lead", "l-tcp");
     let external = spawn_live_external_tcp_peer(&external_name).await;
-    let crate::RuntimeBinding::External { address, .. } = external.binding() else {
+    let crate::RuntimeBinding::External {
+        peer_id: expected_peer_id,
+        address: expected_address,
+        ..
+    } = external.binding()
+    else {
         panic!("live external peer must produce external binding");
     };
     assert!(
-        address.starts_with("tcp://127.0.0.1:"),
-        "test harness must exercise TCP routing, got {address}"
+        expected_address.starts_with("tcp://127.0.0.1:"),
+        "test harness must exercise TCP routing, got {expected_address}"
     );
 
     let mut spec = SpawnMemberSpec::new("lead", "l-tcp");
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     spec.binding = Some(external.binding());
     handle
-        .spawn_spec_with_generated_owner_context(spec, SessionId::new())
+        .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id)
         .await
         .expect("spawn TCP external member");
 
@@ -38531,6 +39309,47 @@ async fn test_external_tcp_bind_and_peer_turn_use_routable_supervisor_bridge() {
         external.delivered_input_ids().await.len(),
         1,
         "remote runtime must receive the post-bind peer turn"
+    );
+
+    handle.stop().await.expect("stop before peer-only resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("resume peer-only TCP member from durable endpoint");
+    let resumed_entry = resumed
+        .get_member(&AgentIdentity::from("l-tcp"))
+        .await
+        .expect("read resumed peer-only TCP member")
+        .expect("resumed peer-only TCP member");
+    match resumed_entry.member_ref {
+        MemberRef::BackendPeer {
+            peer_id,
+            address,
+            session_id,
+            ..
+        } => {
+            assert_eq!(peer_id, expected_peer_id);
+            assert_eq!(address, canonical_external_address(&expected_address));
+            assert!(session_id.is_none());
+        }
+        other => panic!("expected peer-only TCP backend member, got {other:?}"),
+    }
+    let delivered_before_resumed_turn = external.delivered_input_ids().await.len();
+    resumed
+        .member(&AgentIdentity::from("l-tcp"))
+        .await
+        .expect("resumed peer-only TCP handle")
+        .send("tcp external turn after resume", HandlingMode::Queue)
+        .await
+        .expect("resumed peer turn should route to TCP external runtime");
+    assert!(
+        external.delivered_input_ids().await.len() > delivered_before_resumed_turn,
+        "remote runtime must receive the post-resume peer turn"
     );
 }
 
@@ -43039,6 +43858,7 @@ struct MobRuntimeParitySnapshotSummary {
     identity_runtime_fence_tokens: BTreeMap<String, u64>,
     member_peer_ids: BTreeMap<String, String>,
     member_peer_endpoints: BTreeMap<String, String>,
+    member_prior_peer_endpoints: BTreeMap<String, BTreeSet<String>>,
     member_restore_failures: BTreeMap<String, String>,
     member_restore_failure_codes: BTreeMap<String, String>,
     runtime_retire_refusal_codes: BTreeMap<String, String>,
@@ -43933,6 +44753,7 @@ async fn mob_runtime_parity_snapshot_summary(
         identity_runtime_fence_tokens,
         member_peer_ids,
         member_peer_endpoints,
+        member_prior_peer_endpoints,
         member_restore_failures,
         member_revival_pending,
         supervisor_authority_peer_id,
@@ -44011,6 +44832,18 @@ async fn mob_runtime_parity_snapshot_summary(
                 snap.member_peer_endpoints
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
+                snap.member_prior_peer_endpoints
+                    .into_iter()
+                    .map(|(k, endpoints)| {
+                        (
+                            format!("{k:?}"),
+                            endpoints
+                                .into_iter()
+                                .map(|endpoint| format!("{endpoint:?}"))
+                                .collect::<BTreeSet<_>>(),
+                        )
+                    })
                     .collect::<BTreeMap<_, _>>(),
                 snap.member_restore_failures
                     .into_iter()
@@ -44150,6 +44983,7 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                BTreeMap::new(),
                 BTreeSet::new(),
                 None,
                 None,
@@ -44234,6 +45068,7 @@ async fn mob_runtime_parity_snapshot_summary(
         identity_runtime_fence_tokens,
         member_peer_ids,
         member_peer_endpoints,
+        member_prior_peer_endpoints,
         member_restore_failures,
         member_restore_failure_codes,
         runtime_retire_refusal_codes,
@@ -44366,6 +45201,13 @@ fn mob_runtime_parity_field_value(
         "member_peer_endpoints" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .member_peer_endpoints
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_prior_peer_endpoints" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_prior_peer_endpoints
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),

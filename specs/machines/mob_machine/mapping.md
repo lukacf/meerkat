@@ -957,6 +957,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverMemberSessionBindingAlreadyCurrentRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverSpawnedMemberPeerEndpointFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverSpawnedMemberPeerEndpointAlreadyCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverMemberPeerEndpointFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverMemberPeerEndpointAlreadyCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverMemberPeerEndpointChangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRosterMemberResetRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1717,6 +1732,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RegisterMemberPeerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RegisterMemberPeerAlreadyCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeMemberEndpointMigrationTrustCleanupRunningRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeMemberEndpointMigrationTrustCleanupRunningStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeMemberPeerRebindRunning`
@@ -2834,6 +2858,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `member_spawn_material_matches_runtime_binding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_peer_endpoint_material_is_coherent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_prior_peer_endpoints_are_generation_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_peer_id_ownership_is_global_across_generations`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `pending_session_ingress_detach_has_session_correlation`

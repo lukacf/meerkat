@@ -311,6 +311,16 @@ pub trait MobProvisioner: Send + Sync {
         self.trusted_peer_spec(member_ref, fallback_name, fallback_peer_id)
             .await
     }
+    /// Publish operation readiness for an exact endpoint that was already
+    /// resolved and durably journaled by the mob spawn owner.
+    ///
+    /// Implementations must not re-resolve or substitute endpoint material.
+    async fn publish_trusted_peer_spec_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        trusted_peer: TrustedPeerDescriptor,
+    ) -> Result<(), MobError>;
     async fn reconcile_peer_only_trust(
         &self,
         member_ref: &MemberRef,
@@ -410,7 +420,7 @@ impl SessionBackend {
         .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
     }
 
-    fn trusted_peer_spec_from_runtime(
+    pub(super) fn trusted_peer_spec_from_runtime(
         fallback_name: &str,
         runtime: &dyn CoreCommsRuntime,
     ) -> Result<Option<TrustedPeerDescriptor>, MobError> {
@@ -2595,6 +2605,26 @@ impl MobProvisioner for SessionBackend {
         Ok(trusted_peer)
     }
 
+    async fn publish_trusted_peer_spec_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        trusted_peer: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        let peer_name = trusted_peer.name.as_str().to_string();
+        tracing::debug!(
+            peer_name,
+            operation_id = %operation_id,
+            "SessionBackend::publish_trusted_peer_spec_for_operation publishing exact member peer readiness"
+        );
+        self.ops_adapter.mark_member_peer_ready_for_operation(
+            member_ref,
+            operation_id,
+            &peer_name,
+            trusted_peer,
+        )
+    }
+
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
         let bridge_session_id = member_ref.bridge_session_id()?;
         self.ops_adapter
@@ -3719,6 +3749,41 @@ impl MobProvisioner for MultiBackendProvisioner {
                 )?;
                 Ok(spec)
             }
+        }
+    }
+
+    async fn publish_trusted_peer_spec_for_operation(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        trusted_peer: TrustedPeerDescriptor,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                self.session
+                    .publish_trusted_peer_spec_for_operation(member_ref, operation_id, trusted_peer)
+                    .await
+            }
+            MemberRef::BackendPeer {
+                session_id: Some(session_id),
+                ..
+            } => {
+                self.session
+                    .publish_trusted_peer_spec_for_operation(
+                        &MemberRef::Session {
+                            session_id: session_id.clone(),
+                        },
+                        operation_id,
+                        trusted_peer,
+                    )
+                    .await
+            }
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => Err(MobError::Internal(
+                "cannot publish session operation peer readiness for a peer-only member"
+                    .to_string(),
+            )),
         }
     }
 

@@ -711,6 +711,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeMemberEndpointMigrationTrustCleanup,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AuthorizeRetiringMemberTrustCleanupObserved,
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },

@@ -3062,6 +3062,7 @@ runtime_internal_inputs!(
         AuthorizeMemberTrustUnwiring,
         AuthorizeMemberTrustCleanup,
         AuthorizeMemberTrustCleanupObserved,
+        AuthorizeMemberEndpointMigrationTrustCleanup,
         AuthorizeRetiringMemberTrustCleanupObserved,
         CleanupRetiringMemberWiring,
         RestoreRetiringMemberWiring,

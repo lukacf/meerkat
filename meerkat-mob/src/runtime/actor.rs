@@ -622,6 +622,8 @@ struct RetireTrustCleanupPlan {
     retiring_spec: Option<TrustedPeerDescriptor>,
     machine_wired_peer_identities: BTreeSet<AgentIdentity>,
     trust_unwire_authority_by_peer: BTreeMap<AgentIdentity, CommsTrustMutationAuthority>,
+    historical_trust_unwire_authorities_by_peer:
+        BTreeMap<AgentIdentity, Vec<(String, CommsTrustMutationAuthority)>>,
 }
 
 impl RetireTrustCleanupPlan {
@@ -631,6 +633,7 @@ impl RetireTrustCleanupPlan {
             retiring_spec: None,
             machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
+            historical_trust_unwire_authorities_by_peer: BTreeMap::new(),
         }
     }
 
@@ -1251,6 +1254,11 @@ struct SpawnAdmitted {
     member_ref: MemberRef,
     agent_runtime_id: crate::ids::AgentRuntimeId,
     is_replacing: bool,
+    /// Exact endpoint observed for this runtime generation before the
+    /// write-ahead spawn event. Carried verbatim into activation so the live
+    /// MobMachine registration cannot diverge from durable replay authority.
+    member_peer_endpoint: Option<TrustedPeerDescriptor>,
+    transport_public_key: Option<String>,
 }
 
 struct RespawnTopologyRestoreResolution {
@@ -1436,6 +1444,89 @@ impl MobActor {
                 "{context}: invalid peer-only runtime spec: {error}"
             ))
         })
+    }
+
+    /// Resolve the exact generation-bound endpoint that will be registered
+    /// during spawn activation, without publishing operation readiness.
+    ///
+    /// This pure observation runs before the write-ahead `MemberSpawned`
+    /// append. Activation later publishes and registers this same descriptor,
+    /// making disagreement between the journaled and active endpoints
+    /// unrepresentable.
+    async fn resolve_spawn_member_peer_material(
+        &self,
+        member_ref: &MemberRef,
+        profile_name: &ProfileName,
+        identity: &AgentIdentity,
+    ) -> Result<(Option<TrustedPeerDescriptor>, Option<String>), MobError> {
+        if let Some(session_id) = member_ref.bridge_session_id() {
+            let Some(runtime) = self.session_service.comms_runtime(session_id).await else {
+                return Ok((None, None));
+            };
+            let Some(public_key_bytes) = runtime.public_key_bytes() else {
+                return Ok((None, None));
+            };
+            let comms_name = render_member_comms_name(
+                self.definition.id.as_str(),
+                profile_name.as_str(),
+                identity.as_str(),
+            )?;
+            let peer_id = runtime.peer_id().ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "spawn endpoint for '{identity}' has a signing key but no peer id"
+                ))
+            })?;
+            TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer_id, &public_key_bytes)
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "invalid spawn endpoint for '{identity}': {error}"
+                    ))
+                })?;
+            let name = PeerName::new(runtime.comms_name().unwrap_or_else(|| comms_name.clone()))
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "invalid spawn endpoint name for '{identity}': {error}"
+                    ))
+                })?;
+            let address = PeerAddress::parse(
+                runtime
+                    .advertised_address()
+                    .unwrap_or_else(|| format!("inproc://{comms_name}")),
+            )
+            .map_err(|error| {
+                MobError::WiringError(format!(
+                    "invalid spawn endpoint address for '{identity}': {error}"
+                ))
+            })?;
+            let endpoint = TrustedPeerDescriptor {
+                peer_id,
+                name,
+                address,
+                pubkey: public_key_bytes,
+            };
+            let public_key = meerkat_comms::PubKey::new(public_key_bytes).to_pubkey_string();
+            return Ok((Some(endpoint), Some(public_key)));
+        }
+
+        if let MemberRef::BackendPeer {
+            peer_id,
+            address,
+            pubkey,
+            ..
+        } = member_ref
+        {
+            return Ok((
+                Some(Self::peer_only_spec_from_parts(
+                    peer_id,
+                    address,
+                    "resolve_spawn_member_peer_material",
+                    *pubkey,
+                )?),
+                None,
+            ));
+        }
+
+        Ok((None, None))
     }
 
     fn peer_only_spec_for_binding(
@@ -4455,6 +4546,25 @@ impl MobActor {
                 edge: edge.clone(),
                 a_identity: edge.a.clone(),
                 b_identity: edge.b.clone(),
+            },
+            context,
+        )?;
+        self.unwire_members_authority_from_transition(&transition, edge, context)
+    }
+
+    fn authorize_member_endpoint_migration_trust_cleanup(
+        &mut self,
+        edge: &mob_dsl::WiringEdge,
+        entry: &RosterEntry,
+        retained_peer_endpoint: &mob_dsl::MemberPeerEndpoint,
+        context: &str,
+    ) -> Result<MemberTrustHandoff, MobError> {
+        let transition = self.apply_dsl_input_collect_transition(
+            mob_dsl::MobMachineInput::AuthorizeMemberEndpointMigrationTrustCleanup {
+                edge: edge.clone(),
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                retained_peer_endpoint: retained_peer_endpoint.clone(),
             },
             context,
         )?;
@@ -8170,6 +8280,7 @@ impl MobActor {
                         member_runtime_modes: dsl.member_runtime_modes.clone(),
                         member_peer_ids: dsl.member_peer_ids.clone(),
                         member_peer_endpoints: dsl.member_peer_endpoints.clone(),
+                        member_prior_peer_endpoints: dsl.member_prior_peer_endpoints.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
                         member_restore_failure_codes: dsl.member_restore_failure_codes.clone(),
                         runtime_retire_refusal_codes: dsl.runtime_retire_refusal_codes.clone(),
@@ -10661,6 +10772,27 @@ impl MobActor {
             "MobActor::finalize_spawn_admit validated lifecycle journal"
         );
 
+        let (member_peer_endpoint, transport_public_key) = match self
+            .resolve_spawn_member_peer_material(provision.member_ref(), profile_name, &identity)
+            .await
+        {
+            Ok(material) => material,
+            Err(error) => {
+                let error = self.fold_spawn_exec_abort(
+                    &dsl_identity,
+                    agent_identity,
+                    error,
+                    "finalize_spawn_admit_resolve_member_peer",
+                );
+                if let Err(rollback_error) = provision.rollback().await {
+                    return Err(MobError::Internal(format!(
+                        "spawn peer resolution failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+
         tracing::debug!(
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending resolving supervisor comms"
@@ -10770,7 +10902,8 @@ impl MobActor {
                     )
                     .with_bridge_member_ref(Some(Self::sanitized_member_ref(
                         provision.member_ref(),
-                    )));
+                    )))
+                    .with_member_peer_endpoint(member_peer_endpoint.clone());
                     event.runtime_mode = runtime_mode;
                     event.labels = labels.clone();
                     event.continuity_intent = continuity_intent.clone();
@@ -10843,6 +10976,8 @@ impl MobActor {
             member_ref,
             agent_runtime_id,
             is_replacing,
+            member_peer_endpoint,
+            transport_public_key,
         })
     }
 
@@ -10878,6 +11013,8 @@ impl MobActor {
             member_ref,
             agent_runtime_id,
             is_replacing,
+            member_peer_endpoint,
+            transport_public_key,
         } = admitted;
         let profile_name = &profile_name;
         let agent_identity = &agent_identity;
@@ -10896,54 +11033,25 @@ impl MobActor {
         // `peer_id` is the canonical comms routing UUID. The MobMachine also
         // records the full descriptor so generated member trust authority is
         // bound to the exact name/address/signing key that will be installed.
-        let (peer_descriptor, transport_public_key) =
-            if let Some(session_id) = member_ref.bridge_session_id() {
-                match self.session_service.comms_runtime(session_id).await {
-                    Some(runtime) => {
-                        let public_key_bytes = runtime.public_key_bytes();
-                        let descriptor = match public_key_bytes {
-                            Some(_) => {
-                                let comms_name = render_member_comms_name(
-                                    self.definition.id.as_str(),
-                                    profile_name.as_str(),
-                                    identity.as_str(),
-                                )?;
-                                Some(
-                                    self.provisioner
-                                        .trusted_peer_spec_for_operation(
-                                            &member_ref,
-                                            &operation_id,
-                                            &comms_name,
-                                            "",
-                                        )
-                                        .await?,
-                                )
-                            }
-                            None => None,
-                        };
-                        let public_key = public_key_bytes
-                            .map(|pubkey| meerkat_comms::PubKey::new(pubkey).to_pubkey_string());
-                        (descriptor, public_key)
-                    }
-                    None => (None, None),
-                }
-            } else if let MemberRef::BackendPeer {
-                peer_id,
-                address,
-                pubkey,
-                ..
-            } = &member_ref
-            {
-                let descriptor =
-                    Self::peer_only_spec_from_parts(peer_id, address, "finalize_spawn", *pubkey)?;
-                (Some(descriptor), None)
-            } else {
-                (None, None)
-            };
-        let peer_id = peer_descriptor
+        // Session-backed members publish operation readiness after the
+        // membership commit. Peer-only members never used that readiness
+        // path: their backend descriptor intentionally keeps the backend
+        // identity name rather than the rendered local comms name.
+        if member_ref.bridge_session_id().is_some()
+            && let Some(endpoint) = member_peer_endpoint.as_ref()
+        {
+            self.provisioner
+                .publish_trusted_peer_spec_for_operation(
+                    &member_ref,
+                    &operation_id,
+                    endpoint.clone(),
+                )
+                .await?;
+        }
+        let peer_id = member_peer_endpoint
             .as_ref()
             .map(|descriptor| descriptor.peer_id);
-        if let Some(descriptor) = peer_descriptor.as_ref() {
+        if let Some(descriptor) = member_peer_endpoint.as_ref() {
             self.apply_dsl_input(
                 mob_dsl::MobMachineInput::RegisterMemberPeer {
                     agent_identity: dsl_identity.clone(),
@@ -15906,6 +16014,13 @@ impl MobActor {
         }
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let retained_peer_endpoints = self
+            .dsl_authority
+            .state()
+            .member_prior_peer_endpoints
+            .get(&dsl_identity)
+            .cloned()
+            .unwrap_or_default();
         let exact_runtime_is_retiring = self
             .dsl_authority
             .state()
@@ -15999,6 +16114,7 @@ impl MobActor {
                                 retiring_spec: None,
                                 machine_wired_peer_identities,
                                 trust_unwire_authority_by_peer: BTreeMap::new(),
+                                historical_trust_unwire_authorities_by_peer: BTreeMap::new(),
                             });
                         }
                     }
@@ -16007,6 +16123,7 @@ impl MobActor {
         };
         let retiring_peer_id = Self::trusted_peer_removal_key(&retiring_spec);
         let mut authorities = BTreeMap::new();
+        let mut historical_authorities = BTreeMap::new();
         for peer_identity in &machine_wired_peer_identities {
             let peer_entry = {
                 let roster = self.roster.read().await;
@@ -16042,6 +16159,22 @@ impl MobActor {
                 mob_dsl::AgentIdentity::from_domain(&retiring_identity),
                 mob_dsl::AgentIdentity::from_domain(peer_identity),
             );
+            let mut retained_authorities = Vec::new();
+            for retained_peer_endpoint in &retained_peer_endpoints {
+                let retained_peer_id = retained_peer_endpoint.peer_id.0.clone();
+                let handoff = self.authorize_member_endpoint_migration_trust_cleanup(
+                    &edge,
+                    entry,
+                    retained_peer_endpoint,
+                    "member_retire_historical_trust_authority",
+                )?;
+                let authority =
+                    handoff.unwiring_authority_for(&retiring_identity, &retained_peer_id)?;
+                retained_authorities.push((retained_peer_id, authority));
+            }
+            if !retained_authorities.is_empty() {
+                historical_authorities.insert(peer_identity.clone(), retained_authorities);
+            }
             let handoff = match self.authorize_member_trust_unwiring(
                 &edge,
                 "member_retire_trust_authority",
@@ -16082,6 +16215,7 @@ impl MobActor {
             retiring_spec: Some(retiring_spec),
             machine_wired_peer_identities,
             trust_unwire_authority_by_peer: authorities,
+            historical_trust_unwire_authorities_by_peer: historical_authorities,
         })
     }
 
@@ -16106,6 +16240,8 @@ impl MobActor {
             preserve_machine_topology,
             machine_wired_peer_identities: trust_cleanup_plan.machine_wired_peer_identities,
             trust_unwire_authority_by_peer: trust_cleanup_plan.trust_unwire_authority_by_peer,
+            historical_trust_unwire_authorities_by_peer: trust_cleanup_plan
+                .historical_trust_unwire_authorities_by_peer,
         }
     }
 
@@ -16541,8 +16677,19 @@ impl MobActor {
                             "dispose_notify_peers missing generated retire trust handoff for '{peer_identity}'"
                         )));
                     };
+                    let historical_authorities = ctx
+                        .historical_trust_unwire_authorities_by_peer
+                        .get(&peer_identity)
+                        .cloned()
+                        .unwrap_or_default();
                     local_peer_specs.push((peer_identity.clone(), spec.clone()));
-                    local_jobs.push((peer_identity, spec, comms, authority));
+                    local_jobs.push((
+                        peer_identity,
+                        spec,
+                        comms,
+                        authority,
+                        historical_authorities,
+                    ));
                 }
                 WiringEndpoint::PeerOnly { spec, binding } => {
                     peer_only_jobs.push((peer_identity, spec, binding));
@@ -16553,7 +16700,9 @@ impl MobActor {
         let retiring_key = Self::trusted_peer_removal_key(retiring_spec);
         let retiring_comms = ctx.retiring_comms.clone();
         let mut local_tasks = FuturesUnordered::new();
-        for (peer_identity, recipient_spec, recipient_comms, authority) in local_jobs {
+        for (peer_identity, recipient_spec, recipient_comms, authority, historical_authorities) in
+            local_jobs
+        {
             let retiring_key = retiring_key.clone();
             let retiring_comms = retiring_comms.clone();
             let retiring_spec = retiring_spec.clone();
@@ -16602,6 +16751,20 @@ impl MobActor {
                         peer_id = %peer_identity,
                         "dispose_notify_peers: skipping lifecycle notice because retiring member has no live comms runtime"
                     );
+                }
+                for (historical_peer_id, historical_authority) in historical_authorities {
+                    actor
+                        .apply_trusted_peer_remove(
+                            recipient_comms.as_ref(),
+                            historical_peer_id.clone(),
+                            historical_authority,
+                        )
+                        .await
+                        .map_err(|error| {
+                            MobError::RetirementTopologyIncomplete(format!(
+                                "failed to remove historical retiring member trust '{historical_peer_id}' from '{peer_identity}': {error}"
+                            ))
+                        })?;
                 }
                 actor
                     .apply_trusted_peer_remove(recipient_comms.as_ref(), retiring_key, authority)
@@ -21235,6 +21398,7 @@ impl MobActor {
             preserve_machine_topology: false,
             machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
+            historical_trust_unwire_authorities_by_peer: BTreeMap::new(),
         };
         if let Err(error) = self.dispose_archive_session(&rollback_ctx).await {
             return Err(rollback.fail(error).await);

@@ -52,6 +52,7 @@ pub enum MobMachineCatalogInput {
     RestoreRetiringMemberWiring,
     WireExternalPeer,
     RegisterMemberPeer,
+    AuthorizeMemberEndpointMigrationTrustCleanup,
     AuthorizeMemberPeerRebind,
     AuthorizeMemberPeerOverlay,
     AuthorizeMemberTrustWiring,
@@ -205,6 +206,7 @@ impl MobMachineCatalogInput {
         Self::RestoreRetiringMemberWiring,
         Self::WireExternalPeer,
         Self::RegisterMemberPeer,
+        Self::AuthorizeMemberEndpointMigrationTrustCleanup,
         Self::AuthorizeMemberPeerRebind,
         Self::AuthorizeMemberPeerOverlay,
         Self::AuthorizeMemberTrustWiring,
@@ -361,6 +363,7 @@ impl MobMachineCatalogInput {
             Self::RestoreRetiringMemberWiring => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RestoreRetiringMemberWiring,
             Self::WireExternalPeer => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::WireExternalPeer,
             Self::RegisterMemberPeer => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RegisterMemberPeer,
+            Self::AuthorizeMemberEndpointMigrationTrustCleanup => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AuthorizeMemberEndpointMigrationTrustCleanup,
             Self::AuthorizeMemberPeerRebind => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AuthorizeMemberPeerRebind,
             Self::AuthorizeMemberPeerOverlay => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AuthorizeMemberPeerOverlay,
             Self::AuthorizeMemberTrustWiring => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AuthorizeMemberTrustWiring,
@@ -520,6 +523,9 @@ impl MobMachineCatalogInput {
             Self::RestoreRetiringMemberWiring => "RestoreRetiringMemberWiring",
             Self::WireExternalPeer => "WireExternalPeer",
             Self::RegisterMemberPeer => "RegisterMemberPeer",
+            Self::AuthorizeMemberEndpointMigrationTrustCleanup => {
+                "AuthorizeMemberEndpointMigrationTrustCleanup"
+            }
             Self::AuthorizeMemberPeerRebind => "AuthorizeMemberPeerRebind",
             Self::AuthorizeMemberPeerOverlay => "AuthorizeMemberPeerOverlay",
             Self::AuthorizeMemberTrustWiring => "AuthorizeMemberTrustWiring",

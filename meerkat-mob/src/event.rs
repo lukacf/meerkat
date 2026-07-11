@@ -283,18 +283,18 @@ pub enum MobEventKind {
     ///
     /// Unlike the other `Member*` variants which use inline struct fields,
     /// this variant wraps a named [`MemberSpawnedEvent`] struct. The reason
-    /// is load-bearing and not cosmetic: [`MemberSpawnedEvent`] carries a
-    /// `#[serde(skip)] pub(crate) bridge_member_ref: Option<MemberRef>`
-    /// field used by in-crate event replay (see
+    /// is load-bearing and not cosmetic: [`MemberSpawnedEvent`] carries
+    /// `#[serde(skip)]` bridge-member and exact peer-endpoint fields used by
+    /// in-crate event replay (see
     /// [`encode_stored_mob_event`] / [`decode_stored_mob_event`]) that is
     /// deliberately omitted from the public wire shape. A named struct
-    /// keeps the internal replay pointer, its `#[serde(skip)]` attribute,
+    /// keeps the internal replay facts, their `#[serde(skip)]` attributes,
     /// and the constructor/`with_*` helpers self-contained. Inline variant
     /// fields would force the replay plumbing into this enum and leak
     /// "shell owns mechanics, not meaning" internal state into the public
     /// event contract. Finding A6 (DELETE_ME) flagged the shape difference;
     /// the difference is intentional and regression-pinned by
-    /// `member_spawned_public_wire_shape_excludes_bridge_member_ref`.
+    /// `member_spawned_public_wire_shape_excludes_internal_replay_metadata`.
     MemberSpawned(MemberSpawnedEvent),
     /// Retirement was admitted but has not completed its routed runtime and
     /// critical archival work yet.
@@ -565,8 +565,9 @@ pub struct AttributedEvent {
 
 /// Public identity-native member spawn payload.
 ///
-/// The bridge/session carrier is kept as crate-internal replay metadata only;
-/// it is intentionally not serialized on the public event surface.
+/// The bridge/session carrier and exact generation-scoped peer endpoint are
+/// kept as crate-internal replay metadata only; they are intentionally not
+/// serialized on the public event surface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemberSpawnedEvent {
     /// Stable member identity.
@@ -597,6 +598,14 @@ pub struct MemberSpawnedEvent {
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
     pub(crate) bridge_member_ref: Option<MemberRef>,
+    /// Exact comms endpoint bound to this spawned runtime generation.
+    ///
+    /// MobMachine owns the live endpoint map. This replay-only journal fact
+    /// restores that already-authoritative state after a cold restart, before
+    /// broken-member retirement needs to remove reciprocal trust. It is
+    /// optional so journals written before endpoint persistence stay readable.
+    #[serde(skip, default)]
+    pub(crate) member_peer_endpoint: Option<TrustedPeerDescriptor>,
 }
 
 impl MemberSpawnedEvent {
@@ -618,6 +627,7 @@ impl MemberSpawnedEvent {
             effective_profile_override: None,
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             bridge_member_ref: None,
+            member_peer_endpoint: None,
         }
     }
 
@@ -626,16 +636,30 @@ impl MemberSpawnedEvent {
         self
     }
 
+    pub(crate) fn with_member_peer_endpoint(
+        mut self,
+        member_peer_endpoint: Option<TrustedPeerDescriptor>,
+    ) -> Self {
+        self.member_peer_endpoint = member_peer_endpoint;
+        self
+    }
+
     #[cfg(any(not(target_arch = "wasm32"), test))]
     pub(crate) fn bridge_member_ref(&self) -> Option<&MemberRef> {
         self.bridge_member_ref.as_ref()
+    }
+
+    #[cfg(any(not(target_arch = "wasm32"), test))]
+    pub(crate) fn member_peer_endpoint(&self) -> Option<&TrustedPeerDescriptor> {
+        self.member_peer_endpoint.as_ref()
     }
 }
 
 /// Public identity-native payload for a recovered session binding.
 ///
-/// The bridge session id is kept as crate-internal replay metadata only;
-/// it is intentionally not serialized on the public event surface.
+/// The bridge session id and its exact recovered comms endpoint are kept as
+/// crate-internal replay metadata only; they are intentionally not serialized
+/// on the public event surface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemberSessionBindingRecoveredEvent {
     /// Stable member identity whose bridge binding was recovered.
@@ -646,6 +670,14 @@ pub struct MemberSessionBindingRecoveredEvent {
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
     pub(crate) bridge_session_id: Option<SessionId>,
+    /// Exact comms endpoint bound to the recovered bridge session.
+    ///
+    /// A snapshotless session-head repair can preserve the member generation
+    /// while moving it to a different session runtime. Persisting the endpoint
+    /// with that recovery event keeps retirement cleanup exact after another
+    /// cold restart.
+    #[serde(skip, default)]
+    pub(crate) member_peer_endpoint: Option<TrustedPeerDescriptor>,
 }
 
 impl MemberSessionBindingRecoveredEvent {
@@ -658,11 +690,24 @@ impl MemberSessionBindingRecoveredEvent {
             agent_identity,
             agent_runtime_id,
             bridge_session_id: Some(bridge_session_id),
+            member_peer_endpoint: None,
         }
+    }
+
+    pub(crate) fn with_member_peer_endpoint(
+        mut self,
+        member_peer_endpoint: Option<TrustedPeerDescriptor>,
+    ) -> Self {
+        self.member_peer_endpoint = member_peer_endpoint;
+        self
     }
 
     pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
         self.bridge_session_id.as_ref()
+    }
+
+    pub(crate) fn member_peer_endpoint(&self) -> Option<&TrustedPeerDescriptor> {
+        self.member_peer_endpoint.as_ref()
     }
 }
 
@@ -747,6 +792,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             serde_json::to_value(bridge_member_ref)?,
         );
     }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(member_peer_endpoint) = member_spawned.member_peer_endpoint()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "member_peer_endpoint".to_string(),
+            serde_json::to_value(member_peer_endpoint)?,
+        );
+    }
     if let Some(recovered) = event.kind.member_session_binding_recovered()
         && let Some(bridge_session_id) = recovered.bridge_session_id()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
@@ -754,6 +808,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert(
             "bridge_session_id".to_string(),
             serde_json::to_value(bridge_session_id)?,
+        );
+    }
+    if let Some(recovered) = event.kind.member_session_binding_recovered()
+        && let Some(member_peer_endpoint) = recovered.member_peer_endpoint()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "member_peer_endpoint".to_string(),
+            serde_json::to_value(member_peer_endpoint)?,
         );
     }
     if let Some(retiring_peer_endpoint) = event.kind.retiring_peer_endpoint()
@@ -800,6 +863,18 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .and_then(|kind| kind.remove("bridge_member_ref"))
         .map(serde_json::from_value)
         .transpose()?;
+    let spawned_member_peer_endpoint = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("member_peer_endpoint")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value)
+        .transpose()?;
     let recovered_bridge_session_id = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -807,6 +882,19 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
             if kind.get("type").and_then(Value::as_str) == Some("member_session_binding_recovered")
             {
                 kind.remove("bridge_session_id")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value)
+        .transpose()?;
+    let recovered_member_peer_endpoint = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_session_binding_recovered")
+            {
+                kind.remove("member_peer_endpoint")
             } else {
                 None
             }
@@ -831,10 +919,20 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     {
         member_spawned.bridge_member_ref = Some(bridge_member_ref);
     }
+    if let Some(member_peer_endpoint) = spawned_member_peer_endpoint
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.member_peer_endpoint = Some(member_peer_endpoint);
+    }
     if let Some(bridge_session_id) = recovered_bridge_session_id
         && let Some(recovered) = event.kind.member_session_binding_recovered_mut()
     {
         recovered.bridge_session_id = Some(bridge_session_id);
+    }
+    if let Some(member_peer_endpoint) = recovered_member_peer_endpoint
+        && let Some(recovered) = event.kind.member_session_binding_recovered_mut()
+    {
+        recovered.member_peer_endpoint = Some(member_peer_endpoint);
     }
     if let Some(retiring_peer_endpoint) = retiring_peer_endpoint {
         event
@@ -1201,6 +1299,15 @@ mod tests {
     fn test_stored_mob_event_roundtrip_preserves_bridge_member_ref() {
         let sid = SessionId::from_uuid(Uuid::nil());
         let identity = AgentIdentity::from("researcher");
+        let pubkey = [7; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "test-mob/worker/researcher",
+            peer_id.to_string(),
+            pubkey,
+            "inproc://test-mob/worker/researcher",
+        )
+        .expect("member peer endpoint");
         let event = MobEvent {
             cursor: 1,
             timestamp: Utc::now(),
@@ -1213,11 +1320,16 @@ mod tests {
                     AgentRuntimeId::initial(identity),
                     ProfileName::from("worker"),
                 )
-                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone()))),
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone())))
+                .with_member_peer_endpoint(Some(endpoint.clone())),
             ),
         };
 
         let encoded = encode_stored_mob_event(&event).unwrap();
+        assert!(
+            String::from_utf8_lossy(&encoded).contains("member_peer_endpoint"),
+            "stored spawn event must carry the replay-only endpoint"
+        );
         let decoded = decode_stored_mob_event(&encoded).unwrap();
 
         match decoded.kind {
@@ -1228,6 +1340,64 @@ mod tests {
                         .and_then(MemberRef::bridge_session_id),
                     Some(&sid)
                 );
+                assert_eq!(member_spawned.member_peer_endpoint(), Some(&endpoint));
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_stored_v8_member_spawned_without_peer_endpoint_decodes_to_none() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("legacy-worker");
+        let pubkey = [8; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "test-mob/worker/legacy-worker",
+            peer_id.to_string(),
+            pubkey,
+            "inproc://test-mob/worker/legacy-worker",
+        )
+        .expect("member peer endpoint");
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    AgentRuntimeId::initial(identity),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone())))
+                .with_member_peer_endpoint(Some(endpoint)),
+            ),
+        };
+
+        let encoded = encode_stored_mob_event(&event).expect("encode current v8 event");
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("parse stored event");
+        let removed = stored
+            .get_mut("event")
+            .and_then(|event| event.get_mut("kind"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|kind| kind.remove("member_peer_endpoint"));
+        assert!(removed.is_some(), "current event must contain the endpoint");
+
+        let legacy_encoded = serde_json::to_vec(&stored).expect("encode legacy v8 event");
+        let decoded = decode_stored_mob_event(&legacy_encoded)
+            .expect("v8 event without endpoint must remain readable");
+        match decoded.kind {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                assert_eq!(member_spawned.member_peer_endpoint(), None);
+                assert_eq!(
+                    member_spawned
+                        .bridge_member_ref()
+                        .and_then(MemberRef::bridge_session_id),
+                    Some(&sid),
+                );
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
         }
@@ -1237,6 +1407,49 @@ mod tests {
     fn test_stored_mob_event_roundtrip_preserves_recovered_member_session_binding() {
         let sid = SessionId::from_uuid(Uuid::nil());
         let identity = AgentIdentity::from("researcher");
+        let pubkey = [9; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "test-mob/worker/researcher",
+            peer_id.to_string(),
+            pubkey,
+            "inproc://test-mob/worker/researcher",
+        )
+        .expect("recovered member peer endpoint");
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSessionBindingRecovered(
+                MemberSessionBindingRecoveredEvent::new(
+                    identity.clone(),
+                    AgentRuntimeId::initial(identity),
+                    sid.clone(),
+                )
+                .with_member_peer_endpoint(Some(endpoint.clone())),
+            ),
+        };
+
+        let encoded = encode_stored_mob_event(&event).unwrap();
+        assert!(
+            String::from_utf8_lossy(&encoded).contains("member_peer_endpoint"),
+            "stored binding recovery must carry the exact recovered endpoint"
+        );
+        let decoded = decode_stored_mob_event(&encoded).unwrap();
+
+        match decoded.kind {
+            MobEventKind::MemberSessionBindingRecovered(recovered) => {
+                assert_eq!(recovered.bridge_session_id(), Some(&sid));
+                assert_eq!(recovered.member_peer_endpoint(), Some(&endpoint));
+            }
+            other => panic!("expected MemberSessionBindingRecovered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_stored_v8_recovered_binding_without_peer_endpoint_decodes_to_none() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("legacy-recovered-worker");
         let event = MobEvent {
             cursor: 1,
             timestamp: Utc::now(),
@@ -1250,12 +1463,13 @@ mod tests {
             ),
         };
 
-        let encoded = encode_stored_mob_event(&event).unwrap();
-        let decoded = decode_stored_mob_event(&encoded).unwrap();
-
+        let encoded = encode_stored_mob_event(&event).expect("encode legacy-shaped v8 event");
+        let decoded = decode_stored_mob_event(&encoded)
+            .expect("v8 recovered binding without endpoint must remain readable");
         match decoded.kind {
             MobEventKind::MemberSessionBindingRecovered(recovered) => {
                 assert_eq!(recovered.bridge_session_id(), Some(&sid));
+                assert_eq!(recovered.member_peer_endpoint(), None);
             }
             other => panic!("expected MemberSessionBindingRecovered, got {other:?}"),
         }
@@ -1263,16 +1477,22 @@ mod tests {
 
     /// DELETE_ME A6 regression: `MemberSpawned(MemberSpawnedEvent)` uses
     /// a named struct variant while every other `Member*` variant uses
-    /// inline fields. The reason is load-bearing: `bridge_member_ref` is
-    /// crate-internal replay metadata gated by `#[serde(skip)]` that must
-    /// never leak onto the public wire shape. This test pins the public
-    /// `MobEventKind::MemberSpawned` serialized form to exclude
-    /// `bridge_member_ref` so a future refactor cannot silently promote
-    /// the internal replay pointer into the public event contract.
+    /// inline fields. The reason is load-bearing: its bridge reference and
+    /// exact generation endpoint are crate-internal replay metadata gated by
+    /// `#[serde(skip)]` that must never leak onto the public wire shape.
     #[test]
-    fn member_spawned_public_wire_shape_excludes_bridge_member_ref() {
+    fn member_spawned_public_wire_shape_excludes_internal_replay_metadata() {
         let identity = AgentIdentity::from("researcher");
         let sid = SessionId::from_uuid(Uuid::nil());
+        let pubkey = [7; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "test-mob/worker/researcher",
+            peer_id.to_string(),
+            pubkey,
+            "inproc://test-mob/worker/researcher",
+        )
+        .expect("member peer endpoint");
         let kind = MobEventKind::MemberSpawned(
             MemberSpawnedEvent::new(
                 identity.clone(),
@@ -1283,7 +1503,8 @@ mod tests {
             )
             // set the internal pointer so we know the exclusion is real,
             // not a side-effect of it being None.
-            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid))),
+            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+            .with_member_peer_endpoint(Some(endpoint)),
         );
 
         let value = serde_json::to_value(&kind).expect("serialize mob event kind");
@@ -1294,11 +1515,12 @@ mod tests {
         // The public wire shape is {"type":"MemberSpawned", ...fields...}.
         // We don't assert the exact tag convention (that may be internally
         // tagged or adjacent); we assert the inner payload does NOT carry
-        // bridge_member_ref under any key path.
+        // internal replay metadata under any key path.
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(
-            !serialized.contains("bridge_member_ref"),
-            "public MemberSpawned wire shape must never expose bridge_member_ref; got: {serialized}",
+            !serialized.contains("bridge_member_ref")
+                && !serialized.contains("member_peer_endpoint"),
+            "public MemberSpawned wire shape must never expose internal replay metadata; got: {serialized}",
         );
 
         // And the standard struct fields ARE present.
@@ -1314,18 +1536,30 @@ mod tests {
     fn member_session_binding_recovered_public_wire_shape_excludes_bridge_session_id() {
         let identity = AgentIdentity::from("researcher");
         let sid = SessionId::from_uuid(Uuid::nil());
-        let kind =
-            MobEventKind::MemberSessionBindingRecovered(MemberSessionBindingRecoveredEvent::new(
+        let pubkey = [9; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let endpoint = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "test-mob/worker/researcher",
+            peer_id.to_string(),
+            pubkey,
+            "inproc://test-mob/worker/researcher",
+        )
+        .expect("recovered member peer endpoint");
+        let kind = MobEventKind::MemberSessionBindingRecovered(
+            MemberSessionBindingRecoveredEvent::new(
                 identity.clone(),
                 AgentRuntimeId::initial(identity),
                 sid,
-            ));
+            )
+            .with_member_peer_endpoint(Some(endpoint)),
+        );
 
         let value = serde_json::to_value(&kind).expect("serialize mob event kind");
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(
-            !serialized.contains("bridge_session_id"),
-            "public MemberSessionBindingRecovered must not expose bridge_session_id: {serialized}",
+            !serialized.contains("bridge_session_id")
+                && !serialized.contains("member_peer_endpoint"),
+            "public MemberSessionBindingRecovered must not expose replay metadata: {serialized}",
         );
         assert!(
             serialized.contains("agent_identity"),

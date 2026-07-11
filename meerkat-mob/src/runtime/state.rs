@@ -163,6 +163,10 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::MemberPeerEndpoint,
     >,
+    pub member_prior_peer_endpoints: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        std::collections::BTreeSet<crate::machines::mob_machine::MemberPeerEndpoint>,
+    >,
     pub member_restore_failures:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     pub member_restore_failure_codes:

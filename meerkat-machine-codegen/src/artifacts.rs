@@ -8498,6 +8498,81 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         writeln!(
             out,
+            "{}(current_endpoints, prior_endpoints, agent_identity, candidate_endpoint) ==",
+            prefix("mob_machine_member_peer_id_available_for_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ \\A other_identity \\in DOMAIN current_endpoints : other_identity = agent_identity \\/ current_endpoints[other_identity].peer_id /= candidate_endpoint.peer_id"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A other_identity \\in DOMAIN prior_endpoints : other_identity = agent_identity \\/ \\A endpoint \\in prior_endpoints[other_identity] : endpoint.peer_id /= candidate_endpoint.peer_id"
+        );
+        writeln!(
+            out,
+            "{}(edges, agent_identity) ==",
+            prefix("mob_machine_member_has_no_external_peer_edges")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in edges : edge.local /= agent_identity"
+        );
+        writeln!(
+            out,
+            "{}(all_prior_endpoints, agent_identity, current_endpoint, next_endpoint) ==",
+            prefix("mob_machine_member_prior_peer_endpoints_after_migration")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET prior == IF agent_identity \\in DOMAIN all_prior_endpoints THEN all_prior_endpoints[agent_identity] ELSE {{}}"
+        );
+        pushln!(
+            out,
+            "        retained == {{ endpoint \\in (prior \\cup {{current_endpoint}}) : endpoint.peer_id /= next_endpoint.peer_id }}"
+        );
+        pushln!(out, "    IN IF retained = {{}}");
+        pushln!(
+            out,
+            "       THEN [id \\in (DOMAIN all_prior_endpoints \\ {{agent_identity}}) |-> all_prior_endpoints[id]]"
+        );
+        pushln!(
+            out,
+            "       ELSE [id \\in (DOMAIN all_prior_endpoints \\cup {{agent_identity}}) |-> IF id = agent_identity THEN retained ELSE all_prior_endpoints[id]]"
+        );
+        writeln!(
+            out,
+            "{}(endpoint_identity, migrated_identity, retained_peer_endpoint, current_peer_ids) ==",
+            prefix("mob_machine_member_endpoint_migration_cleanup_peer_id")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF endpoint_identity = migrated_identity THEN retained_peer_endpoint.peer_id ELSE current_peer_ids[endpoint_identity]"
+        );
+        writeln!(
+            out,
+            "{}(edge) == edge.a",
+            prefix("mob_machine_wiring_edge_a")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge) == edge.b",
+            prefix("mob_machine_wiring_edge_b")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}(edge, agent_identity) == edge.a = agent_identity \\/ edge.b = agent_identity",
+            prefix("mob_machine_wiring_edge_contains_identity")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
             "{}({}, {}, agent_identity) ==",
             prefix("mob_machine_member_peer_overlay_complete"),
             local("wiring_edges"),

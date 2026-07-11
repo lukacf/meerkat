@@ -204,6 +204,13 @@ macro_rules! mob_catalog_machine_dsl {
             member_runtime_modes: Map<AgentIdentity, Enum<SpawnPolicyRuntimeMode>>,
             member_peer_ids: Map<AgentIdentity, PeerId>,
             member_peer_endpoints: Map<AgentIdentity, MemberPeerEndpoint>,
+            // Generation-scoped endpoint history retained when durable
+            // session-head recovery rotates a member's comms identity without
+            // changing its runtime generation. The current endpoint is never
+            // present in this set. Historical endpoints authorize exact,
+            // reciprocal stale-trust cleanup on still-wired member edges and
+            // are cleared whenever the generation is replaced or terminal.
+            member_prior_peer_endpoints: Map<AgentIdentity, Set<MemberPeerEndpoint>>,
             pending_session_ingress_detach_runtime_ids: Set<AgentRuntimeId>,
             // Dynamic auto-spawn policy facts. The opaque callback remains a
             // shell observation source, but MobMachine owns whether policy is
@@ -433,6 +440,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_runtime_modes = EmptyMap,
             member_peer_ids = EmptyMap,
             member_peer_endpoints = EmptyMap,
+            member_prior_peer_endpoints = EmptyMap,
             pending_session_ingress_detach_runtime_ids = EmptySet,
             spawn_policy_enabled = false,
             spawn_policy_revision = 0,
@@ -807,6 +815,7 @@ macro_rules! mob_catalog_machine_dsl {
             RestoreRetiringMemberWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             WireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             RegisterMemberPeer { agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint },
+            AuthorizeMemberEndpointMigrationTrustCleanup { edge: WiringEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, retained_peer_endpoint: MemberPeerEndpoint },
             AuthorizeMemberPeerRebind { agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint },
             AuthorizeMemberPeerOverlay { agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint },
             AuthorizeMemberTrustWiring { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
@@ -1133,6 +1142,8 @@ macro_rules! mob_catalog_machine_dsl {
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool },
             RecoverMemberSessionBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId> },
+            RecoverSpawnedMemberPeerEndpoint { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, peer_endpoint: MemberPeerEndpoint },
+            RecoverMemberPeerEndpoint { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, peer_endpoint: MemberPeerEndpoint },
             RecoverRosterMemberReset { agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RecoverRosterMemberRetirementStarted { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>, retiring_peer_endpoint: Option<MemberPeerEndpoint> },
             RecoverRemoteMemberRuntimeRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
@@ -1596,6 +1607,38 @@ macro_rules! mob_catalog_machine_dsl {
             && for_all(id in self.identity_to_runtime.keys(), self.member_runtime_modes.contains_key(id))
             && for_all(id in self.member_profile_names.keys(), self.identity_to_runtime.contains_key(id))
             && for_all(id in self.member_runtime_modes.keys(), self.identity_to_runtime.contains_key(id))
+        }
+
+        invariant member_peer_endpoint_material_is_coherent {
+            for_all(id in self.member_peer_ids.keys(), self.member_peer_endpoints.contains_key(id))
+            && for_all(id in self.member_peer_endpoints.keys(), self.member_peer_ids.contains_key(id))
+            && for_all(id in self.member_peer_endpoints.keys(),
+                self.member_peer_ids.get_cloned(id) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(id).get("value"))))
+        }
+
+        invariant member_prior_peer_endpoints_are_generation_scoped {
+            for_all(id in self.member_prior_peer_endpoints.keys(),
+                self.identity_to_runtime.contains_key(id)
+                && self.member_peer_endpoints.contains_key(id)
+                && self.member_prior_peer_endpoints.get_cloned(id).get("value") != EmptySet
+                && for_all(prior_endpoint in self.member_prior_peer_endpoints.get_cloned(id).get("value"),
+                    mob_machine_member_peer_endpoint_peer_id(prior_endpoint) != mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(id).get("value"))))
+        }
+
+        invariant member_peer_id_ownership_is_global_across_generations {
+            for_all(id in self.member_peer_endpoints.keys(),
+                mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    id,
+                    self.member_peer_endpoints.get_cloned(id).get("value")))
+            && for_all(id in self.member_prior_peer_endpoints.keys(),
+                for_all(prior_endpoint in self.member_prior_peer_endpoints.get_cloned(id).get("value"),
+                    mob_machine_member_peer_id_available_for_identity(
+                        self.member_peer_endpoints,
+                        self.member_prior_peer_endpoints,
+                        id,
+                        prior_endpoint)))
         }
 
         invariant pending_session_ingress_detach_has_session_correlation {
@@ -3537,6 +3580,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_profile_names.insert(agent_identity, self.spawn_profile_authority_profile_names.get_cloned(agent_identity).get("value"));
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
@@ -3859,6 +3905,153 @@ macro_rules! mob_catalog_machine_dsl {
             emit SessionProvisionOperationOwnerAuthorized { agent_identity: agent_identity, session_id: bridge_session_id }
         }
 
+        // Replay-only endpoint recovery for the exact durable runtime/session
+        // binding. A legacy journal may not have registered an endpoint at
+        // spawn, so the fresh arm establishes the first endpoint without
+        // claiming a rotation. Replaying the exact same descriptor is a typed
+        // no-op. Only an actual descriptor change retains the previous
+        // generation endpoint, replaces current authority, and advances the
+        // topology epoch so every previously minted trust authority is stale.
+        transition RecoverSpawnedMemberPeerEndpointFreshRunning {
+            on signal RecoverSpawnedMemberPeerEndpoint { agent_identity, agent_runtime_id, fence_token, generation, peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_peer_not_registered" { self.member_peer_ids.contains_key(agent_identity) == false }
+            guard "member_endpoint_not_registered" { self.member_peer_endpoints.contains_key(agent_identity) == false }
+            guard "prior_endpoint_history_absent" { self.member_prior_peer_endpoints.contains_key(agent_identity) == false }
+            guard "peer_id_available_for_identity" {
+                mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    peer_endpoint)
+            }
+            update {
+                self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
+                self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
+            }
+            to Running
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+        }
+
+        transition RecoverSpawnedMemberPeerEndpointAlreadyCurrentRunning {
+            on signal RecoverSpawnedMemberPeerEndpoint { agent_identity, agent_runtime_id, fence_token, generation, peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "fence_token_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "member_endpoint_registered" { self.member_peer_endpoints.contains_key(agent_identity) == true }
+            guard "current_endpoint_matches" { self.member_peer_endpoints.get_cloned(agent_identity) == Some(peer_endpoint) }
+            guard "current_peer_id_matches" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(peer_endpoint)) }
+            update {}
+            to Running
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+        }
+
+        transition RecoverMemberPeerEndpointFreshRunning {
+            on signal RecoverMemberPeerEndpoint { agent_identity, agent_runtime_id, bridge_session_id, peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(bridge_session_id) }
+            guard "member_peer_not_registered" { self.member_peer_ids.contains_key(agent_identity) == false }
+            guard "member_endpoint_not_registered" { self.member_peer_endpoints.contains_key(agent_identity) == false }
+            guard "prior_endpoint_history_absent" { self.member_prior_peer_endpoints.contains_key(agent_identity) == false }
+            // With no durable baseline endpoint there is no exact old PeerId
+            // authority to remove from already-connected peers. New journals
+            // register before wiring; legacy journals with retained topology
+            // must fail closed instead of treating an arbitrary live
+            // observation as the historical baseline.
+            guard "no_member_wiring_edges" {
+                for_all(edge in self.wiring_edges,
+                    mob_machine_wiring_edge_contains_identity(edge, agent_identity) == false)
+            }
+            guard "no_external_peer_edges" {
+                mob_machine_member_has_no_external_peer_edges(self.external_peer_edges, agent_identity)
+            }
+            guard "peer_id_available_for_identity" {
+                mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    peer_endpoint)
+            }
+            update {
+                self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
+                self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
+            }
+            to Running
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+        }
+
+        transition RecoverMemberPeerEndpointAlreadyCurrentRunning {
+            on signal RecoverMemberPeerEndpoint { agent_identity, agent_runtime_id, bridge_session_id, peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(bridge_session_id) }
+            guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "member_endpoint_registered" { self.member_peer_endpoints.contains_key(agent_identity) == true }
+            guard "current_endpoint_matches_recovered" { self.member_peer_endpoints.get_cloned(agent_identity) == Some(peer_endpoint) }
+            guard "current_peer_id_matches_recovered" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(peer_endpoint)) }
+            update {}
+            to Running
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+        }
+
+        transition RecoverMemberPeerEndpointChangedRunning {
+            on signal RecoverMemberPeerEndpoint { agent_identity, agent_runtime_id, bridge_session_id, peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(bridge_session_id) }
+            guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "member_endpoint_registered" { self.member_peer_endpoints.contains_key(agent_identity) == true }
+            guard "current_peer_id_matches_endpoint" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(agent_identity).get("value"))) }
+            guard "recovered_endpoint_changed" { self.member_peer_endpoints.get_cloned(agent_identity) != Some(peer_endpoint) }
+            // Trust stores are keyed by PeerId and generated mutation
+            // preflight deliberately forbids rewriting descriptor material in
+            // place. Treat same-PeerId descriptor drift as corruption, not a
+            // migration; only a new cryptographic peer identity may rotate.
+            guard "recovered_peer_id_changed" {
+                mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(agent_identity).get("value"))
+                    != mob_machine_member_peer_endpoint_peer_id(peer_endpoint)
+            }
+            guard "recovered_peer_id_available_for_identity" {
+                mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    peer_endpoint)
+            }
+            // External reciprocal trust does not yet have a generated
+            // historical-endpoint cleanup handoff. Refuse the migration rather
+            // than strand an old local PeerId in an external peer's trust
+            // store. Member-to-member edges are covered below.
+            guard "no_external_peer_edges" { mob_machine_member_has_no_external_peer_edges(self.external_peer_edges, agent_identity) }
+            update {
+                self.member_prior_peer_endpoints = mob_machine_member_prior_peer_endpoints_after_migration(
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    self.member_peer_endpoints.get_cloned(agent_identity).get("value"),
+                    peer_endpoint
+                );
+                self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
+                self.member_peer_endpoints.insert(agent_identity, peer_endpoint);
+                self.topology_epoch += 1;
+            }
+            to Running
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+        }
+
         transition RecoverRosterMemberResetRunning {
             on signal RecoverRosterMemberReset { agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token, generation }
             guard { self.lifecycle_phase == Phase::Running }
@@ -3894,6 +4087,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
@@ -4105,6 +4301,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
@@ -4148,6 +4345,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
@@ -5689,6 +5887,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.active_run_count = 0;
             }
             to Running
@@ -5738,6 +5937,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.active_run_count = 0;
             }
             to Running
@@ -5776,6 +5976,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.active_run_count = 0;
             }
             to Stopped
@@ -5807,6 +6008,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
             }
             to Running
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -5836,6 +6038,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
             }
             to Stopped
             emit AppendLifecycleJournal { kind: MobLifecycleJournalKind::MemberRetired, agent_identity: Some(agent_identity), agent_runtime_id: Some(agent_runtime_id), fence_token: None, generation: Some(generation), session_id: session_id }
@@ -5979,6 +6182,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
@@ -6032,6 +6236,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
@@ -6078,6 +6283,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
@@ -6122,6 +6328,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_session_bindings.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_restore_failures.remove(agent_identity);
                 self.member_restore_failure_codes.remove(agent_identity);
                 self.member_revival_pending.remove(agent_identity);
@@ -6233,6 +6440,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
@@ -6290,6 +6500,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, fence_token);
+                self.member_peer_ids.remove(agent_identity);
+                self.member_peer_endpoints.remove(agent_identity);
+                self.member_prior_peer_endpoints.remove(agent_identity);
                 self.member_profile_names.insert(agent_identity, profile_name);
                 self.member_runtime_modes.insert(agent_identity, runtime_mode);
                 self.member_startup_binding_requested.insert(agent_runtime_id);
@@ -6508,6 +6721,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_runtime_modes = EmptyMap;
                 self.member_peer_ids = EmptyMap;
                 self.member_peer_endpoints = EmptyMap;
+                self.member_prior_peer_endpoints = EmptyMap;
                 self.member_startup_binding_requested = EmptySet;
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
@@ -7097,10 +7311,22 @@ macro_rules! mob_catalog_machine_dsl {
             on input RegisterMemberPeer { agent_identity, peer_endpoint }
             guard { self.lifecycle_phase == Phase::Running }
             guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            guard "retiring_endpoint_not_replaced" {
-                self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
-                || self.member_peer_endpoints.contains_key(agent_identity) == false
-                || self.member_peer_endpoints.get_cloned(agent_identity) == Some(peer_endpoint)
+            guard "member_peer_not_registered" { self.member_peer_ids.contains_key(agent_identity) == false }
+            guard "member_endpoint_not_registered" { self.member_peer_endpoints.contains_key(agent_identity) == false }
+            guard "fresh_spawn_or_no_retained_topology" {
+                self.spawn_exec_phase.get_cloned(agent_identity) == Some(SpawnExecPhase::MembershipCommitted)
+                || (
+                    for_all(edge in self.wiring_edges,
+                        mob_machine_wiring_edge_contains_identity(edge, agent_identity) == false)
+                    && mob_machine_member_has_no_external_peer_edges(self.external_peer_edges, agent_identity)
+                )
+            }
+            guard "peer_id_available_for_identity" {
+                mob_machine_member_peer_id_available_for_identity(
+                    self.member_peer_endpoints,
+                    self.member_prior_peer_endpoints,
+                    agent_identity,
+                    peer_endpoint)
             }
             update {
                 self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(peer_endpoint));
@@ -7108,6 +7334,76 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+        }
+
+        transition RegisterMemberPeerAlreadyCurrentRunning {
+            on input RegisterMemberPeer { agent_identity, peer_endpoint }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_present" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "member_endpoint_registered" { self.member_peer_endpoints.contains_key(agent_identity) == true }
+            guard "current_endpoint_matches" { self.member_peer_endpoints.get_cloned(agent_identity) == Some(peer_endpoint) }
+            guard "current_peer_id_matches" { self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(peer_endpoint)) }
+            update {}
+            to Running
+            emit MemberPeerRegistered { agent_identity: agent_identity, peer_id: mob_machine_member_peer_endpoint_peer_id(peer_endpoint) }
+        }
+
+        // A durable endpoint recovery may leave stale reciprocal trust on
+        // each still-wired peer. This authorization is deliberately separate
+        // from ordinary cleanup: the exact current runtime, exact retained
+        // descriptor, live edge, and the other endpoint's current descriptor
+        // all come from MobMachine state. The effect carries the historical
+        // peer id only on the migrated side and the current peer id on the
+        // other side; the existing generated member-unwiring handoff then
+        // mints the reciprocal PublicRemove authority without removing the
+        // topology edge.
+        transition AuthorizeMemberEndpointMigrationTrustCleanupRunning {
+            per_phase [Running, Stopped]
+            on input AuthorizeMemberEndpointMigrationTrustCleanup { edge, agent_identity, agent_runtime_id, retained_peer_endpoint }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            // Normal resume cleans history while the runtime is live. A
+            // retirement retry may already have observed the runtime as gone,
+            // but its exact Retiring tuple remains the durable cleanup anchor
+            // until MemberRetired clears the generation.
+            guard "runtime_live_or_retiring" {
+                self.live_runtime_ids.contains(agent_runtime_id) == true
+                || self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring)
+            }
+            guard "edge_currently_wired" { self.wiring_edges.contains(edge) == true }
+            guard "edge_contains_migrated_member" { mob_machine_wiring_edge_contains_identity(edge, agent_identity) }
+            guard "retained_endpoint_history_present" {
+                self.member_prior_peer_endpoints.contains_key(agent_identity) == true
+                && self.member_prior_peer_endpoints.get_cloned(agent_identity).get("value").contains(retained_peer_endpoint) == true
+            }
+            guard "migrated_current_endpoint_registered" { self.member_peer_endpoints.contains_key(agent_identity) == true }
+            guard "migrated_current_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            guard "migrated_current_endpoint_changed" { self.member_peer_endpoints.get_cloned(agent_identity) != Some(retained_peer_endpoint) }
+            guard "migrated_current_peer_id_changed" {
+                mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(agent_identity).get("value"))
+                    != mob_machine_member_peer_endpoint_peer_id(retained_peer_endpoint)
+            }
+            guard "migrated_current_peer_id_matches_endpoint" {
+                self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(agent_identity).get("value")))
+            }
+            guard "edge_a_current_peer_registered" { self.member_peer_ids.contains_key(mob_machine_wiring_edge_a(edge)) == true }
+            guard "edge_b_current_peer_registered" { self.member_peer_ids.contains_key(mob_machine_wiring_edge_b(edge)) == true }
+            guard "edge_a_current_endpoint_registered" { self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_a(edge)) == true }
+            guard "edge_b_current_endpoint_registered" { self.member_peer_endpoints.contains_key(mob_machine_wiring_edge_b(edge)) == true }
+            guard "edge_a_current_peer_id_matches_endpoint" {
+                self.member_peer_ids.get_cloned(mob_machine_wiring_edge_a(edge)) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(mob_machine_wiring_edge_a(edge)).get("value")))
+            }
+            guard "edge_b_current_peer_id_matches_endpoint" {
+                self.member_peer_ids.get_cloned(mob_machine_wiring_edge_b(edge)) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_peer_endpoints.get_cloned(mob_machine_wiring_edge_b(edge)).get("value")))
+            }
+            update {}
+            to Running
+            emit MemberTrustUnwiringRequested {
+                edge: edge,
+                a_peer_id: mob_machine_member_endpoint_migration_cleanup_peer_id(mob_machine_wiring_edge_a(edge), agent_identity, retained_peer_endpoint, self.member_peer_ids),
+                b_peer_id: mob_machine_member_endpoint_migration_cleanup_peer_id(mob_machine_wiring_edge_b(edge), agent_identity, retained_peer_endpoint, self.member_peer_ids),
+                epoch: self.topology_epoch
+            }
         }
 
         transition AuthorizeMemberPeerRebindRunning {
@@ -10412,6 +10708,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_runtime_modes = EmptyMap;
                 self.member_peer_ids = EmptyMap;
                 self.member_peer_endpoints = EmptyMap;
+                self.member_prior_peer_endpoints = EmptyMap;
                 self.runtime_retire_refusal_codes = EmptyMap;
                 self.runtime_retire_refusal_reasons = EmptyMap;
                 self.runtime_retire_pending_sessions = EmptyMap;
@@ -10979,6 +11276,91 @@ macro_rules! mob_catalog_machine_dsl {
 
         fn mob_machine_member_peer_endpoint_peer_id(endpoint: &MemberPeerEndpoint) -> PeerId {
             endpoint.peer_id.clone()
+        }
+
+        fn mob_machine_member_peer_id_available_for_identity(
+            current_endpoints: &std::collections::BTreeMap<AgentIdentity, MemberPeerEndpoint>,
+            prior_endpoints: &std::collections::BTreeMap<AgentIdentity, std::collections::BTreeSet<MemberPeerEndpoint>>,
+            agent_identity: &AgentIdentity,
+            candidate_endpoint: &MemberPeerEndpoint,
+        ) -> bool {
+            current_endpoints.iter().all(|(other_identity, endpoint)| {
+                other_identity == agent_identity
+                    || endpoint.peer_id != candidate_endpoint.peer_id
+            }) && prior_endpoints.iter().all(|(other_identity, endpoints)| {
+                other_identity == agent_identity
+                    || endpoints
+                        .iter()
+                        .all(|endpoint| endpoint.peer_id != candidate_endpoint.peer_id)
+            })
+        }
+
+        fn mob_machine_member_has_no_external_peer_edges(
+            external_peer_edges: &std::collections::BTreeSet<ExternalPeerEdge>,
+            agent_identity: &AgentIdentity,
+        ) -> bool {
+            external_peer_edges
+                .iter()
+                .all(|edge| edge.local != *agent_identity)
+        }
+
+        fn mob_machine_member_prior_peer_endpoints_after_migration(
+            all_prior_endpoints: &std::collections::BTreeMap<AgentIdentity, std::collections::BTreeSet<MemberPeerEndpoint>>,
+            agent_identity: &AgentIdentity,
+            current_endpoint: &MemberPeerEndpoint,
+            next_endpoint: &MemberPeerEndpoint,
+        ) -> std::collections::BTreeMap<AgentIdentity, std::collections::BTreeSet<MemberPeerEndpoint>> {
+            let mut all_prior_endpoints = all_prior_endpoints.clone();
+            {
+                let prior_endpoints = all_prior_endpoints
+                    .entry(agent_identity.clone())
+                    .or_default();
+                prior_endpoints.insert(current_endpoint.clone());
+                // Rotating back to a previously used endpoint makes it
+                // current again. Trust stores are keyed by PeerId, so remove
+                // every descriptor for the next PeerId rather than only an
+                // exactly equal descriptor; cleanup must never remove the live
+                // trust row through an older metadata shape of the same key.
+                prior_endpoints.retain(|endpoint| endpoint.peer_id != next_endpoint.peer_id);
+            }
+            if all_prior_endpoints
+                .get(agent_identity)
+                .is_some_and(std::collections::BTreeSet::is_empty)
+            {
+                all_prior_endpoints.remove(agent_identity);
+            }
+            all_prior_endpoints
+        }
+
+        fn mob_machine_wiring_edge_a(edge: &WiringEdge) -> AgentIdentity {
+            edge.a.clone()
+        }
+
+        fn mob_machine_wiring_edge_b(edge: &WiringEdge) -> AgentIdentity {
+            edge.b.clone()
+        }
+
+        fn mob_machine_wiring_edge_contains_identity(
+            edge: &WiringEdge,
+            agent_identity: &AgentIdentity,
+        ) -> bool {
+            edge.a == *agent_identity || edge.b == *agent_identity
+        }
+
+        fn mob_machine_member_endpoint_migration_cleanup_peer_id(
+            endpoint_identity: &AgentIdentity,
+            migrated_identity: &AgentIdentity,
+            retained_peer_endpoint: &MemberPeerEndpoint,
+            current_peer_ids: &std::collections::BTreeMap<AgentIdentity, PeerId>,
+        ) -> PeerId {
+            if endpoint_identity == migrated_identity {
+                retained_peer_endpoint.peer_id.clone()
+            } else {
+                current_peer_ids
+                    .get(endpoint_identity)
+                    .expect("migration cleanup guards require the other member's current peer id")
+                    .clone()
+            }
         }
 
         fn mob_machine_external_peer_endpoint_as_member(

@@ -324,6 +324,30 @@ impl MobOpsAdapter {
         }
     }
 
+    fn require_exact_existing_peer_handle(
+        registry: &Arc<dyn OpsLifecycleRegistry>,
+        operation_id: &OperationId,
+        requested_peer_handle: &OperationPeerHandle,
+    ) -> Result<(), MobError> {
+        let snapshot = registry
+            .snapshot(operation_id)
+            .map_err(|error| MobError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "operation '{operation_id}' reported already peer-ready but has no lifecycle snapshot"
+                ))
+            })?;
+        match snapshot.peer_handle {
+            Some(existing) if &existing == requested_peer_handle => Ok(()),
+            Some(existing) => Err(MobError::Internal(format!(
+                "operation '{operation_id}' is already peer-ready with a different handle: existing={existing:?}, requested={requested_peer_handle:?}"
+            ))),
+            None => Err(MobError::Internal(format!(
+                "operation '{operation_id}' reported already peer-ready without a persisted peer handle"
+            ))),
+        }
+    }
+
     fn format_operation_ids(ids: &[OperationId]) -> String {
         ids.iter()
             .map(ToString::to_string)
@@ -641,22 +665,31 @@ impl MobOpsAdapter {
             operation_id = %operation_id,
             "MobOpsAdapter::mark_member_peer_ready applying peer ready"
         );
-        match registry.peer_ready(
-            &operation_id,
-            OperationPeerHandle {
-                peer_name: meerkat_core::comms::PeerName::new(peer_name)
-                    .map_err(|e| MobError::Internal(format!("invalid peer name: {e}")))?,
-                trusted_peer,
-            },
-        ) {
-            Ok(()) | Err(OpsLifecycleError::AlreadyPeerReady(_)) => Ok(()),
+        let requested_peer_handle = OperationPeerHandle {
+            peer_name: meerkat_core::comms::PeerName::new(peer_name)
+                .map_err(|e| MobError::Internal(format!("invalid peer name: {e}")))?,
+            trusted_peer,
+        };
+        match registry.peer_ready(&operation_id, requested_peer_handle.clone()) {
+            Ok(()) => Ok(()),
+            Err(OpsLifecycleError::AlreadyPeerReady(_)) => {
+                Self::require_exact_existing_peer_handle(
+                    &registry,
+                    &operation_id,
+                    &requested_peer_handle,
+                )
+            }
             Err(error) => {
                 if Self::invalid_transition_is_idempotent(
                     &registry,
                     OperationLifecycleAction::PeerReady,
                     &error,
                 )? {
-                    Ok(())
+                    Self::require_exact_existing_peer_handle(
+                        &registry,
+                        &operation_id,
+                        &requested_peer_handle,
+                    )
                 } else {
                     Err(MobError::Internal(error.to_string()))
                 }
@@ -698,22 +731,31 @@ impl MobOpsAdapter {
             member_key = ?member_key,
             "MobOpsAdapter::mark_member_peer_ready_for_operation applying peer ready"
         );
-        match registry.peer_ready(
-            operation_id,
-            OperationPeerHandle {
-                peer_name: meerkat_core::comms::PeerName::new(peer_name)
-                    .map_err(|e| MobError::Internal(format!("invalid peer name: {e}")))?,
-                trusted_peer,
-            },
-        ) {
-            Ok(()) | Err(OpsLifecycleError::AlreadyPeerReady(_)) => Ok(()),
+        let requested_peer_handle = OperationPeerHandle {
+            peer_name: meerkat_core::comms::PeerName::new(peer_name)
+                .map_err(|e| MobError::Internal(format!("invalid peer name: {e}")))?,
+            trusted_peer,
+        };
+        match registry.peer_ready(operation_id, requested_peer_handle.clone()) {
+            Ok(()) => Ok(()),
+            Err(OpsLifecycleError::AlreadyPeerReady(_)) => {
+                Self::require_exact_existing_peer_handle(
+                    &registry,
+                    operation_id,
+                    &requested_peer_handle,
+                )
+            }
             Err(error) => {
                 if Self::invalid_transition_is_idempotent(
                     &registry,
                     OperationLifecycleAction::PeerReady,
                     &error,
                 )? {
-                    Ok(())
+                    Self::require_exact_existing_peer_handle(
+                        &registry,
+                        operation_id,
+                        &requested_peer_handle,
+                    )
                 } else {
                     Err(MobError::Internal(error.to_string()))
                 }
@@ -932,6 +974,97 @@ mod tests {
             .expect("snapshot projection")
             .expect("snapshot");
         assert_eq!(retired_snapshot.status, OperationStatus::Retired);
+    }
+
+    #[tokio::test]
+    async fn operation_peer_ready_retry_requires_the_exact_existing_handle() {
+        let adapter = MobOpsAdapter::new();
+        let owner_bridge_session_id = SessionId::new();
+        let session_id = SessionId::new();
+        let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter.bind_session_registry(
+            session_id.clone(),
+            owner_bridge_session_id,
+            Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+        );
+        let operation_id = adapter
+            .mark_member_provisioned(&session_id, "mob-a/orchestrator/member-alpha")
+            .await
+            .expect("register member");
+        let peer_name = "mob-a/orchestrator/member-alpha";
+        let exact_peer = TrustedPeerDescriptor::test_only_unsigned(
+            peer_name,
+            "00000000-0000-4000-8000-000000000002",
+            "inproc://member-alpha",
+        )
+        .expect("exact trusted peer");
+
+        adapter
+            .mark_member_peer_ready_for_operation(
+                &member_ref,
+                &operation_id,
+                peer_name,
+                exact_peer.clone(),
+            )
+            .expect("first peer-ready publication");
+        adapter
+            .mark_member_peer_ready_for_operation(
+                &member_ref,
+                &operation_id,
+                peer_name,
+                exact_peer.clone(),
+            )
+            .expect("same exact peer handle is idempotent");
+        adapter
+            .mark_member_peer_ready(&member_ref, peer_name, exact_peer.clone())
+            .await
+            .expect("resolved-operation path also accepts the exact existing handle");
+
+        let different_peer = TrustedPeerDescriptor::test_only_unsigned(
+            peer_name,
+            "00000000-0000-4000-8000-000000000003",
+            "inproc://member-alpha-rebound",
+        )
+        .expect("different trusted peer");
+        let resolved_error = adapter
+            .mark_member_peer_ready(&member_ref, peer_name, different_peer.clone())
+            .await
+            .expect_err("resolved-operation path must reject a different peer handle");
+        assert!(
+            resolved_error
+                .to_string()
+                .contains("already peer-ready with a different handle"),
+            "unexpected resolved-operation mismatch error: {resolved_error}"
+        );
+        let error = adapter
+            .mark_member_peer_ready_for_operation(
+                &member_ref,
+                &operation_id,
+                peer_name,
+                different_peer,
+            )
+            .expect_err("different peer handle must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("already peer-ready with a different handle"),
+            "unexpected mismatch error: {error}"
+        );
+
+        let snapshot = registry
+            .snapshot(&operation_id)
+            .expect("snapshot projection")
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.peer_handle,
+            Some(OperationPeerHandle {
+                peer_name: meerkat_core::comms::PeerName::new(peer_name)
+                    .expect("canonical peer name"),
+                trusted_peer: exact_peer,
+            }),
+            "failed retry must not replace the operation's exact peer handle"
+        );
     }
 
     #[tokio::test]

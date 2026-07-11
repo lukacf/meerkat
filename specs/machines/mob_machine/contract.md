@@ -124,6 +124,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_runtime_modes`: `Map<AgentIdentity, SpawnPolicyRuntimeMode>`
 - `member_peer_ids`: `Map<AgentIdentity, PeerId>`
 - `member_peer_endpoints`: `Map<AgentIdentity, MemberPeerEndpoint>`
+- `member_prior_peer_endpoints`: `Map<AgentIdentity, Set<MemberPeerEndpoint>>`
 - `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
 - `spawn_policy_enabled`: `Bool`
 - `spawn_policy_revision`: `u64`
@@ -290,6 +291,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CleanupRetiringMemberWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RestoreRetiringMemberWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RegisterMemberPeer`(agent_identity: AgentIdentity, peer_endpoint: MemberPeerEndpoint)
+- `AuthorizeMemberEndpointMigrationTrustCleanup`(edge: WiringEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, retained_peer_endpoint: MemberPeerEndpoint)
 - `AuthorizeMemberPeerRebind`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
 - `AuthorizeMemberPeerOverlay`(agent_identity: AgentIdentity, expected_peer_endpoint: MemberPeerEndpoint)
 - `AuthorizeMemberTrustWiring`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
@@ -382,6 +384,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool)
 - `RecoverMemberSessionBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, replacing: Option<SessionId>)
+- `RecoverSpawnedMemberPeerEndpoint`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, peer_endpoint: MemberPeerEndpoint)
+- `RecoverMemberPeerEndpoint`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, bridge_session_id: SessionId, peer_endpoint: MemberPeerEndpoint)
 - `RecoverRosterMemberReset`(agent_identity: AgentIdentity, previous_agent_runtime_id: AgentRuntimeId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RecoverRosterMemberRetirementStarted`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId>, retiring_peer_endpoint: Option<MemberPeerEndpoint>)
 - `RecoverRemoteMemberRuntimeRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
@@ -629,6 +633,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `bindings_require_known_identity`
 - `identity_runtime_material_matches_runtime_binding`
 - `member_spawn_material_matches_runtime_binding`
+- `member_peer_endpoint_material_is_coherent`
+- `member_prior_peer_endpoints_are_generation_scoped`
+- `member_peer_id_ownership_is_global_across_generations`
 - `pending_session_ingress_detach_has_session_correlation`
 - `remote_runtime_retired_is_still_retiring`
 - `remote_supervisor_revoked_has_retired_runtime_anchor`
@@ -3239,6 +3246,86 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SessionProvisionOperationOwnerAuthorized`
 - To: `Running`
 
+### `RecoverSpawnedMemberPeerEndpointFreshRunning`
+- From: `Running`
+- On: `RecoverSpawnedMemberPeerEndpoint`(agent_identity, agent_runtime_id, fence_token, generation, peer_endpoint)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_peer_not_registered`
+  - `member_endpoint_not_registered`
+  - `prior_endpoint_history_absent`
+  - `peer_id_available_for_identity`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
+### `RecoverSpawnedMemberPeerEndpointAlreadyCurrentRunning`
+- From: `Running`
+- On: `RecoverSpawnedMemberPeerEndpoint`(agent_identity, agent_runtime_id, fence_token, generation, peer_endpoint)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `fence_token_matches`
+  - `generation_matches`
+  - `member_peer_registered`
+  - `member_endpoint_registered`
+  - `current_endpoint_matches`
+  - `current_peer_id_matches`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
+### `RecoverMemberPeerEndpointFreshRunning`
+- From: `Running`
+- On: `RecoverMemberPeerEndpoint`(agent_identity, agent_runtime_id, bridge_session_id, peer_endpoint)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `member_not_retiring`
+  - `session_binding_matches`
+  - `member_peer_not_registered`
+  - `member_endpoint_not_registered`
+  - `prior_endpoint_history_absent`
+  - `no_member_wiring_edges`
+  - `no_external_peer_edges`
+  - `peer_id_available_for_identity`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
+### `RecoverMemberPeerEndpointAlreadyCurrentRunning`
+- From: `Running`
+- On: `RecoverMemberPeerEndpoint`(agent_identity, agent_runtime_id, bridge_session_id, peer_endpoint)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `member_not_retiring`
+  - `session_binding_matches`
+  - `member_peer_registered`
+  - `member_endpoint_registered`
+  - `current_endpoint_matches_recovered`
+  - `current_peer_id_matches_recovered`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
+### `RecoverMemberPeerEndpointChangedRunning`
+- From: `Running`
+- On: `RecoverMemberPeerEndpoint`(agent_identity, agent_runtime_id, bridge_session_id, peer_endpoint)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_recovered`
+  - `member_not_retiring`
+  - `session_binding_matches`
+  - `member_peer_registered`
+  - `member_endpoint_registered`
+  - `current_peer_id_matches_endpoint`
+  - `recovered_endpoint_changed`
+  - `recovered_peer_id_changed`
+  - `recovered_peer_id_available_for_identity`
+  - `no_external_peer_edges`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
 ### `RecoverRosterMemberResetRunning`
 - From: `Running`
 - On: `RecoverRosterMemberReset`(agent_identity, previous_agent_runtime_id, agent_runtime_id, fence_token, generation)
@@ -5601,9 +5688,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RegisterMemberPeer`(agent_identity, peer_endpoint)
 - Guards:
   - `identity_present`
-  - `retiring_endpoint_not_replaced`
+  - `member_peer_not_registered`
+  - `member_endpoint_not_registered`
+  - `fresh_spawn_or_no_retained_topology`
+  - `peer_id_available_for_identity`
 - Emits: `MemberPeerRegistered`
 - To: `Running`
+
+### `RegisterMemberPeerAlreadyCurrentRunning`
+- From: `Running`
+- On: `RegisterMemberPeer`(agent_identity, peer_endpoint)
+- Guards:
+  - `identity_present`
+  - `member_peer_registered`
+  - `member_endpoint_registered`
+  - `current_endpoint_matches`
+  - `current_peer_id_matches`
+- Emits: `MemberPeerRegistered`
+- To: `Running`
+
+### `AuthorizeMemberEndpointMigrationTrustCleanupRunningRunning`
+- From: `Running`
+- On: `AuthorizeMemberEndpointMigrationTrustCleanup`(edge, agent_identity, agent_runtime_id, retained_peer_endpoint)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live_or_retiring`
+  - `edge_currently_wired`
+  - `edge_contains_migrated_member`
+  - `retained_endpoint_history_present`
+  - `migrated_current_endpoint_registered`
+  - `migrated_current_peer_registered`
+  - `migrated_current_endpoint_changed`
+  - `migrated_current_peer_id_changed`
+  - `migrated_current_peer_id_matches_endpoint`
+  - `edge_a_current_peer_registered`
+  - `edge_b_current_peer_registered`
+  - `edge_a_current_endpoint_registered`
+  - `edge_b_current_endpoint_registered`
+  - `edge_a_current_peer_id_matches_endpoint`
+  - `edge_b_current_peer_id_matches_endpoint`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Running`
+
+### `AuthorizeMemberEndpointMigrationTrustCleanupRunningStopped`
+- From: `Stopped`
+- On: `AuthorizeMemberEndpointMigrationTrustCleanup`(edge, agent_identity, agent_runtime_id, retained_peer_endpoint)
+- Guards:
+  - `identity_runtime_matches`
+  - `runtime_live_or_retiring`
+  - `edge_currently_wired`
+  - `edge_contains_migrated_member`
+  - `retained_endpoint_history_present`
+  - `migrated_current_endpoint_registered`
+  - `migrated_current_peer_registered`
+  - `migrated_current_endpoint_changed`
+  - `migrated_current_peer_id_changed`
+  - `migrated_current_peer_id_matches_endpoint`
+  - `edge_a_current_peer_registered`
+  - `edge_b_current_peer_registered`
+  - `edge_a_current_endpoint_registered`
+  - `edge_b_current_endpoint_registered`
+  - `edge_a_current_peer_id_matches_endpoint`
+  - `edge_b_current_peer_id_matches_endpoint`
+- Emits: `MemberTrustUnwiringRequested`
+- To: `Stopped`
 
 ### `AuthorizeMemberPeerRebindRunning`
 - From: `Running`

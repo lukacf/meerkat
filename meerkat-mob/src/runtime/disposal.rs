@@ -68,6 +68,8 @@ pub(super) struct DisposalContext {
     pub machine_wired_peer_identities: BTreeSet<crate::ids::AgentIdentity>,
     pub trust_unwire_authority_by_peer:
         BTreeMap<crate::ids::AgentIdentity, CommsTrustMutationAuthority>,
+    pub historical_trust_unwire_authorities_by_peer:
+        BTreeMap<crate::ids::AgentIdentity, Vec<(String, CommsTrustMutationAuthority)>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +230,7 @@ mod tests {
             preserve_machine_topology: false,
             machine_wired_peer_identities: BTreeSet::new(),
             trust_unwire_authority_by_peer: BTreeMap::new(),
+            historical_trust_unwire_authorities_by_peer: BTreeMap::new(),
         }
     }
 

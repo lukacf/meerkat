@@ -56,6 +56,18 @@ else
   bad "npm is not installed; SDK publish checks need npm"
 fi
 
+release_python="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3 2>/dev/null || true)}"
+if [[ -z "${release_python}" ]]; then
+  bad "release hook Python is missing; install Python >= 3.10"
+elif "${release_python}" -c \
+  'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+  release_python_version="$("${release_python}" -c 'import platform; print(platform.python_version())')"
+  pass "release hook Python ${release_python_version} satisfies >= 3.10"
+else
+  release_python_version="$("${release_python}" --version 2>&1 || true)"
+  bad "release hook Python '${release_python}' is too old (${release_python_version:-unknown}); require >= 3.10"
+fi
+
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   gh_user="$(gh api user --jq '.login' 2>/dev/null || true)"
   owner_release_account=false

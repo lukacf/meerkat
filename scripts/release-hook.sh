@@ -23,14 +23,30 @@ case "${DRY_RUN:-}" in
         ;;
 esac
 
+# cargo-release invokes this hook from individual crate directories. Resolve
+# caller-provided relative interpreter paths and all later outputs from the
+# workspace root.
+cd "$ROOT"
+
+# Keep the release path on the same Python floor as the SDK/codegen targets.
+# macOS can place an older system `python3` ahead of Homebrew in PATH, so prefer
+# the supported python3.11 interpreter unless the caller selected one explicitly.
+PYTHON="${PYTHON:-$(command -v python3.11 2>/dev/null || command -v python3 2>/dev/null || true)}"
+if [[ -z "$PYTHON" ]] || ! "$PYTHON" -c \
+    'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    selected_version="unavailable"
+    if [[ -n "$PYTHON" ]]; then
+        selected_version="$("$PYTHON" --version 2>&1 || true)"
+    fi
+    echo "error: release hook requires Python >= 3.10; selected '${PYTHON:-missing}' (${selected_version:-unavailable})" >&2
+    exit 1
+fi
+
 # cargo-release runs this hook per-crate. Only execute once.
 SENTINEL="$ROOT/.release-hook-done"
 if [[ -f "$SENTINEL" ]] && [[ "$(cat "$SENTINEL")" == "$VERSION" ]]; then
     exit 0
 fi
-
-# All commands must run from workspace root (emit-schemas writes to ./artifacts/)
-cd "$ROOT"
 
 echo "==> Release hook: syncing SDK versions to $VERSION"
 
@@ -55,7 +71,7 @@ sed "/pub const CURRENT/,/};/{
     s/minor: [0-9]*/minor: $V_MINOR/
     s/patch: [0-9]*/patch: $V_PATCH/
 }" "$VERSION_RS" > "${VERSION_RS}.tmp" && mv "${VERSION_RS}.tmp" "$VERSION_RS"
-VERSION_PRERELEASE="$V_PRE" python3 - "$VERSION_RS" <<'PY'
+VERSION_PRERELEASE="$V_PRE" "$PYTHON" - "$VERSION_RS" <<'PY'
 from pathlib import Path
 import os
 import re
@@ -84,7 +100,7 @@ echo "==> Emitting schemas..."
 "$CARGO" run -p meerkat-contracts --features schema --bin emit-schemas
 
 echo "==> Running SDK codegen..."
-python3 "$ROOT/tools/sdk-codegen/generate.py"
+"$PYTHON" "$ROOT/tools/sdk-codegen/generate.py"
 
 echo "==> Regenerating BuildBuddy BUILD files..."
 make buildbuddy-generate

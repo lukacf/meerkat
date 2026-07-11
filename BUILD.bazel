@@ -556,6 +556,7 @@ test_suite(
         "//xtask:effect_authority_test",
         "//xtask:no_provider_data_in_core_test",
         "//xtask:protocol_codegen_drift_test",
+        "//xtask:release_workflow_asset_manifest_test",
         "//xtask:rmat_audit_test",
         "//xtask:rmat_strict_test",
         "//xtask:runtime_authority_bypass_test",

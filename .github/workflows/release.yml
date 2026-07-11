@@ -838,28 +838,51 @@ jobs:
             echo "release_tag is required for release asset recovery" >&2
             exit 1
           fi
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort > manifest_files.txt
-          if [[ ! -s manifest_files.txt ]]; then
-            echo "No release artifacts found" >&2
-            exit 1
-          fi
-          xargs sha256sum < manifest_files.txt > checksums.sha256
           python3 - <<'PY'
-          import os
+          import hashlib
           import json
+          import os
           from pathlib import Path
 
-          paths = [
-              p.as_posix().lstrip("./")
-              for p in sorted(Path(".").rglob("*"))
-              if p.is_file() and (p.name.endswith(".tar.gz") or p.name.endswith(".zip"))
-          ]
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          archive_paths = sorted(
+              (
+                  path
+                  for path in Path(".").rglob("*")
+                  if path.is_file()
+                  and (path.name.endswith(".tar.gz") or path.name.endswith(".zip"))
+              ),
+              key=lambda path: (path.name, path.as_posix()),
+          )
+          if not archive_paths:
+              raise SystemExit("No release artifacts found")
+
+          artifacts_by_name = {}
+          for path in archive_paths:
+              public_name = path.name
+              previous = artifacts_by_name.get(public_name)
+              if previous is not None:
+                  raise SystemExit(
+                      "duplicate release asset basename "
+                      f"{public_name!r}: {previous.as_posix()} and {path.as_posix()}"
+                  )
+              artifacts_by_name[public_name] = path
+
+          with open("checksums.sha256", "w", encoding="utf-8") as checksums:
+              for public_name, path in artifacts_by_name.items():
+                  checksums.write(f"{sha256(path)}  {public_name}\n")
 
           tag = os.environ["RELEASE_TAG"]
           manifest = {
               "version": tag.lstrip("v"),
               "tag": tag,
-              "artifacts": paths,
+              "artifacts": list(artifacts_by_name),
               "checksums": "checksums.sha256",
           }
 

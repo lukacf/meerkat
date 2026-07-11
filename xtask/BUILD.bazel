@@ -634,6 +634,69 @@ rust_test(
 )
 
 rust_test(
+    name = "release_workflow_asset_manifest_test",
+    aliases = aliases(
+        package_name = "xtask",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "release_workflow_asset_manifest",
+    crate_root = "tests/release_workflow_asset_manifest.rs",
+    crate_features = [
+        "machine-authority",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/release_workflow_asset_manifest.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.28",
+        "CARGO_BIN_NAME": "release_workflow_asset_manifest",
+        "CARGO_MANIFEST_DIR": "./xtask",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+        "//:github_workflows",
+        "tests/rustfmt_host.sh",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+        "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+        "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
+        "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
+        "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "xtask",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-machine-codegen:meerkat_machine_codegen",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//xtask:xtask",
+        "@crates//:which-7.0.3",
+    ] + all_crate_deps(
+        package_name = "xtask",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "rmat_audit_test",
     aliases = aliases(
         package_name = "xtask",
@@ -928,6 +991,7 @@ test_suite(
         ":effect_authority_test",
         ":no_provider_data_in_core_test",
         ":protocol_codegen_drift_test",
+        ":release_workflow_asset_manifest_test",
         ":rmat_audit_test",
         ":rmat_strict_test",
         ":runtime_authority_bypass_test",

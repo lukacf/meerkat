@@ -11,14 +11,61 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures (enforced by the `semver-breaks` release gate
 via cargo-semver-checks against the published baselines).
 
+## [0.7.28] - 2026-07-11
+
+### Breaking
+
+- `meerkat_contracts::LiveOpenParams` gained the optional `seed_max_chars`
+  field. Rust struct literals must initialize it; omission on the wire retains
+  complete-history realtime seeding.
+- `RealtimeSessionOpenConfig` and `meerkat_core::LiveProjectionSnapshot`
+  gained `canonical_user_image_decoded_bytes`; downstream struct literals
+  must initialize the new image-budget sidecar.
+- `ReasoningEffort` and `WireReasoningEffort` gained `Max`;
+  `OpenAiProviderTag` and `WireProviderTag::OpenAi` gained `reasoning_mode`,
+  `reasoning_context`, `text_verbosity`, and `prompt_cache_options`; and
+  `ModelCapabilities` gained `openai_responses_params`.
+- Generated MobMachine state and exhaustive alphabets gained
+  `member_prior_peer_endpoints`,
+  `AuthorizeMemberEndpointMigrationTrustCleanup`,
+  `RecoverSpawnedMemberPeerEndpoint`, `RecoverMemberPeerEndpoint`, and their
+  associated kind and transition variants. Downstream state literals and
+  exhaustive matches must handle them.
+
+### Added
+
+- Added OpenAI GPT-5.6 Sol, Terra, Luna, and the official `gpt-5.6` Sol alias
+  with 1.05M context, 128K output, multimodal and tool capabilities, `max`
+  reasoning effort, reasoning mode/context, text verbosity, and request-wide
+  prompt-cache controls.
+- `live/open.seed_max_chars` can now bound provider seed history to an
+  affordable complete-turn suffix while preserving enabled root context, an
+  affordable compaction summary, identity/tombstone/rewrite-generation and
+  canonical-image sidecars, and explicit degraded-continuity reporting.
+  Omission preserves complete-history behavior and disabled roots remain
+  disabled.
+
+### Changed
+
+- `gpt-5.6-sol` is now the OpenAI provider default and Meerkat global catalog
+  default. Existing explicit GPT-5.5 pins remain honored. GPT-5.6 is a limited
+  preview; deployments without access should explicitly retain GPT-5.5.
+
+### Fixed
+
+- Cold restart and snapshotless session-head recovery now replay each member's
+  exact generation peer endpoint from private, legacy-v8-compatible metadata,
+  retain prior endpoints across same-generation rotation, and preserve the
+  authority needed to clean them during retirement and crash retry.
+- Endpoint recovery and retirement now fail closed on same-`PeerId`
+  descriptor drift, cross-member `PeerId` reuse, and external topology
+  without migration provenance; trust-repair batches preflight before mutation,
+  and local or peer-only retirement removes historical and current trust rows.
+
 ## [0.7.27] - 2026-07-10
 
 ### Breaking
 
-- `meerkat_contracts::LiveOpenParams` gained the optional
-  `seed_max_chars` field. Downstream Rust struct literals must initialize it;
-  omitting the field on the wire preserves the complete-history realtime seed,
-  while a positive value requests a bounded complete-turn suffix.
 - `meerkat_contracts::RealtimeInputKind` gained the exhaustive `Image`
   variant and `meerkat_contracts::RealtimeInputChunk` gained the exhaustive
   `ImageChunk(RealtimeImageChunk)` variant. Downstream Rust matches over
@@ -55,12 +102,11 @@ via cargo-semver-checks against the published baselines).
   `(&RealtimeExternalSessionTarget, &RealtimeSessionOpenConfig)` instead of
   separate identity and turning-mode arguments. `RealtimeSessionOpenConfig`
   struct literals must also initialize `user_content_identities`,
-  `user_content_tombstones`, `canonical_user_image_decoded_bytes`, and
-  `transcript_rewrite_generation`.
+  `user_content_tombstones`, and `transcript_rewrite_generation`.
 - `meerkat_core::LiveProjectionSnapshot` struct literals must initialize the
-  new `user_content_identities`, `user_content_tombstones`,
-  `canonical_user_image_decoded_bytes`, and `transcript_rewrite_generation`
-  fields used by exact-retry, image-budget, and live rewrite guards.
+  new `user_content_identities`, `user_content_tombstones`, and
+  `transcript_rewrite_generation` fields used by exact-retry and live rewrite
+  guards.
 - `WireLiveAdapterObservation::RealtimeTranscript.event` now uses the
   public-safe `WireRealtimeTranscriptEvent` Rust type instead of the internal
   `RealtimeTranscriptEvent`. Its serialized/schema shape preserves the public
@@ -112,18 +158,9 @@ via cargo-semver-checks against the published baselines).
   reject malformed required fields, missing result arrays, and non-object
   top-level results as typed `INVALID_RESPONSE` failures instead of
   synthesizing empty/default records.
-- `ReasoningEffort` and `WireReasoningEffort` add the `Max` variant;
-  `OpenAiProviderTag` and `WireProviderTag::OpenAi` add `reasoning_mode`,
-  `reasoning_context`, `text_verbosity`, and `prompt_cache_options`; and
-  `ModelCapabilities` adds `openai_responses_params`. Downstream exhaustive
-  matches and struct literals must handle or initialize the new members.
 
 ### Added
 
-- OpenAI GPT-5.6 Sol, Terra, Luna, and the official `gpt-5.6` Sol alias are
-  cataloged with their 1.05M context / 128K output limits, multimodal and tool
-  capabilities, the `max` reasoning-effort tier, reasoning mode/context, text
-  verbosity, and request-wide prompt-cache options.
 - Image input on the OpenAI Realtime live channel: `gpt-realtime-2` accepts
   still images, and the live surface now carries them end to end — a
   `LiveInputChunk::Image` (wire `kind: "image"`, base64 data) renders as a
@@ -173,16 +210,6 @@ via cargo-semver-checks against the published baselines).
   and deadline bounds, and token authority must resolve within 10 seconds.
   Inline images are not a direct-WebSocket input and must use the 64
   MiB-bounded JSON-RPC `live/send_input` control plane.
-
-### Changed
-
-- `gpt-5.6-sol` is now both the OpenAI provider default and Meerkat's global
-  catalog default. Fresh or unset configuration and newly synthesized OpenAI
-  OAuth bindings select Sol; existing explicit GPT-5.5 agent, provider,
-  binding, and per-session pins remain honored. GPT-5.6 is currently a limited
-  preview, so this default requires access for the relevant API organization or
-  Codex workspace; other users should explicitly configure GPT-5.5 until
-  access broadens.
 
 ### Fixed
 

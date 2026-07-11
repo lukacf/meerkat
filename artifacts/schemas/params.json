@@ -5091,6 +5091,70 @@
   },
   "ForkSessionAtParams": {
     "$defs": {
+      "ToolAccessPolicy": {
+        "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "description": "Inherit all tools from parent",
+            "properties": {
+              "type": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only allow specific tools",
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Block specific tools",
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolName": {
+        "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
+        "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
       "TranscriptEditRunningBehavior": {
         "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
         "oneOf": [
@@ -5117,6 +5181,16 @@
       },
       "session_id": {
         "type": "string"
+      },
+      "tool_access_policy": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ToolAccessPolicy"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
@@ -5923,6 +5997,58 @@
         ],
         "type": "object"
       },
+      "ToolAccessPolicy": {
+        "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "description": "Inherit all tools from parent",
+            "properties": {
+              "type": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only allow specific tools",
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Block specific tools",
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ToolConfigChangeDomain": {
         "description": "Optional typed domain for tool-configuration change payloads.",
         "enum": [
@@ -6094,6 +6220,14 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolNameSet": {
+        "description": "Set of canonical tool names.",
+        "items": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "type": "array",
+        "uniqueItems": true
       },
       "TranscriptEditRunningBehavior": {
         "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
@@ -7081,6 +7215,16 @@
       },
       "session_id": {
         "type": "string"
+      },
+      "tool_access_policy": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ToolAccessPolicy"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
@@ -8505,6 +8649,35 @@
       "work_ref"
     ],
     "title": "MobCancelWorkParams",
+    "type": "object"
+  },
+  "MobConcludeObjectiveParams": {
+    "$defs": {
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Explicitly concludes one machine-owned kickoff objective.",
+    "properties": {
+      "member_ref": {
+        "$ref": "#/$defs/WireMemberRef"
+      },
+      "objective_id": {
+        "type": "string"
+      },
+      "outcome": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "member_ref",
+      "objective_id",
+      "outcome"
+    ],
+    "title": "MobConcludeObjectiveParams",
     "type": "object"
   },
   "MobCreateParams": {
@@ -11133,6 +11306,12 @@
       "fork_context": true,
       "mob_id": {
         "type": "string"
+      },
+      "model_override": {
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "prompt": {
         "type": "string"
@@ -14648,6 +14827,12 @@
       "mob_id": {
         "type": "string"
       },
+      "model_override": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "prompt": {
         "type": "string"
       },
@@ -14734,6 +14919,12 @@
             },
             "type": [
               "object",
+              "null"
+            ]
+          },
+          "model_override": {
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -16561,6 +16752,12 @@
       "mob_id": {
         "type": "string"
       },
+      "model_override": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "override_profile": {
         "anyOf": [
           {
@@ -16851,6 +17048,13 @@
       },
       "member_ref": {
         "$ref": "#/$defs/WireMemberRef"
+      },
+      "objective_id": {
+        "description": "Durable kickoff objective correlation to stamp onto this delegated turn.",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "origin": {
         "$ref": "#/$defs/WireWorkOrigin",

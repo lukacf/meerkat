@@ -44,6 +44,7 @@ use meerkat_core::comms::{
 // ─── Tool name constants ─────────────────────────────────────────────────
 
 const TOOL_DELEGATE: &str = "delegate";
+const TOOL_CONCLUDE_OBJECTIVE: &str = "conclude_objective";
 const TOOL_MOB_CREATE: &str = "mob_create";
 const TOOL_MOB_DESTROY: &str = "mob_destroy";
 const TOOL_MOB_SPAWN_MEMBER: &str = "mob_spawn_member";
@@ -187,6 +188,7 @@ impl AgentMobToolSurface {
         };
         sender
             .send(CommsCommand::PeerRequest {
+                objective_id: None,
                 to: route,
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({
@@ -288,6 +290,7 @@ impl AgentMobToolSurface {
         "# Agent Delegation & Orchestration\n\n\
          You can delegate work to helper agents and orchestrate multi-agent mobs:\n\n\
          - delegate: Quick helper spawn — creates an implicit mob on first use, spawns a member, auto-wires comms\n\
+         - conclude_objective: Publish the final answer for the current pre-addressed kickoff objective\n\
          - mob_create: Create an explicit mob with full control over profiles, wiring, and flows\n\
          - mob_destroy: Destroy an explicit mob (cannot destroy implicit delegation mob)\n\
          - mob_spawn_member: Spawn a member into any mob\n\
@@ -874,6 +877,7 @@ impl AgentMobToolSurface {
     async fn dispatch_delegate(
         &self,
         call: ToolCallView<'_>,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         self.ensure_create_authority(call.name).await?;
         let args: DelegateArgs = call
@@ -895,6 +899,18 @@ impl AgentMobToolSurface {
             .ensure_implicit_mob()
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+
+        if let Some(objective_id) = objective_id {
+            let owner_identity = self
+                .state
+                .objective_principal_for_mob_owner_session(&mob_id, &self.owner_bridge_session_id)
+                .await
+                .map_err(|error| Self::map_mob_error(call, error))?;
+            self.state
+                .mob_bind_objective_owner(&mob_id, owner_identity, objective_id)
+                .await
+                .map_err(|error| Self::map_mob_error(call, error))?;
+        }
 
         // Authority grant is returned as a typed effect for the turn owner
         // to merge and commit — no re-entrant session service call.
@@ -927,6 +943,7 @@ impl AgentMobToolSurface {
         // Implicit mob always uses the "delegate" profile.
         let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), identity.clone());
         spec.initial_message = Some(ContentInput::Text(args.task));
+        spec.objective_id = objective_id;
         spec.runtime_mode = Some(MobRuntimeMode::AutonomousHost);
         // Don't use auto_wire_parent — it requires an orchestrator member in the roster.
         // We wire explicitly below using PeerTarget::External.
@@ -1082,6 +1099,7 @@ impl AgentMobToolSurface {
     async fn dispatch_mob_spawn_member(
         &self,
         call: ToolCallView<'_>,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let args: SpawnMemberArgs = call
             .parse_args()
@@ -1096,11 +1114,24 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
+        if let Some(objective_id) = objective_id {
+            let owner_identity = self
+                .state
+                .objective_principal_for_mob_owner_session(&mob_id, &self.owner_bridge_session_id)
+                .await
+                .map_err(|error| Self::map_mob_error(call, error))?;
+            self.state
+                .mob_bind_objective_owner(&mob_id, owner_identity, objective_id)
+                .await
+                .map_err(|error| Self::map_mob_error(call, error))?;
+        }
+
         let mut spec = SpawnMemberSpec::new(
             ProfileName::from(args.profile),
             AgentIdentity::from(args.member_id),
         );
         spec.initial_message = args.initial_message;
+        spec.objective_id = objective_id;
         spec.runtime_mode = args.runtime_mode;
         spec.backend = args.backend;
         if let Some(auto_wire) = args.auto_wire_parent {
@@ -1131,6 +1162,45 @@ impl AgentMobToolSurface {
             .await;
 
         Self::encode_result(call, Self::spawn_result_payload(&mob_id, &spawn_result))
+    }
+
+    async fn dispatch_conclude_objective(
+        &self,
+        call: ToolCallView<'_>,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: ConcludeObjectiveArgs = call
+            .parse_args()
+            .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+        if args.outcome.trim().is_empty() {
+            return Err(ToolError::invalid_arguments(
+                call.name,
+                "outcome must not be empty",
+            ));
+        }
+        let objective_id = objective_id.ok_or_else(|| {
+            ToolError::execution_failed(
+                "conclude_objective is only available inside an objective-correlated turn",
+            )
+        })?;
+        let (mob_id, identity) = self
+            .state
+            .objective_principal_for_bridge_session(&self.owner_bridge_session_id)
+            .await
+            .map_err(|error| Self::map_mob_error(call, error))?
+            .ok_or_else(|| {
+                ToolError::execution_failed(
+                    "conclude_objective could not resolve this session to its objective lead principal",
+                )
+            })?;
+        self.state
+            .mob_conclude_objective(&mob_id, &identity, objective_id, args.outcome)
+            .await
+            .map_err(|error| Self::map_mob_error(call, error))?;
+        Self::encode_result(
+            call,
+            json!({"ok": true, "objective_id": objective_id.to_string()}),
+        )
     }
 
     async fn dispatch_mob_retire_member(
@@ -1539,11 +1609,35 @@ impl AgentToolDispatcher for AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let objective_id = context
+            .turn_metadata(meerkat_core::agent::TOOL_DISPATCH_OBJECTIVE_ID_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "{}: invalid objective correlation in dispatch context: {error}",
+                    call.name
+                ))
+            })?
+            .map(meerkat_core::interaction::ObjectiveId);
         match call.name {
-            TOOL_DELEGATE => Box::pin(self.dispatch_delegate(call)).await,
+            TOOL_DELEGATE => Box::pin(self.dispatch_delegate(call, objective_id)).await,
+            TOOL_CONCLUDE_OBJECTIVE => self.dispatch_conclude_objective(call, objective_id).await,
             TOOL_MOB_CREATE => self.dispatch_mob_create(call).await,
             TOOL_MOB_DESTROY => self.dispatch_mob_destroy(call).await,
-            TOOL_MOB_SPAWN_MEMBER => Box::pin(self.dispatch_mob_spawn_member(call)).await,
+            TOOL_MOB_SPAWN_MEMBER => {
+                Box::pin(self.dispatch_mob_spawn_member(call, objective_id)).await
+            }
             TOOL_MOB_RETIRE_MEMBER => self.dispatch_mob_retire_member(call).await,
             TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member(call).await,
             TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members(call).await,
@@ -1676,6 +1770,11 @@ fn build_tool_defs_with_profile_support(
                 \"deny_overlay\": [\"delegate\"]}} -- then later call mob_check_member to see \
                 the result.",
             typed_schema::<DelegateArgs>(),
+        ),
+        tool_def(
+            TOOL_CONCLUDE_OBJECTIVE,
+            "Conclude the current kickoff objective with its final answer. The objective and member are pre-addressed from this turn; supply only the final outcome.",
+            typed_schema::<ConcludeObjectiveArgs>(),
         ),
         tool_def(
             TOOL_MOB_CREATE,
@@ -1948,6 +2047,12 @@ struct DelegateArgs {
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
     tooling: Option<meerkat_mob::SpawnTooling>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ConcludeObjectiveArgs {
+    /// Final answer or terminal outcome for the current objective.
+    outcome: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2685,6 +2790,7 @@ mod tests {
         async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
             match cmd {
                 CommsCommand::PeerRequest {
+                    objective_id: None,
                     to,
                     intent,
                     params,
@@ -2705,6 +2811,7 @@ mod tests {
                         .await
                         .ok_or_else(|| SendError::PeerNotFound(to.label()))?;
                     recipient.inbox.write().await.push(InboxInteraction {
+                        objective_id: None,
                         sender_taint: None,
                         id: InteractionId(uuid::Uuid::new_v4()),
                         from_route: Some(self.peer_id),
@@ -3203,9 +3310,10 @@ mod tests {
     #[test]
     fn test_all_tool_definitions_present() {
         let defs = build_tool_defs();
-        assert_eq!(defs.len(), 10);
+        assert_eq!(defs.len(), 11);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"delegate"));
+        assert!(names.contains(&"conclude_objective"));
         assert!(names.contains(&"mob_create"));
         assert!(names.contains(&"mob_destroy"));
         assert!(names.contains(&"mob_spawn_member"));

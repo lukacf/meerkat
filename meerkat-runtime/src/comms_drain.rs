@@ -961,6 +961,7 @@ fn peer_input_from_delivery_payload(
     payload: BridgeDeliveryPayload,
 ) -> Input {
     Input::Peer(PeerInput {
+        objective_id: None,
         header: InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -1530,6 +1531,7 @@ async fn send_bridge_response(
             blocks: None,
             content_taint: None,
             handling_mode: None,
+            objective_id: candidate.interaction.objective_id,
         })
         .await
     {
@@ -4564,6 +4566,7 @@ mod tests {
         let sender = "partial-authority-peer";
         PeerInputCandidate {
             interaction: InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id,
                 from_route: None,
@@ -4611,6 +4614,7 @@ mod tests {
         let in_reply_to = InteractionId(Uuid::new_v4());
         PeerInputCandidate {
             interaction: InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id,
                 from_route: Some(PeerId::new()),
@@ -5241,6 +5245,7 @@ mod tests {
         let sender_label = sender_pubkey.to_pubkey_string();
         let candidate = PeerInputCandidate {
             interaction: InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id,
                 from_route: None,
@@ -5584,6 +5589,7 @@ mod tests {
                 blocks: None,
                 handling_mode: HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
+                objective_id: None,
             })
             .await
             .expect("supervisor sends bootstrap BindMember over TCP");
@@ -5745,6 +5751,7 @@ mod tests {
                 blocks: None,
                 handling_mode: HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
+                objective_id: None,
             })
             .await
             .expect("supervisor sends idempotent BindMember over TCP");
@@ -6815,6 +6822,7 @@ mod tests {
         };
         PeerInputCandidate {
             interaction: InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id,
                 from_route: None,
@@ -6884,6 +6892,7 @@ mod tests {
     fn peer_turn_metadata_matches_live_interaction_complete_identity() {
         let interaction_id = InteractionId(Uuid::new_v4());
         let input = crate::input::Input::Peer(crate::input::PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
@@ -7411,6 +7420,7 @@ mod tests {
         let interaction_id = InteractionId(Uuid::new_v4());
         let candidate = PeerInputCandidate {
             interaction: InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id: interaction_id,
                 from_route: None,
@@ -8248,7 +8258,7 @@ mod tests {
                 }
                 _ => meerkat_core::comms::SendReceipt::PeerMessageSent {
                     envelope_id: Uuid::new_v4(),
-                    acked: true,
+                    delivery: meerkat_core::comms::PeerDeliveryOutcome::Acked,
                 },
             };
             self.sent.lock().await.push(cmd);
@@ -8742,6 +8752,7 @@ mod tests {
         let id = ingress.interaction_id;
         PeerInputCandidate {
             interaction: InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id,
                 from_route: None,
@@ -8781,6 +8792,7 @@ mod tests {
         let id = ingress.interaction_id;
         PeerInputCandidate {
             interaction: InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id,
                 from_route: None,

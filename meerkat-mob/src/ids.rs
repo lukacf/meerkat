@@ -185,6 +185,12 @@ string_newtype!(
 );
 
 impl AgentIdentity {
+    /// Stable synthetic lead principal for an owner bridge session that is
+    /// not itself a roster member (implicit delegation mobs).
+    pub fn objective_lead_for_session(session_id: &meerkat_core::SessionId) -> Self {
+        Self::from(format!("objective-lead-session:{session_id}"))
+    }
+
     /// Returns `true` when this identity falls inside the reserved
     /// flow-owned member namespace.
     ///
@@ -396,6 +402,9 @@ pub struct WorkSpec {
     /// content heuristics. Serde-additive: absent on old stored shapes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_id: Option<meerkat_core::interaction::InteractionId>,
+    /// Durable objective correlation propagated through the work lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
 }
 
 impl WorkSpec {
@@ -408,7 +417,17 @@ impl WorkSpec {
             origin,
             injected_context: Vec::new(),
             interaction_id: None,
+            objective_id: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_objective_id(
+        mut self,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+    ) -> Self {
+        self.objective_id = Some(objective_id);
+        self
     }
 
     /// Attach host-attached injected context to this work spec.

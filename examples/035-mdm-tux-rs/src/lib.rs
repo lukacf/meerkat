@@ -111,7 +111,7 @@ pub fn direct_control_request(
     payload: &DirectControlPayload,
 ) -> anyhow::Result<meerkat_comms::MessageKind> {
     let params = serde_json::to_value(payload).context("encode direct control payload")?;
-    Ok(meerkat_comms::MessageKind::Request {
+    Ok(meerkat_comms::MessageKind::Request { objective_id: None,
         intent: DIRECT_CONTROL_INTENT.into(),
         params,
         blocks: None,

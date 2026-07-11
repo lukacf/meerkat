@@ -72,6 +72,7 @@ impl CommsEventInjector {
             interaction_id: Some(interaction_id),
             blocks,
             render_metadata,
+            objective_id: None,
         }) {
             AdmissionOutcome::Admitted => Ok(()),
             AdmissionOutcome::Dropped { reason } => Err(drop_reason_to_injector_error(reason)),
@@ -99,6 +100,7 @@ impl EventInjector for CommsEventInjector {
             interaction_id: None,
             blocks,
             render_metadata,
+            objective_id: None,
         }) {
             AdmissionOutcome::Admitted => Ok(()),
             AdmissionOutcome::Dropped { reason } => Err(drop_reason_to_injector_error(reason)),
@@ -121,6 +123,34 @@ fn drop_reason_to_injector_error(reason: DropReason) -> EventInjectorError {
 }
 
 impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
+    fn inject_with_turn_identity(
+        &self,
+        interaction_id: Option<meerkat_core::interaction::InteractionId>,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+        content: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        let body = content.text_content();
+        let blocks = match content {
+            ContentInput::Text(_) => None,
+            ContentInput::Blocks(blocks) => Some(blocks),
+        };
+        match self.sender.send_classified(InboxItem::PlainEvent {
+            body,
+            source,
+            handling_mode,
+            interaction_id: interaction_id.map(|id| id.0),
+            blocks,
+            render_metadata,
+            objective_id,
+        }) {
+            AdmissionOutcome::Admitted => Ok(()),
+            AdmissionOutcome::Dropped { reason } => Err(drop_reason_to_injector_error(reason)),
+        }
+    }
+
     fn inject_with_subscription(
         &self,
         content: ContentInput,
@@ -148,6 +178,7 @@ impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
                 interaction_id: Some(id),
                 blocks,
                 render_metadata,
+                objective_id: None,
             })
         {
             // Clean up subscriber on send failure

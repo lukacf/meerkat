@@ -73,6 +73,7 @@ mod tests {
     #[test]
     fn response_progress_with_handling_mode_rejected() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -94,6 +95,7 @@ mod tests {
     #[test]
     fn response_terminal_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -111,6 +113,7 @@ mod tests {
     #[test]
     fn response_terminal_with_queue_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -128,6 +131,7 @@ mod tests {
     #[test]
     fn message_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -142,6 +146,7 @@ mod tests {
     #[test]
     fn request_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -159,6 +164,7 @@ mod tests {
     #[test]
     fn no_convention_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -175,6 +181,7 @@ mod tests {
     #[test]
     fn steer_with_injected_context_rejected() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: vec![meerkat_core::types::ContentInput::Text(
                 "ambient".to_string(),
             )],
@@ -197,6 +204,7 @@ mod tests {
     #[test]
     fn queue_with_injected_context_accepted() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: vec![meerkat_core::types::ContentInput::Text(
                 "ambient".to_string(),
             )],
@@ -229,6 +237,7 @@ mod tests {
             None,
         ] {
             let input = Input::Peer(PeerInput {
+                objective_id: None,
                 injected_context: Vec::new(),
                 sender_taint: None,
                 header: make_header(),

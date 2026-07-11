@@ -487,6 +487,47 @@ pub struct MobMemberSnapshot {
     /// current bridge session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_capabilities: Option<meerkat_contracts::WireResolvedModelCapabilities>,
+    /// Machine-owned live execution/progress projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<MemberProgressSnapshot>,
+}
+
+/// Whether the member currently owns an open execution run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberRunState {
+    Idle,
+    RunOpen,
+    Unknown,
+}
+
+/// Machine-owned liveness classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberHealthClass {
+    Healthy,
+    Degraded,
+    Wedged,
+    Unknown,
+}
+
+/// Typed last-progress observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberProgressEvent {
+    ExecutionAdvanced,
+    BecameIdle,
+    Unchanged,
+}
+
+/// Point-in-time execution health for a member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberProgressSnapshot {
+    pub run_state: MemberRunState,
+    pub in_flight_work: u64,
+    pub last_progress_at_ms: u64,
+    pub last_progress_event: MemberProgressEvent,
+    pub health: MemberHealthClass,
 }
 
 impl MobMemberSnapshot {
@@ -580,6 +621,42 @@ impl MobMemberSnapshot {
             kickoff,
             external_member,
             resolved_capabilities: self.resolved_capabilities.clone(),
+            progress: self.progress.as_ref().map(|progress| {
+                meerkat_contracts::WireMemberProgressSnapshot {
+                    run_state: match progress.run_state {
+                        MemberRunState::Idle => meerkat_contracts::WireMemberRunState::Idle,
+                        MemberRunState::RunOpen => meerkat_contracts::WireMemberRunState::RunOpen,
+                        MemberRunState::Unknown => meerkat_contracts::WireMemberRunState::Unknown,
+                    },
+                    in_flight_work: progress.in_flight_work,
+                    last_progress_at_ms: progress.last_progress_at_ms,
+                    last_progress_event: match progress.last_progress_event {
+                        MemberProgressEvent::ExecutionAdvanced => {
+                            meerkat_contracts::WireMemberProgressEvent::ExecutionAdvanced
+                        }
+                        MemberProgressEvent::BecameIdle => {
+                            meerkat_contracts::WireMemberProgressEvent::BecameIdle
+                        }
+                        MemberProgressEvent::Unchanged => {
+                            meerkat_contracts::WireMemberProgressEvent::Unchanged
+                        }
+                    },
+                    health: match progress.health {
+                        MemberHealthClass::Healthy => {
+                            meerkat_contracts::WireMemberHealthClass::Healthy
+                        }
+                        MemberHealthClass::Degraded => {
+                            meerkat_contracts::WireMemberHealthClass::Degraded
+                        }
+                        MemberHealthClass::Wedged => {
+                            meerkat_contracts::WireMemberHealthClass::Wedged
+                        }
+                        MemberHealthClass::Unknown => {
+                            meerkat_contracts::WireMemberHealthClass::Unknown
+                        }
+                    },
+                }
+            }),
         })
     }
 }
@@ -1059,6 +1136,7 @@ pub(crate) struct MemberSpawnReceipt {
     pub(crate) member_ref: MemberRef,
     /// Canonical mob child operation for the spawned member lifecycle.
     pub(crate) operation_id: OperationId,
+    pub(crate) session_origin: super::provisioner::ProvisionSessionOrigin,
 }
 
 /// Public result from a successful member spawn.
@@ -1477,8 +1555,8 @@ pub struct PeerMessageReceipt {
     pub to: AgentIdentity,
     /// Transport envelope id for the typed peer message.
     pub envelope_id: uuid::Uuid,
-    /// Whether the transport reported an acknowledgement.
-    pub acked: bool,
+    /// Strongest delivery fact proved by the selected transport.
+    pub delivery: meerkat_core::comms::PeerDeliveryOutcome,
     /// How the recipient should handle the peer message.
     pub handling_mode: HandlingMode,
 }
@@ -1512,6 +1590,12 @@ pub struct HelperOptions {
     pub inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
     /// Override profile resolved from scheduled or agent-owned tooling resolution.
     pub override_profile: Option<crate::profile::Profile>,
+    /// Field-scoped model override reapplied over the current role profile on
+    /// every materialization. Unlike `override_profile`, this does not freeze
+    /// unrelated profile fields across definition drift.
+    pub model_override: Option<String>,
+    /// Objective causality inherited from the spawning turn.
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -1903,6 +1987,15 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
+    /// Field-scoped model override.
+    ///
+    /// The runtime resolves the current role profile first and then applies
+    /// this value, including on cold restore, revival, and respawn. This is the
+    /// correct seam for model-only re-profiling because tools, skills, and peer
+    /// posture continue to follow the definition.
+    pub model_override: Option<String>,
+    /// Objective causality inherited from the spawning turn.
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-member auth binding. When set, this member's agent builds with
     /// `AgentBuildConfig.auth_binding = Some(this)`, scoping credential
     /// resolution to the named realm + binding. `None` means the caller did not
@@ -1941,6 +2034,8 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("shell_env", &self.shell_env)
             .field("inherited_tool_filter", &self.inherited_tool_filter)
             .field("override_profile", &self.override_profile)
+            .field("model_override", &self.model_override)
+            .field("objective_id", &self.objective_id)
             .field("auth_binding", &self.auth_binding)
             .field("external_tools", &self.external_tools.is_some())
             .field("system_prompt_override", &self.system_prompt_override)
@@ -1969,6 +2064,8 @@ impl SpawnMemberSpec {
             shell_env: None,
             inherited_tool_filter: None,
             override_profile: None,
+            model_override: None,
+            objective_id: None,
             auth_binding: None,
             external_tools: None,
             system_prompt_override: None,
@@ -2488,6 +2585,7 @@ impl MobHandle {
                     origin: spec.origin,
                     injected_context: spec.injected_context,
                     interaction_id: spec.interaction_id,
+                    objective_id: spec.objective_id,
                     handling_mode,
                     render_metadata,
                     ack_mode,
@@ -2594,6 +2692,20 @@ impl MobHandle {
                     })
                     .await??;
                 Ok(MobMachineCommandResult::MemberStatus(snapshot))
+            }
+            MobMachineCommand::ConcludeObjective {
+                agent_identity,
+                objective_id,
+                outcome,
+            } => {
+                self.send_actor_command(|reply_tx| MobCommand::ConcludeObjective {
+                    agent_identity,
+                    objective_id,
+                    outcome,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::SubscribeAgentEvents { agent_identity } => {
                 let effects = self
@@ -3107,6 +3219,7 @@ impl MobHandle {
                 machine_state,
                 roster_entry.and_then(|entry| entry.kickoff.as_ref()),
             ),
+            progress: None,
         });
         let snapshot = material.to_snapshot();
         let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
@@ -3507,6 +3620,7 @@ impl MobHandle {
                 current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff,
+                progress: None,
             })
             .to_snapshot(),
         )
@@ -4820,11 +4934,14 @@ impl MobHandle {
             })
             .await??;
         match receipt {
-            SendReceipt::PeerMessageSent { envelope_id, acked } => Ok(PeerMessageReceipt {
+            SendReceipt::PeerMessageSent {
+                envelope_id,
+                delivery,
+            } => Ok(PeerMessageReceipt {
                 from,
                 to,
                 envelope_id,
-                acked,
+                delivery,
                 handling_mode,
             }),
             other => Err(MobError::Internal(format!(
@@ -5699,6 +5816,37 @@ impl MobHandle {
         Ok(snapshot)
     }
 
+    /// Explicitly conclude the durable kickoff objective owned by `identity`.
+    pub async fn conclude_objective(
+        &self,
+        identity: &AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+        outcome: impl Into<String>,
+    ) -> Result<(), MobError> {
+        self.execute_machine_command(MobMachineCommand::ConcludeObjective {
+            agent_identity: identity.clone(),
+            objective_id,
+            outcome: outcome.into(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Bind a propagated objective to its lead principal before delegated
+    /// member kickoff can observe the same correlation id.
+    pub async fn bind_objective_owner(
+        &self,
+        owner_identity: AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::BindObjectiveOwner {
+            owner_identity,
+            objective_id,
+            reply_tx,
+        })
+        .await?
+    }
+
     async fn project_member_peer_connectivity(
         &self,
         identity: &AgentIdentity,
@@ -5972,6 +6120,8 @@ impl MobHandle {
         spec.auth_binding = options.auth_binding;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
+        spec.model_override = options.model_override;
+        spec.objective_id = options.objective_id;
         spec.auto_wire_parent = true;
 
         self.spawn_spec_internal_with_source(spec, SpawnSource::HelperSpawn)
@@ -6025,6 +6175,8 @@ impl MobHandle {
         spec.auth_binding = options.auth_binding;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
+        spec.model_override = options.model_override;
+        spec.objective_id = options.objective_id;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,
@@ -6892,6 +7044,21 @@ impl MobHandle {
         }
     }
 
+    /// Return whether `bridge_session_id` is the machine-owned owner session
+    /// for this mob. This intentionally exposes the narrow ownership query,
+    /// not the generated machine state itself, across crate boundaries.
+    pub async fn owns_bridge_session(
+        &self,
+        bridge_session_id: &meerkat_core::types::SessionId,
+    ) -> Result<bool, MobError> {
+        Ok(self
+            .query_machine_state()
+            .await?
+            .owner_bridge_session_id
+            .as_ref()
+            .is_some_and(|session_id| session_id.0 == bridge_session_id.to_string()))
+    }
+
     #[cfg(test)]
     pub(crate) async fn authorize_member_trust_cleanup_for_test(
         &self,
@@ -7016,6 +7183,17 @@ impl MemberHandle {
         self.mob.member_status(&self.identity()).await
     }
 
+    /// Pre-addressed conclusion affordance for this member's kickoff objective.
+    pub async fn conclude_objective(
+        &self,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+        outcome: impl Into<String>,
+    ) -> Result<(), MobError> {
+        self.mob
+            .conclude_objective(&self.identity(), objective_id, outcome)
+            .await
+    }
+
     /// Subscribe to this member's agent events.
     pub async fn events(&self) -> Result<EventStream, MobError> {
         self.mob.subscribe_agent_events(&self.identity()).await
@@ -7094,6 +7272,7 @@ mod tests {
             kickoff: None,
             external_member: None,
             resolved_capabilities: None,
+            progress: None,
         }
         .with_current_bridge_session_id(Some(sid.clone()));
         let snapshot_value =
@@ -7126,6 +7305,7 @@ mod tests {
             kickoff: None,
             external_member: None,
             resolved_capabilities: None,
+            progress: None,
         };
 
         let snapshot_value =
@@ -7160,6 +7340,7 @@ mod tests {
             kickoff: None,
             external_member: None,
             resolved_capabilities: None,
+            progress: None,
         };
         assert_eq!(
             snapshot.agent_identity(),
@@ -7184,6 +7365,7 @@ mod tests {
             current_bridge_session_id: Some(sid.clone()),
             peer_connectivity: None,
             kickoff: None,
+            progress: None,
         }
         .to_snapshot();
 
@@ -7501,6 +7683,7 @@ mod tests {
             transport_public_key: None,
             external_peer_specs: BTreeMap::new(),
             effective_profile_override: None,
+            effective_model_override: None,
         }
     }
 

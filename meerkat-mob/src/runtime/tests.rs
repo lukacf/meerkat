@@ -1144,7 +1144,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     .push("peer_message".to_string());
                 Ok(SendReceipt::PeerMessageSent {
                     envelope_id: uuid::Uuid::new_v4(),
-                    acked: false,
+                    delivery: meerkat_core::comms::PeerDeliveryOutcome::HandedOff,
                 })
             }
             unsupported => Err(SendError::Unsupported(format!(
@@ -1216,6 +1216,7 @@ struct CreateSessionRecord {
     peer_meta_labels: BTreeMap<String, String>,
     runtime_build_mode_session_owned: bool,
     budget_limits: Option<meerkat_core::BudgetLimits>,
+    model: String,
 }
 
 /// A mock session service that creates sessions with mock comms runtimes.
@@ -2137,6 +2138,7 @@ impl SessionService for MockSessionService {
                     .build
                     .as_ref()
                     .and_then(|build| build.budget_limits.clone()),
+                model: req.model.clone(),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -2982,6 +2984,8 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MemberReset { .. } => "MemberReset",
             MobEventKind::MemberSessionBindingRecovered(..) => "MemberSessionBindingRecovered",
             MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
+            MobEventKind::ObjectiveOwnerBound { .. } => "ObjectiveOwnerBound",
+            MobEventKind::ObjectiveConcluded { .. } => "ObjectiveConcluded",
             MobEventKind::MembersWired { .. } => "MembersWired",
             MobEventKind::MembersWiredBatch { .. } => "MembersWiredBatch",
             MobEventKind::MembersUnwired { .. } => "MembersUnwired",
@@ -5408,6 +5412,7 @@ async fn spawn_live_external_peer_with_transport(
                         loop {
                             match responder_runtime
                                 .send(CommsCommand::PeerResponse {
+                                    objective_id: None,
                                     content_taint: None,
                                     to: to.clone(),
                                     in_reply_to: candidate.interaction.id,
@@ -26711,6 +26716,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
 
     provisioner
         .provision_member(super::provisioner::ProvisionMemberRequest {
+            session_origin: super::provisioner::ProvisionSessionOrigin::Fresh,
             create_session: CreateSessionRequest {
                 injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
@@ -27773,14 +27779,11 @@ async fn test_stop_pending_spawn_archive_failure_retains_cleanup_anchor_for_retr
 }
 
 #[tokio::test]
-async fn test_member_pending_spawn_archive_failure_retains_cleanup_anchor_for_retry() {
+async fn test_retire_absent_does_not_cancel_later_pending_spawn_incarnation() {
     let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
     let (handle, service) = create_test_mob(sample_definition()).await;
-    let agent_identity = AgentIdentity::from("w-retire-pending-archive-fail");
+    let agent_identity = AgentIdentity::from("w-retire-absent-pending-spawn");
     let comms_name = test_comms_name("worker", agent_identity.as_str());
-    service
-        .set_archive_failure_for_comms_name(&comms_name)
-        .await;
 
     let pending_spawn = {
         let handle = handle.clone();
@@ -27791,43 +27794,20 @@ async fn test_member_pending_spawn_archive_failure_retains_cleanup_anchor_for_re
                 .await
         })
     };
-    let session_id = wait_for_session_id_for_comms_name(&service, &comms_name).await;
+    let _session_id = wait_for_session_id_for_comms_name(&service, &comms_name).await;
 
-    let retire_error = handle
-        .retire(AgentIdentity::from(agent_identity.as_str()))
-        .await
-        .expect_err("retire should fail before roster mutation when pending cleanup is ambiguous");
-    assert!(
-        retire_error
-            .to_string()
-            .contains("pending spawn cleanup incomplete"),
-        "retire should expose pending spawn cleanup failure, got: {retire_error}"
-    );
-    let spawn_error = pending_spawn
-        .await
-        .expect("spawn join")
-        .expect_err("pending spawn should fail once retire cancels it");
-    assert!(
-        spawn_error.to_string().contains("retire command received"),
-        "spawn should receive retire cancellation reason, got: {spawn_error}"
-    );
-    assert_eq!(
-        service.active_session_count().await,
-        1,
-        "archive failure must keep the provisioned session available for member retry"
-    );
-
-    service.clear_archive_failure(&session_id).await;
     handle
         .retire(AgentIdentity::from(agent_identity.as_str()))
         .await
-        .expect(
-            "retry should drain cleanup anchor and treat the canceled pending member as retired",
-        );
+        .expect("RetireAbsent is an inert idempotent success");
+    pending_spawn
+        .await
+        .expect("spawn join")
+        .expect("an absent retire must not cancel a later pending incarnation");
     assert_eq!(
         service.active_session_count().await,
-        0,
-        "member retry should archive the previously ambiguous pending-spawn session"
+        1,
+        "the new incarnation must remain live"
     );
 }
 
@@ -33939,6 +33919,7 @@ async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settle
     let receipt = CoreCommsRuntime::send(
         &*comms_a,
         CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(&*comms_a, &test_comms_name("worker", "w-prekickoff")).await,
             body: "body: immediate orchestration after wait_for_ready".to_string(),
@@ -34069,6 +34050,7 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
         let receipt = CoreCommsRuntime::send(
             &*comms_lead,
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 to: test_peer_route(&*comms_lead, &test_comms_name("worker", agent_identity)).await,
                 body: format!("body: fanout to {agent_identity}"),
@@ -34222,6 +34204,7 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
     CoreCommsRuntime::send(
         &*artist_comms,
         CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(&*artist_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: first peer message".to_string(),
@@ -34260,6 +34243,7 @@ async fn test_running_peer_message_to_autonomous_member_live_injects_during_curr
     CoreCommsRuntime::send(
         &*helper_comms,
         CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(&*helper_comms, &test_comms_name("worker", "w-target")).await,
             body: "body: second peer message while running".to_string(),
@@ -34823,6 +34807,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let receipt = CoreCommsRuntime::send(
         &*requester_comms,
         CommsCommand::PeerRequest {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(&*requester_comms, &test_comms_name("worker", "w-responder")).await,
             intent: "interpret_image".to_string(),
@@ -34858,6 +34843,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerResponse {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(&*responder_comms, &test_comms_name("lead", "l-requester")).await,
             in_reply_to: request_id,
@@ -35109,6 +35095,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(
                 &*responder_comms,
@@ -35142,6 +35129,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     let request_receipt = CoreCommsRuntime::send(
         &*requester_comms,
         CommsCommand::PeerRequest {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(
                 &*requester_comms,
@@ -35182,6 +35170,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     CoreCommsRuntime::send(
         &*responder_comms,
         CommsCommand::PeerResponse {
+            objective_id: None,
             content_taint: None,
             to: test_peer_route(
                 &*responder_comms,
@@ -36019,6 +36008,50 @@ async fn test_turn_driven_submit_work_interaction_id_stamps_transcript_identity(
     );
 }
 
+#[tokio::test]
+async fn test_turn_driven_submit_work_objective_id_stamps_transcript_identity() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-objective-id");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+    let objective_id = meerkat_core::interaction::ObjectiveId::new();
+
+    handle
+        .submit_work(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("delegated objective", WorkOrigin::Internal)
+                .with_objective_id(objective_id),
+        )
+        .await
+        .expect("submit objective-correlated work");
+    wait_for_start_turn_call_count(&service, 1, "objective work should start a turn").await;
+
+    let records = service.recorded_start_turn_metadata().await;
+    let metadata = records
+        .last()
+        .and_then(|(_, metadata)| metadata.as_ref())
+        .expect("objective delivery must carry turn metadata");
+    assert_eq!(
+        metadata.transcript_identity.objective_id,
+        Some(objective_id)
+    );
+}
+
 /// Ask-15 addendum (autonomous): a host-supplied `WorkSpec.interaction_id`
 /// rides the injected inbox event, so the comms classification (and the
 /// runtime transcript identity derived from it) carries the SAME id as the
@@ -36230,6 +36263,7 @@ async fn test_wire_enables_peer_request_delivery() {
     let _ = CoreCommsRuntime::drain_inbox_interactions(&*comms_b).await;
 
     let cmd = meerkat_core::comms::CommsCommand::PeerRequest {
+        objective_id: None,
         content_taint: None,
         to: test_peer_route(&*comms_a, &comms_name_b).await,
         intent: "mob.test_ping".to_string(),
@@ -37469,6 +37503,61 @@ async fn test_discarded_live_session_revived_by_machine_authorized_dispatch() {
         .await
         .expect("member status");
     assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Active);
+}
+
+#[tokio::test]
+async fn test_model_override_is_field_scoped_and_survives_revival_without_profile_snapshot() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .expect("inline worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    let mut spec = SpawnMemberSpec::new("worker", "w-model-only");
+    spec.model_override = Some("override-model".to_string());
+    handle.spawn_spec(spec).await.expect("spawn model override");
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-model-only"))
+        .await
+        .expect("get member")
+        .expect("member exists");
+    assert_eq!(
+        entry.effective_model_override.as_deref(),
+        Some("override-model")
+    );
+    assert!(
+        entry.effective_profile_override.is_none(),
+        "model-only override must not freeze the rest of the profile"
+    );
+
+    let bridge_session_id = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("w-model-only"))
+        .await
+        .expect("session-backed member");
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+    handle
+        .member(&AgentIdentity::from("w-model-only"))
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("revive with model patch"))
+        .await
+        .expect("revive model-only member");
+
+    let requests = service.recorded_create_requests().await;
+    assert!(
+        requests.len() >= 2,
+        "spawn and revival must both materialize"
+    );
+    assert_eq!(
+        requests.last().map(|request| request.model.as_str()),
+        Some("override-model"),
+        "revival must reapply the model patch over the resolved profile"
+    );
 }
 
 /// Task #37 race regression: if the dispatch-triggered revival observes the
@@ -43917,6 +44006,16 @@ struct MobRuntimeParitySnapshotSummary {
     desired_members: BTreeSet<String>,
     members_to_spawn: BTreeSet<String>,
     members_to_retire: BTreeSet<String>,
+    member_kickoff_objective_ids: BTreeMap<String, String>,
+    objective_outcomes: BTreeMap<String, String>,
+    concluded_objective_ids: BTreeSet<String>,
+    member_run_open: BTreeMap<String, bool>,
+    member_in_flight_work: BTreeMap<String, u64>,
+    member_progress_tokens: BTreeMap<String, String>,
+    member_last_observed_at_ms: BTreeMap<String, u64>,
+    member_last_progress_at_ms: BTreeMap<String, u64>,
+    member_last_progress_event: BTreeMap<String, String>,
+    member_health_class: BTreeMap<String, String>,
 }
 
 /// Lock-in test for T2 DSL field projection in the runtime parity snapshot.
@@ -44198,6 +44297,7 @@ enum MobRuntimeParityProbeInput {
     SetSpawnPolicy,
     Shutdown,
     ForceCancel,
+    ConcludeObjective,
 }
 
 struct MobRuntimeParityFixture {
@@ -44209,6 +44309,7 @@ struct MobRuntimeParityFixture {
     flow_run_id: Option<RunId>,
     submitted_work_ref: Option<WorkRef>,
     wired_external: bool,
+    objective_id: meerkat_core::interaction::ObjectiveId,
 }
 
 impl MobRuntimeParityFixture {
@@ -44499,6 +44600,9 @@ fn mob_runtime_parity_probe_for_input_variant(
         }
         SchemaMobMachineInputVariant::Shutdown => Some(MobRuntimeParityProbeInput::Shutdown),
         SchemaMobMachineInputVariant::ForceCancel => Some(MobRuntimeParityProbeInput::ForceCancel),
+        SchemaMobMachineInputVariant::ConcludeObjective => {
+            Some(MobRuntimeParityProbeInput::ConcludeObjective)
+        }
         _ => None,
     }
 }
@@ -44655,6 +44759,70 @@ async fn mob_runtime_parity_snapshot_summary(
         )
         .expect("serialize coordinator_bound"),
     );
+    if let Some(dsl) = dsl_t2.as_ref() {
+        for (name, value) in [
+            (
+                "member_kickoff_objective_ids",
+                serde_json::to_value(&dsl.member_kickoff_objective_ids),
+            ),
+            (
+                "objective_owner_ids",
+                serde_json::to_value(&dsl.objective_owner_ids),
+            ),
+            (
+                "objective_outcomes",
+                serde_json::to_value(&dsl.objective_outcomes),
+            ),
+            (
+                "concluded_objective_ids",
+                serde_json::to_value(&dsl.concluded_objective_ids),
+            ),
+            (
+                "member_run_open",
+                serde_json::to_value(&dsl.member_run_open),
+            ),
+            (
+                "member_in_flight_work",
+                serde_json::to_value(&dsl.member_in_flight_work),
+            ),
+            (
+                "member_progress_tokens",
+                serde_json::to_value(&dsl.member_progress_tokens),
+            ),
+            (
+                "member_last_observed_at_ms",
+                serde_json::to_value(&dsl.member_last_observed_at_ms),
+            ),
+            (
+                "member_last_progress_at_ms",
+                serde_json::to_value(&dsl.member_last_progress_at_ms),
+            ),
+            (
+                "member_last_progress_event",
+                serde_json::to_value(
+                    dsl.member_last_progress_event
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+            (
+                "member_health_class",
+                serde_json::to_value(
+                    dsl.member_health_class
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+        ] {
+            formal_available_fields.insert(
+                name.to_string(),
+                serde_json::to_string(&value.expect("serialize MobMachine authority field"))
+                    .expect("serialize MobMachine authority JSON value"),
+            );
+        }
+    }
     let mut formal_unavailable_fields = schema_mob_machine()
         .state
         .fields
@@ -44739,6 +44907,86 @@ async fn mob_runtime_parity_snapshot_summary(
             snap.supervisor_pending_authority_member_target_addresses
                 .iter()
                 .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_kickoff_objective_ids = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_kickoff_objective_ids
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let objective_outcomes = dsl_t2
+        .as_ref()
+        .map(|snap| snap.objective_outcomes.clone())
+        .unwrap_or_default();
+    let concluded_objective_ids = dsl_t2
+        .as_ref()
+        .map(|snap| snap.concluded_objective_ids.clone())
+        .unwrap_or_default();
+    let member_run_open = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_run_open
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), *value))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_in_flight_work = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_in_flight_work
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), *value))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_progress_tokens = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_progress_tokens
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_last_observed_at_ms = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_last_observed_at_ms
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), *value))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_last_progress_at_ms = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_last_progress_at_ms
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), *value))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_last_progress_event = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_last_progress_event
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_health_class = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_health_class
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
                 .collect()
         })
         .unwrap_or_default();
@@ -45117,6 +45365,16 @@ async fn mob_runtime_parity_snapshot_summary(
         desired_members,
         members_to_spawn,
         members_to_retire,
+        member_kickoff_objective_ids,
+        objective_outcomes,
+        concluded_objective_ids,
+        member_run_open,
+        member_in_flight_work,
+        member_progress_tokens,
+        member_last_observed_at_ms,
+        member_last_progress_at_ms,
+        member_last_progress_event,
+        member_health_class,
     })
 }
 
@@ -45255,6 +45513,61 @@ fn mob_runtime_parity_field_value(
         )),
         "member_revival_pending" => Some(MobRuntimeParityExprValue::Set(
             snapshot.member_revival_pending.clone(),
+        )),
+        "member_kickoff_objective_ids" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_kickoff_objective_ids
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "objective_owner_ids" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        "objective_outcomes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .objective_outcomes
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "concluded_objective_ids" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.concluded_objective_ids.clone(),
+        )),
+        "member_run_open" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_run_open
+                .iter()
+                .map(|(key, value)| (key.clone(), u64::from(*value)))
+                .collect(),
+        )),
+        "member_in_flight_work" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_in_flight_work.clone(),
+        )),
+        "member_progress_tokens" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_progress_tokens
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "member_last_observed_at_ms" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_last_observed_at_ms.clone(),
+        )),
+        "member_last_progress_at_ms" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_last_progress_at_ms.clone(),
+        )),
+        "member_last_progress_event" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_last_progress_event
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "member_health_class" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_health_class
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
         )),
         "supervisor_authority_peer_id" => Some(
             snapshot
@@ -45853,6 +46166,9 @@ fn mob_modeled_schema_result_summary(
         | MobRuntimeParityProbeInput::ForceCancel => {
             Some(summarize_mob_runtime_success(probe, "unit"))
         }
+        MobRuntimeParityProbeInput::ConcludeObjective => {
+            Some(summarize_mob_runtime_success(probe, "unit"))
+        }
         MobRuntimeParityProbeInput::Respawn => {
             Some(summarize_mob_runtime_success(probe, "respawned"))
         }
@@ -45889,6 +46205,7 @@ async fn build_mob_runtime_parity_fixture() -> MobRuntimeParityFixture {
         flow_run_id: None,
         submitted_work_ref: None,
         wired_external: false,
+        objective_id: meerkat_core::interaction::ObjectiveId::new(),
     }
 }
 
@@ -45978,6 +46295,19 @@ async fn mob_runtime_parity_prepare_probe(
         MobRuntimeParityProbeInput::ForceCancel => {
             fixture.ensure_force_cancel_member().await?;
             setup_tags.push("turn_driven_member_spawned".to_string());
+        }
+        MobRuntimeParityProbeInput::ConcludeObjective => {
+            fixture.ensure_worker().await?;
+            let snapshot = fixture
+                .handle
+                .member_status(&fixture.worker_identity)
+                .await
+                .map_err(|error| format!("project worker kickoff objective: {error:?}"))?;
+            fixture.objective_id = snapshot
+                .kickoff
+                .and_then(|kickoff| kickoff.objective_id)
+                .ok_or_else(|| "spawned worker has no kickoff objective".to_string())?;
+            setup_tags.push("worker_objective_resolved".to_string());
         }
         MobRuntimeParityProbeInput::Spawn
         | MobRuntimeParityProbeInput::AuthorizeSpawnProfile
@@ -46317,6 +46647,15 @@ async fn mob_runtime_parity_execute_probe(
         MobRuntimeParityProbeInput::ForceCancel => fixture
             .handle
             .force_cancel_member(fixture.cancel_identity.clone())
+            .await
+            .map(|()| summarize_mob_runtime_success(probe, "unit")),
+        MobRuntimeParityProbeInput::ConcludeObjective => fixture
+            .handle
+            .conclude_objective(
+                &fixture.worker_identity,
+                fixture.objective_id,
+                "mob runtime parity objective complete",
+            )
             .await
             .map(|()| summarize_mob_runtime_success(probe, "unit")),
     }
@@ -46911,6 +47250,9 @@ fn mob_runtime_parity_probe_input_variant(
         }
         MobRuntimeParityProbeInput::Shutdown => Some(SchemaMobMachineInputVariant::Shutdown),
         MobRuntimeParityProbeInput::ForceCancel => Some(SchemaMobMachineInputVariant::ForceCancel),
+        MobRuntimeParityProbeInput::ConcludeObjective => {
+            Some(SchemaMobMachineInputVariant::ConcludeObjective)
+        }
     }
 }
 
@@ -48107,6 +48449,7 @@ async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
         .project_machine_input(
             crate::machines::mob_machine::MobMachineInput::KickoffMarkPending {
                 member_id: dsl_member.clone(),
+                objective_id: "00000000-0000-0000-0000-000000000001".into(),
             },
         )
         .await
@@ -48175,6 +48518,7 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
         .project_machine_input(
             crate::machines::mob_machine::MobMachineInput::KickoffMarkPending {
                 member_id: dsl_member.clone(),
+                objective_id: "00000000-0000-0000-0000-000000000001".into(),
             },
         )
         .await

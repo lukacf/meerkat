@@ -53,6 +53,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
+- `ReviveArchivedSessionDocument`(session_id: SessionId)
 - `ArchiveSessionDocument`(session_id: SessionId, runtime_backed: Bool, durable_document_present: Bool, runtime_observation: SessionArchiveRuntimeObservation)
 
 ## Signals
@@ -91,6 +92,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
 - `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
 - `SessionLifecycleTerminalRecovered`
+- `SessionRevivalResolved`
 - `SessionArchiveResolved`(disposition: SessionArchiveDisposition, write_document: Bool, retire_runtime: Bool)
 
 ## Helpers
@@ -911,6 +913,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `SessionLifecycleTerminalRecovered`
+- To: `Ready`
+
+### `ReviveArchivedSessionDocument`
+- From: `Ready`
+- On: `ReviveArchivedSessionDocument`(session_id)
+- Guards:
+  - ``
+- Emits: `SessionRevivalResolved`
 - To: `Ready`
 
 ### `ArchiveSessionDocumentActive`

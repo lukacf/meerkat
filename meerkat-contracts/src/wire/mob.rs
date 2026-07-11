@@ -716,6 +716,8 @@ pub struct MobSpawnParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_profile: Option<WireMobProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
 }
 
@@ -747,6 +749,8 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
 }
@@ -1881,6 +1885,8 @@ pub struct MobSpawnHelperParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<WireMobRuntimeMode>,
@@ -1900,6 +1906,8 @@ pub struct MobForkHelperParams {
     pub agent_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2041,6 +2049,46 @@ pub struct MobMemberStatusResult {
     pub external_member: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_capabilities: Option<crate::wire::WireResolvedModelCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<WireMemberProgressSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMemberRunState {
+    Idle,
+    RunOpen,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMemberHealthClass {
+    Healthy,
+    Degraded,
+    Wedged,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMemberProgressEvent {
+    ExecutionAdvanced,
+    BecameIdle,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMemberProgressSnapshot {
+    pub run_state: WireMemberRunState,
+    pub in_flight_work: u64,
+    pub last_progress_at_ms: u64,
+    pub last_progress_event: WireMemberProgressEvent,
+    pub health: WireMemberHealthClass,
 }
 
 /// Response payload for `mob/snapshot`.
@@ -2085,6 +2133,7 @@ mod member_status_capability_tests {
             kickoff: None,
             external_member: None,
             resolved_capabilities: Some(capabilities.clone()),
+            progress: None,
         };
 
         let json = serde_json::to_string(&result)?;
@@ -2349,6 +2398,9 @@ pub struct MobSubmitWorkParams {
     /// autonomous inbox delivery rejects it with a typed error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injected_context: Option<Vec<WireContentInput>>,
+    /// Durable kickoff objective correlation to stamp onto this delegated turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<String>,
 }
 
 /// Response payload for `mob/submit_work`.
@@ -2358,6 +2410,26 @@ pub struct MobSubmitWorkResult {
     pub mob_id: String,
     pub work_ref: String,
     pub member_ref: WireMemberRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<String>,
+}
+
+/// Explicitly concludes one machine-owned kickoff objective.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobConcludeObjectiveParams {
+    pub member_ref: WireMemberRef,
+    pub objective_id: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobConcludeObjectiveResult {
+    pub member_ref: WireMemberRef,
+    pub objective_id: String,
+    pub concluded: bool,
 }
 
 /// Request payload for `mob/cancel_work`.

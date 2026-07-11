@@ -493,6 +493,7 @@ impl SessionRuntime {
         }
 
         let input = meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+            objective_id: None,
             header: meerkat_runtime::input::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

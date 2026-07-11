@@ -770,6 +770,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 content_taint,
                 handling_mode,
+                objective_id,
             } => self
                 .send_peer_command(
                     &to,
@@ -778,16 +779,14 @@ impl CoreCommsRuntime for CommsRuntime {
                         blocks,
                         content_taint: None,
                         handling_mode: Some(handling_mode),
+                        objective_id,
                     },
                     content_taint,
                 )
                 .await
                 .map(|outcome| SendReceipt::PeerMessageSent {
                     envelope_id: outcome.envelope_id,
-                    // Verified ACK truth from the delivery path: `true` only
-                    // when a peer ACK was received and verified over a stream
-                    // transport; inproc handoffs report `false`.
-                    acked: outcome.acked,
+                    delivery: outcome.delivery,
                 }),
             CommsCommand::PeerLifecycle { to, kind, params } => self
                 .send_peer_command(
@@ -807,6 +806,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 content_taint,
                 handling_mode,
                 stream,
+                objective_id,
             } => {
                 let interaction_id = Uuid::new_v4();
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
@@ -851,6 +851,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             blocks,
                             content_taint: None,
                             handling_mode: Some(handling_mode),
+                            objective_id,
                         },
                         content_taint,
                     )
@@ -886,6 +887,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 content_taint,
                 handling_mode,
+                objective_id,
             } => {
                 let (peer_handle, _stream_authority) =
                     self.require_peer_request_response_authority("PeerResponse")?;
@@ -958,6 +960,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             blocks,
                             content_taint: None,
                             handling_mode: effective_handling_mode,
+                            objective_id,
                         },
                         content_taint,
                     )
@@ -1035,6 +1038,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 content_taint,
                 handling_mode,
                 stream: InputStreamMode::ReserveInteraction,
+                objective_id,
             } => {
                 // Reserve under the canonical request envelope id so the same
                 // id can be used for stream attachment and reply correlation.
@@ -1073,6 +1077,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             blocks,
                             content_taint: None,
                             handling_mode: Some(handling_mode),
+                            objective_id,
                         },
                         content_taint,
                     )
@@ -1258,12 +1263,14 @@ impl CoreCommsRuntime for CommsRuntime {
                         // content facts (signed-when-present on the envelope);
                         // extract it before the kind is consumed below.
                         let sender_taint = envelope.kind.content_taint();
+                        let objective_id = envelope.kind.objective_id();
                         let content = match envelope.kind {
                             MessageKind::Message {
                                 body,
                                 blocks,
                                 content_taint: _,
                                 handling_mode: _,
+                                objective_id: _,
                             } => meerkat_core::InteractionContent::Message { body, blocks },
                             MessageKind::Request {
                                 intent,
@@ -1271,6 +1278,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 blocks,
                                 content_taint: _,
                                 handling_mode: _,
+                                objective_id: _,
                             } => {
                                 let typed_intent = MessageIntent::from(intent.as_str());
                                 meerkat_core::InteractionContent::Request {
@@ -1293,6 +1301,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 blocks,
                                 content_taint: _,
                                 handling_mode: _,
+                                objective_id: _,
                             } => {
                                 let core_status = match status {
                                     crate::types::Status::Accepted => {
@@ -1328,6 +1337,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 handling_mode: envelope_handling_mode,
                                 render_metadata: None,
                                 sender_taint,
+                                objective_id,
                             },
                             ingress,
                             lifecycle_peer,
@@ -1338,6 +1348,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         body,
                         source,
                         handling_mode,
+                        objective_id,
                         interaction_id,
                         blocks,
                         render_metadata,
@@ -1356,6 +1367,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             // Plain events are host-injected, not peer
                             // envelopes: no sender declaration exists.
                             sender_taint: None,
+                            objective_id,
                         },
                         ingress,
                         lifecycle_peer,
@@ -2152,6 +2164,7 @@ impl CommsRuntime {
                 blocks: Some(mut blocks),
                 content_taint,
                 handling_mode,
+                objective_id,
             } => {
                 self.hydrate_blocks_for_transport(&mut blocks, "comms message")
                     .await?;
@@ -2160,6 +2173,7 @@ impl CommsRuntime {
                     blocks: Some(blocks),
                     content_taint,
                     handling_mode,
+                    objective_id,
                 })
             }
             crate::types::MessageKind::Request {
@@ -2168,6 +2182,7 @@ impl CommsRuntime {
                 blocks: Some(mut blocks),
                 content_taint,
                 handling_mode,
+                objective_id,
             } => {
                 self.hydrate_blocks_for_transport(&mut blocks, "comms request")
                     .await?;
@@ -2177,6 +2192,7 @@ impl CommsRuntime {
                     blocks: Some(blocks),
                     content_taint,
                     handling_mode,
+                    objective_id,
                 })
             }
             crate::types::MessageKind::Response {
@@ -2186,6 +2202,7 @@ impl CommsRuntime {
                 blocks: Some(mut blocks),
                 content_taint,
                 handling_mode,
+                objective_id,
             } => {
                 self.hydrate_blocks_for_transport(&mut blocks, "comms response")
                     .await?;
@@ -2196,6 +2213,7 @@ impl CommsRuntime {
                     blocks: Some(blocks),
                     content_taint,
                     handling_mode,
+                    objective_id,
                 })
             }
             other => Ok(other),
@@ -2830,6 +2848,7 @@ impl CommsRuntime {
                 interaction_id: Some(interaction_id),
                 blocks,
                 render_metadata: None,
+                objective_id: None,
             })
         {
             self.expire_interaction_stream_on_send_failure(corr_id, interaction_id);
@@ -5032,6 +5051,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             &sender,
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 to: peer_route(&receiver_name, receiver.public_key()),
@@ -5198,6 +5218,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 body: "hello".to_string(),
@@ -5208,6 +5229,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 19}),
                 blocks: None,
@@ -5222,6 +5244,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Response {
+                objective_id: None,
                 in_reply_to: reply_to,
                 status: Status::Completed,
                 result: serde_json::json!({"ok": true}),
@@ -5306,6 +5329,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
+                objective_id: None,
                 body: "tainted body".to_string(),
                 blocks: None,
                 content_taint: Some(SenderContentTaint::Tainted),
@@ -5316,6 +5340,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 7}),
                 blocks: None,
@@ -5327,6 +5352,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
+                objective_id: None,
                 body: "undeclared body".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -5450,6 +5476,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
+                objective_id: None,
                 body: "please inspect this".to_string(),
                 blocks: Some(blocks.clone()),
                 content_taint: None,
@@ -5505,6 +5532,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
+                objective_id: None,
                 body: "DISMISS".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -5567,6 +5595,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             runtime.as_ref(),
             CommsCommand::PeerRequest {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "checksum".to_string(),
@@ -5659,6 +5688,7 @@ mod tests {
         let receipt = CoreCommsRuntime::send(
             runtime.as_ref(),
             CommsCommand::PeerRequest {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "checksum".to_string(),
@@ -5714,6 +5744,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             &runtime,
             CommsCommand::PeerRequest {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "must-have-authority".to_string(),
@@ -5761,6 +5792,7 @@ mod tests {
         let result = CoreCommsRuntime::send_and_stream(
             &runtime,
             CommsCommand::PeerRequest {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "must-have-stream-authority".to_string(),
@@ -5812,6 +5844,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             &runtime,
             CommsCommand::PeerResponse {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&peer_name, peer.public_key()),
                 in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
@@ -5853,6 +5886,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             runtime.as_ref(),
             CommsCommand::PeerResponse {
+                objective_id: None,
                 content_taint: None,
                 to: missing_peer_route(&format!("missing-response-peer-{suffix}")),
                 in_reply_to: InteractionId(interaction_id),
@@ -5940,6 +5974,7 @@ mod tests {
         let receipt = CoreCommsRuntime::send(
             sender.as_ref(),
             CommsCommand::PeerResponse {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&receiver_name, receiver.public_key()),
                 in_reply_to: InteractionId(interaction_id),
@@ -6059,6 +6094,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             runtime.as_ref(),
             CommsCommand::PeerRequest {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "must-have-complete-authority".to_string(),
@@ -6117,6 +6153,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             runtime.as_ref(),
             CommsCommand::PeerResponse {
+                objective_id: None,
                 content_taint: None,
                 to: peer_route(&peer_name, peer.public_key()),
                 in_reply_to: InteractionId(interaction_id),
@@ -6427,6 +6464,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::PlainEvent {
+                objective_id: None,
                 blocks: None,
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
@@ -6457,6 +6495,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::PlainEvent {
+                objective_id: None,
                 blocks: None,
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
@@ -6488,6 +6527,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::PlainEvent {
+                objective_id: None,
                 blocks: None,
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
@@ -6531,6 +6571,7 @@ mod tests {
             &sender,
             runtime.public_key,
             crate::types::MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
                 blocks: None,
@@ -6549,6 +6590,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::PlainEvent {
+                objective_id: None,
                 blocks: None,
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
@@ -6647,6 +6689,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"scope": "peer"}),
                 blocks: None,
@@ -6696,6 +6739,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"scope": "peer"}),
                 blocks: None,
@@ -6847,6 +6891,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Request {
+                objective_id: None,
                 intent: "status".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -7125,6 +7170,7 @@ mod tests {
         let runtime = CommsRuntime::inproc_only(&format!("sender-{suffix}")).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: None,
             to: missing_peer_route("missing-peer"),
@@ -7165,6 +7211,7 @@ mod tests {
         .await;
 
         let cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: None,
             to: peer_route(&receiver_name, receiver.public_key()),
@@ -7176,8 +7223,11 @@ mod tests {
         match receipt {
             Ok(SendReceipt::PeerMessageSent {
                 envelope_id: _,
-                acked,
-            }) => assert!(!acked),
+                delivery,
+            }) => assert_eq!(
+                delivery,
+                meerkat_core::comms::PeerDeliveryOutcome::HandedOff
+            ),
             other => panic!("Expected peer message receipt, got: {other:?}"),
         }
 
@@ -7224,6 +7274,7 @@ mod tests {
         .await;
 
         let cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: Some(vec![ContentBlock::Image {
                 media_type: "image/png".to_string(),
@@ -7293,6 +7344,7 @@ mod tests {
         .await;
 
         let cmd = CommsCommand::PeerRequest {
+            objective_id: None,
             content_taint: None,
             blocks: Some(vec![ContentBlock::Image {
                 media_type: "image/png".to_string(),
@@ -7377,6 +7429,7 @@ mod tests {
         .expect("seed inbound request state");
 
         let cmd = CommsCommand::PeerResponse {
+            objective_id: None,
             content_taint: None,
             blocks: Some(vec![ContentBlock::Image {
                 media_type: "image/png".to_string(),
@@ -7420,6 +7473,7 @@ mod tests {
         let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
 
         let cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: None,
             to: peer_route(&receiver_name, receiver.public_key()),
@@ -7489,6 +7543,7 @@ mod tests {
         let receiver_pubkey = receiver.public_key();
 
         let cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: None,
             to: peer_route(&receiver_name, receiver.public_key()),
@@ -7602,6 +7657,7 @@ mod tests {
         assert_eq!(receiver_entries.len(), 1, "peer should appear in peers()");
 
         let send_cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: None,
             to: peer_route(&receiver_name, receiver.public_key()),
@@ -7930,6 +7986,7 @@ mod tests {
         CoreCommsRuntime::send(
             &sender,
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 to: peer_route(&receiver_name, receiver.public_key()),
@@ -7964,6 +8021,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             &sender,
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 to: peer_route(&peer_name, peer_pubkey),
@@ -8015,6 +8073,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             &sender,
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 to: peer_route(&receiver_name, receiver.public_key()),
@@ -8050,6 +8109,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             &sender,
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 to: missing_peer_route(&missing_name),
@@ -8094,6 +8154,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             &sender,
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 to: peer_route(&missing_name, missing_pubkey),
@@ -8150,6 +8211,7 @@ mod tests {
             for kind in &entry.sendable_kinds {
                 let cmd = match kind {
                     PeerSendability::PeerMessage => CommsCommand::PeerMessage {
+                        objective_id: None,
                         content_taint: None,
                         blocks: None,
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
@@ -8157,6 +8219,7 @@ mod tests {
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                     },
                     PeerSendability::PeerRequest => CommsCommand::PeerRequest {
+                        objective_id: None,
                         content_taint: None,
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         intent: "test".to_string(),
@@ -8166,6 +8229,7 @@ mod tests {
                         stream: InputStreamMode::None,
                     },
                     PeerSendability::PeerResponse => CommsCommand::PeerResponse {
+                        objective_id: None,
                         content_taint: None,
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
@@ -8319,6 +8383,7 @@ mod tests {
         .await;
 
         let cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: None,
             to: peer_route(&peer_name, peer.public_key()),
@@ -8491,6 +8556,7 @@ mod tests {
 
         // Verify sending to the removed peer fails (PeerNotFound)
         let cmd = CommsCommand::PeerMessage {
+            objective_id: None,
             content_taint: None,
             blocks: None,
             to: peer_route(&receiver_name, receiver.public_key()),

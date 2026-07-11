@@ -132,6 +132,7 @@ fn test_transcript_message_identity_serialization_is_optional() {
     user.identity = TranscriptMessageIdentity {
         interaction_id: Some(interaction_id),
         run_id: Some(run_id.clone()),
+        objective_id: None,
     };
 
     let json = serde_json::to_value(Message::User(user)).unwrap();

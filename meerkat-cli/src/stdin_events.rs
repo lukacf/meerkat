@@ -31,6 +31,7 @@ fn make_stdin_external_event_input(
     format: StdinLineFormat,
 ) -> meerkat_runtime::Input {
     meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+        objective_id: None,
         header: meerkat_runtime::InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),

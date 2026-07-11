@@ -45,6 +45,7 @@ fn response_route_id() -> PeerId {
 
 fn make_message(from: &str, body: &str) -> InboxInteraction {
     InboxInteraction {
+        objective_id: None,
         sender_taint: None,
         from_route: None,
         id: iid(),
@@ -61,6 +62,7 @@ fn make_message(from: &str, body: &str) -> InboxInteraction {
 
 fn make_message_with_blocks(from: &str, body: &str) -> InboxInteraction {
     InboxInteraction {
+        objective_id: None,
         sender_taint: None,
         from_route: None,
         id: iid(),
@@ -84,6 +86,7 @@ fn make_message_with_blocks(from: &str, body: &str) -> InboxInteraction {
 fn make_response(from: &str, status: ResponseStatus) -> InboxInteraction {
     let in_reply_to = iid();
     InboxInteraction {
+        objective_id: None,
         sender_taint: None,
         from_route: Some(response_route_id()),
         id: iid(),
@@ -102,6 +105,7 @@ fn make_response(from: &str, status: ResponseStatus) -> InboxInteraction {
 
 fn make_request(from: &str, intent: &str) -> InboxInteraction {
     InboxInteraction {
+        objective_id: None,
         sender_taint: None,
         from_route: None,
         id: iid(),
@@ -830,6 +834,7 @@ async fn terminal_response_with_steer_policy_while_running() {
     // Build a terminal response with Steer handling_mode.
     let in_reply_to = iid();
     let interaction = InboxInteraction {
+        objective_id: None,
         sender_taint: None,
         from_route: Some(response_route_id()),
         id: iid(),
@@ -880,6 +885,7 @@ async fn terminal_response_with_steer_policy_while_idle() {
     // Build a terminal response with Steer handling_mode.
     let in_reply_to = iid();
     let interaction = InboxInteraction {
+        objective_id: None,
         sender_taint: None,
         from_route: Some(response_route_id()),
         id: iid(),

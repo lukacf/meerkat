@@ -2890,6 +2890,7 @@ mod tests {
             "non-prompt-driver-before-prompt-selection",
         ));
         let event_input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            objective_id: None,
             header: crate::input::InputHeader {
                 id: InputId::new(),
                 timestamp: chrono::Utc::now(),

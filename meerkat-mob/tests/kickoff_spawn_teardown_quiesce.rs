@@ -118,6 +118,7 @@ fn mark_kickoff_starting(authority: &mut MobMachineAuthority, identity_name: &st
         authority,
         MobMachineInput::KickoffMarkPending {
             member_id: identity(identity_name),
+            objective_id: "00000000-0000-0000-0000-000000000001".into(),
         },
     )
     .expect("kickoff mark pending must be accepted for a fresh member");

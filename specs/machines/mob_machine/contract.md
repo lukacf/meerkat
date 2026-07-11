@@ -89,6 +89,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_kickoff_failed`: `Set<AgentIdentity>`
 - `member_kickoff_cancelled`: `Set<AgentIdentity>`
 - `member_kickoff_error`: `Map<AgentIdentity, String>`
+- `member_kickoff_objective_ids`: `Map<AgentIdentity, String>`
+- `objective_owner_ids`: `Map<String, AgentIdentity>`
+- `objective_outcomes`: `Map<String, String>`
+- `concluded_objective_ids`: `Set<String>`
 - `member_restore_failures`: `Map<AgentIdentity, String>`
 - `member_restore_failure_codes`: `Map<AgentIdentity, String>`
 - `runtime_retire_refusal_codes`: `Map<AgentRuntimeId, String>`
@@ -97,6 +101,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `remote_runtime_retired_ids`: `Set<AgentRuntimeId>`
 - `remote_supervisor_revoked_ids`: `Set<AgentRuntimeId>`
 - `member_revival_pending`: `Set<AgentIdentity>`
+- `member_run_open`: `Map<AgentIdentity, Bool>`
+- `member_in_flight_work`: `Map<AgentIdentity, u64>`
+- `member_progress_tokens`: `Map<AgentIdentity, String>`
+- `member_last_observed_at_ms`: `Map<AgentIdentity, u64>`
+- `member_last_progress_at_ms`: `Map<AgentIdentity, u64>`
+- `member_last_progress_event`: `Map<AgentIdentity, MemberProgressEventKind>`
+- `member_health_class`: `Map<AgentIdentity, MemberHealthClass>`
 - `spawn_exec_phase`: `Map<AgentIdentity, SpawnExecPhase>`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
@@ -242,6 +253,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetSpawnPolicy`(enabled: Bool)
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
+- `ConcludeObjective`(member_id: AgentIdentity, objective_id: String, outcome: String)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -275,6 +287,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSpawnProfile`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool)
 - `ClassifySpawnManyFailure`(observation: MobSpawnManyFailureObservationKind)
 - `ClassifyMemberWait`(agent_identity: AgentIdentity)
+- `ObserveMemberProgress`(agent_identity: AgentIdentity, run_open: Bool, in_flight_work: u64, progress_token: String, observed_at_ms: u64)
 - `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
 - `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_budget_split_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
@@ -328,7 +341,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMobEventRouterMemberRemoval`(agent_identity: AgentIdentity)
 - `PollEventsStrict`(after_cursor: u64, latest_cursor: u64, limit: u64)
 - `ResolveSpawnPolicy`(agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<SpawnPolicyRuntimeMode>)
-- `KickoffMarkPending`(member_id: AgentIdentity)
+- `KickoffMarkPending`(member_id: AgentIdentity, objective_id: String)
+- `BindObjectiveOwner`(owner_id: AgentIdentity, objective_id: String)
 - `KickoffMarkStarting`(member_id: AgentIdentity)
 - `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `KickoffResolveStarted`(member_id: AgentIdentity)
@@ -393,6 +407,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverRosterMemberRetired`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `ConvergeRecoveredRosterTopology`(edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity)
 - `RecoverMemberKickoff`(member_id: AgentIdentity, phase: KickoffPhase, error: Option<String>)
+- `RecoverObjectiveBinding`(member_id: AgentIdentity, objective_id: String)
+- `RecoverObjectiveConclusion`(member_id: AgentIdentity, objective_id: String, outcome: String)
 - `RecoverRosterWiring`(edge: WiringEdge)
 - `RecoverRosterUnwire`(edge: WiringEdge)
 - `RecoverExternalPeerWiring`(key: ExternalPeerKey, edge: ExternalPeerEdge)
@@ -464,6 +480,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PersistKickoffUpdate`(member_id: AgentIdentity, phase: KickoffPhase)
 - `PersistKickoffFailureUpdate`(member_id: AgentIdentity, phase: KickoffPhase, error: String)
 - `EmitKickoffLifecycleNotice`(member_id: AgentIdentity, intent: KickoffIntent)
+- `PersistObjectiveOwnerBinding`(owner_id: AgentIdentity, objective_id: String)
+- `PersistObjectiveConclusion`(member_id: AgentIdentity, objective_id: String, outcome: String)
 - `RequestKickoffQuiesce`(member_id: AgentIdentity)
 - `RequestPendingSpawnQuiesceForDestroy`
 - `MemberAdmissionProbed`(agent_identity: AgentIdentity, verdict: MemberAdmissionVerdictKind)
@@ -861,6 +879,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `runtime_material_present`
 - Emits: `MemberWaitClassified`
+- To: `Running`
+
+### `ObserveMemberProgressChangedOpenRunning`
+- From: `Running`
+- On: `ObserveMemberProgress`(agent_identity, run_open, in_flight_work, progress_token, observed_at_ms)
+- Guards:
+  - `observation_monotonic`
+  - `member_progress_changed`
+  - `run_open`
+- To: `Running`
+
+### `ObserveMemberProgressChangedIdleRunning`
+- From: `Running`
+- On: `ObserveMemberProgress`(agent_identity, run_open, in_flight_work, progress_token, observed_at_ms)
+- Guards:
+  - `observation_monotonic`
+  - `member_progress_changed`
+  - `run_idle`
+- To: `Running`
+
+### `ObserveMemberProgressUnchangedIdleRunning`
+- From: `Running`
+- On: `ObserveMemberProgress`(agent_identity, run_open, in_flight_work, progress_token, observed_at_ms)
+- Guards:
+  - `observation_monotonic`
+  - `member_progress_unchanged`
+  - `run_idle`
+- To: `Running`
+
+### `ObserveMemberProgressUnchangedOpenHealthyRunning`
+- From: `Running`
+- On: `ObserveMemberProgress`(agent_identity, run_open, in_flight_work, progress_token, observed_at_ms)
+- Guards:
+  - `observation_monotonic`
+  - `member_progress_unchanged`
+  - `run_open`
+  - `progress_recent`
+- To: `Running`
+
+### `ObserveMemberProgressUnchangedOpenDegradedRunning`
+- From: `Running`
+- On: `ObserveMemberProgress`(agent_identity, run_open, in_flight_work, progress_token, observed_at_ms)
+- Guards:
+  - `observation_monotonic`
+  - `member_progress_unchanged`
+  - `run_open`
+  - `progress_degraded`
+- To: `Running`
+
+### `ObserveMemberProgressUnchangedOpenWedgedRunning`
+- From: `Running`
+- On: `ObserveMemberProgress`(agent_identity, run_open, in_flight_work, progress_token, observed_at_ms)
+- Guards:
+  - `observation_monotonic`
+  - `member_progress_unchanged`
+  - `run_open`
+  - `progress_wedged`
+- To: `Running`
+
+### `ObserveMemberProgressStaleRunning`
+- From: `Running`
+- On: `ObserveMemberProgress`(agent_identity, run_open, in_flight_work, progress_token, observed_at_ms)
+- Guards:
+  - `observation_stale`
 - To: `Running`
 
 ### `ClassifyMemberWaitRuntimeMaterialPresentStopped`
@@ -3563,6 +3645,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recover_cancelled_without_error`
 - To: `Running`
 
+### `RecoverObjectiveBinding`
+- From: `Running`
+- On: `RecoverObjectiveBinding`(member_id, objective_id)
+- To: `Running`
+
+### `BindObjectiveOwnerRunning`
+- From: `Running`
+- On: `BindObjectiveOwner`(owner_id, objective_id)
+- Guards:
+  - `objective_owner_unbound`
+- Emits: `PersistObjectiveOwnerBinding`
+- To: `Running`
+
+### `BindObjectiveOwnerIdempotentRunning`
+- From: `Running`
+- On: `BindObjectiveOwner`(owner_id, objective_id)
+- Guards:
+  - `objective_owner_matches`
+- To: `Running`
+
+### `RecoverObjectiveConclusion`
+- From: `Running`
+- On: `RecoverObjectiveConclusion`(member_id, objective_id, outcome)
+- Guards:
+  - `objective_belongs_to_lead`
+- To: `Running`
+
 ### `ReconcileRunning`
 - From: `Running`
 - On: `Reconcile`(desired, retire_stale)
@@ -3617,7 +3726,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `KickoffMarkPendingRunning`
 - From: `Running`
-- On: `KickoffMarkPending`(member_id)
+- On: `KickoffMarkPending`(member_id, objective_id)
 - Guards:
   - `kickoff_not_started`
 - Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
@@ -3625,7 +3734,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `KickoffMarkPendingStopped`
 - From: `Stopped`
-- On: `KickoffMarkPending`(member_id)
+- On: `KickoffMarkPending`(member_id, objective_id)
 - Guards:
   - `kickoff_not_started`
 - Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
@@ -3633,11 +3742,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `KickoffMarkPendingCompleted`
 - From: `Completed`
-- On: `KickoffMarkPending`(member_id)
+- On: `KickoffMarkPending`(member_id, objective_id)
 - Guards:
   - `kickoff_not_started`
 - Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
 - To: `Completed`
+
+### `ConcludeObjectiveRunning`
+- From: `Running`
+- On: `ConcludeObjective`(member_id, objective_id, outcome)
+- Guards:
+  - `objective_belongs_to_lead`
+  - `objective_not_concluded`
+- Emits: `PersistObjectiveConclusion`
+- To: `Running`
+
+### `ConcludeObjectiveIdempotentRunning`
+- From: `Running`
+- On: `ConcludeObjective`(member_id, objective_id, outcome)
+- Guards:
+  - `objective_belongs_to_lead`
+  - `objective_already_concluded`
+  - `objective_outcome_matches`
+- To: `Running`
 
 ### `KickoffMarkStartingRunning`
 - From: `Running`

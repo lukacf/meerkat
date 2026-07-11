@@ -214,7 +214,7 @@ pub use image_content::{
 };
 pub use image_generation::*;
 pub use interaction::{
-    ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
+    ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId, ObjectiveId,
     PeerIngressAdmission, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
     PeerIngressAuthExemption, PeerIngressAuthorityPhase, PeerIngressClassification,
     PeerIngressConvention, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,

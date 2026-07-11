@@ -944,6 +944,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 body: "test".to_string(),
@@ -959,6 +960,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Request {
+                objective_id: None,
                 content_taint: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
@@ -972,6 +974,7 @@ mod tests {
     fn make_response_envelope(in_reply_to: Uuid) -> Envelope {
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Response {
+            objective_id: None,
             content_taint: None,
             in_reply_to,
             status: crate::types::Status::Completed,
@@ -1310,6 +1313,7 @@ mod tests {
 
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Request {
+            objective_id: None,
             content_taint: None,
             intent: "review".to_string(),
             params: serde_json::json!({}),
@@ -1335,6 +1339,7 @@ mod tests {
 
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Response {
+            objective_id: None,
             content_taint: None,
             in_reply_to: Uuid::new_v4(),
             status: crate::types::Status::Completed,
@@ -1389,6 +1394,7 @@ mod tests {
 
         sender
             .send_classified(InboxItem::PlainEvent {
+                objective_id: None,
                 body: "event".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -1416,6 +1422,7 @@ mod tests {
 
         let mut envelope = make_test_envelope();
         envelope.kind = MessageKind::Request {
+            objective_id: None,
             content_taint: None,
             intent: "mob.peer_added".to_string(),
             params: serde_json::json!({"peer": "new-agent"}),
@@ -1472,6 +1479,7 @@ mod tests {
             .unwrap();
         sender
             .send_classified(InboxItem::PlainEvent {
+                objective_id: None,
                 body: "event".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -1575,6 +1583,7 @@ mod tests {
         }
         sender
             .send_classified(InboxItem::PlainEvent {
+                objective_id: None,
                 body: "event".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -2147,6 +2156,7 @@ mod tests {
             from: sender.public_key(),
             to: receiver.public_key(),
             kind: MessageKind::Request {
+                objective_id: None,
                 content_taint: None,
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),

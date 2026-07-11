@@ -393,6 +393,8 @@ pub struct PeerInput {
     /// durable input persistence (absent on older persisted inputs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_taint: Option<meerkat_core::comms::SenderContentTaint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Host-attached injected context carried by supervisor-authored work
     /// deliveries (remote mob members over the supervisor bridge). Each entry
     /// lowers into a separate
@@ -464,6 +466,7 @@ pub fn peer_response_terminal_input(
     let display_identity = display_name.map_or_else(|| peer_id.clone(), |name| name.as_string());
 
     Input::Peer(PeerInput {
+        objective_id: None,
         injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
@@ -527,6 +530,8 @@ pub struct ExternalEventInput {
     /// Optional normalized render metadata carried with the event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
 }
 
 /// Typed continuation discriminant carried on a [`ContinuationInput`].
@@ -1296,6 +1301,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: vec![ContentInput::Text("supervisor ambient".to_string())],
             sender_taint: None,
             header,
@@ -1380,6 +1386,7 @@ mod tests {
     #[test]
     fn peer_input_message_serde() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -1407,6 +1414,7 @@ mod tests {
         };
         header.correlation_id = correlation_id;
         Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1519,6 +1527,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1586,6 +1595,7 @@ mod tests {
                 runtime_id: None,
             };
             let input = Input::Peer(PeerInput {
+                objective_id: None,
                 injected_context: Vec::new(),
                 sender_taint: declared,
                 header,
@@ -1645,6 +1655,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1789,6 +1800,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1861,6 +1873,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1904,6 +1917,7 @@ mod tests {
     #[test]
     fn peer_input_request_serde() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -1927,6 +1941,7 @@ mod tests {
     #[test]
     fn peer_input_response_terminal_serde() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -1946,6 +1961,7 @@ mod tests {
     #[test]
     fn peer_input_response_progress_serde() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -1989,6 +2005,7 @@ mod tests {
     #[test]
     fn external_event_input_serde() {
         let input = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header(),
             event_type: "webhook.received".into(),
             payload: serde_json::json!({"url": "https://example.com"}),
@@ -2017,6 +2034,7 @@ mod tests {
         // The retired shape smuggled multimodal blocks inside the payload
         // JSON. It must fail closed with a typed error — never migrate.
         let event = ExternalEventInput {
+            objective_id: None,
             header: make_header(),
             event_type: "webhook.received".into(),
             payload: serde_json::json!({
@@ -2042,6 +2060,7 @@ mod tests {
     #[test]
     fn external_event_payload_without_blocks_key_passes_rejection_gate() {
         let event = ExternalEventInput {
+            objective_id: None,
             header: make_header(),
             event_type: "webhook.received".into(),
             payload: serde_json::json!({ "body": "plain payload" }),
@@ -2168,6 +2187,7 @@ mod tests {
         assert_eq!(prompt.kind(), InputKind::Prompt);
 
         let peer_msg = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2179,6 +2199,7 @@ mod tests {
         assert_eq!(peer_msg.kind(), InputKind::PeerMessage);
 
         let peer_req = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2271,6 +2292,7 @@ mod tests {
     #[test]
     fn peer_input_with_queue_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2365,6 +2387,7 @@ mod tests {
     #[test]
     fn peer_input_with_steer_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2385,6 +2408,7 @@ mod tests {
     #[test]
     fn peer_input_handling_mode_not_serialized_when_none() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),

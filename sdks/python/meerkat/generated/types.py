@@ -810,6 +810,7 @@ class ForkSessionAtParams:
     message_index: int
     session_id: str
     running_behavior: Optional[Literal['reject']] = None
+    tool_access_policy: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -824,6 +825,7 @@ the emitted JSON schema is the closed replacement enum rather than a bare
     replacement: dict[str, Any]
     session_id: str
     running_behavior: Optional[Literal['reject']] = None
+    tool_access_policy: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -1021,10 +1023,10 @@ class RuntimeHostHealth:
 @dataclass
 class RuntimeHostInfo:
     """Read-only host information. This is a projection, not a registry entry."""
-    capabilities: dict[str, Any]
+    capabilities: RuntimeHostCapabilities
     contract_version: dict[str, Any]
     endpoints: dict[str, Any]
-    health: dict[str, Any]
+    health: RuntimeHostHealth
     host_id: str
     host_id_scope: Literal['process', 'realm_instance']
     process_name: str
@@ -1235,6 +1237,7 @@ class MobSpawnParams:
     initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, str]] = None
     launch_mode: Optional[WireMemberLaunchMode] = None
+    model_override: Optional[str] = None
     override_profile: Optional[WireMobProfile] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
     shell_env: Optional[dict[str, str]] = None
@@ -1260,6 +1263,7 @@ class MobSpawnSpecParams:
     context: Optional[Any] = None
     initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, str]] = None
+    model_override: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
 
 
@@ -1319,6 +1323,16 @@ without leaking bridge-internal fields."""
     error: Optional[str] = None
     labels: Optional[dict[str, str]] = None
     wired_to: Optional[list[str]] = None
+
+
+@dataclass
+class WireMemberProgressSnapshot:
+    """Wire payload for WireMemberProgressSnapshot."""
+    health: Literal['healthy', 'degraded', 'wedged', 'unknown']
+    in_flight_work: int
+    last_progress_at_ms: int
+    last_progress_event: Literal['execution_advanced', 'became_idle', 'unchanged']
+    run_state: Literal['idle', 'run_open', 'unknown']
 
 
 @dataclass
@@ -1582,7 +1596,7 @@ semantics without introducing a separate thread/project runtime."""
 class MobIngressInteractionResult:
     """Response payload for `mob/ingress_interaction`."""
     agent_identity: str
-    delivery: dict[str, Any]
+    delivery: MobMemberSendResult
     ensure_outcome: dict[str, MobSpawnReceiptWire] | dict[str, MobMemberListEntryWire]
     events_after_cursor: int
     latest_event_cursor: int
@@ -1653,7 +1667,7 @@ class MobFlowStatusResult:
     """Response payload for `mob/flow_status`.
 
 `run` is `None` when the requested run id has no persisted run."""
-    run: Optional[dict[str, Any]] = None
+    run: Optional[WireMobRun] = None
 
 
 @dataclass
@@ -1668,7 +1682,7 @@ class MobRunResult:
     """Response payload for `mob/run_result`.
 
 `run` is `None` when the requested run id has no persisted run."""
-    run: Optional[dict[str, Any]] = None
+    run: Optional[WireMobRunResultEnvelope] = None
 
 
 @dataclass
@@ -1692,6 +1706,7 @@ class MobSpawnHelperParams:
     agent_identity: Optional[str] = None
     auth_binding: Optional[WireAuthBindingRef] = None
     backend: Optional[WireMobBackendKind] = None
+    model_override: Optional[str] = None
     role_name: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
 
@@ -1706,6 +1721,7 @@ class MobForkHelperParams:
     auth_binding: Optional[WireAuthBindingRef] = None
     backend: Optional[WireMobBackendKind] = None
     fork_context: Optional[Any] = None
+    model_override: Optional[str] = None
     role_name: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
 
@@ -1764,7 +1780,8 @@ class MobMemberStatusResult:
     external_member: Optional[Any] = None
     kickoff: Optional[Any] = None
     output_preview: Optional[str] = None
-    peer_connectivity: Optional[dict[str, Any]] = None
+    peer_connectivity: Optional[WirePeerConnectivity] = None
+    progress: Optional[WireMemberProgressSnapshot] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
 
@@ -1810,6 +1827,7 @@ server resolves against the live roster — callers do not pass
     content: WireContentInput
     member_ref: WireMemberRef
     injected_context: Optional[list[WireContentInput]] = None
+    objective_id: Optional[str] = None
     origin: Optional[Literal['external', 'internal']] = None
     work_ref: Optional[str] = None
 
@@ -1820,6 +1838,23 @@ class MobSubmitWorkResult:
     member_ref: WireMemberRef
     mob_id: str
     work_ref: str
+    objective_id: Optional[str] = None
+
+
+@dataclass
+class MobConcludeObjectiveParams:
+    """Explicitly concludes one machine-owned kickoff objective."""
+    member_ref: WireMemberRef
+    objective_id: str
+    outcome: str
+
+
+@dataclass
+class MobConcludeObjectiveResult:
+    """Wire payload for MobConcludeObjectiveResult."""
+    concluded: bool
+    member_ref: WireMemberRef
+    objective_id: str
 
 
 @dataclass
@@ -1890,7 +1925,7 @@ class MobProfileLookupResult:
 @dataclass
 class MobProfileListResult:
     """Response payload for `mob/profile/list`."""
-    profiles: list[dict[str, Any]]
+    profiles: list[MobProfileLookupResult]
 
 
 @dataclass
@@ -3820,7 +3855,7 @@ fields with typed projections so the wire carries no untyped carriers."""
     updated_at: str
     attempt_count: Optional[int] = None
     durability: Optional[Literal['durable', 'volatile', 'ephemeral']] = None
-    history: Optional[list[dict[str, Any]]] = None
+    history: Optional[list[WireInputStateHistoryEntry]] = None
     idempotency_key: Optional[str] = None
     last_boundary_sequence: Optional[int] = None
     last_run_id: Optional[str] = None
@@ -3834,7 +3869,7 @@ fields with typed projections so the wire carries no untyped carriers."""
 @dataclass
 class ScheduleListResult:
     """Response payload for schedule/list."""
-    schedules: list[dict[str, Any]]
+    schedules: list[Schedule]
 
 
 @dataclass
@@ -3910,7 +3945,7 @@ class CatalogModelEntry:
 class ProviderCatalog:
     """Provider-level grouping in the catalog response."""
     default_model_id: str
-    models: list[dict[str, Any]]
+    models: list[CatalogModelEntry]
     provider: str
 
 
@@ -3930,8 +3965,8 @@ prefix inference: an entry's provider is the one recorded for its catalog
 id (or its self-hosted alias config), never inferred from a `claude-*` /
 `gpt-*` / `gemini-*` name prefix. Uncatalogued model names resolve through
 the registry, not by prefix guessing."""
-    contract_version: dict[str, Any]
-    providers: list[dict[str, Any]]
+    contract_version: ContractVersion
+    providers: list[ProviderCatalog]
 
 
 @dataclass
@@ -4049,9 +4084,9 @@ class WireProviderBinding:
 class WireRealmConnectionSet:
     """Wire projection of [`meerkat_core::RealmConnectionSet`]. Returned
 from the `realm/get` / `GET /realm/:id` endpoints."""
-    auth_profiles: dict[str, dict[str, Any]]
-    backends: dict[str, dict[str, Any]]
-    bindings: dict[str, dict[str, Any]]
+    auth_profiles: dict[str, WireAuthProfile]
+    backends: dict[str, WireBackendProfile]
+    bindings: dict[str, WireProviderBinding]
     realm_id: str
     default_binding: Optional[str] = None
 
@@ -4084,7 +4119,7 @@ class WireAuthProfileCreated:
 class WireAuthProfileDetail:
     """`GET /auth/bindings/{binding_id}` success body."""
     auth_binding: WireAuthBindingRef
-    auth_profile: dict[str, Any]
+    auth_profile: WireAuthProfile
     binding_id: str
     profile_id: str
 
@@ -4153,16 +4188,16 @@ class WireRealmSummary:
 @dataclass
 class WireRealmList:
     """`GET /realms` success body."""
-    realms: list[dict[str, Any]]
+    realms: list[WireRealmSummary]
 
 
 @dataclass
 class WireAuthProfilesList:
     """`GET /auth/profiles` success body — realm-scoped lists of backend,
 auth, and binding profiles."""
-    auth_profiles: list[dict[str, Any]]
-    backend_profiles: list[dict[str, Any]]
-    bindings: list[dict[str, Any]]
+    auth_profiles: list[WireAuthProfile]
+    backend_profiles: list[WireBackendProfile]
+    bindings: list[WireProviderBinding]
     realm_id: str
 
 
@@ -5207,7 +5242,7 @@ class CommsSendResultInputAccepted(TypedDict, total=False):
     stream_reserved: Required[bool]
 
 class CommsSendResultPeerMessageSent(TypedDict, total=False):
-    acked: Required[bool]
+    delivery: Required[Literal['acked', 'handed_off', 'queued']]
     envelope_id: Required[str]
     kind: Required[Literal['peer_message_sent']]
 

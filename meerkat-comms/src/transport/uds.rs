@@ -101,6 +101,7 @@ mod tests {
             from: keypair.public_key(),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 body: "hello from uds".to_string(),

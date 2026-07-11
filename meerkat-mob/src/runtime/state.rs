@@ -187,6 +187,30 @@ pub(crate) struct MobDslT2Snapshot {
     // materialization is gone while a durable snapshot remains.
     pub member_revival_pending:
         std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub member_kickoff_objective_ids:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub objective_owner_ids:
+        std::collections::BTreeMap<String, crate::machines::mob_machine::AgentIdentity>,
+    pub objective_outcomes: std::collections::BTreeMap<String, String>,
+    pub concluded_objective_ids: std::collections::BTreeSet<String>,
+    pub member_run_open:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, bool>,
+    pub member_in_flight_work:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
+    pub member_progress_tokens:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub member_last_observed_at_ms:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
+    pub member_last_progress_at_ms:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
+    pub member_last_progress_event: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberProgressEventKind,
+    >,
+    pub member_health_class: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberHealthClass,
+    >,
     // W3-H-1: canonical identity→bridge-session binding map, projected from
     // `MobMachineAuthority.state.member_session_bindings`. Used by the
     // runtime-parity snapshot to expose the DSL's realtime binding map to
@@ -284,6 +308,8 @@ pub(super) struct SubmitWorkPayload {
     /// `render_metadata`); stamped into the turn's transcript identity at
     /// delivery so the committed transcript joins the host's live frames.
     pub interaction_id: Option<meerkat_core::interaction::InteractionId>,
+    /// Durable objective causality riding with this work item.
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
     pub ack_mode: crate::mob_machine::SubmitWorkAckMode,
@@ -501,6 +527,17 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
+    ConcludeObjective {
+        agent_identity: crate::ids::AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+        outcome: String,
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
+    },
+    BindObjectiveOwner {
+        owner_identity: crate::ids::AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
+    },
     MemberMachineProjection {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<MobMemberMachineProjection>,
@@ -628,6 +665,8 @@ impl MobCommand {
             Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",
             Self::ProjectMemberList { .. } => "ProjectMemberList",
             Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
+            Self::ConcludeObjective { .. } => "ConcludeObjective",
+            Self::BindObjectiveOwner { .. } => "BindObjectiveOwner",
             Self::MemberMachineProjection { .. } => "MemberMachineProjection",
             Self::Stop { .. } => "Stop",
             Self::ResumeLifecycle { .. } => "ResumeLifecycle",

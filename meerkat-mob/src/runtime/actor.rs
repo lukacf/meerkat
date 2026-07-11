@@ -135,6 +135,7 @@ struct SubmitWorkDispatchRequest {
     /// so the committed transcript messages persist the id the host's live
     /// interaction frames carry (mobkit ask-15 addendum).
     interaction_id: Option<meerkat_core::interaction::InteractionId>,
+    objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     handling_mode: meerkat_core::types::HandlingMode,
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
@@ -147,8 +148,9 @@ struct SubmitWorkDispatchRequest {
 fn submit_work_turn_metadata(
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
     interaction_id: Option<meerkat_core::interaction::InteractionId>,
+    objective_id: Option<meerkat_core::interaction::ObjectiveId>,
 ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
-    if render_metadata.is_none() && interaction_id.is_none() {
+    if render_metadata.is_none() && interaction_id.is_none() && objective_id.is_none() {
         return None;
     }
     Some(
@@ -157,6 +159,7 @@ fn submit_work_turn_metadata(
             transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
                 interaction_id,
                 run_id: None,
+                objective_id,
             },
             ..Default::default()
         },
@@ -1091,6 +1094,10 @@ pub(super) struct PendingSpawn {
     /// Effective profile override from `SpawnTooling::Profile` resolution.
     /// Persisted in the roster so respawn/restore can use it.
     pub(super) effective_profile_override: Option<crate::profile::Profile>,
+    /// Field-scoped model override reapplied over the current role profile.
+    pub(super) effective_model_override: Option<String>,
+    /// Objective causality inherited from the spawning turn.
+    pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
     /// actor retention map is updated in the same block as the roster insert.
     pub(super) per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
@@ -1207,6 +1214,7 @@ struct RespawnSnapshot {
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
+    effective_model_override: Option<String>,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -1241,6 +1249,8 @@ struct SpawnFinalizeCtx {
     auto_wire_parent: bool,
     restore_wiring: Option<RestoreWiringPlan>,
     effective_profile_override: Option<crate::profile::Profile>,
+    effective_model_override: Option<String>,
+    objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
     continuity_intent: super::handle::SpawnContinuityIntent,
@@ -1252,6 +1262,7 @@ struct SpawnFinalizeCtx {
 /// and runtime.
 struct SpawnAdmitted {
     member_ref: MemberRef,
+    session_origin: super::provisioner::ProvisionSessionOrigin,
     agent_runtime_id: crate::ids::AgentRuntimeId,
     is_replacing: bool,
     /// Exact endpoint observed for this runtime generation before the
@@ -1259,6 +1270,16 @@ struct SpawnAdmitted {
     /// MobMachine registration cannot diverge from durable replay authority.
     member_peer_endpoint: Option<TrustedPeerDescriptor>,
     transport_public_key: Option<String>,
+}
+
+struct FailedSpawnRollback<'a> {
+    generation: crate::ids::Generation,
+    profile_name: &'a ProfileName,
+    member_ref: &'a MemberRef,
+    operation_id: &'a meerkat_core::ops::OperationId,
+    session_origin: super::provisioner::ProvisionSessionOrigin,
+    successful_wiring_targets: &'a [AgentIdentity],
+    planned_wiring_targets: &'a [AgentIdentity],
 }
 
 struct RespawnTopologyRestoreResolution {
@@ -5109,6 +5130,129 @@ impl MobActor {
                 .and_then(|entry| entry.kickoff.as_ref()),
         );
 
+        let progress = if include_session_details {
+            match current_bridge_session_id.as_ref() {
+                Some(session_id) => match self.session_service.execution_snapshot(session_id).await
+                {
+                    Ok(Some(snapshot)) => {
+                        let run_open = snapshot.active_run_id.is_some() && !snapshot.turn_terminal;
+                        let pending_operations = snapshot
+                            .pending_operation_ids
+                            .as_ref()
+                            .map_or(0_u64, |ids| ids.len() as u64);
+                        let in_flight_work = pending_operations
+                            .saturating_add(u64::from(snapshot.tool_calls_pending))
+                            .saturating_add(u64::from(run_open));
+                        let progress_token = format!(
+                            "{:?}|{:?}|{}|{}|{}|{}",
+                            snapshot.active_run_id,
+                            snapshot.turn_phase,
+                            snapshot.boundary_count,
+                            snapshot.applied_cursor,
+                            snapshot.tool_calls_pending,
+                            pending_operations,
+                        );
+                        let observed_at_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
+                        if self.dsl_authority.state().lifecycle_phase == mob_dsl::MobPhase::Running
+                        {
+                            self.apply_dsl_input(
+                                mob_dsl::MobMachineInput::ObserveMemberProgress {
+                                    agent_identity: dsl_identity.clone(),
+                                    run_open,
+                                    in_flight_work,
+                                    progress_token,
+                                    observed_at_ms,
+                                },
+                                "member_status_observe_progress",
+                            )?;
+                        }
+                        let state = self.dsl_authority.state();
+                        let run_state = if state
+                            .member_run_open
+                            .get(&dsl_identity)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            super::handle::MemberRunState::RunOpen
+                        } else {
+                            super::handle::MemberRunState::Idle
+                        };
+                        let last_progress_event = match state
+                            .member_last_progress_event
+                            .get(&dsl_identity)
+                            .copied()
+                            .unwrap_or(mob_dsl::MemberProgressEventKind::Unchanged)
+                        {
+                            mob_dsl::MemberProgressEventKind::ExecutionAdvanced => {
+                                super::handle::MemberProgressEvent::ExecutionAdvanced
+                            }
+                            mob_dsl::MemberProgressEventKind::BecameIdle => {
+                                super::handle::MemberProgressEvent::BecameIdle
+                            }
+                            mob_dsl::MemberProgressEventKind::Unchanged => {
+                                super::handle::MemberProgressEvent::Unchanged
+                            }
+                        };
+                        let health = match state
+                            .member_health_class
+                            .get(&dsl_identity)
+                            .copied()
+                            .unwrap_or(mob_dsl::MemberHealthClass::Unknown)
+                        {
+                            mob_dsl::MemberHealthClass::Healthy => {
+                                super::handle::MemberHealthClass::Healthy
+                            }
+                            mob_dsl::MemberHealthClass::Degraded => {
+                                super::handle::MemberHealthClass::Degraded
+                            }
+                            mob_dsl::MemberHealthClass::Wedged => {
+                                super::handle::MemberHealthClass::Wedged
+                            }
+                            mob_dsl::MemberHealthClass::Unknown => {
+                                super::handle::MemberHealthClass::Unknown
+                            }
+                        };
+                        Some(super::handle::MemberProgressSnapshot {
+                            run_state,
+                            in_flight_work: state
+                                .member_in_flight_work
+                                .get(&dsl_identity)
+                                .copied()
+                                .unwrap_or(0),
+                            last_progress_at_ms: state
+                                .member_last_progress_at_ms
+                                .get(&dsl_identity)
+                                .copied()
+                                .unwrap_or(observed_at_ms),
+                            last_progress_event,
+                            health,
+                        })
+                    }
+                    Ok(None) | Err(_) => Some(super::handle::MemberProgressSnapshot {
+                        run_state: super::handle::MemberRunState::Unknown,
+                        in_flight_work: 0,
+                        last_progress_at_ms: 0,
+                        last_progress_event: super::handle::MemberProgressEvent::Unchanged,
+                        health: super::handle::MemberHealthClass::Unknown,
+                    }),
+                },
+                None => Some(super::handle::MemberProgressSnapshot {
+                    run_state: super::handle::MemberRunState::Unknown,
+                    in_flight_work: 0,
+                    last_progress_at_ms: 0,
+                    last_progress_event: super::handle::MemberProgressEvent::Unchanged,
+                    health: super::handle::MemberHealthClass::Unknown,
+                }),
+            }
+        } else {
+            None
+        };
+
         Ok(MobMemberLifecycleProjection::materialize(
             MobMemberLifecycleInput {
                 member_present,
@@ -5123,6 +5267,7 @@ impl MobActor {
                 current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff,
+                progress,
             },
         ))
     }
@@ -5481,13 +5626,16 @@ impl MobActor {
 
         // Resolve and machine-authorize the profile material exactly like the
         // resume-restore reconciliation.
-        let profile = if let Some(p) = entry.effective_profile_override.clone() {
+        let mut profile = if let Some(p) = entry.effective_profile_override.clone() {
             p
         } else {
             self.definition
                 .resolve_profile(&entry.role, self.realm_profile_store.as_ref())
                 .await?
         };
+        if let Some(model) = entry.effective_model_override.as_ref() {
+            profile.model.clone_from(model);
+        }
         self.authorize_spawn_profile_material(
             &agent_identity,
             &entry.role,
@@ -5610,6 +5758,7 @@ impl MobActor {
             .provisioner
             .provision_member(ProvisionMemberRequest {
                 create_session: req,
+                session_origin: super::provisioner::ProvisionSessionOrigin::ResumedDurable,
                 binding: crate::RuntimeBinding::Session,
                 peer_name,
                 owner_bridge_session_id: None,
@@ -5777,7 +5926,15 @@ impl MobActor {
         phase: crate::roster::MobMemberKickoffPhase,
         error: Option<String>,
     ) -> Result<(), MobError> {
+        let objective_id = self
+            .dsl_authority
+            .state()
+            .member_kickoff_objective_ids
+            .get(&mob_dsl::AgentIdentity::from_domain(agent_identity))
+            .and_then(|id| uuid::Uuid::parse_str(id.as_str()).ok())
+            .map(meerkat_core::interaction::ObjectiveId);
         let kickoff = crate::roster::MobMemberKickoffSnapshot {
+            objective_id,
             phase,
             error,
             updated_at: SystemTime::now(),
@@ -5887,6 +6044,12 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &'static str,
     ) -> Result<bool, MobError> {
+        let mut objective_rollback_state = matches!(
+            &input,
+            mob_dsl::MobMachineInput::ConcludeObjective { .. }
+                | mob_dsl::MobMachineInput::BindObjectiveOwner { .. }
+        )
+        .then(|| self.dsl_authority.state().clone());
         let transition = match mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input) {
             Ok(transition) => transition,
             Err(error) => return Err(Self::kickoff_rejection_error(context, error)),
@@ -5938,6 +6101,80 @@ impl MobActor {
                             intent = %intent,
                             "failed to emit kickoff lifecycle notice"
                         );
+                    }
+                }
+                mob_dsl::MobMachineEffect::PersistObjectiveOwnerBinding {
+                    owner_id: _,
+                    objective_id,
+                } => {
+                    let objective_id = uuid::Uuid::parse_str(objective_id.as_str())
+                        .map(meerkat_core::interaction::ObjectiveId)
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "MobMachine emitted invalid objective id '{objective_id}': {error}"
+                            ))
+                        })?;
+                    if let Err(error) = self
+                        .events
+                        .append(NewMobEvent {
+                            mob_id: self.definition.id.clone(),
+                            timestamp: None,
+                            kind: MobEventKind::ObjectiveOwnerBound {
+                                owner: agent_identity.clone(),
+                                objective_id,
+                            },
+                        })
+                        .await
+                    {
+                        if let Some(previous_state) = objective_rollback_state.take() {
+                            self.dsl_authority =
+                                mob_dsl::MobMachineAuthority::recover_from_state(previous_state)
+                                    .map_err(|recovery_error| {
+                                        MobError::Internal(format!(
+                                            "objective owner persistence failed ({error}); authority rollback failed: {recovery_error}"
+                                        ))
+                                    })?;
+                            self.publish_machine_state_projection();
+                        }
+                        return Err(error.into());
+                    }
+                }
+                mob_dsl::MobMachineEffect::PersistObjectiveConclusion {
+                    member_id: _,
+                    objective_id,
+                    outcome,
+                } => {
+                    let objective_id = uuid::Uuid::parse_str(objective_id.as_str())
+                        .map(meerkat_core::interaction::ObjectiveId)
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "MobMachine emitted invalid objective id '{objective_id}': {error}"
+                            ))
+                        })?;
+                    if let Err(error) = self
+                        .events
+                        .append(NewMobEvent {
+                            mob_id: self.definition.id.clone(),
+                            timestamp: None,
+                            kind: MobEventKind::ObjectiveConcluded {
+                                member: agent_identity.clone(),
+                                objective_id,
+                                outcome,
+                            },
+                        })
+                        .await
+                    {
+                        if let Some(previous_state) = objective_rollback_state.take() {
+                            self.dsl_authority =
+                                mob_dsl::MobMachineAuthority::recover_from_state(previous_state)
+                                    .map_err(|recovery_error| {
+                                        MobError::Internal(format!(
+                                            "objective conclusion persistence failed ({error}); authority rollback failed: {recovery_error}"
+                                        ))
+                                    })?;
+                            self.publish_machine_state_projection();
+                        }
+                        return Err(error.into());
                     }
                 }
                 // Routed seam effects (`Request*`) were harvested above
@@ -7285,6 +7522,14 @@ impl MobActor {
             ))
         })?;
 
+        let kickoff_objective_id = self
+            .dsl_authority
+            .state()
+            .member_kickoff_objective_ids
+            .get(&mob_dsl::AgentIdentity::from_domain(agent_identity))
+            .and_then(|raw| uuid::Uuid::parse_str(raw.as_str()).ok())
+            .map(meerkat_core::interaction::ObjectiveId);
+
         {
             // Runtime-backed path: true admission ack via accept_input_with_completion.
             use meerkat_runtime::{Input, InputHeader, PromptInput};
@@ -7303,7 +7548,7 @@ impl MobActor {
                 },
                 content: prompt,
                 typed_turn_appends: Vec::new(),
-                turn_metadata: None,
+                turn_metadata: submit_work_turn_metadata(None, None, kickoff_objective_id),
             });
 
             let (_outcome, completion_handle) = adapter
@@ -7902,24 +8147,39 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let result = match self
-                        .cancel_pending_spawns_for_member(
-                            &agent_identity,
-                            "retire command received",
-                        )
-                        .await
-                    {
-                        Ok(canceled) => {
-                            if canceled > 0 {
-                                tracing::info!(
-                                    agent_identity = %agent_identity,
-                                    canceled,
-                                    "retire canceled pending spawn lineage before roster retirement"
-                                );
+                    // A retire with no roster incarnation is an idempotent
+                    // RetireAbsent observation. It must not cancel an
+                    // unrelated, later provision for the same stable
+                    // identity: that provision is a new incarnation and the
+                    // absent retire carries no runtime/fence authority over
+                    // it. This is the causal fence that makes
+                    // retire-then-resume sequencing safe.
+                    let roster_incarnation_exists = {
+                        let roster = self.roster.read().await;
+                        roster.get(&agent_identity).is_some()
+                    };
+                    let result = if roster_incarnation_exists {
+                        match self
+                            .cancel_pending_spawns_for_member(
+                                &agent_identity,
+                                "retire command received",
+                            )
+                            .await
+                        {
+                            Ok(canceled) => {
+                                if canceled > 0 {
+                                    tracing::info!(
+                                        agent_identity = %agent_identity,
+                                        canceled,
+                                        "retire canceled pending spawn lineage before roster retirement"
+                                    );
+                                }
+                                self.handle_retire(agent_identity).await
                             }
-                            self.handle_retire(agent_identity).await
+                            Err(error) => Err(error),
                         }
-                        Err(error) => Err(error),
+                    } else {
+                        self.handle_retire(agent_identity).await
                     };
                     let _ = reply_tx.send(result);
                 }
@@ -8291,6 +8551,17 @@ impl MobActor {
                         remote_runtime_retired_ids: dsl.remote_runtime_retired_ids.clone(),
                         remote_supervisor_revoked_ids: dsl.remote_supervisor_revoked_ids.clone(),
                         member_revival_pending: dsl.member_revival_pending.clone(),
+                        member_kickoff_objective_ids: dsl.member_kickoff_objective_ids.clone(),
+                        objective_owner_ids: dsl.objective_owner_ids.clone(),
+                        objective_outcomes: dsl.objective_outcomes.clone(),
+                        concluded_objective_ids: dsl.concluded_objective_ids.clone(),
+                        member_run_open: dsl.member_run_open.clone(),
+                        member_in_flight_work: dsl.member_in_flight_work.clone(),
+                        member_progress_tokens: dsl.member_progress_tokens.clone(),
+                        member_last_observed_at_ms: dsl.member_last_observed_at_ms.clone(),
+                        member_last_progress_at_ms: dsl.member_last_progress_at_ms.clone(),
+                        member_last_progress_event: dsl.member_last_progress_event.clone(),
+                        member_health_class: dsl.member_health_class.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
                         spawn_exec_phase: dsl.spawn_exec_phase.clone(),
                         pending_spawn_sessions: dsl.pending_spawn_sessions.clone(),
@@ -8366,6 +8637,44 @@ impl MobActor {
                             .await
                             .map(|material| material.to_snapshot()),
                     );
+                }
+                MobCommand::ConcludeObjective {
+                    agent_identity,
+                    objective_id,
+                    outcome,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .apply_kickoff_input(
+                            &agent_identity,
+                            mob_dsl::MobMachineInput::ConcludeObjective {
+                                member_id: mob_dsl::AgentIdentity::from_domain(&agent_identity),
+                                objective_id: objective_id.to_string(),
+                                outcome,
+                            },
+                            "conclude_objective",
+                        )
+                        .await
+                        .map(|_| ());
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::BindObjectiveOwner {
+                    owner_identity,
+                    objective_id,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .apply_kickoff_input(
+                            &owner_identity,
+                            mob_dsl::MobMachineInput::BindObjectiveOwner {
+                                owner_id: mob_dsl::AgentIdentity::from_domain(&owner_identity),
+                                objective_id: objective_id.to_string(),
+                            },
+                            "bind_objective_owner",
+                        )
+                        .await
+                        .map(|_| ());
+                    let _ = reply_tx.send(result);
                 }
                 MobCommand::MemberMachineProjection {
                     agent_identity,
@@ -9370,6 +9679,8 @@ impl MobActor {
             shell_env,
             inherited_tool_filter,
             override_profile,
+            model_override,
+            objective_id,
             auth_binding,
             external_tools: per_spawn_external_tools,
             system_prompt_override,
@@ -9417,6 +9728,7 @@ impl MobActor {
 
             // Capture the override for roster persistence before consuming it.
             let effective_profile_override = override_profile.clone();
+            let effective_model_override = model_override.clone();
 
             // Use override_profile if provided (from SpawnTooling::Profile resolution),
             // otherwise resolve from the mob definition.
@@ -9427,6 +9739,9 @@ impl MobActor {
                     .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
                     .await?
             };
+            if let Some(model) = model_override {
+                profile.model = model;
+            }
             tracing::debug!(
                 mob_id = %self.definition.id,
                 agent_identity = %agent_identity,
@@ -9527,6 +9842,8 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        effective_model_override.clone(),
+                        objective_id,
                         per_spawn_external_tools.clone(),
                         authorized_profile_material.clone(),
                         continuity_intent.clone(),
@@ -9534,16 +9851,24 @@ impl MobActor {
                 }
 
                 if self.session_service.supports_persistent_sessions() {
-                    let stored_session = self
+                    let stored_session = match self
                         .session_service
                         .load_persisted_session(&resume_id)
                         .await
                         .map_err(MobError::from)?
-                        .ok_or_else(|| {
-                            MobError::Internal(format!(
-                                "missing durable session snapshot for '{resume_id}'"
-                            ))
-                        })?;
+                    {
+                        Some(session) => session,
+                        None => self
+                            .session_service
+                            .load_revivable_retired_session(&resume_id)
+                            .await
+                            .map_err(MobError::from)?
+                            .ok_or_else(|| {
+                                MobError::Internal(format!(
+                                    "missing durable session snapshot for '{resume_id}'"
+                                ))
+                            })?,
+                    };
 
                     let external_tools =
                         self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
@@ -9598,6 +9923,8 @@ impl MobActor {
                     )?;
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
+                        session_origin:
+                            super::provisioner::ProvisionSessionOrigin::ResumedDurable,
                         binding: selected_binding,
                         peer_name,
                         owner_bridge_session_id: owner_bridge_session_id.clone(),
@@ -9618,6 +9945,8 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        effective_model_override.clone(),
+                        objective_id,
                         per_spawn_external_tools.clone(),
                         authorized_profile_material.clone(),
                         continuity_intent.clone(),
@@ -9764,6 +10093,7 @@ impl MobActor {
             )?;
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
+                session_origin: super::provisioner::ProvisionSessionOrigin::Fresh,
                 binding: selected_binding,
                 peer_name,
                 owner_bridge_session_id: owner_bridge_session_id.clone(),
@@ -9784,6 +10114,8 @@ impl MobActor {
                 owner_bridge_session_id.clone(),
                 auto_wire_parent,
                 effective_profile_override,
+                effective_model_override,
+                objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
@@ -9804,6 +10136,8 @@ impl MobActor {
             spawn_owner_bridge_session_id,
             auto_wire_parent,
             effective_profile_override,
+            effective_model_override,
+            objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
             continuity_intent,
@@ -9857,8 +10191,13 @@ impl MobActor {
                     return;
                 }
             };
-            let provision =
-                PendingProvision::new(member_ref, agent_identity.clone(), self.provisioner.clone());
+            let provision = PendingProvision::new(
+                member_ref,
+                agent_identity.clone(),
+                self.provisioner.clone(),
+                operation_id.clone(),
+                super::provisioner::ProvisionSessionOrigin::ResumedDurable,
+            );
             // Go straight to finalization — no async provisioning task needed.
             let fence = self.issue_fence_token();
             let result = Box::pin(self.finalize_spawn_from_pending(
@@ -9876,6 +10215,8 @@ impl MobActor {
                 auto_wire_parent,
                 None,
                 effective_profile_override,
+                effective_model_override,
+                objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
@@ -9964,6 +10305,8 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring: None,
             effective_profile_override,
+            effective_model_override,
+            objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
             continuity_intent,
@@ -10130,6 +10473,8 @@ impl MobActor {
                         spawn_receipt.member_ref,
                         AgentIdentity::from("__unknown_ticket__"),
                         self.provisioner.clone(),
+                        spawn_receipt.operation_id,
+                        spawn_receipt.session_origin,
                     );
                     if let Err(error) = orphan.rollback().await {
                         tracing::warn!(
@@ -10158,6 +10503,8 @@ impl MobActor {
                 auto_wire_parent,
                 restore_wiring,
                 effective_profile_override,
+                effective_model_override,
+                objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
@@ -10195,6 +10542,8 @@ impl MobActor {
                         spawn_receipt.member_ref.clone(),
                         agent_identity.clone(),
                         self.provisioner.clone(),
+                        spawn_receipt.operation_id.clone(),
+                        spawn_receipt.session_origin,
                     );
                     if let Err(error) = self.require_member_operation_eligible() {
                         if let Err(retire_error) = provision.rollback().await {
@@ -10225,6 +10574,8 @@ impl MobActor {
                             auto_wire_parent,
                             restore_wiring,
                             effective_profile_override,
+                            effective_model_override,
+                            objective_id,
                             per_spawn_external_tools,
                             authorized_profile_material,
                             continuity_intent,
@@ -10292,6 +10643,8 @@ impl MobActor {
             shell_env,
             inherited_tool_filter,
             override_profile,
+            model_override,
+            objective_id: _,
             auth_binding,
             external_tools: per_spawn_external_tools,
             system_prompt_override,
@@ -10318,6 +10671,9 @@ impl MobActor {
                 .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
                 .await?
         };
+        if let Some(model) = model_override.as_ref() {
+            profile.model.clone_from(model);
+        }
         if inherited_tool_filter.is_some() && override_profile.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
@@ -10383,6 +10739,7 @@ impl MobActor {
         )?;
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
+            session_origin: super::provisioner::ProvisionSessionOrigin::Fresh,
             binding: selected_binding,
             peer_name,
             owner_bridge_session_id: None,
@@ -10431,6 +10788,8 @@ impl MobActor {
             auto_wire_parent: false,
             restore_wiring: None,
             effective_profile_override: override_profile.clone(),
+            effective_model_override: model_override.clone(),
+            objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
             continuity_intent: continuity_intent.clone(),
@@ -10500,6 +10859,8 @@ impl MobActor {
                 spawn_receipt.member_ref.clone(),
                 agent_identity.clone(),
                 self.provisioner.clone(),
+                spawn_receipt.operation_id.clone(),
+                spawn_receipt.session_origin,
             );
             if let Err(error) = self.require_member_operation_eligible() {
                 if let Err(retire_error) = provision.rollback().await {
@@ -10525,6 +10886,8 @@ impl MobActor {
                 false,
                 None,
                 override_profile, // policy spawns usually use definition profiles; customizers may supply an override
+                model_override,
+                None,
                 per_spawn_external_tools,
                 authorized_profile_material,
                 continuity_intent,
@@ -10619,6 +10982,8 @@ impl MobActor {
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
         effective_profile_override: Option<crate::profile::Profile>,
+        effective_model_override: Option<String>,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
         per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
         authorized_profile_material: AuthorizedSpawnProfileMaterial,
         continuity_intent: super::handle::SpawnContinuityIntent,
@@ -10643,6 +11008,8 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring,
             effective_profile_override,
+            effective_model_override,
+            objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
             continuity_intent,
@@ -10699,7 +11066,7 @@ impl MobActor {
         // carries the spawn admission guards, sets the per-identity phase to
         // `Opened`, and emits nothing. Any failure between here and
         // `CommitSpawnMembership` fires `AbortSpawnExec` to reset the phase.
-        self.apply_dsl_input(
+        if let Err(error) = self.apply_dsl_input(
             mob_dsl::MobMachineInput::BeginSpawnExec {
                 agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
@@ -10714,7 +11081,14 @@ impl MobActor {
                 replacing: replacing.clone(),
             },
             "finalize_spawn_admit_begin_spawn_exec",
-        )?;
+        ) {
+            if let Err(rollback_error) = provision.rollback().await {
+                return Err(MobError::Internal(format!(
+                    "spawn admission failed for '{agent_identity}': {error}; compensation failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
         // Spawn ladder step 2: prepare `CommitSpawnMembership`. It guards on
         // `phase == Opened` and carries the verbatim membership update plus the
         // `MemberSpawned` lifecycle journal emit. Prepared (not committed) here
@@ -10738,12 +11112,18 @@ impl MobActor {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Err(self.fold_spawn_exec_abort(
+                let error = self.fold_spawn_exec_abort(
                     &dsl_identity,
                     agent_identity,
                     error,
                     "finalize_spawn_admit_commit_membership",
-                ));
+                );
+                if let Err(rollback_error) = provision.rollback().await {
+                    return Err(MobError::Internal(format!(
+                        "spawn membership admission failed for '{agent_identity}': {error}; compensation failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
             }
         };
         tracing::debug!(
@@ -10760,12 +11140,18 @@ impl MobActor {
             bridge_session_id.clone(),
             "finalize_spawn_admit_commit_membership",
         ) {
-            return Err(self.fold_spawn_exec_abort(
+            let error = self.fold_spawn_exec_abort(
                 &dsl_identity,
                 agent_identity,
                 error,
                 "finalize_spawn_admit_commit_membership",
-            ));
+            );
+            if let Err(rollback_error) = provision.rollback().await {
+                return Err(MobError::Internal(format!(
+                    "spawn journal admission failed for '{agent_identity}': {error}; compensation failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
         }
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -10911,6 +11297,7 @@ impl MobActor {
                     // repopulates RosterEntry.effective_profile_override so
                     // restarts keep per-spawn tooling without a customizer.
                     event.effective_profile_override = ctx.effective_profile_override.clone();
+                    event.effective_model_override = ctx.effective_model_override.clone();
                     event
                 }),
             })
@@ -10949,7 +11336,75 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit committing membership"
         );
-        self.commit_prepared_dsl_transition(prepared_spawn)?;
+        if let Err(commit_error) = self.commit_prepared_dsl_transition(prepared_spawn) {
+            let commit_error = self.fold_spawn_exec_abort(
+                &dsl_identity,
+                agent_identity,
+                commit_error,
+                "finalize_spawn_admit_commit_membership",
+            );
+            // MemberSpawned is already durable at this point. Close that
+            // journal incarnation before releasing its provision so replay
+            // cannot resurrect a member whose session was returned to its
+            // pre-spawn lifecycle.
+            let mut terminal_retry_delay = std::time::Duration::from_millis(25);
+            loop {
+                match self
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MemberRetired {
+                            agent_identity: identity.clone(),
+                            generation,
+                            role: profile_name.clone(),
+                        },
+                    })
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(retire_error) => {
+                        // The durable MemberSpawned record already exists, so
+                        // releasing this provision would make replay
+                        // resurrect a member with no backing continuity. Keep
+                        // ownership in this actor command and fail-stop on the
+                        // event-store boundary until the matching terminal is
+                        // durable. The bounded backoff avoids a hot loop while
+                        // preserving the only safe ordering.
+                        tracing::error!(
+                            agent_identity = %agent_identity,
+                            %retire_error,
+                            "spawn membership commit failed; retaining provision until durable terminal compensation succeeds"
+                        );
+                        tokio::time::sleep(terminal_retry_delay).await;
+                        terminal_retry_delay = terminal_retry_delay
+                            .saturating_mul(2)
+                            .min(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+            self.retired_event_index
+                .write()
+                .await
+                .insert(Self::retire_event_key(&identity, generation));
+            if overlay_record.is_some() {
+                let _ = self
+                    .delete_external_binding_overlay_for_member(&identity, generation)
+                    .await;
+            }
+            if let Some((session_id, comms, install)) = supervisor_private_trust_install.as_ref() {
+                Box::pin(
+                    self.cleanup_supervisor_private_trust_for_session(session_id, comms, install),
+                )
+                .await;
+            }
+            return match provision.rollback().await {
+                Ok(()) => Err(commit_error),
+                Err(rollback_error) => Err(MobError::Internal(format!(
+                    "spawn membership commit failed for '{agent_identity}': {commit_error}; provision rollback failed: {rollback_error}"
+                ))),
+            };
+        }
         tracing::debug!(
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit committed membership"
@@ -10958,6 +11413,7 @@ impl MobActor {
         // Commit the provision: the member is now owned by the roster.
         // From this point, rollback_failed_spawn handles cleanup via the
         // disposal pipeline.
+        let session_origin = provision.session_origin();
         let member_ref = provision.commit()?;
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -10974,6 +11430,7 @@ impl MobActor {
 
         Ok(SpawnAdmitted {
             member_ref,
+            session_origin,
             agent_runtime_id,
             is_replacing,
             member_peer_endpoint,
@@ -11005,12 +11462,15 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring,
             effective_profile_override,
+            effective_model_override,
+            objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
             continuity_intent: _,
         } = *ctx;
         let SpawnAdmitted {
             member_ref,
+            session_origin,
             agent_runtime_id,
             is_replacing,
             member_peer_endpoint,
@@ -11074,6 +11534,7 @@ impl MobActor {
                 transport_public_key,
                 labels: labels.clone(),
                 effective_profile_override: effective_profile_override.clone(),
+                effective_model_override: effective_model_override.clone(),
             });
         }
         {
@@ -11109,6 +11570,7 @@ impl MobActor {
                     agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkPending {
                         member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        objective_id: objective_id.unwrap_or_default().to_string(),
                     },
                     "finalize_spawn_kickoff_mark_pending",
                 )
@@ -11180,11 +11642,15 @@ impl MobActor {
                     self.clear_kickoff_state(agent_identity).await;
                     if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
                         agent_identity,
-                        generation,
-                        profile_name,
-                        &member_ref,
-                        &wired_spawn_targets,
-                        &planned_wiring_targets,
+                        FailedSpawnRollback {
+                            generation,
+                            profile_name,
+                            member_ref: &member_ref,
+                            operation_id: &operation_id,
+                            session_origin,
+                            successful_wiring_targets: &wired_spawn_targets,
+                            planned_wiring_targets: &planned_wiring_targets,
+                        },
                     ))
                     .await
                     {
@@ -11215,11 +11681,15 @@ impl MobActor {
                 self.clear_kickoff_state(agent_identity).await;
                 if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
                     agent_identity,
-                    generation,
-                    profile_name,
-                    &member_ref,
-                    &wired_spawn_targets,
-                    &planned_wiring_targets,
+                    FailedSpawnRollback {
+                        generation,
+                        profile_name,
+                        member_ref: &member_ref,
+                        operation_id: &operation_id,
+                        session_origin,
+                        successful_wiring_targets: &wired_spawn_targets,
+                        planned_wiring_targets: &planned_wiring_targets,
+                    },
                 ))
                 .await
                 {
@@ -11235,11 +11705,15 @@ impl MobActor {
                 self.clear_kickoff_state(agent_identity).await;
                 if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
                     agent_identity,
-                    generation,
-                    profile_name,
-                    &member_ref,
-                    &wired_spawn_targets,
-                    &planned_wiring_targets,
+                    FailedSpawnRollback {
+                        generation,
+                        profile_name,
+                        member_ref: &member_ref,
+                        operation_id: &operation_id,
+                        session_origin,
+                        successful_wiring_targets: &wired_spawn_targets,
+                        planned_wiring_targets: &planned_wiring_targets,
+                    },
                 ))
                 .await
                 {
@@ -11306,16 +11780,21 @@ impl MobActor {
                     fence_token,
                     &operation_id,
                     initial_turn_prompt,
+                    objective_id,
                 ))
                 .await
                 {
                     if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
                         agent_identity,
-                        generation,
-                        profile_name,
-                        &member_ref,
-                        &wired_spawn_targets,
-                        &planned_wiring_targets,
+                        FailedSpawnRollback {
+                            generation,
+                            profile_name,
+                            member_ref: &member_ref,
+                            operation_id: &operation_id,
+                            session_origin,
+                            successful_wiring_targets: &wired_spawn_targets,
+                            planned_wiring_targets: &planned_wiring_targets,
+                        },
                     ))
                     .await
                     {
@@ -11394,6 +11873,7 @@ impl MobActor {
             receipt: super::handle::MemberSpawnReceipt {
                 member_ref,
                 operation_id,
+                session_origin,
             },
             failed_restore_peer_ids,
         })
@@ -12688,6 +13168,7 @@ impl MobActor {
             to,
             sender_comms,
             command: CommsCommand::PeerMessage {
+                objective_id: None,
                 to: route,
                 body,
                 blocks,
@@ -15225,6 +15706,7 @@ impl MobActor {
                 restore_wiring,
                 binding,
                 effective_profile_override: entry.effective_profile_override,
+                effective_model_override: entry.effective_model_override,
                 cleanup_retry,
             }
         };
@@ -15246,6 +15728,7 @@ impl MobActor {
         replacement_spec.binding = Some(snapshot.binding.clone());
         replacement_spec.labels = Some(snapshot.labels.clone());
         replacement_spec.override_profile = snapshot.effective_profile_override.clone();
+        replacement_spec.model_override = snapshot.effective_model_override.clone();
         self.customize_spawn_spec(
             super::handle::SpawnSource::Respawn,
             None,
@@ -15287,6 +15770,8 @@ impl MobActor {
             shell_env: replacement_shell_env,
             inherited_tool_filter: replacement_inherited_tool_filter,
             override_profile: replacement_profile_override,
+            model_override: replacement_model_override,
+            objective_id: _,
             auth_binding: replacement_auth_binding,
             external_tools: replacement_external_tools,
             system_prompt_override: replacement_system_prompt_override,
@@ -15461,6 +15946,9 @@ impl MobActor {
                 .resolve_profile(&snapshot.profile_name, self.realm_profile_store.as_ref())
                 .await?
         };
+        if let Some(model) = replacement_model_override.as_ref() {
+            profile.model.clone_from(model);
+        }
         if replacement_inherited_tool_filter.is_some() && replacement_profile_override.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
@@ -15511,6 +15999,7 @@ impl MobActor {
         )?;
         let mut provision_request = ProvisionMemberRequest {
             create_session: req,
+            session_origin: super::provisioner::ProvisionSessionOrigin::Fresh,
             binding: snapshot.binding.clone(),
             peer_name,
             owner_bridge_session_id: None,
@@ -15585,6 +16074,8 @@ impl MobActor {
                 || !snapshot.restore_wiring.external_peers.is_empty())
             .then_some(snapshot.restore_wiring.clone()),
             effective_profile_override: replacement_profile_override.clone(),
+            effective_model_override: replacement_model_override.clone(),
+            objective_id: None,
             per_spawn_external_tools: replacement_external_tools.clone(),
             authorized_profile_material: replacement_authorized_profile_material.clone(),
             continuity_intent: replacement_continuity_intent.clone(),
@@ -15706,6 +16197,8 @@ impl MobActor {
                 spawn_receipt.member_ref.clone(),
                 agent_identity.clone(),
                 self.provisioner.clone(),
+                spawn_receipt.operation_id.clone(),
+                spawn_receipt.session_origin,
             );
             if let Err(error) = self.require_member_operation_eligible() {
                 if let Err(retire_error) = provision.rollback().await {
@@ -15755,6 +16248,8 @@ impl MobActor {
                         || !snapshot.restore_wiring.external_peers.is_empty())
                     .then_some(snapshot.restore_wiring.clone()),
                     replacement_profile_override,
+                    replacement_model_override,
+                    None,
                     replacement_external_tools,
                     replacement_authorized_profile_material,
                     replacement_continuity_intent,
@@ -19189,6 +19684,7 @@ impl MobActor {
             origin,
             injected_context,
             interaction_id,
+            objective_id,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -19395,6 +19891,7 @@ impl MobActor {
                     content,
                     injected_context,
                     interaction_id,
+                    objective_id,
                     handling_mode,
                     render_metadata,
                     ack_mode,
@@ -19445,6 +19942,7 @@ impl MobActor {
         fence_token: FenceToken,
         operation_id: &meerkat_core::ops::OperationId,
         content: ContentInput,
+        inherited_objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     ) -> Result<(), MobError> {
         let entry = {
             let roster = self.roster.read().await;
@@ -19514,6 +20012,14 @@ impl MobActor {
                     injected_context: Vec::new(),
                     // Mob-internal kickoff carries no host interaction id.
                     interaction_id: None,
+                    objective_id: inherited_objective_id.or_else(|| {
+                        self.dsl_authority
+                            .state()
+                            .member_kickoff_objective_ids
+                            .get(&dsl_identity)
+                            .and_then(|raw| uuid::Uuid::parse_str(raw.as_str()).ok())
+                            .map(meerkat_core::interaction::ObjectiveId)
+                    }),
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     render_metadata: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
@@ -19652,6 +20158,7 @@ impl MobActor {
             content,
             injected_context,
             interaction_id,
+            objective_id,
             handling_mode,
             render_metadata,
             ack_mode,
@@ -19777,7 +20284,11 @@ impl MobActor {
                             handling_mode,
                             None,
                             Vec::new(),
-                            submit_work_turn_metadata(render_metadata, interaction_id),
+                            submit_work_turn_metadata(
+                                render_metadata,
+                                interaction_id,
+                                objective_id,
+                            ),
                         ),
                     };
                     return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
@@ -19804,21 +20315,14 @@ impl MobActor {
                 // runtime transcript identity) carries the SAME id as the
                 // host's live interaction frames instead of minting a fresh
                 // unrelated one.
-                let inject_result = match interaction_id {
-                    Some(interaction_id) => injector.inject_with_interaction_id(
-                        interaction_id,
-                        content,
-                        meerkat_core::PlainEventSource::Rpc,
-                        handling_mode,
-                        render_metadata,
-                    ),
-                    None => injector.inject(
-                        content,
-                        meerkat_core::PlainEventSource::Rpc,
-                        handling_mode,
-                        render_metadata,
-                    ),
-                };
+                let inject_result = injector.inject_with_turn_identity(
+                    interaction_id,
+                    objective_id,
+                    content,
+                    meerkat_core::PlainEventSource::Rpc,
+                    handling_mode,
+                    render_metadata,
+                );
                 inject_result.map_err(|error| {
                     MobError::Internal(format!(
                         "autonomous dispatch inject failed for '{}': {}",
@@ -19862,7 +20366,7 @@ impl MobActor {
                         handling_mode,
                         None,
                         Vec::new(),
-                        submit_work_turn_metadata(render_metadata, interaction_id),
+                        submit_work_turn_metadata(render_metadata, interaction_id, objective_id),
                     ),
                 };
                 tracing::debug!(
@@ -20947,12 +21451,17 @@ impl MobActor {
     async fn rollback_failed_spawn(
         &mut self,
         agent_identity: &AgentIdentity,
-        generation: crate::ids::Generation,
-        profile_name: &ProfileName,
-        member_ref: &MemberRef,
-        successful_wiring_targets: &[AgentIdentity],
-        planned_wiring_targets: &[AgentIdentity],
+        rollback_context: FailedSpawnRollback<'_>,
     ) -> Result<(), MobError> {
+        let FailedSpawnRollback {
+            generation,
+            profile_name,
+            member_ref,
+            operation_id,
+            session_origin,
+            successful_wiring_targets,
+            planned_wiring_targets,
+        } = rollback_context;
         let spawned_entry = {
             let roster = self.roster.read().await;
             roster.get(agent_identity).cloned()
@@ -21288,6 +21797,96 @@ impl MobActor {
             }
         }
 
+        if matches!(
+            session_origin,
+            super::provisioner::ProvisionSessionOrigin::ResumedDurable
+                | super::provisioner::ProvisionSessionOrigin::RevivedRetired
+        ) {
+            let entry = spawned_entry.as_ref().ok_or_else(|| {
+                MobError::Internal(format!(
+                    "resumed spawn rollback lost roster incarnation for '{agent_identity}'"
+                ))
+            })?;
+            if let Some(session_id) = member_ref.bridge_session_id() {
+                // The failed incarnation must not consume a late routed bind
+                // after its durable session has been returned to idle.
+                self.discard_pending_routed_effects_for_session(session_id);
+            }
+
+            // Persist the membership rollback obligation before touching the
+            // only durable session.  A crash or restore failure therefore
+            // leaves a replayable Retiring incarnation correlated with the
+            // exact preserved session instead of a live roster row pointing
+            // at a session that has already been returned to idle.
+            let session_id = member_ref
+                .bridge_session_id()
+                .map(mob_dsl::SessionId::from_domain)
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "resumed spawn rollback for '{agent_identity}' lost its durable session binding"
+                    ))
+                })?;
+            let prepared_retire = self.prepare_dsl_input_transition(
+                mob_dsl::MobMachineInput::Retire {
+                    mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                    generation: mob_dsl::Generation::from_domain(entry.generation),
+                    releasing: None,
+                    session_id: Some(session_id.clone()),
+                },
+                "rollback_resumed_spawn_mark_retiring",
+            )?;
+            Self::require_member_lifecycle_journal_effect(
+                &prepared_retire.transition,
+                mob_dsl::MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                &entry.agent_identity,
+                &entry.agent_runtime_id,
+                None,
+                entry.generation,
+                Some(session_id.clone()),
+                "rollback_resumed_spawn_mark_retiring",
+            )?;
+            if !retire_event_already_present {
+                self.append_retirement_started_event_for_entry(
+                    entry,
+                    mob_dsl::MobLifecycleJournalKind::MemberRetirementStartedPreservingBinding,
+                    Some(session_id),
+                )
+                .await?;
+            }
+            self.commit_prepared_dsl_transition(prepared_retire)?;
+            if let Err(error) = self
+                .provisioner
+                .restore_resumed_member(member_ref, operation_id, session_origin)
+                .await
+            {
+                return Err(rollback.fail(error).await);
+            }
+            if !retire_event_already_present {
+                self.append_retire_event_for_entry(entry).await?;
+            }
+            self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::RecoverRosterMemberRetired {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                },
+                "rollback_resumed_spawn_membership",
+            )?;
+            self.delete_external_binding_overlay_for_member(agent_identity, generation)
+                .await?;
+            self.roster.write().await.remove_member(agent_identity);
+            self.per_spawn_external_tools
+                .write()
+                .await
+                .remove(agent_identity);
+            self.restore_diagnostics
+                .write()
+                .await
+                .remove(agent_identity);
+            return Ok(());
+        }
+
         if let Some(entry) = spawned_entry.as_ref() {
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
             let detach_session_id = member_ref.bridge_session_id().cloned();
@@ -21390,6 +21989,7 @@ impl MobActor {
                     labels: std::collections::BTreeMap::new(),
                     kickoff: None,
                     effective_profile_override: None,
+                    effective_model_override: None,
                 }
             }),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
@@ -21877,6 +22477,7 @@ impl MobActor {
                 params,
             },
             _ => CommsCommand::PeerRequest {
+                objective_id: None,
                 to: peer_route,
                 intent: intent.to_string(),
                 params,

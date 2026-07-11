@@ -25,6 +25,30 @@ impl std::fmt::Display for InteractionId {
     }
 }
 
+/// Durable correlation identity for one delegated objective.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ObjectiveId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
+
+impl ObjectiveId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for ObjectiveId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for ObjectiveId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Typed status for response interactions.
 ///
 /// Mirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.
@@ -112,6 +136,9 @@ pub struct InboxInteraction {
     /// [`SenderContentTaint::Clean`]. This is content-adjacent payload (like
     /// `render_metadata`): it makes no admission or routing decision.
     pub sender_taint: Option<SenderContentTaint>,
+    /// Durable objective causality carried by host injection or a signed peer
+    /// envelope. This is correlation only; it grants no conclusion authority.
+    pub objective_id: Option<ObjectiveId>,
 }
 
 /// Canonical model-facing text projection for an external event.
@@ -1005,6 +1032,7 @@ mod tests {
     #[test]
     fn inbox_interaction_preserves_runtime_hints() {
         let interaction = InboxInteraction {
+            objective_id: None,
             id: InteractionId(Uuid::new_v4()),
             from_route: None,
             from: "event:webhook".into(),

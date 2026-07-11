@@ -8,7 +8,7 @@
 //! The `#[must_use]` attribute on the type ensures the compiler warns if the
 //! value is discarded.
 
-use super::provisioner::MobProvisioner;
+use super::provisioner::{MobProvisioner, ProvisionSessionOrigin};
 use crate::error::MobError;
 use crate::event::MemberRef;
 use crate::ids::AgentIdentity;
@@ -24,6 +24,8 @@ pub(super) struct PendingProvision {
     member_ref: Option<MemberRef>,
     agent_identity: AgentIdentity,
     provisioner: Arc<dyn MobProvisioner>,
+    operation_id: meerkat_core::ops::OperationId,
+    session_origin: ProvisionSessionOrigin,
     committed: bool,
     rollback_attempted: bool,
 }
@@ -33,11 +35,15 @@ impl PendingProvision {
         member_ref: MemberRef,
         agent_identity: AgentIdentity,
         provisioner: Arc<dyn MobProvisioner>,
+        operation_id: meerkat_core::ops::OperationId,
+        session_origin: ProvisionSessionOrigin,
     ) -> Self {
         Self {
             member_ref: Some(member_ref),
             agent_identity,
             provisioner,
+            operation_id,
+            session_origin,
             committed: false,
             rollback_attempted: false,
         }
@@ -52,10 +58,19 @@ impl PendingProvision {
         self.take_member_ref("commit")
     }
 
-    /// Roll back the provision, archiving the session.
+    /// Roll back the provision. Fresh sessions are retired/archived; resumed
+    /// durable sessions are detached and restored to durable idle.
     pub(super) async fn rollback(mut self) -> Result<(), MobError> {
         let member_ref = self.take_member_ref("rollback")?;
-        match self.provisioner.retire_member(&member_ref).await {
+        let rollback = match self.session_origin {
+            ProvisionSessionOrigin::Fresh => self.provisioner.retire_member(&member_ref).await,
+            ProvisionSessionOrigin::ResumedDurable | ProvisionSessionOrigin::RevivedRetired => {
+                self.provisioner
+                    .restore_resumed_member(&member_ref, &self.operation_id, self.session_origin)
+                    .await
+            }
+        };
+        match rollback {
             Ok(()) => {
                 self.committed = true;
                 Ok(())
@@ -82,6 +97,10 @@ impl PendingProvision {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn member_identity(&self) -> &AgentIdentity {
         &self.agent_identity
+    }
+
+    pub(super) fn session_origin(&self) -> ProvisionSessionOrigin {
+        self.session_origin
     }
 
     /// Extract the member ref, returning an error if already consumed.
@@ -133,6 +152,7 @@ mod tests {
 
     struct MockProvisioner {
         retired: AtomicBool,
+        restored: AtomicBool,
         fail_retire: bool,
     }
 
@@ -140,6 +160,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 retired: AtomicBool::new(false),
+                restored: AtomicBool::new(false),
                 fail_retire: false,
             }
         }
@@ -147,6 +168,7 @@ mod tests {
         fn failing_retire() -> Self {
             Self {
                 retired: AtomicBool::new(false),
+                restored: AtomicBool::new(false),
                 fail_retire: true,
             }
         }
@@ -161,6 +183,7 @@ mod tests {
             Ok(MemberSpawnReceipt {
                 member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
                 operation_id: meerkat_core::ops::OperationId::new(),
+                session_origin: ProvisionSessionOrigin::Fresh,
             })
         }
 
@@ -171,6 +194,16 @@ mod tests {
             _reason: &str,
         ) -> Result<(), MobError> {
             self.retired.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn restore_resumed_member(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &OperationId,
+            _original_origin: ProvisionSessionOrigin,
+        ) -> Result<(), MobError> {
+            self.restored.store(true, Ordering::Release);
             Ok(())
         }
 
@@ -273,7 +306,13 @@ mod tests {
         let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
         let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref.clone(), member_identity, provisioner.clone());
+        let guard = PendingProvision::new(
+            member_ref.clone(),
+            member_identity,
+            provisioner.clone(),
+            OperationId::new(),
+            ProvisionSessionOrigin::Fresh,
+        );
         let committed_ref = guard.commit().unwrap();
         assert_eq!(committed_ref, member_ref);
         assert!(!provisioner.retired.load(Ordering::Acquire));
@@ -285,9 +324,32 @@ mod tests {
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref, member_identity, provisioner.clone());
+        let guard = PendingProvision::new(
+            member_ref,
+            member_identity,
+            provisioner.clone(),
+            OperationId::new(),
+            ProvisionSessionOrigin::Fresh,
+        );
         guard.rollback().await.unwrap();
         assert!(provisioner.retired.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn resumed_rollback_restores_without_retiring_member() {
+        let provisioner = Arc::new(MockProvisioner::new());
+        let guard = PendingProvision::new(
+            MemberRef::from_bridge_session_id(SessionId::new()),
+            AgentIdentity::from("resumed-member"),
+            provisioner.clone(),
+            OperationId::new(),
+            ProvisionSessionOrigin::ResumedDurable,
+        );
+
+        guard.rollback().await.unwrap();
+
+        assert!(provisioner.restored.load(Ordering::Acquire));
+        assert!(!provisioner.retired.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -296,7 +358,13 @@ mod tests {
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref, member_identity, provisioner.clone());
+        let guard = PendingProvision::new(
+            member_ref,
+            member_identity,
+            provisioner.clone(),
+            OperationId::new(),
+            ProvisionSessionOrigin::Fresh,
+        );
         let error = guard
             .rollback()
             .await
@@ -312,7 +380,13 @@ mod tests {
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref.clone(), member_identity, provisioner);
+        let guard = PendingProvision::new(
+            member_ref.clone(),
+            member_identity,
+            provisioner,
+            OperationId::new(),
+            ProvisionSessionOrigin::Fresh,
+        );
         assert_eq!(guard.member_ref(), &member_ref);
         let _ = guard.commit(); // consume to avoid Drop panic
     }
@@ -323,7 +397,13 @@ mod tests {
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let member_identity = AgentIdentity::from("test-member");
 
-        let guard = PendingProvision::new(member_ref, member_identity.clone(), provisioner);
+        let guard = PendingProvision::new(
+            member_ref,
+            member_identity.clone(),
+            provisioner,
+            OperationId::new(),
+            ProvisionSessionOrigin::Fresh,
+        );
         assert_eq!(guard.member_identity(), &member_identity);
         let _ = guard.commit(); // consume
     }
@@ -336,7 +416,13 @@ mod tests {
         let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let member_identity = AgentIdentity::from("test-member");
 
-        let _guard = PendingProvision::new(member_ref, member_identity, provisioner);
+        let _guard = PendingProvision::new(
+            member_ref,
+            member_identity,
+            provisioner,
+            OperationId::new(),
+            ProvisionSessionOrigin::Fresh,
+        );
         // dropped without commit or rollback
     }
 }

@@ -31,6 +31,7 @@ use meerkat_runtime::{
 
 fn make_progress_input(label: &str) -> Input {
     Input::Peer(PeerInput {
+        objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {

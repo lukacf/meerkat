@@ -2888,6 +2888,14 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["RuntimeMaterialPresent", "MissingRuntimeMaterial"],
             ),
             NamedTypeBinding::string_enum(
+                "MemberHealthClass",
+                &["Healthy", "Degraded", "Wedged", "Unknown"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberProgressEventKind",
+                &["ExecutionAdvanced", "BecameIdle", "Unchanged"],
+            ),
+            NamedTypeBinding::string_enum(
                 "MobPhase",
                 &["Running", "Stopped", "Completed", "Destroyed"],
             ),
@@ -3006,6 +3014,10 @@ runtime_internal_inputs!(
         ClassifyFlowRunPublicResult,
         BindOwnerBridgeSession,
         ClassifyMemberWait,
+        // Sampled by the actor as part of `MemberStatus`; the transition owns
+        // the durable progress/health projection but is not independently
+        // callable from a public surface.
+        ObserveMemberProgress,
         ClassifySpawnManyFailure,
         ResolveFlowDelegationEdgeAdmission,
         ClassifyRemoteMemberRuntimeObservation,
@@ -3023,6 +3035,7 @@ runtime_internal_inputs!(
         KickoffCancelRequested,
         KickoffClear,
         KickoffMarkPending,
+        BindObjectiveOwner,
         KickoffMarkStarting,
         // 0.7.2 L5 disciplined shell inputs: teardown drain-obligation
         // closures fired by the mob actor, never by surfaces.

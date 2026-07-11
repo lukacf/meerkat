@@ -5,6 +5,20 @@ export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed"
 
 export type WireMemberRef = string;
 
+export type WireMemberProgressEvent = "execution_advanced" | "became_idle" | "unchanged";
+
+export type WireMemberRunState = "idle" | "run_open" | "unknown";
+
+export type WireMemberHealthClass = "healthy" | "degraded" | "wedged" | "unknown";
+
+export interface WireMemberProgressSnapshot {
+  health: WireMemberHealthClass;
+  in_flight_work: number;
+  last_progress_at_ms: number;
+  last_progress_event: WireMemberProgressEvent;
+  run_state: WireMemberRunState;
+}
+
 export interface MobStatusResult {
   mob_id: string;
   status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
@@ -65,6 +79,7 @@ export interface MobMemberStatusResult {
   member_ref: WireMemberRef;
   output_preview?: string;
   peer_connectivity?: Record<string, unknown>;
+  progress?: WireMemberProgressSnapshot;
   resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;

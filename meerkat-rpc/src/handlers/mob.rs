@@ -13,17 +13,17 @@ use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::{WireAuthBindingRef, WireMobProfile};
 use meerkat_contracts::{
     ErrorCode, MobAppendSystemContextResult, MobCancelAllWorkResult, MobCancelWorkResult,
-    MobCreateParams, MobCreateResult, MobDestroyResult, MobEventsResult, MobFlowCancelResult,
-    MobFlowRunResult, MobFlowsResult, MobForceCancelResult, MobHelperResult, MobLifecycleResult,
-    MobListResult, MobMemberListEntryWire, MobMembersResult, MobProfileDeleteResult,
-    MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRotateSupervisorResult, MobRunParams,
-    MobRunResult, MobRunResultParams, MobSnapshotResult, MobSpawnManyResult,
-    MobSpawnManyResultEntry, MobSpawnResult, MobStatusResult, MobUnwireResult,
-    MobWaitMembersResult, MobWireMembersBatchEdge, MobWireMembersBatchParams,
-    MobWireMembersBatchResult, MobWireResult, SupervisorRotationIncompleteDataWire,
-    SupervisorRotationIncompleteDetailsWire, SupervisorRotationReportWire,
-    SupervisorRotationRetryAuthority, SupervisorRotationRetryScope, WireMobBackendKind,
-    WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
+    MobConcludeObjectiveParams, MobConcludeObjectiveResult, MobCreateParams, MobCreateResult,
+    MobDestroyResult, MobEventsResult, MobFlowCancelResult, MobFlowRunResult, MobFlowsResult,
+    MobForceCancelResult, MobHelperResult, MobLifecycleResult, MobListResult,
+    MobMemberListEntryWire, MobMembersResult, MobProfileDeleteResult, MobRespawnReceipt,
+    MobRespawnResult, MobRetireResult, MobRotateSupervisorResult, MobRunParams, MobRunResult,
+    MobRunResultParams, MobSnapshotResult, MobSpawnManyResult, MobSpawnManyResultEntry,
+    MobSpawnResult, MobStatusResult, MobUnwireResult, MobWaitMembersResult,
+    MobWireMembersBatchEdge, MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireResult,
+    SupervisorRotationIncompleteDataWire, SupervisorRotationIncompleteDetailsWire,
+    SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
+    WireMobBackendKind, WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
 };
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::AppendSystemContextRequest;
@@ -446,6 +446,9 @@ pub struct MobSpawnParams {
     /// Rust tool bundles intentionally empty.
     #[serde(default)]
     pub override_profile: Option<WireMobProfile>,
+    /// Field-scoped model override applied over the current definition profile.
+    #[serde(default)]
+    pub model_override: Option<String>,
     /// Explicit provider binding for this member's session build.
     ///
     /// The mob runtime refuses ambient credential selection; callers
@@ -516,6 +519,7 @@ pub async fn handle_spawn(
             }
         }
     }
+    spec.model_override = params.model_override;
     if let Some(auth_binding) = params.auth_binding {
         // Reconstruct origin: Configured server-side (client cannot forge it).
         spec.auth_binding = Some(auth_binding.into());
@@ -556,6 +560,8 @@ pub struct MobSpawnSpecParams {
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default)]
+    pub model_override: Option<String>,
+    #[serde(default)]
     pub auth_binding: Option<WireAuthBindingRef>,
 }
 
@@ -589,6 +595,7 @@ pub async fn handle_spawn_many(
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
         spec.additional_instructions = s.additional_instructions.clone();
+        spec.model_override = s.model_override.clone();
         spec.auth_binding = s.auth_binding.clone().map(Into::into);
         specs.push(spec);
     }
@@ -1359,6 +1366,8 @@ pub struct MobSpawnHelperParams {
     #[serde(default)]
     pub role_name: Option<String>,
     #[serde(default)]
+    pub model_override: Option<String>,
+    #[serde(default)]
     pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
@@ -1398,6 +1407,7 @@ pub async fn handle_spawn_helper(
     // name {realm, binding, profile} only and must never forge the env-default
     // discriminant that drives is_env_default() credential-resolution authority.
     options.auth_binding = params.auth_binding.map(Into::into);
+    options.model_override = params.model_override;
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
     match state
@@ -1436,6 +1446,8 @@ pub struct MobForkHelperParams {
     pub agent_identity: Option<String>,
     #[serde(default)]
     pub role_name: Option<String>,
+    #[serde(default)]
+    pub model_override: Option<String>,
     #[serde(default)]
     pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default)]
@@ -1481,6 +1493,7 @@ pub async fn handle_fork_helper(
     // name {realm, binding, profile} only and must never forge the env-default
     // discriminant that drives is_env_default() credential-resolution authority.
     options.auth_binding = params.auth_binding.map(Into::into);
+    options.model_override = params.model_override;
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
     match state
@@ -1755,7 +1768,20 @@ pub async fn handle_submit_work(
         Ok(entries) => entries,
         Err(err) => return invalid_params(id, format!("invalid injected_context: {err}")),
     };
-    let spec = meerkat_mob::WorkSpec::new(content, origin).with_injected_context(injected_context);
+    let objective_id = match params.objective_id {
+        Some(raw) => match uuid::Uuid::parse_str(&raw) {
+            Ok(id) => Some(meerkat_core::interaction::ObjectiveId(id)),
+            Err(err) => {
+                return invalid_params(id, format!("objective_id must be a valid UUID: {err}"));
+            }
+        },
+        None => None,
+    };
+    let mut spec =
+        meerkat_mob::WorkSpec::new(content, origin).with_injected_context(injected_context);
+    if let Some(objective_id) = objective_id {
+        spec = spec.with_objective_id(objective_id);
+    }
     match state
         .mob_submit_work(&mob_id, runtime_id.clone(), fence_token, work_ref, spec)
         .await
@@ -1766,9 +1792,46 @@ pub async fn handle_submit_work(
                 mob_id: mob_id.to_string(),
                 work_ref: receipt.work_ref.to_string(),
                 member_ref: WireMemberRef::encode(mob_id.as_str(), &identity_str),
+                objective_id: objective_id.map(|id| id.to_string()),
             };
             RpcResponse::success(id, body)
         }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_conclude_objective(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobConcludeObjectiveParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    if params.outcome.trim().is_empty() {
+        return invalid_params(id, "outcome must not be empty");
+    }
+    let (mob_id, identity, _, _) = match resolve_member_ref(&params.member_ref, state).await {
+        Ok(resolved) => resolved,
+        Err(err) => return invalid_params(id, err),
+    };
+    let objective_id = match uuid::Uuid::parse_str(&params.objective_id) {
+        Ok(id) => meerkat_core::interaction::ObjectiveId(id),
+        Err(err) => return invalid_params(id, format!("objective_id must be a valid UUID: {err}")),
+    };
+    match state
+        .mob_conclude_objective(&mob_id, &identity, objective_id, params.outcome)
+        .await
+    {
+        Ok(()) => RpcResponse::success(
+            id,
+            MobConcludeObjectiveResult {
+                member_ref: params.member_ref,
+                objective_id: objective_id.to_string(),
+                concluded: true,
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }

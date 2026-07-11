@@ -566,7 +566,7 @@ pub enum CommsSendResult {
     },
     PeerMessageSent {
         envelope_id: String,
-        acked: bool,
+        delivery: meerkat_core::comms::PeerDeliveryOutcome,
     },
     PeerLifecycleSent {
         envelope_id: String,
@@ -593,12 +593,13 @@ impl From<meerkat_core::comms::SendReceipt> for CommsSendResult {
                 interaction_id: interaction_id.0.to_string(),
                 stream_reserved,
             },
-            meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
-                Self::PeerMessageSent {
-                    envelope_id: envelope_id.to_string(),
-                    acked,
-                }
-            }
+            meerkat_core::comms::SendReceipt::PeerMessageSent {
+                envelope_id,
+                delivery,
+            } => Self::PeerMessageSent {
+                envelope_id: envelope_id.to_string(),
+                delivery,
+            },
             meerkat_core::comms::SendReceipt::PeerLifecycleSent { envelope_id } => {
                 Self::PeerLifecycleSent {
                     envelope_id: envelope_id.to_string(),

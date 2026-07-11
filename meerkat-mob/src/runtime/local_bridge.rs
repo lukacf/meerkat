@@ -114,6 +114,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
         // transport-prefixed session string.
         let runtime_id = LogicalRuntimeId::for_session(&self.session_id);
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

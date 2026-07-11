@@ -1811,6 +1811,10 @@ pub mod inputs {
         pub terminal: SessionDocumentLifecycle,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReviveArchivedSessionDocument {
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ArchiveSessionDocument {
         pub session_id: SessionId,
         pub runtime_backed: bool,
@@ -1861,6 +1865,7 @@ pub enum Input {
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
     RecoverSessionLifecycleTerminal(inputs::RecoverSessionLifecycleTerminal),
+    ReviveArchivedSessionDocument(inputs::ReviveArchivedSessionDocument),
     ArchiveSessionDocument(inputs::ArchiveSessionDocument),
 }
 impl Input {
@@ -1938,6 +1943,7 @@ impl Input {
             Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
             Self::TranscriptEdit(_) => InputKind::TranscriptEdit,
             Self::RecoverSessionLifecycleTerminal(_) => InputKind::RecoverSessionLifecycleTerminal,
+            Self::ReviveArchivedSessionDocument(_) => InputKind::ReviveArchivedSessionDocument,
             Self::ArchiveSessionDocument(_) => InputKind::ArchiveSessionDocument,
         }
     }
@@ -1984,6 +1990,7 @@ pub enum InputKind {
     ApplyPendingToolResults,
     TranscriptEdit,
     RecoverSessionLifecycleTerminal,
+    ReviveArchivedSessionDocument,
     ArchiveSessionDocument,
 }
 
@@ -2132,6 +2139,8 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionLifecycleTerminalRecovered {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SessionRevivalResolved {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionArchiveResolved {
         pub disposition: SessionArchiveDisposition,
         pub write_document: bool,
@@ -2178,6 +2187,7 @@ pub enum Effect {
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
     SessionLifecycleTerminalRecovered(effects::SessionLifecycleTerminalRecovered),
+    SessionRevivalResolved(effects::SessionRevivalResolved),
     SessionArchiveResolved(effects::SessionArchiveResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2215,6 +2225,7 @@ pub enum EffectKind {
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
     SessionLifecycleTerminalRecovered,
+    SessionRevivalResolved,
     SessionArchiveResolved,
 }
 
@@ -2321,6 +2332,7 @@ pub enum TransitionId {
     TranscriptEditFork,
     TranscriptEditRewrite,
     RecoverSessionLifecycleTerminal,
+    ReviveArchivedSessionDocument,
     ArchiveSessionDocumentActive,
     ArchiveSessionDocumentAlreadyArchived,
     ArchiveSessionDocumentCompleteRetire,

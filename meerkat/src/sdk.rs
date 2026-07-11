@@ -831,6 +831,7 @@ mod tests {
         let result = CoreCommsRuntime::send(
             sender.as_ref(),
             CommsCommand::PeerMessage {
+                objective_id: None,
                 content_taint: None,
                 blocks: None,
                 to: peer_route(&receiver_name, receiver.public_key()),

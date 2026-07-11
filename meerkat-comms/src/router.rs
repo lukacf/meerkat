@@ -92,16 +92,11 @@ pub enum SendError {
 
 /// Outcome of a successful router send.
 ///
-/// Carries the verified delivery-acknowledgement truth alongside the envelope
-/// id. `acked` is `true` only when the send waited for and cryptographically
-/// verified a peer ACK over a stream transport. Inproc delivery has no ACK
-/// round-trip (direct inbox handoff), and non-ack-bearing kinds (Ack/Response)
-/// never wait — both report `acked == false`. The public receipt must reflect
-/// this truth rather than hardcoding it.
+/// Carries the strongest delivery fact the transport can truthfully prove.
 #[derive(Debug, Clone, Copy)]
 pub struct SendOutcome {
     pub envelope_id: Uuid,
-    pub acked: bool,
+    pub delivery: meerkat_core::comms::PeerDeliveryOutcome,
 }
 
 #[inline]
@@ -467,10 +462,10 @@ impl Router {
                             return Err(SendError::PeerOffline);
                         }
                         // A peer ACK was received and verified: this is the only
-                        // path that may report `acked == true`.
+                        // path that may report `PeerDeliveryOutcome::Acked`.
                         Ok(SendOutcome {
                             envelope_id: sent_id,
-                            acked: true,
+                            delivery: meerkat_core::comms::PeerDeliveryOutcome::Acked,
                         })
                     } else {
                         Err(SendError::PeerOffline)
@@ -483,7 +478,7 @@ impl Router {
             // was received.
             Ok(SendOutcome {
                 envelope_id: sent_id,
-                acked: false,
+                delivery: meerkat_core::comms::PeerDeliveryOutcome::Queued,
             })
         }
     }
@@ -540,7 +535,7 @@ impl Router {
         // so we never claim the envelope was acked.
         Ok(SendOutcome {
             envelope_id,
-            acked: false,
+            delivery: meerkat_core::comms::PeerDeliveryOutcome::HandedOff,
         })
     }
 
@@ -679,8 +674,8 @@ mod tests {
 
     /// ROW #268 gate: `acked` reflects the verified ACK from the delivery path.
     /// A stream send that receives and verifies a peer ACK reports
-    /// `acked == true`; a send that does not await an ACK reports
-    /// `acked == false`. The truth is never hardcoded.
+    /// [`PeerDeliveryOutcome::Acked`]; sends without receiver acknowledgement
+    /// report the weaker typed `Queued` or `HandedOff` outcome.
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn send_outcome_acked_reflects_verified_ack() {
@@ -703,6 +698,7 @@ mod tests {
             from: router_pubkey,
             to: peer_pubkey,
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "needs ack".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -746,18 +742,19 @@ mod tests {
         peer_task.await.expect("peer task completes");
 
         assert_eq!(outcome.envelope_id, sent_id);
-        assert!(
-            outcome.acked,
-            "a verified peer ACK must produce acked == true, not a hardcoded false"
+        assert_eq!(
+            outcome.delivery,
+            meerkat_core::comms::PeerDeliveryOutcome::Acked
         );
 
-        // A kind that does not await an ACK (Response) must report acked=false.
+        // A kind that does not await an ACK (Response) proves only a write.
         let (mut client2, _server2) = tokio::io::duplex(4096);
         let mut response_env = Envelope {
             id: Uuid::new_v4(),
             from: router_pubkey,
             to: peer_pubkey,
             kind: MessageKind::Response {
+                objective_id: None,
                 in_reply_to: Uuid::new_v4(),
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({"ok": true}),
@@ -772,9 +769,9 @@ mod tests {
             .send_on_stream(&mut client2, response_env, false)
             .await
             .expect("non-ack-bearing send succeeds");
-        assert!(
-            !no_ack.acked,
-            "a send that does not await an ACK must report acked == false"
+        assert_eq!(
+            no_ack.delivery,
+            meerkat_core::comms::PeerDeliveryOutcome::Queued
         );
     }
 
@@ -835,6 +832,7 @@ mod tests {
             .send(
                 peer_id,
                 MessageKind::Message {
+                    objective_id: None,
                     body: "cross-namespace must not deliver".to_string(),
                     blocks: None,
                     content_taint: None,
@@ -921,6 +919,7 @@ mod tests {
             .send(
                 peer_id,
                 MessageKind::Message {
+                    objective_id: None,
                     body: "deliver in-namespace".to_string(),
                     blocks: None,
                     content_taint: None,
@@ -1148,6 +1147,7 @@ mod tests {
             .expect("trust add");
 
         let message = |body: &str| MessageKind::Message {
+            objective_id: None,
             body: body.to_string(),
             blocks: None,
             content_taint: None,

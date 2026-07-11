@@ -105,6 +105,7 @@ pub async fn handle_plain_connection<S>(
                     interaction_id: None,
                     blocks: None,
                     render_metadata: None,
+                    objective_id: None,
                 }) {
                     AdmissionOutcome::Admitted => {}
                     AdmissionOutcome::Dropped {

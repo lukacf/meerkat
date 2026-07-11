@@ -463,6 +463,9 @@ pub enum SessionDocumentInput {
         session_id: SessionDocumentKey,
         terminal: SessionDocumentLifecycle,
     },
+    ReviveArchivedSessionDocument {
+        session_id: SessionDocumentKey,
+    },
     ArchiveSessionDocument {
         session_id: SessionDocumentKey,
         runtime_backed: bool,
@@ -581,6 +584,7 @@ pub enum SessionDocumentEffect {
         success: bool,
     },
     SessionLifecycleTerminalRecovered,
+    SessionRevivalResolved,
     SessionArchiveResolved {
         disposition: SessionArchiveDisposition,
         write_document: bool,
@@ -729,6 +733,7 @@ enum SessionDocumentTransition {
     TranscriptEditFork,
     TranscriptEditRewrite,
     RecoverSessionLifecycleTerminal,
+    ReviveArchivedSessionDocument,
     ArchiveSessionDocumentActive,
     ArchiveSessionDocumentAlreadyArchived,
     ArchiveSessionDocumentCompleteRetire,
@@ -3274,6 +3279,29 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
+            SessionDocumentInput::ReviveArchivedSessionDocument { session_id } => {
+                let mut matches = Vec::new();
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (self.session_lifecycle_terminal_value(&session_id)?
+                        == SessionDocumentLifecycle::Archived)
+                {
+                    matches.push(SessionDocumentTransition::ReviveArchivedSessionDocument);
+                }
+                let transition = Self::single_transition(matches, "ReviveArchivedSessionDocument")?;
+                match transition {
+                    SessionDocumentTransition::ReviveArchivedSessionDocument => {
+                        self.state
+                            .session_lifecycle_terminal
+                            .insert(session_id.clone(), SessionDocumentLifecycle::Active);
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::SessionRevivalResolved])
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => Err(SessionDocumentError {
+                        op: "ReviveArchivedSessionDocument_transition",
+                    }),
+                }
+            }
             SessionDocumentInput::ArchiveSessionDocument {
                 session_id,
                 runtime_backed,
@@ -3908,6 +3936,13 @@ impl SessionDocumentMachineAuthority {
             session_id,
             terminal,
         })
+    }
+
+    pub fn revive_archived_session_document(
+        &mut self,
+        session_id: SessionDocumentKey,
+    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
+        self.apply_input(SessionDocumentInput::ReviveArchivedSessionDocument { session_id })
     }
 
     pub fn archive_session_document(

@@ -11,8 +11,9 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AdaptiveLayerPhase, AdaptiveLayerSetupFaultKind, AdaptiveRunPhase, AdaptiveStopReason,
     ExternalMemberRebindCapability, FlowFrameReducerCommandKind, FlowRunPublicResultClassKind,
     FlowRunReducerCommandKind, LoopIterationReducerCommandKind, MemberAdmissionVerdictKind,
-    MobLifecycleJournalKind, PolicyDecision, SpawnExecPhase, StepFaultDispositionKind,
-    StepOutputFaultKind, SupervisorEscalationFailureCause, TurnTimeoutDisposition,
+    MemberHealthClass, MemberProgressEventKind, MobLifecycleJournalKind, PolicyDecision,
+    SpawnExecPhase, StepFaultDispositionKind, StepOutputFaultKind,
+    SupervisorEscalationFailureCause, TurnTimeoutDisposition,
 };
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
@@ -4529,6 +4530,7 @@ mod tests {
             &mut authority,
             MobMachineInput::KickoffMarkPending {
                 member_id: member_id.clone(),
+                objective_id: "00000000-0000-0000-0000-000000000001".into(),
             },
         )
         .expect("kickoff should enter pending state");
@@ -4569,6 +4571,161 @@ mod tests {
                 .state()
                 .member_kickoff_error
                 .contains_key(&member_id)
+        );
+    }
+
+    #[test]
+    fn member_progress_health_is_classified_by_machine_elapsed_time() {
+        let mut authority = MobMachineAuthority::new();
+        let member_id = AgentIdentity::from("worker");
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ObserveMemberProgress {
+                agent_identity: member_id.clone(),
+                run_open: true,
+                in_flight_work: 2,
+                progress_token: "run-1:started".into(),
+                observed_at_ms: 1_000,
+            },
+        )
+        .expect("first open observation should establish progress");
+        assert_eq!(
+            authority.state().member_health_class.get(&member_id),
+            Some(&MemberHealthClass::Healthy)
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ObserveMemberProgress {
+                agent_identity: member_id.clone(),
+                run_open: true,
+                in_flight_work: 2,
+                progress_token: "run-1:started".into(),
+                observed_at_ms: 61_000,
+            },
+        )
+        .expect("unchanged open work should become degraded at the machine threshold");
+        assert_eq!(
+            authority.state().member_health_class.get(&member_id),
+            Some(&MemberHealthClass::Degraded)
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ObserveMemberProgress {
+                agent_identity: member_id.clone(),
+                run_open: true,
+                in_flight_work: 2,
+                progress_token: "run-1:started".into(),
+                observed_at_ms: 301_000,
+            },
+        )
+        .expect("unchanged open work should become wedged at the machine threshold");
+        assert_eq!(
+            authority.state().member_health_class.get(&member_id),
+            Some(&MemberHealthClass::Wedged)
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ObserveMemberProgress {
+                agent_identity: member_id.clone(),
+                run_open: false,
+                in_flight_work: 0,
+                progress_token: "stale-clock-heal".into(),
+                observed_at_ms: 60_000,
+            },
+        )
+        .expect("stale wall-clock observation should be accepted as a no-op");
+        assert_eq!(
+            authority.state().member_health_class.get(&member_id),
+            Some(&MemberHealthClass::Wedged),
+            "a regressed wall clock must not heal machine-owned health"
+        );
+        assert_eq!(
+            authority.state().member_progress_tokens.get(&member_id),
+            Some(&"run-1:started".to_string())
+        );
+
+        let near_max = AgentIdentity::from("near-max-clock");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ObserveMemberProgress {
+                agent_identity: near_max.clone(),
+                run_open: true,
+                in_flight_work: 1,
+                progress_token: "open".into(),
+                observed_at_ms: u64::MAX - 1,
+            },
+        )
+        .expect("near-max observation should establish progress");
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ObserveMemberProgress {
+                agent_identity: near_max.clone(),
+                run_open: true,
+                in_flight_work: 1,
+                progress_token: "open".into(),
+                observed_at_ms: u64::MAX,
+            },
+        )
+        .expect("elapsed classification must not overflow at u64::MAX");
+        assert_eq!(
+            authority.state().member_health_class.get(&near_max),
+            Some(&MemberHealthClass::Healthy)
+        );
+    }
+
+    #[test]
+    fn objective_conclusion_is_owned_idempotent_and_outcome_stable() {
+        let mut authority = MobMachineAuthority::new();
+        let member_id = AgentIdentity::from("worker");
+        let objective_id = "00000000-0000-0000-0000-000000000029";
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::KickoffMarkPending {
+                member_id: member_id.clone(),
+                objective_id: objective_id.into(),
+            },
+        )
+        .expect("kickoff should mint an objective binding");
+        let concluded = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ConcludeObjective {
+                member_id: member_id.clone(),
+                objective_id: objective_id.into(),
+                outcome: "completed".into(),
+            },
+        )
+        .expect("the owning member objective should conclude");
+        assert!(concluded.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::PersistObjectiveConclusion { objective_id: id, outcome, .. }
+                if id.as_str() == objective_id && outcome.as_str() == "completed"
+        )));
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ConcludeObjective {
+                member_id: member_id.clone(),
+                objective_id: objective_id.into(),
+                outcome: "completed".into(),
+            },
+        )
+        .expect("an identical conclusion should be idempotent");
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::ConcludeObjective {
+                    member_id,
+                    objective_id: objective_id.into(),
+                    outcome: "failed".into(),
+                },
+            )
+            .is_err(),
+            "a concluded objective must reject outcome rewriting"
         );
     }
 

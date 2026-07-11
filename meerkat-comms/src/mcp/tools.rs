@@ -330,7 +330,9 @@ pub async fn handle_tools_call_with_context(
                 // declaration is inherited from the runtime-level host config.
                 content_taint: None,
                 handling_mode: input.handling_mode,
-            };
+                objective_id: None,
+            }
+            .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
             dispatch(ctx, command).await
         }
         "send_message" => {
@@ -354,7 +356,9 @@ pub async fn handle_tools_call_with_context(
                 // declaration is inherited from the runtime-level host config.
                 content_taint: None,
                 handling_mode: input.handling_mode,
-            };
+                objective_id: None,
+            }
+            .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
             dispatch(ctx, command).await
         }
         "send_request" => {
@@ -373,7 +377,8 @@ pub async fn handle_tools_call_with_context(
                 handling_mode: Some(input.handling_mode),
                 stream: Some(InputStreamMode::ReserveInteraction),
             };
-            let command = project_peer_request_command(typed_request, to)?;
+            let command = project_peer_request_command(typed_request, to)?
+                .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
             dispatch(ctx, command).await
         }
         "send_response" => {
@@ -394,7 +399,8 @@ pub async fn handle_tools_call_with_context(
                 content_taint: None,
                 handling_mode: input.handling_mode,
             };
-            let command = project_peer_response_command(typed_request, to)?;
+            let command = project_peer_response_command(typed_request, to)?
+                .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
             dispatch(ctx, command).await
         }
         "peers" => {
@@ -465,6 +471,18 @@ fn project_body_from_blocks(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn objective_id_from_dispatch_context(
+    dispatch_context: &ToolDispatchContext,
+) -> Result<Option<meerkat_core::interaction::ObjectiveId>, String> {
+    dispatch_context
+        .turn_metadata(meerkat_core::agent::TOOL_DISPATCH_OBJECTIVE_ID_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|error| format!("invalid objective correlation in dispatch context: {error}"))
+        .map(|objective_id| objective_id.map(meerkat_core::interaction::ObjectiveId))
 }
 
 fn resolve_tool_block(
@@ -554,6 +572,7 @@ fn project_peer_request_command(
         content_taint,
         handling_mode: handling_mode.unwrap_or_default(),
         stream: stream.unwrap_or(InputStreamMode::None),
+        objective_id: None,
     })
 }
 
@@ -586,6 +605,7 @@ fn project_peer_response_command(
         blocks,
         content_taint,
         handling_mode,
+        objective_id: None,
     })
 }
 
@@ -739,6 +759,7 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
             blocks,
             content_taint,
             handling_mode,
+            objective_id,
             ..
         } => {
             // The per-send taint override rides to the router's stamping
@@ -752,6 +773,7 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
                         blocks,
                         content_taint: None,
                         handling_mode: Some(handling_mode),
+                        objective_id,
                     },
                     content_taint,
                 )
@@ -1003,7 +1025,7 @@ mod tests {
                 CommsCommand::PeerMessage { .. } => {
                     meerkat_core::comms::SendReceipt::PeerMessageSent {
                         envelope_id: uuid::Uuid::from_u128(5),
-                        acked: false,
+                        delivery: meerkat_core::comms::PeerDeliveryOutcome::HandedOff,
                     }
                 }
                 CommsCommand::PeerRequest { stream, .. } => {
@@ -2437,6 +2459,26 @@ mod tests {
             "expected typed result serde error, got: {error}"
         );
         assert_eq!(runtime.sent_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_bound_send_message_returns_typed_delivery_outcome() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime));
+
+        let result = handle_tools_call(
+            &ctx,
+            "send_message",
+            &json!({"peer_id": peer_id, "body": "hello", "handling_mode": "queue"}),
+        )
+        .await
+        .expect("send_message should return a typed receipt");
+
+        assert_eq!(result["receipt"]["kind"], "peer_message_sent");
+        assert_eq!(result["receipt"]["delivery"], "handed_off");
+        assert!(result["receipt"].get("acked").is_none());
     }
 
     #[tokio::test]

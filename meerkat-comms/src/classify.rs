@@ -294,6 +294,7 @@ impl IngressClassificationContext {
                 interaction_id,
                 blocks,
                 render_metadata,
+                objective_id,
             } => {
                 let interaction_id = interaction_id.unwrap_or_else(Uuid::new_v4);
                 let facts = PeerIngressPlainEventFacts {
@@ -330,6 +331,7 @@ impl IngressClassificationContext {
                         interaction_id: Some(interaction_id),
                         blocks,
                         render_metadata,
+                        objective_id,
                     },
                 })
             }
@@ -689,6 +691,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -723,6 +726,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Message {
+                objective_id: None,
                 blocks: None,
                 body: "hello".to_string(),
                 content_taint: None,
@@ -762,6 +766,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Message {
+                objective_id: None,
                 blocks: None,
                 body: "hello".to_string(),
                 content_taint: None,
@@ -792,6 +797,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -818,6 +824,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Response {
+                objective_id: None,
                 in_reply_to: Uuid::new_v4(),
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({}),
@@ -866,6 +873,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
                 blocks: None,
@@ -887,6 +895,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "mob.peer_retired".to_string(),
                 params: serde_json::json!({"peer": "old-agent"}),
                 blocks: None,
@@ -908,6 +917,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "my-silent-intent".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -930,6 +940,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -950,6 +961,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({
                     "command": "bind_member",
@@ -1003,6 +1015,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -1028,6 +1041,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -1053,6 +1067,7 @@ mod tests {
 
         let external_cases = [
             MessageKind::Request {
+                objective_id: None,
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -1060,6 +1075,7 @@ mod tests {
                 handling_mode: None,
             },
             MessageKind::Request {
+                objective_id: None,
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
                 blocks: None,
@@ -1067,6 +1083,7 @@ mod tests {
                 handling_mode: None,
             },
             MessageKind::Response {
+                objective_id: None,
                 in_reply_to: response_id,
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({"ok": true}),
@@ -1087,6 +1104,7 @@ mod tests {
         }
 
         let plain_result = ctx.prepare(InboxItem::PlainEvent {
+            objective_id: None,
             blocks: None,
             body: "event body".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
@@ -1115,6 +1133,7 @@ mod tests {
             envelope: make_envelope(
                 &sender,
                 MessageKind::Request {
+                    objective_id: None,
                     intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params: serde_json::json!({}),
                     blocks: None,
@@ -1145,6 +1164,7 @@ mod tests {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Request {
+                        objective_id: None,
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
                         blocks: None,
@@ -1171,6 +1191,7 @@ mod tests {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Response {
+                        objective_id: None,
                         in_reply_to: Uuid::new_v4(),
                         status: crate::types::Status::Completed,
                         result: serde_json::json!({"ok": true}),
@@ -1208,6 +1229,7 @@ mod tests {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Request {
+                        objective_id: None,
                         intent: "review".to_string(),
                         params: serde_json::json!({}),
                         blocks: None,
@@ -1224,6 +1246,7 @@ mod tests {
                 envelope: make_envelope(
                     &sender,
                     MessageKind::Request {
+                        objective_id: None,
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
                         blocks: None,
@@ -1252,6 +1275,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
                 blocks: None,
@@ -1281,6 +1305,7 @@ mod tests {
     fn classify_plain_event() {
         let ctx = make_context(false, TrustStore::new(), vec![]);
         let item = InboxItem::PlainEvent {
+            objective_id: None,
             blocks: None,
             body: "event".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
@@ -1305,6 +1330,7 @@ mod tests {
 
         let prepared = ctx
             .prepare(InboxItem::PlainEvent {
+                objective_id: None,
                 blocks: None,
                 body: "event body".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
@@ -1333,6 +1359,7 @@ mod tests {
         );
 
         let prepared = ctx.prepare(InboxItem::PlainEvent {
+            objective_id: None,
             blocks: None,
             body: "event body".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
@@ -1352,6 +1379,7 @@ mod tests {
     fn no_lifecycle_leakage_plain_events_remain_the_only_non_peer_inbox_class() {
         let ctx = make_context(false, TrustStore::new(), vec![]);
         let item = InboxItem::PlainEvent {
+            objective_id: None,
             body: "event".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -1380,6 +1408,7 @@ mod tests {
             let envelope = make_envelope(
                 &sender,
                 MessageKind::Request {
+                    objective_id: None,
                     intent: "mob.peer_added".to_string(),
                     params,
                     blocks: None,
@@ -1405,6 +1434,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
+                objective_id: None,
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({
                     "peer": "new-agent",
@@ -1431,6 +1461,7 @@ mod tests {
         let ctx = make_context(false, TrustStore::new(), vec![]);
         let prepared = ctx
             .prepare(InboxItem::PlainEvent {
+                objective_id: None,
                 body: "event body".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,

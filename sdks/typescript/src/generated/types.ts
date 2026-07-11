@@ -634,6 +634,7 @@ export interface ForkSessionAtParams {
   message_index: number;
   running_behavior?: "reject";
   session_id: string;
+  tool_access_policy?: Record<string, unknown>;
 }
 
 export interface ForkSessionReplaceParams {
@@ -641,6 +642,7 @@ export interface ForkSessionReplaceParams {
   replacement: Record<string, unknown>;
   running_behavior?: "reject";
   session_id: string;
+  tool_access_policy?: Record<string, unknown>;
 }
 
 export interface HelpRequest {
@@ -786,10 +788,10 @@ export interface RuntimeHostHealth {
 }
 
 export interface RuntimeHostInfo {
-  capabilities: Record<string, unknown>;
+  capabilities: RuntimeHostCapabilities;
   contract_version: Record<string, unknown>;
   endpoints: Record<string, unknown>;
-  health: Record<string, unknown>;
+  health: RuntimeHostHealth;
   host_id: string;
   host_id_scope: "process" | "realm_instance";
   placement_labels?: Record<string, string>;
@@ -946,6 +948,7 @@ export interface MobSpawnParams {
   labels?: Record<string, string>;
   launch_mode?: WireMemberLaunchMode;
   mob_id: string;
+  model_override?: string;
   override_profile?: WireMobProfile;
   profile: string;
   runtime_mode?: WireMobRuntimeMode;
@@ -967,6 +970,7 @@ export interface MobSpawnSpecParams {
   context?: unknown;
   initial_message?: WireContentInput;
   labels?: Record<string, string>;
+  model_override?: string;
   profile: string;
   runtime_mode?: WireMobRuntimeMode;
 }
@@ -1010,6 +1014,14 @@ export interface MobMemberListEntryWire {
   runtime_mode: WireMobRuntimeMode;
   status: WireMobMemberStatus;
   wired_to?: string[];
+}
+
+export interface WireMemberProgressSnapshot {
+  health: "healthy" | "degraded" | "wedged" | "unknown";
+  in_flight_work: number;
+  last_progress_at_ms: number;
+  last_progress_event: "execution_advanced" | "became_idle" | "unchanged";
+  run_state: "idle" | "run_open" | "unknown";
 }
 
 export interface WireMobToolConfig {
@@ -1189,7 +1201,7 @@ export interface MobIngressInteractionParams {
 
 export interface MobIngressInteractionResult {
   agent_identity: string;
-  delivery: Record<string, unknown>;
+  delivery: MobMemberSendResult;
   ensure_outcome: { spawned: MobSpawnReceiptWire } | { existed: MobMemberListEntryWire };
   events_after_cursor: number;
   latest_event_cursor: number;
@@ -1239,7 +1251,7 @@ export interface MobFlowStatusParams {
 }
 
 export interface MobFlowStatusResult {
-  run?: Record<string, unknown>;
+  run?: WireMobRun;
 }
 
 export interface MobRunResultParams {
@@ -1248,7 +1260,7 @@ export interface MobRunResultParams {
 }
 
 export interface MobRunResult {
-  run?: Record<string, unknown>;
+  run?: WireMobRunResultEnvelope;
 }
 
 export interface MobFlowCancelParams {
@@ -1265,6 +1277,7 @@ export interface MobSpawnHelperParams {
   auth_binding?: WireAuthBindingRef;
   backend?: WireMobBackendKind;
   mob_id: string;
+  model_override?: string;
   prompt: string;
   role_name?: string;
   runtime_mode?: WireMobRuntimeMode;
@@ -1276,6 +1289,7 @@ export interface MobForkHelperParams {
   backend?: WireMobBackendKind;
   fork_context?: unknown;
   mob_id: string;
+  model_override?: string;
   prompt: string;
   role_name?: string;
   runtime_mode?: WireMobRuntimeMode;
@@ -1320,7 +1334,8 @@ export interface MobMemberStatusResult {
   kickoff?: unknown;
   member_ref: WireMemberRef;
   output_preview?: string;
-  peer_connectivity?: Record<string, unknown>;
+  peer_connectivity?: WirePeerConnectivity;
+  progress?: WireMemberProgressSnapshot;
   resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;
@@ -1354,6 +1369,7 @@ export interface MobSubmitWorkParams {
   content: WireContentInput;
   injected_context?: WireContentInput[];
   member_ref: WireMemberRef;
+  objective_id?: string;
   origin?: "external" | "internal";
   work_ref?: string;
 }
@@ -1361,7 +1377,20 @@ export interface MobSubmitWorkParams {
 export interface MobSubmitWorkResult {
   member_ref: WireMemberRef;
   mob_id: string;
+  objective_id?: string;
   work_ref: string;
+}
+
+export interface MobConcludeObjectiveParams {
+  member_ref: WireMemberRef;
+  objective_id: string;
+  outcome: string;
+}
+
+export interface MobConcludeObjectiveResult {
+  concluded: boolean;
+  member_ref: WireMemberRef;
+  objective_id: string;
 }
 
 export interface MobCancelWorkParams {
@@ -1412,7 +1441,7 @@ export interface MobProfileLookupResult {
 }
 
 export interface MobProfileListResult {
-  profiles: Record<string, unknown>[];
+  profiles: MobProfileLookupResult[];
 }
 
 export interface MobProfileUpdateParams {
@@ -2748,7 +2777,7 @@ export interface CommsSendResultInputAccepted {
 }
 
 export interface CommsSendResultPeerMessageSent {
-  acked: boolean;
+  delivery: "acked" | "handed_off" | "queued";
   envelope_id: string;
   kind: "peer_message_sent";
 }
@@ -3483,7 +3512,7 @@ export interface WireInputState {
   created_at: string;
   current_state: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
   durability?: "durable" | "volatile" | "ephemeral";
-  history?: Record<string, unknown>[];
+  history?: WireInputStateHistoryEntry[];
   idempotency_key?: string;
   input_id: string;
   last_boundary_sequence?: number;
@@ -3497,7 +3526,7 @@ export interface WireInputState {
 }
 
 export interface ScheduleListResult {
-  schedules: Record<string, unknown>[];
+  schedules: Schedule[];
 }
 
 export interface ScheduleOccurrencesResult {
@@ -3554,13 +3583,13 @@ export interface CatalogModelEntry {
 
 export interface ProviderCatalog {
   default_model_id: string;
-  models: Record<string, unknown>[];
+  models: CatalogModelEntry[];
   provider: string;
 }
 
 export interface ModelsCatalogResponse {
-  contract_version: Record<string, unknown>;
-  providers: Record<string, unknown>[];
+  contract_version: ContractVersion;
+  providers: ProviderCatalog[];
 }
 
 export interface WireModelProfile {
@@ -3648,9 +3677,9 @@ export interface WireProviderBinding {
 }
 
 export interface WireRealmConnectionSet {
-  auth_profiles: Record<string, Record<string, unknown>>;
-  backends: Record<string, Record<string, unknown>>;
-  bindings: Record<string, Record<string, unknown>>;
+  auth_profiles: Record<string, WireAuthProfile>;
+  backends: Record<string, WireBackendProfile>;
+  bindings: Record<string, WireProviderBinding>;
   default_binding?: string;
   realm_id: string;
 }
@@ -3673,7 +3702,7 @@ export interface WireAuthProfileCreated {
 
 export interface WireAuthProfileDetail {
   auth_binding: WireAuthBindingRef;
-  auth_profile: Record<string, unknown>;
+  auth_profile: WireAuthProfile;
   binding_id: string;
   profile_id: string;
 }
@@ -3724,13 +3753,13 @@ export interface WireRealmSummary {
 }
 
 export interface WireRealmList {
-  realms: Record<string, unknown>[];
+  realms: WireRealmSummary[];
 }
 
 export interface WireAuthProfilesList {
-  auth_profiles: Record<string, unknown>[];
-  backend_profiles: Record<string, unknown>[];
-  bindings: Record<string, unknown>[];
+  auth_profiles: WireAuthProfile[];
+  backend_profiles: WireBackendProfile[];
+  bindings: WireProviderBinding[];
   realm_id: string;
 }
 

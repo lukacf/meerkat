@@ -61,6 +61,8 @@ pub enum MessageKind {
         content_taint: Option<SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     },
     /// A request for the peer to perform an action.
     Request {
@@ -74,6 +76,8 @@ pub enum MessageKind {
         content_taint: Option<SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     },
     /// A one-way peer lifecycle notification.
     Lifecycle {
@@ -93,12 +97,23 @@ pub enum MessageKind {
         content_taint: Option<SenderContentTaint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     },
     /// Acknowledgment of message receipt.
     Ack { in_reply_to: Uuid },
 }
 
 impl MessageKind {
+    #[must_use]
+    pub fn objective_id(&self) -> Option<meerkat_core::interaction::ObjectiveId> {
+        match self {
+            Self::Message { objective_id, .. }
+            | Self::Request { objective_id, .. }
+            | Self::Response { objective_id, .. } => *objective_id,
+            Self::Lifecycle { .. } | Self::Ack { .. } => None,
+        }
+    }
     /// Sender-declared content taint carried by this kind, when it is a
     /// content-bearing kind (`Message` / `Request` / `Response`) and a
     /// declaration is present.
@@ -241,6 +256,8 @@ pub enum InboxItem {
         /// Optional normalized rendering metadata.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         render_metadata: Option<RenderMetadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     },
 }
 
@@ -260,6 +277,7 @@ mod tests {
     #[test]
     fn test_message_kind_message_fields() {
         let msg = MessageKind::Message {
+            objective_id: None,
             body: "hello".to_string(),
             blocks: None,
             content_taint: None,
@@ -270,6 +288,7 @@ mod tests {
             blocks,
             content_taint,
             handling_mode,
+            ..
         } = msg
         {
             assert_eq!(body, "hello");
@@ -284,6 +303,7 @@ mod tests {
     #[test]
     fn test_message_kind_request_fields() {
         let req = MessageKind::Request {
+            objective_id: None,
             intent: "review-pr".to_string(),
             params: serde_json::json!({"pr": 42}),
             blocks: None,
@@ -296,6 +316,7 @@ mod tests {
             blocks,
             content_taint,
             handling_mode,
+            ..
         } = req
         {
             assert_eq!(intent, "review-pr");
@@ -312,6 +333,7 @@ mod tests {
     fn test_message_kind_response_fields() {
         let id = Uuid::new_v4();
         let resp = MessageKind::Response {
+            objective_id: None,
             in_reply_to: id,
             status: Status::Completed,
             result: serde_json::json!({"approved": true}),
@@ -352,6 +374,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "test".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -378,12 +401,14 @@ mod tests {
     fn test_message_kind_cbor_roundtrip() {
         let kinds = vec![
             MessageKind::Message {
+                objective_id: None,
                 body: "hello".to_string(),
                 blocks: None,
                 content_taint: None,
                 handling_mode: None,
             },
             MessageKind::Request {
+                objective_id: None,
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
@@ -391,6 +416,7 @@ mod tests {
                 handling_mode: None,
             },
             MessageKind::Response {
+                objective_id: None,
                 in_reply_to: Uuid::new_v4(),
                 status: Status::Completed,
                 result: serde_json::json!(null),
@@ -399,12 +425,14 @@ mod tests {
                 handling_mode: None,
             },
             MessageKind::Message {
+                objective_id: None,
                 body: "declared".to_string(),
                 blocks: None,
                 content_taint: Some(SenderContentTaint::Tainted),
                 handling_mode: None,
             },
             MessageKind::Response {
+                objective_id: None,
                 in_reply_to: Uuid::new_v4(),
                 status: Status::Completed,
                 result: serde_json::json!(null),
@@ -431,6 +459,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "test".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -480,6 +509,7 @@ mod tests {
                 },
             },
             InboxItem::PlainEvent {
+                objective_id: None,
                 body: "event".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
                 handling_mode: HandlingMode::Queue,
@@ -515,6 +545,7 @@ mod tests {
     fn test_message_kind_tags_are_strings() {
         // Verify MessageKind uses string tags, not ordinals
         let msg = MessageKind::Message {
+            objective_id: None,
             body: "test".to_string(),
             blocks: None,
             content_taint: None,
@@ -539,6 +570,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "test".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -561,6 +593,7 @@ mod tests {
             from: keypair.public_key(),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "test".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -583,6 +616,7 @@ mod tests {
             from: keypair.public_key(),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "test".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -601,6 +635,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "hello".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -640,6 +675,7 @@ mod tests {
             from: sender_keypair.public_key(),
             to: receiver_keypair.public_key(),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "hello".to_string(),
                 blocks: None,
                 content_taint: None,
@@ -767,6 +803,7 @@ mod tests {
         use meerkat_core::PlainEventSource;
 
         let item = InboxItem::PlainEvent {
+            objective_id: None,
             body: "New email from john@example.com".to_string(),
             source: PlainEventSource::Tcp,
             handling_mode: HandlingMode::Queue,
@@ -793,6 +830,7 @@ mod tests {
 
         let items = vec![
             InboxItem::PlainEvent {
+                objective_id: None,
                 body: "hello".to_string(),
                 source: PlainEventSource::Tcp,
                 handling_mode: HandlingMode::Queue,
@@ -801,6 +839,7 @@ mod tests {
                 render_metadata: None,
             },
             InboxItem::PlainEvent {
+                objective_id: None,
                 body: r#"{"event":"email"}"#.to_string(),
                 source: PlainEventSource::Stdin,
                 handling_mode: HandlingMode::Queue,
@@ -809,6 +848,7 @@ mod tests {
                 render_metadata: None,
             },
             InboxItem::PlainEvent {
+                objective_id: None,
                 body: "webhook payload".to_string(),
                 source: PlainEventSource::Webhook,
                 handling_mode: HandlingMode::Queue,
@@ -817,6 +857,7 @@ mod tests {
                 render_metadata: None,
             },
             InboxItem::PlainEvent {
+                objective_id: None,
                 body: "rpc event".to_string(),
                 source: PlainEventSource::Rpc,
                 handling_mode: HandlingMode::Queue,
@@ -846,6 +887,7 @@ mod tests {
                 interaction_id,
                 blocks,
                 render_metadata,
+                ..
             } => {
                 assert_eq!(body, "hello");
                 assert_eq!(source, meerkat_core::PlainEventSource::Tcp);
@@ -861,6 +903,7 @@ mod tests {
     fn test_inbox_item_plain_event_with_interaction_id_json_roundtrip() {
         let id = Uuid::new_v4();
         let item = InboxItem::PlainEvent {
+            objective_id: None,
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
             handling_mode: HandlingMode::Queue,
@@ -882,6 +925,7 @@ mod tests {
     fn test_inbox_item_plain_event_with_interaction_id_cbor_roundtrip() {
         let id = Uuid::new_v4();
         let item = InboxItem::PlainEvent {
+            objective_id: None,
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
             handling_mode: HandlingMode::Queue,
@@ -899,6 +943,7 @@ mod tests {
     #[test]
     fn test_inbox_item_plain_event_none_interaction_id_skipped_in_json() {
         let item = InboxItem::PlainEvent {
+            objective_id: None,
             body: "untracked".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
             handling_mode: HandlingMode::Queue,
@@ -921,6 +966,7 @@ mod tests {
     #[test]
     fn message_kind_with_blocks_cbor_roundtrip() {
         let kind = MessageKind::Message {
+            objective_id: None,
             body: "hello".to_string(),
             blocks: Some(vec![
                 ContentBlock::Text {
@@ -948,6 +994,7 @@ mod tests {
         // Then deserialize and verify blocks defaults to None.
         let keypair = Keypair::generate();
         let kind = MessageKind::Message {
+            objective_id: None,
             body: "test".to_string(),
             blocks: None,
             content_taint: None,
@@ -1015,6 +1062,7 @@ mod tests {
             from: PubKey::new([1u8; 32]),
             to: PubKey::new([2u8; 32]),
             kind: MessageKind::Message {
+                objective_id: None,
                 body: "hello".to_string(),
                 blocks: None,
                 content_taint: Some(SenderContentTaint::Tainted),
@@ -1064,6 +1112,7 @@ mod tests {
                 from: keypair.public_key(),
                 to: PubKey::new([2u8; 32]),
                 kind: MessageKind::Request {
+                    objective_id: None,
                     intent: "review".to_string(),
                     params: serde_json::json!({"pr": 7}),
                     blocks: None,
@@ -1097,12 +1146,14 @@ mod tests {
         // serialized declaration. A receiver coalescing the two would erase
         // the sender's claim; the wire keeps them distinct.
         let undeclared = MessageKind::Message {
+            objective_id: None,
             body: "hello".to_string(),
             blocks: None,
             content_taint: None,
             handling_mode: None,
         };
         let clean = MessageKind::Message {
+            objective_id: None,
             body: "hello".to_string(),
             blocks: None,
             content_taint: Some(SenderContentTaint::Clean),

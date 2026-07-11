@@ -1376,8 +1376,19 @@ where
         self.emit_run_started_event(run_prompt_input.clone(), event_tx.as_ref())
             .await;
 
+        let mut dispatch_metadata = self.turn_tool_dispatch_metadata.clone();
+        if let Some(objective_id) = self
+            .active_transcript_identity
+            .as_ref()
+            .and_then(|identity| identity.objective_id)
+        {
+            dispatch_metadata.insert(
+                crate::agent::TOOL_DISPATCH_OBJECTIVE_ID_KEY.to_string(),
+                serde_json::Value::String(objective_id.to_string()),
+            );
+        }
         self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&run_prompt_input)
-            .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
+            .with_turn_metadata(dispatch_metadata);
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -1491,8 +1502,19 @@ where
         self.emit_run_started_event(prompt.clone(), event_tx.as_ref())
             .await;
 
+        let mut dispatch_metadata = self.turn_tool_dispatch_metadata.clone();
+        if let Some(objective_id) = self
+            .active_transcript_identity
+            .as_ref()
+            .and_then(|identity| identity.objective_id)
+        {
+            dispatch_metadata.insert(
+                crate::agent::TOOL_DISPATCH_OBJECTIVE_ID_KEY.to_string(),
+                serde_json::Value::String(objective_id.to_string()),
+            );
+        }
         self.tool_dispatch_context = crate::ToolDispatchContext::from_run_input(&prompt)
-            .with_turn_metadata(self.turn_tool_dispatch_metadata.clone());
+            .with_turn_metadata(dispatch_metadata);
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -2203,6 +2225,7 @@ mod skill_activation_effect_tests {
         let transcript_identity = crate::types::TranscriptMessageIdentity {
             interaction_id: Some(interaction_id),
             run_id: None,
+            objective_id: None,
         };
 
         let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
@@ -2266,6 +2289,7 @@ mod skill_activation_effect_tests {
         let transcript_identity = crate::types::TranscriptMessageIdentity {
             interaction_id: Some(interaction_id),
             run_id: None,
+            objective_id: None,
         };
 
         let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
@@ -2329,6 +2353,7 @@ mod skill_activation_effect_tests {
         agent.set_active_transcript_identity(Some(crate::types::TranscriptMessageIdentity {
             interaction_id: Some(interaction_id),
             run_id: None,
+            objective_id: None,
         }));
 
         agent

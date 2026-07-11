@@ -10973,6 +10973,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         self.ensure_runtime_session_registered(session_id).await?;
 
         let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: Utc::now(),

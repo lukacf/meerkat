@@ -67,7 +67,7 @@ pub use realm::{
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub use schedule_sqlite_store::SqliteScheduleStore;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-pub use sqlite_store::SqliteSessionStore;
+pub use sqlite_store::{SqliteConnectionOptions, SqliteSessionStore};
 
 #[cfg(all(feature = "jsonl", not(target_arch = "wasm32")))]
 pub use jsonl::JsonlStore;

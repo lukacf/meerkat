@@ -4942,6 +4942,7 @@ impl SessionRuntime {
         let blocks = decode_wire_content_blocks(blocks)?;
 
         let input = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -11184,6 +11185,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -11313,6 +11315,7 @@ mod tests {
             .accept_input(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -11496,6 +11499,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -11626,6 +11630,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -11815,6 +11820,7 @@ mod tests {
         CoreCommsRuntime::send(
             &*sender,
             CommsCommand::PeerResponse {
+                objective_id: None,
                 content_taint: None,
                 to: PeerRoute::with_display_name(
                     operator_pubkey.to_peer_id(),
@@ -15415,6 +15421,7 @@ mod tests {
             .expect("commit persisted runtime authority snapshot");
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {

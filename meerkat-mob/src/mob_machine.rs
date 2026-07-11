@@ -108,6 +108,11 @@ pub(crate) enum MobMachineCommand {
     MemberStatus {
         agent_identity: AgentIdentity,
     },
+    ConcludeObjective {
+        agent_identity: AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+        outcome: String,
+    },
     SubscribeAgentEvents {
         agent_identity: AgentIdentity,
     },
@@ -345,6 +350,7 @@ impl MobMachineCommandVariant {
             }
             Self::ListAllMembers => Some(MobMachineCatalogInput::ListAllMembers),
             Self::MemberStatus => Some(MobMachineCatalogInput::MemberStatus),
+            Self::ConcludeObjective => Some(MobMachineCatalogInput::ConcludeObjective),
             Self::SubscribeAgentEvents => Some(MobMachineCatalogInput::SubscribeAgentEvents),
             Self::SubscribeAllAgentEvents => Some(MobMachineCatalogInput::SubscribeAllAgentEvents),
             Self::SubscribeMobEvents => Some(MobMachineCatalogInput::SubscribeMobEvents),
@@ -394,6 +400,11 @@ pub enum MobMachineRuntimeInternalReason {
     /// step is the surfaced spawn command target; these three are internal
     /// phase transitions with no independent surface command or runtime probe.
     SpawnExecLadderAuthority,
+    /// Live execution observations are sampled by the actor while realizing
+    /// `MemberStatus`; they are machine inputs, but not independent public
+    /// commands. The machine remains the sole owner of health classification.
+    MemberProgressObservationAuthority,
+    ObjectiveOwnerBindingAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +428,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::CommitSpawnActivation,
         reason: MobMachineRuntimeInternalReason::SpawnExecLadderAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ObserveMemberProgress,
+        reason: MobMachineRuntimeInternalReason::MemberProgressObservationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BindObjectiveOwner,
+        reason: MobMachineRuntimeInternalReason::ObjectiveOwnerBindingAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AbortSpawnExec,
@@ -1070,6 +1089,9 @@ const fn mob_machine_command_classification(
         }
         MobMachineCommandVariant::MemberStatus => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::MemberStatus)
+        }
+        MobMachineCommandVariant::ConcludeObjective => {
+            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::ConcludeObjective)
         }
         MobMachineCommandVariant::SubscribeAgentEvents => {
             MobMachineCommandClassification::CatalogInput(

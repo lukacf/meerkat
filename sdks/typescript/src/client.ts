@@ -80,6 +80,8 @@ import {
   type MobTurnStartParams,
   type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
   type MobRotateSupervisorResult,
+  type MobConcludeObjectiveParams,
+  type MobConcludeObjectiveResult,
   type McpAddParams,
   type McpLiveOpResponse,
   type McpReloadParams,
@@ -87,6 +89,7 @@ import {
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
   type WireMobMemberStatus,
+  type WireMemberProgressSnapshot,
   type ToolsRegisterParams,
   type ToolsRegisterResult,
   SkillListResponse,
@@ -412,6 +415,7 @@ function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown
   setIfDefined(payload, "budget_split_policy", spec.budgetSplitPolicy);
   setIfDefined(payload, "inherited_tool_filter", spec.inheritedToolFilter);
   setIfDefined(payload, "override_profile", spec.overrideProfile);
+  setIfDefined(payload, "model_override", spec.modelOverride);
   setIfDefined(payload, "auth_binding", spec.authBinding);
   return payload;
 }
@@ -428,6 +432,7 @@ function mobSpawnManySpecPayload(spec: SpawnManySpec): MobSpawnSpecParams {
   setIfDefined(payload, "context", spec.context);
   setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
   setIfDefined(payload, "auth_binding", spec.authBinding);
+  setIfDefined(payload, "model_override", spec.modelOverride);
   return payload;
 }
 
@@ -2009,6 +2014,9 @@ export class MeerkatClient {
     if (Object.prototype.hasOwnProperty.call(result, "external_member")) {
       snapshot.externalMember = result.external_member;
     }
+    if (result.progress !== undefined && result.progress !== null) {
+      snapshot.progress = result.progress as WireMemberProgressSnapshot;
+    }
     return snapshot;
   }
 
@@ -2105,7 +2113,8 @@ export class MeerkatClient {
     workRef?: string;
     origin?: "external" | "internal";
     injectedContext?: ContentInput[];
-  }): Promise<{ mobId: string; workRef: string; memberRef: string }> {
+    objectiveId?: string;
+  }): Promise<{ mobId: string; workRef: string; memberRef: string; objectiveId?: string }> {
     const params: Record<string, unknown> = {
       member_ref: args.memberRef,
       content: args.content,
@@ -2116,6 +2125,9 @@ export class MeerkatClient {
     }
     if (args.injectedContext !== undefined && args.injectedContext.length > 0) {
       params.injected_context = args.injectedContext;
+    }
+    if (args.objectiveId !== undefined) {
+      params.objective_id = args.objectiveId;
     }
     const result = await this.request("mob/submit_work", params);
     return {
@@ -2134,6 +2146,28 @@ export class MeerkatClient {
         "member_ref",
         "Invalid mob/submit_work response: missing member_ref",
       ),
+      ...(typeof result.objective_id === "string"
+        ? { objectiveId: result.objective_id }
+        : {}),
+    };
+  }
+
+  /** Conclude a machine-owned kickoff objective for a pre-addressed member. */
+  async mobConcludeObjective(args: {
+    memberRef: string;
+    objectiveId: string;
+    outcome: string;
+  }): Promise<MobConcludeObjectiveResult> {
+    const params: MobConcludeObjectiveParams = {
+      member_ref: args.memberRef,
+      objective_id: args.objectiveId,
+      outcome: args.outcome,
+    };
+    const result = await this.request("mob/conclude_objective", params);
+    return {
+      member_ref: MeerkatClient.requireStringField(result, "member_ref", "Invalid mob/conclude_objective response"),
+      objective_id: MeerkatClient.requireStringField(result, "objective_id", "Invalid mob/conclude_objective response"),
+      concluded: MeerkatClient.requireBooleanField(result, "concluded", "Invalid mob/conclude_objective response"),
     };
   }
 
@@ -2549,13 +2583,17 @@ export class MeerkatClient {
 
   async getMobFlowStatus(mobId: string, runId: string): Promise<MobFlowStatus | null> {
     const result = await this.request("mob/flow_status", { mob_id: mobId, run_id: runId });
-    return result.run == null ? null : { run: result.run as Record<string, unknown> };
+    return result.run == null
+      ? null
+      : { run: result.run as unknown as Record<string, unknown> };
   }
 
   async getMobRunResult(mobId: string, runId: string): Promise<PublicMobRunResult | null> {
     const params: MobRunResultParams = { mob_id: mobId, run_id: runId };
     const result = (await this.request("mob/run_result", params)) as MobRunResult;
-    return result.run == null ? null : { run: result.run as Record<string, unknown> };
+    return result.run == null
+      ? null
+      : { run: result.run as unknown as Record<string, unknown> };
   }
 
   async cancelMobFlow(mobId: string, runId: string): Promise<void> {

@@ -3480,8 +3480,38 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn persist_transcript_fork(
         &self,
         source_session_id: SessionId,
-        forked: Session,
+        mut forked: Session,
+        source_metadata: Option<meerkat_core::SessionMetadata>,
+        requested_tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     ) -> Result<SessionForkResult, SessionError> {
+        // Core transcript forks deliberately strip session authority metadata.
+        // Rebuild sanitized execution configuration whenever canonical source
+        // metadata exists. `None`/`Inherit` retain the source's effective
+        // policy; a concrete policy replaces it on the branch only.
+        if let Some(mut metadata) = source_metadata {
+            let effective_policy = match requested_tool_access_policy {
+                Some(meerkat_core::ops::ToolAccessPolicy::Inherit) | None => {
+                    metadata.tooling.tool_access_policy.clone()
+                }
+                Some(policy) => Some(policy),
+            };
+            metadata.comms_name = None;
+            metadata.peer_meta = None;
+            metadata.mob_member_binding = None;
+            metadata.keep_alive = false;
+            metadata.tooling.tool_access_policy = effective_policy;
+            forked.set_session_metadata(metadata).map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to persist fork tool authorization for session {source_session_id}: {error}"
+                )))
+            })?;
+        } else if requested_tool_access_policy
+            .is_some_and(|policy| !matches!(policy, meerkat_core::ops::ToolAccessPolicy::Inherit))
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "session {source_session_id} has no canonical session metadata for fork tool authorization"
+            ))));
+        }
         let saved = self.save_normalized_session(forked).await?;
         Ok(SessionForkResult {
             source_session_id,
@@ -6214,6 +6244,95 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    /// Promote an archived document back to Active under explicit machine
+    /// control. This is the durable half of retired-session revival; ordinary
+    /// create/resume remains unable to cross the absorbing Archived terminal.
+    pub async fn revive_archived_session_with_machine_authority(
+        &self,
+        id: &SessionId,
+        _authority: MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock().await;
+        let mut session = self
+            .load_authoritative_session_base(id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let runtime_state = Self::load_runtime_state_for_session(&self.runtime_store, id).await?;
+        if runtime_state != Some(RuntimeState::Retired) {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "session {id} is not an archived document with a retired runtime"
+            ))));
+        }
+        if !session_marks_archived(&session) {
+            // Crash recovery for the two machine-owned commits that comprise
+            // revival. The document promotion may have landed while the
+            // runtime is still Retired. Treat that exact Active+Retired pair
+            // as an idempotent in-progress revival, repair the compatibility
+            // projection, and let the caller perform the runtime reset. No
+            // other runtime state is accepted here.
+            self.save_compatibility_projection_only(session).await?;
+            return Ok(());
+        }
+
+        let mut document_authority = SessionDocumentMachineAuthority::new();
+        let document_key = SessionDocumentKey::new(id.to_string());
+        document_authority
+            .recover_session_lifecycle_terminal(
+                document_key.clone(),
+                SessionLifecycleTerminal::Archived.into(),
+            )
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected revival recovery for session {id}: {error}"
+                )))
+            })?;
+        let effects = document_authority
+            .revive_archived_session_document(document_key)
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "generated session document authority rejected revival for session {id}: {error}"
+                )))
+            })?;
+        if !effects
+            .iter()
+            .any(|effect| matches!(effect, SessionDocumentEffect::SessionRevivalResolved))
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "generated session document authority returned no revival verdict for session {id}"
+            ))));
+        }
+
+        session
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Active)
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to mark revived session {id} active: {error}"
+                )))
+            })?;
+        let session_snapshot = serde_json::to_vec(&session).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to serialize revived session {id}: {error}"
+            )))
+        })?;
+        self.runtime_store
+            .commit_session_snapshot(
+                &Self::runtime_id_for_session(id),
+                SessionDelta { session_snapshot },
+            )
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to persist revived runtime snapshot for session {id}: {error}"
+                )))
+            })?;
+        self.save_compatibility_projection_only(session).await?;
+        if let Some(gate) = self.existing_gate_for_session(id).await {
+            *gate.cancelled.lock().await = false;
+        }
+        Ok(())
+    }
+
     async fn create_session_with_admission(
         &self,
         mut req: CreateSessionRequest,
@@ -6983,6 +7102,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
     ) -> Result<SessionForkResult, SessionError> {
         let _ = req.running_behavior;
         let source = self.source_session_for_transcript_edit(id).await?;
+        let source_metadata = source.try_session_metadata().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to decode source session metadata while forking session {id}: {error}"
+            )))
+        })?;
         if req.message_index > source.messages().len() {
             return Err(meerkat_core::TranscriptEditError::MessageIndexOutOfBounds {
                 message_index: req.message_index,
@@ -6993,7 +7117,8 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
 
         let forked = source.fork_at(req.message_index);
         self.authorize_transcript_edit(id, TranscriptEditKind::Fork)?;
-        self.persist_transcript_fork(id.clone(), forked).await
+        self.persist_transcript_fork(id.clone(), forked, source_metadata, req.tool_access_policy)
+            .await
     }
 
     async fn fork_session_replace(
@@ -7003,11 +7128,17 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
     ) -> Result<SessionForkResult, SessionError> {
         let _ = req.running_behavior;
         let source = self.source_session_for_transcript_edit(id).await?;
+        let source_metadata = source.try_session_metadata().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to decode source session metadata while forking session {id}: {error}"
+            )))
+        })?;
         let forked = source
             .fork_replacing(req.message_index, req.replacement)
             .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
         self.authorize_transcript_edit(id, TranscriptEditKind::Fork)?;
-        self.persist_transcript_fork(id.clone(), forked).await
+        self.persist_transcript_fork(id.clone(), forked, source_metadata, req.tool_access_policy)
+            .await
     }
 
     async fn rewrite_session_transcript(
@@ -10852,6 +10983,7 @@ mod tests {
                 SessionForkAtRequest {
                     message_index: 2,
                     running_behavior: TranscriptEditRunningBehavior::Reject,
+                    tool_access_policy: None,
                 },
             )
             .await
@@ -10875,6 +11007,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transcript_fork_persists_call_scoped_tool_policy_on_branch_only() {
+        let (service, store, runtime_store, parent_id) = transcript_edit_fixture().await;
+        let source_policy = meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["shell".to_string()].into_iter().collect(),
+        );
+        let mut parent = store
+            .load(&parent_id)
+            .await
+            .expect("load parent")
+            .expect("parent exists");
+        parent
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "test".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling {
+                    tool_access_policy: Some(source_policy.clone()),
+                    ..meerkat_core::SessionTooling::default()
+                },
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("seed canonical parent metadata");
+        store.save(&parent).await.expect("save parent metadata");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&parent_id),
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&parent)
+                        .expect("serialize parent metadata snapshot"),
+                },
+            )
+            .await
+            .expect("commit parent metadata snapshot");
+        service
+            .discard_live_session(&parent_id)
+            .await
+            .expect("force fork source through the durable runtime snapshot");
+        let policy = meerkat_core::ops::ToolAccessPolicy::AllowList(
+            ["memory_search".to_string()].into_iter().collect(),
+        );
+        let forked = service
+            .fork_session_at(
+                &parent_id,
+                SessionForkAtRequest {
+                    message_index: 2,
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                    tool_access_policy: Some(policy.clone()),
+                },
+            )
+            .await
+            .expect("fork policy should persist");
+
+        let branch = store
+            .load(&forked.session_id)
+            .await
+            .expect("load branch")
+            .expect("branch exists");
+        assert_eq!(
+            branch
+                .try_session_metadata()
+                .expect("decode branch metadata")
+                .expect("branch metadata")
+                .tooling
+                .tool_access_policy,
+            Some(policy)
+        );
+        assert_eq!(
+            store
+                .load(&parent_id)
+                .await
+                .expect("load parent")
+                .expect("parent exists")
+                .try_session_metadata()
+                .expect("decode parent metadata")
+                .expect("parent metadata")
+                .tooling
+                .tool_access_policy,
+            Some(source_policy.clone()),
+            "call-scoped fork authorization must not mutate the source"
+        );
+
+        for requested_policy in [None, Some(meerkat_core::ops::ToolAccessPolicy::Inherit)] {
+            let inherited = service
+                .fork_session_at(
+                    &parent_id,
+                    SessionForkAtRequest {
+                        message_index: 2,
+                        running_behavior: TranscriptEditRunningBehavior::Reject,
+                        tool_access_policy: requested_policy,
+                    },
+                )
+                .await
+                .expect("default/Inherit fork should retain source authorization");
+            let inherited = store
+                .load(&inherited.session_id)
+                .await
+                .expect("load inherited branch")
+                .expect("inherited branch exists");
+            assert_eq!(
+                inherited
+                    .try_session_metadata()
+                    .expect("decode inherited branch metadata")
+                    .expect("inherited branch metadata")
+                    .tooling
+                    .tool_access_policy,
+                Some(source_policy.clone()),
+                "None/Inherit must preserve the source session's effective policy"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_persistent_fork_replace_message_creates_changed_branch() {
         let (service, _store, _runtime_store, parent_id) = transcript_edit_fixture().await;
 
@@ -10887,6 +11143,7 @@ mod tests {
                         message: Message::User(UserMessage::text("edited follow up")),
                     },
                     running_behavior: TranscriptEditRunningBehavior::Reject,
+                    tool_access_policy: None,
                 },
             )
             .await
@@ -12203,6 +12460,7 @@ mod tests {
                 SessionForkAtRequest {
                     message_index: 1,
                     running_behavior: TranscriptEditRunningBehavior::Reject,
+                    tool_access_policy: None,
                 },
             )
             .await;
@@ -20238,6 +20496,100 @@ mod tests {
             runtime_state,
             Some(meerkat_runtime::RuntimeState::Retired),
             "archive must durably retire the registered runtime session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_machine_authorized_revival_promotes_only_archived_retired_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        store.save(&session).await.expect("seed durable session");
+
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("register session");
+        service
+            .archive_with_machine_protocol(
+                &id,
+                MachineSessionArchiveProtocol::from_machine(&machine),
+            )
+            .await
+            .expect("archive session");
+
+        service
+            .revive_archived_session_with_machine_authority(
+                &id,
+                machine.session_control_authority(),
+            )
+            .await
+            .expect("machine-authorized archived+retired revival");
+
+        let revived = service
+            .load_authoritative_session_base(&id)
+            .await
+            .expect("load revived session")
+            .expect("revived session remains durable");
+        assert!(
+            !session_marks_archived(&revived),
+            "revival must durably promote the session document to Active"
+        );
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(
+                runtime_store.as_ref(),
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("load runtime state"),
+            Some(meerkat_runtime::RuntimeState::Retired),
+            "document revival must not silently reset runtime authority; the caller owns that next transition"
+        );
+
+        service
+            .revive_archived_session_with_machine_authority(
+                &id,
+                machine.session_control_authority(),
+            )
+            .await
+            .expect("Active+Retired crash boundary must resume idempotently");
+
+        let active = Session::new();
+        let active_id = active.id().clone();
+        store.save(&active).await.expect("seed active session");
+        machine
+            .register_session(active_id.clone())
+            .await
+            .expect("register active runtime");
+        let active_error = service
+            .revive_archived_session_with_machine_authority(
+                &active_id,
+                machine.session_control_authority(),
+            )
+            .await
+            .expect_err("active runtime must not enter retired-session revival");
+        assert!(
+            matches!(
+                &active_error,
+                SessionError::NotFound { id } if id == &active_id
+            ) || matches!(
+                &active_error,
+                SessionError::Agent(AgentError::InternalError(message))
+                    if message.contains("not an archived document with a retired runtime")
+            ),
+            "unexpected active-session revival error: {active_error:?}"
         );
     }
 

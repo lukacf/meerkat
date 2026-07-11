@@ -16599,8 +16599,10 @@ default_model = "gemma"
         }
     }
 
+    #[cfg(any(feature = "openai", feature = "gemini"))]
     struct FakeImageGenerationExecutor;
 
+    #[cfg(any(feature = "openai", feature = "gemini"))]
     #[async_trait]
     impl meerkat_llm_core::ImageGenerationExecutor for FakeImageGenerationExecutor {
         async fn execute_image_generation(
@@ -21436,6 +21438,9 @@ capabilities = ["rpc"]
         );
     }
 
+    // These wiring contracts require a compiled image-provider profile. Slim
+    // provider-free builds intentionally have no image planner or image tool.
+    #[cfg(any(feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_run_session_build_wires_generate_image_for_runtime_owned_one_shot() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
@@ -21507,6 +21512,7 @@ capabilities = ["rpc"]
         assert!(names.contains("generate_image"));
     }
 
+    #[cfg(any(feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_run_session_build_keeps_generate_image_visible_without_executor() {
         let temp = tempfile::tempdir().expect("tempdir must be created");

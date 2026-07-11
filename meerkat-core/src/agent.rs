@@ -290,6 +290,9 @@ pub struct ToolDispatchContext {
     turn_metadata: BTreeMap<String, serde_json::Value>,
 }
 
+/// Dispatch-context key carrying the current durable objective id.
+pub const TOOL_DISPATCH_OBJECTIVE_ID_KEY: &str = "meerkat.objective_id";
+
 impl ToolDispatchContext {
     pub fn from_current_turn_input(input: &crate::types::ContentInput) -> Self {
         let blocks = match input {
@@ -1106,6 +1109,7 @@ pub trait CommsRuntime: Send + Sync {
             .await
             .into_iter()
             .map(|text| crate::interaction::InboxInteraction {
+                objective_id: None,
                 id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 from_route: None,
                 from: "unknown".into(),

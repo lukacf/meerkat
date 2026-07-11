@@ -883,6 +883,9 @@ machine! {
                 session_id: SessionId,
                 terminal: Enum<SessionDocumentLifecycle>,
             },
+            ReviveArchivedSessionDocument {
+                session_id: SessionId,
+            },
             ArchiveSessionDocument {
                 session_id: SessionId,
                 runtime_backed: bool,
@@ -1066,6 +1069,7 @@ machine! {
             // with durable truth still convergent (`Retired` implies the
             // document is Archived; the converse failure window is retryable).
             SessionLifecycleTerminalRecovered,
+            SessionRevivalResolved,
             SessionArchiveResolved {
                 disposition: Enum<SessionArchiveDisposition>,
                 write_document: bool,
@@ -1303,6 +1307,7 @@ machine! {
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
         disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
         disposition SessionLifecycleTerminalRecovered => local seam NoOwnerRealization,
+        disposition SessionRevivalResolved => local seam NoOwnerRealization,
         disposition SessionArchiveResolved => local seam NoOwnerRealization,
 
         // ---------------------------------------------------------------
@@ -3766,6 +3771,21 @@ machine! {
             }
             to Ready
             emit SessionLifecycleTerminalRecovered
+        }
+
+        transition ReviveArchivedSessionDocument {
+            on input ReviveArchivedSessionDocument { session_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_lifecycle_terminal.get_cloned(session_id).get("value")
+                    == SessionDocumentLifecycle::Archived
+            }
+            update {
+                self.session_lifecycle_terminal
+                    .insert(session_id, SessionDocumentLifecycle::Active);
+            }
+            to Ready
+            emit SessionRevivalResolved
         }
 
         // Archive from Active: the only transition that moves the document

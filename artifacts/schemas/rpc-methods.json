@@ -680,6 +680,12 @@
       "result_type": "MobSubmitWorkResult"
     },
     {
+      "description": "Explicitly conclude a machine-owned kickoff objective",
+      "name": "mob/conclude_objective",
+      "params_type": "MobConcludeObjectiveParams",
+      "result_type": "MobConcludeObjectiveResult"
+    },
+    {
       "description": "Cancel a previously submitted unit of work",
       "name": "mob/cancel_work",
       "params_type": "MobCancelWorkParams",

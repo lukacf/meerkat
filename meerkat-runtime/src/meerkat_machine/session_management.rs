@@ -1246,6 +1246,20 @@ impl MeerkatMachine {
         self.unregister_session_inner(session_id).await;
     }
 
+    /// Unregister a session and report whether the machine-owned detach and
+    /// durable Idle projection committed. Callers performing compensation
+    /// must use this checked form; swallowing a persistence failure would
+    /// falsely claim that a resumed durable session was preserved.
+    pub async fn try_unregister_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let Some(gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            return Ok(());
+        };
+        Box::pin(self.unregister_session_inner_locked_authorized(session_id, gate_guard)).await
+    }
+
     /// Stage `BeginUnregisterSession`, which opens the machine-owned drain
     /// window. Carries the same binding facts as the final `UnregisterSession`
     /// so the machine can match them against the active runtime authority.

@@ -3892,6 +3892,7 @@ mod tests {
 
     fn peer_message_input() -> Input {
         Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -3939,6 +3940,7 @@ mod tests {
 
     fn progress_input_with_supersession(label: &str, supersession_key: &str) -> Input {
         Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -4934,6 +4936,7 @@ mod tests {
             .unwrap();
 
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {

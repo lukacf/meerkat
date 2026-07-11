@@ -7536,6 +7536,10 @@
         ],
         "type": "string"
       },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
+      },
       "SenderContentTaint": {
         "description": "Sender-declared content-taint classification for peer content.\n\nThis is the typed vocabulary for the optional taint declaration a sender\nstamps onto content-bearing comms envelopes (`Message` / `Request` /\n`Response`). `Clean` and `Tainted` are the two DECLARED states.\n\n`None` at the carriers (`MessageKind::*.content_taint`,\n`SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)\nmeans \"the sender made no declaration\" — a REAL third state. Receivers\nmust never coalesce `None` into `Clean`: an absent declaration carries no\ntrust information, while `Clean` is an affirmative sender claim.",
         "oneOf": [
@@ -7708,6 +7712,17 @@
           },
           "input_id": {
             "type": "string"
+          },
+          "objective_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ObjectiveId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Durable delegated-objective causality for this work delivery."
           },
           "protocol_version": {
             "$ref": "#/$defs/BridgeProtocolVersion"
@@ -8457,6 +8472,10 @@
         ],
         "type": "string"
       },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
+      },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
@@ -8506,6 +8525,17 @@
       },
       "input_id": {
         "type": "string"
+      },
+      "objective_id": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ObjectiveId"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Durable delegated-objective causality for this work delivery."
       },
       "protocol_version": {
         "$ref": "#/$defs/BridgeProtocolVersion"
@@ -11703,6 +11733,17 @@
               "input_id": {
                 "type": "string"
               },
+              "objective_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ObjectiveId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Durable delegated-objective causality for this work delivery."
+              },
               "protocol_version": {
                 "$ref": "#/$defs/BridgeProtocolVersion"
               },
@@ -13054,6 +13095,10 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
+      },
       "PeerId": {
         "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
         "type": "string"
@@ -13680,6 +13725,17 @@
               },
               "input_id": {
                 "type": "string"
+              },
+              "objective_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ObjectiveId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Durable delegated-objective causality for this work delivery."
               },
               "protocol_version": {
                 "$ref": "#/$defs/BridgeProtocolVersion"
@@ -14309,6 +14365,10 @@
           "queue",
           "steer"
         ],
+        "type": "string"
+      },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
         "type": "string"
       },
       "SenderContentTaint": {
@@ -15455,6 +15515,28 @@
     "title": "CommsSendErrorData"
   },
   "CommsSendResult": {
+    "$defs": {
+      "PeerDeliveryOutcome": {
+        "description": "Strongest successful peer-delivery fact proved by the selected transport.",
+        "oneOf": [
+          {
+            "const": "acked",
+            "description": "A peer acknowledgement was received and verified.",
+            "type": "string"
+          },
+          {
+            "const": "handed_off",
+            "description": "The receiver's local inbox admitted the envelope directly.",
+            "type": "string"
+          },
+          {
+            "const": "queued",
+            "description": "The envelope was written to a transport that does not acknowledge this\nmessage kind; receiver admission is not known.",
+            "type": "string"
+          }
+        ]
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `comms/send`.",
     "oneOf": [
@@ -15482,8 +15564,8 @@
       {
         "additionalProperties": false,
         "properties": {
-          "acked": {
-            "type": "boolean"
+          "delivery": {
+            "$ref": "#/$defs/PeerDeliveryOutcome"
           },
           "envelope_id": {
             "type": "string"
@@ -15496,7 +15578,7 @@
         "required": [
           "kind",
           "envelope_id",
-          "acked"
+          "delivery"
         ],
         "type": "object"
       },
@@ -25848,6 +25930,33 @@
     "title": "MobCancelWorkResult",
     "type": "object"
   },
+  "MobConcludeObjectiveResult": {
+    "$defs": {
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "concluded": {
+        "type": "boolean"
+      },
+      "member_ref": {
+        "$ref": "#/$defs/WireMemberRef"
+      },
+      "objective_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "member_ref",
+      "objective_id",
+      "concluded"
+    ],
+    "title": "MobConcludeObjectiveResult",
+    "type": "object"
+  },
   "MobCreateResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `mob/create`.",
@@ -29295,8 +29404,64 @@
   },
   "MobMemberStatusResult": {
     "$defs": {
+      "WireMemberHealthClass": {
+        "enum": [
+          "healthy",
+          "degraded",
+          "wedged",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "WireMemberProgressEvent": {
+        "enum": [
+          "execution_advanced",
+          "became_idle",
+          "unchanged"
+        ],
+        "type": "string"
+      },
+      "WireMemberProgressSnapshot": {
+        "properties": {
+          "health": {
+            "$ref": "#/$defs/WireMemberHealthClass"
+          },
+          "in_flight_work": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_progress_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_progress_event": {
+            "$ref": "#/$defs/WireMemberProgressEvent"
+          },
+          "run_state": {
+            "$ref": "#/$defs/WireMemberRunState"
+          }
+        },
+        "required": [
+          "run_state",
+          "in_flight_work",
+          "last_progress_at_ms",
+          "last_progress_event",
+          "health"
+        ],
+        "type": "object"
+      },
       "WireMemberRef": {
         "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      },
+      "WireMemberRunState": {
+        "enum": [
+          "idle",
+          "run_open",
+          "unknown"
+        ],
         "type": "string"
       },
       "WireMobMemberStatus": {
@@ -29478,6 +29643,16 @@
         "anyOf": [
           {
             "$ref": "#/$defs/WirePeerConnectivity"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "progress": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMemberProgressSnapshot"
           },
           {
             "type": "null"
@@ -32388,6 +32563,12 @@
       },
       "mob_id": {
         "type": "string"
+      },
+      "objective_id": {
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "work_ref": {
         "type": "string"
@@ -52726,6 +52907,17 @@
     "title": "WireLoginStart",
     "type": "object"
   },
+  "WireMemberHealthClass": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "healthy",
+      "degraded",
+      "wedged",
+      "unknown"
+    ],
+    "title": "WireMemberHealthClass",
+    "type": "string"
+  },
   "WireMemberLaunchMode": {
     "$defs": {
       "WireForkContext": {
@@ -52819,6 +53011,86 @@
       }
     ],
     "title": "WireMemberLaunchMode"
+  },
+  "WireMemberProgressEvent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "execution_advanced",
+      "became_idle",
+      "unchanged"
+    ],
+    "title": "WireMemberProgressEvent",
+    "type": "string"
+  },
+  "WireMemberProgressSnapshot": {
+    "$defs": {
+      "WireMemberHealthClass": {
+        "enum": [
+          "healthy",
+          "degraded",
+          "wedged",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "WireMemberProgressEvent": {
+        "enum": [
+          "execution_advanced",
+          "became_idle",
+          "unchanged"
+        ],
+        "type": "string"
+      },
+      "WireMemberRunState": {
+        "enum": [
+          "idle",
+          "run_open",
+          "unknown"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "health": {
+        "$ref": "#/$defs/WireMemberHealthClass"
+      },
+      "in_flight_work": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "last_progress_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "last_progress_event": {
+        "$ref": "#/$defs/WireMemberProgressEvent"
+      },
+      "run_state": {
+        "$ref": "#/$defs/WireMemberRunState"
+      }
+    },
+    "required": [
+      "run_state",
+      "in_flight_work",
+      "last_progress_at_ms",
+      "last_progress_event",
+      "health"
+    ],
+    "title": "WireMemberProgressSnapshot",
+    "type": "object"
+  },
+  "WireMemberRunState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "idle",
+      "run_open",
+      "unknown"
+    ],
+    "title": "WireMemberRunState",
+    "type": "string"
   },
   "WireMobBackendKind": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

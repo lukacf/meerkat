@@ -87,6 +87,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyMemberWaitRuntimeMaterialPresentRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveMemberProgressChangedOpenRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberProgressChangedIdleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberProgressUnchangedIdleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberProgressUnchangedOpenHealthyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberProgressUnchangedOpenDegradedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberProgressUnchangedOpenWedgedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberProgressStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyMemberWaitRuntimeMaterialPresentStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1038,6 +1059,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverMemberKickoffCancelled`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverObjectiveBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindObjectiveOwnerRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindObjectiveOwnerIdempotentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverObjectiveConclusion`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReconcileRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1070,6 +1103,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `KickoffMarkPendingCompleted`
   - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `ConcludeObjectiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConcludeObjectiveIdempotentRunning`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `KickoffMarkStartingRunning`
   - anchors: (unclaimed)
@@ -2619,6 +2658,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `EmitKickoffLifecycleNotice`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PersistObjectiveOwnerBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PersistObjectiveConclusion`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RequestKickoffQuiesce`

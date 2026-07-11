@@ -1538,6 +1538,7 @@ impl CommsCommandRequest {
                 blocks,
                 content_taint,
                 handling_mode: handling_mode.unwrap_or_default(),
+                objective_id: None,
             },
             CommsCommandRequest::PeerLifecycle {
                 to,
@@ -1569,6 +1570,7 @@ impl CommsCommandRequest {
                 content_taint,
                 handling_mode: handling_mode.unwrap_or_default(),
                 stream: stream.unwrap_or(InputStreamMode::None),
+                objective_id: None,
             },
             CommsCommandRequest::PeerResponse {
                 to,
@@ -1586,6 +1588,7 @@ impl CommsCommandRequest {
                 blocks,
                 content_taint,
                 handling_mode,
+                objective_id: None,
             },
         })
     }
@@ -1669,6 +1672,7 @@ pub enum CommsCommand {
         /// Per-send taint override: `None` inherits the runtime declaration.
         content_taint: Option<SendTaintOverride>,
         handling_mode: HandlingMode,
+        objective_id: Option<crate::interaction::ObjectiveId>,
     },
     /// Send a one-way peer lifecycle notification.
     PeerLifecycle {
@@ -1686,6 +1690,7 @@ pub enum CommsCommand {
         content_taint: Option<SendTaintOverride>,
         handling_mode: HandlingMode,
         stream: InputStreamMode,
+        objective_id: Option<crate::interaction::ObjectiveId>,
     },
     /// Send a response to a prior peer request.
     PeerResponse {
@@ -1697,10 +1702,31 @@ pub enum CommsCommand {
         /// Per-send taint override: `None` inherits the runtime declaration.
         content_taint: Option<SendTaintOverride>,
         handling_mode: Option<HandlingMode>,
+        objective_id: Option<crate::interaction::ObjectiveId>,
     },
 }
 
 impl CommsCommand {
+    #[must_use]
+    pub fn with_objective_id(
+        mut self,
+        objective_id: Option<crate::interaction::ObjectiveId>,
+    ) -> Self {
+        match &mut self {
+            Self::PeerMessage {
+                objective_id: slot, ..
+            }
+            | Self::PeerRequest {
+                objective_id: slot, ..
+            }
+            | Self::PeerResponse {
+                objective_id: slot, ..
+            } => *slot = objective_id,
+            Self::Input { .. } | Self::PeerLifecycle { .. } => {}
+        }
+        self
+    }
+
     pub fn command_kind(&self) -> &'static str {
         match self {
             Self::Input { .. } => "input",
@@ -1712,6 +1738,21 @@ impl CommsCommand {
     }
 }
 
+/// Strongest successful peer-delivery fact proved by the selected transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PeerDeliveryOutcome {
+    /// A peer acknowledgement was received and verified.
+    Acked,
+    /// The receiver's local inbox admitted the envelope directly.
+    HandedOff,
+    /// The envelope was written to a transport that does not acknowledge this
+    /// message kind; receiver admission is not known.
+    Queued,
+}
+
 /// Receipt returned after accepting a comms command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendReceipt {
@@ -1721,7 +1762,7 @@ pub enum SendReceipt {
     },
     PeerMessageSent {
         envelope_id: uuid::Uuid,
-        acked: bool,
+        delivery: PeerDeliveryOutcome,
     },
     PeerLifecycleSent {
         envelope_id: uuid::Uuid,

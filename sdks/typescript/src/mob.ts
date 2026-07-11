@@ -22,6 +22,7 @@ import type {
   MobSpawnManyResultEntry,
   WireAuthBindingRef,
   WireMobMemberStatus,
+  WireMemberProgressSnapshot,
 } from "./generated/types.js";
 import type { MeerkatClient } from "./client.js";
 
@@ -102,6 +103,7 @@ export interface MobMemberSnapshot {
   kickoff?: Record<string, unknown>;
   externalMember?: unknown;
   peerConnectivity?: MobPeerConnectivity;
+  progress?: WireMemberProgressSnapshot;
 }
 
 export interface MobKickoffWaitOptions {

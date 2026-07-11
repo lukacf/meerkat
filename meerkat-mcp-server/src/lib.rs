@@ -6433,6 +6433,7 @@ mod tests {
             .expect("attach runtime executor");
 
         let input = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: meerkat_core::types::message_timestamp_now(),

@@ -2777,7 +2777,7 @@ mod tests {
 	                runtime_id: &LogicalRuntimeId,
 	                ingress: &PeerIngressFact,
 	            ) -> Input {
-	                Input::Peer(PeerInput {
+	                Input::Peer(PeerInput { objective_id: None,
 	                    body: peer_rendered_body(interaction),
                     blocks: peer_blocks(interaction),
                 })
@@ -2819,7 +2819,7 @@ mod tests {
                 if interaction.from.starts_with("event:") {
                     return Input::ExternalEvent(todo!());
                 }
-                Input::Peer(PeerInput { body: String::new(), blocks: None })
+                Input::Peer(PeerInput { objective_id: None, body: String::new(), blocks: None })
             }
         "#;
         let drain = r"
@@ -2853,7 +2853,7 @@ mod tests {
     fn runtime_external_event_projection_rule_accepts_literal_text_and_blocks() {
         let stdin = r#"
             fn make_stdin_external_event_input(body: String, format: StdinLineFormat) -> Input {
-                Input::ExternalEvent(ExternalEventInput {
+                Input::ExternalEvent(ExternalEventInput { objective_id: None,
                     payload: match format {
                         StdinLineFormat::Text => serde_json::json!({ "body": body }),
                         StdinLineFormat::Json => match serde_json::from_str::<serde_json::Value>(&body) {
@@ -2870,7 +2870,7 @@ mod tests {
 	                let interaction = &classified.interaction;
 	                if classified.class() == PeerInputClass::PlainEvent {
 	                    let blocks = external_event_blocks(interaction);
-	                    return Input::ExternalEvent(ExternalEventInput {
+	                    return Input::ExternalEvent(ExternalEventInput { objective_id: None,
 	                        payload: external_event_payload(interaction),
                         blocks,
                     });
@@ -2926,7 +2926,7 @@ mod tests {
         let stdin = r#"
             fn make_stdin_external_event_input(body: String, _format: StdinLineFormat) -> Input {
                 let parsed = serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::Value::String(body));
-                Input::ExternalEvent(ExternalEventInput {
+                Input::ExternalEvent(ExternalEventInput { objective_id: None,
                     payload: serde_json::json!({ "body": parsed }),
                     blocks: None,
                 })
@@ -2936,7 +2936,7 @@ mod tests {
 	            pub fn classified_interaction_to_runtime_input(classified: &PeerInputCandidate) -> Input {
 	                let interaction = &classified.interaction;
 	                if classified.class() == PeerInputClass::PlainEvent {
-	                    return Input::ExternalEvent(ExternalEventInput {
+	                    return Input::ExternalEvent(ExternalEventInput { objective_id: None,
                         payload: serde_json::json!({ "body": "flattened" }),
                         blocks: None,
                     });

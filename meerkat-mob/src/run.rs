@@ -438,6 +438,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
             | mob_dsl::MobMachineInput::ListAllMembers
             | mob_dsl::MobMachineInput::MemberStatus
+            | mob_dsl::MobMachineInput::ObserveMemberProgress { .. }
             | mob_dsl::MobMachineInput::SubscribeAgentEvents { .. }
             | mob_dsl::MobMachineInput::SubscribeAllAgentEvents { .. }
             | mob_dsl::MobMachineInput::SubscribeMobEvents { .. }
@@ -452,9 +453,11 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::SetSpawnPolicy { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnPolicy { .. }
             | mob_dsl::MobMachineInput::BindOwnerBridgeSession { .. }
+            | mob_dsl::MobMachineInput::BindObjectiveOwner { .. }
             | mob_dsl::MobMachineInput::Shutdown
             | mob_dsl::MobMachineInput::ForceCancel { .. }
             | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
+            | mob_dsl::MobMachineInput::ConcludeObjective { .. }
             | mob_dsl::MobMachineInput::KickoffMarkStarting { .. }
             | mob_dsl::MobMachineInput::StartupMarkReady { .. }
             | mob_dsl::MobMachineInput::KickoffResolveStarted { .. }
@@ -1697,7 +1700,10 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RecordBodyEvidenceMissing { .. }
             | mob_dsl::MobMachineInput::ResolveAdaptiveFinish { .. }
             | mob_dsl::MobMachineInput::RequestAdaptiveCancel { .. }
-            | mob_dsl::MobMachineInput::RecordDeadlineObserved { .. } => {
+            | mob_dsl::MobMachineInput::RecordDeadlineObserved { .. }
+            | mob_dsl::MobMachineInput::ObserveMemberProgress { .. }
+            | mob_dsl::MobMachineInput::BindObjectiveOwner { .. }
+            | mob_dsl::MobMachineInput::ConcludeObjective { .. } => {
                 return Err(MobError::Internal(format!(
                     "MobMachine input {input:?} is not a flow authority input"
                 )));

@@ -1,6 +1,7 @@
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken};
 use crate::machines::mob_machine as mob_dsl;
 use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
+use crate::runtime::handle::MemberProgressSnapshot;
 use crate::runtime::handle::{HelperResult, MobMemberSnapshot, MobMemberStatus};
 use meerkat_core::time_compat::UNIX_EPOCH;
 use meerkat_core::types::SessionId;
@@ -28,6 +29,7 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<meerkat_contracts::WirePeerConnectivity>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
+    pub(super) progress: Option<MemberProgressSnapshot>,
 }
 
 impl CanonicalMemberSnapshotMaterial {
@@ -54,6 +56,7 @@ impl CanonicalMemberSnapshotMaterial {
             kickoff: self.kickoff.clone(),
             external_member: None,
             resolved_capabilities: None,
+            progress: self.progress.clone(),
         }
         .with_current_bridge_session_id(self.current_bridge_session_id.clone())
     }
@@ -83,6 +86,7 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<meerkat_contracts::WirePeerConnectivity>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
+    pub(super) progress: Option<MemberProgressSnapshot>,
 }
 
 pub(super) struct MobMemberLifecycleProjection;
@@ -110,6 +114,11 @@ pub(super) fn kickoff_snapshot_from_machine_state(
         .map(|snapshot| snapshot.updated_at)
         .unwrap_or(UNIX_EPOCH);
     Some(MobMemberKickoffSnapshot {
+        objective_id: machine_state
+            .member_kickoff_objective_ids
+            .get(&mob_dsl::AgentIdentity(member_id.to_string()))
+            .and_then(|id| uuid::Uuid::parse_str(id.as_str()).ok())
+            .map(meerkat_core::interaction::ObjectiveId),
         phase,
         error: material.error,
         updated_at,
@@ -147,6 +156,7 @@ impl MobMemberLifecycleProjection {
             current_bridge_session_id: input.current_bridge_session_id,
             peer_connectivity: input.peer_connectivity,
             kickoff: input.kickoff,
+            progress: input.progress,
         }
     }
 }
@@ -173,6 +183,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            progress: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Broken);
         assert!(material.is_terminal);
@@ -182,6 +193,7 @@ mod tests {
     #[test]
     fn kickoff_projection_uses_machine_state_not_roster_projection() {
         let roster_projection = MobMemberKickoffSnapshot {
+            objective_id: None,
             phase: MobMemberKickoffPhase::Started,
             error: None,
             updated_at: UNIX_EPOCH + std::time::Duration::from_secs(42),
@@ -233,6 +245,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            progress: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Completed);
         assert!(material.is_terminal);
@@ -255,6 +268,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            progress: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Active);
         assert!(!material.is_terminal);
@@ -277,6 +291,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            progress: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Retiring);
         assert!(!material.is_terminal);

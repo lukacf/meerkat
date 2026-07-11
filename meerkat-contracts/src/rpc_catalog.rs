@@ -812,6 +812,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobSubmitWorkResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/conclude_objective",
+                "Explicitly conclude a machine-owned kickoff objective",
+                "MobConcludeObjectiveParams",
+                "MobConcludeObjectiveResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/cancel_work",
                 "Cancel a previously submitted unit of work",
                 "MobCancelWorkParams",

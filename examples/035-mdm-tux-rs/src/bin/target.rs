@@ -423,7 +423,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         self.ensure_runtime_session_registered(session_id).await?;
         self.update_peer_ingress_context(session_id).await;
 
-        let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+        let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput { objective_id: None,
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -765,7 +765,7 @@ fn spawn_heartbeat(
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             let send_fut = router.send(
                 peer,
-                meerkat_comms::MessageKind::Request {
+                meerkat_comms::MessageKind::Request { objective_id: None,
                     intent: "heartbeat".into(),
                     params: serde_json::json!(null),
                     blocks: None,

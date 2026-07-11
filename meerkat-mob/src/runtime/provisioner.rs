@@ -228,11 +228,23 @@ fn defer_turn_events_until_machine_completion(
 
 pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
+    /// Whether provisioning owns a newly-created session or is temporarily
+    /// attaching an existing durable session. Compensation is destructive
+    /// only for the former.
+    pub session_origin: ProvisionSessionOrigin,
     pub binding: RuntimeBinding,
     pub peer_name: String,
     pub(crate) owner_bridge_session_id: Option<SessionId>,
     pub ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
     pub(crate) generated_self_owned_operation_owner: Option<SessionId>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProvisionSessionOrigin {
+    Fresh,
+    ResumedDurable,
+    RevivedRetired,
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -247,6 +259,15 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         operation_id: &OperationId,
         reason: &str,
+    ) -> Result<(), MobError>;
+    /// Release a failed resume provision without archiving its durable
+    /// session. The runtime is returned to durable idle and detached from the
+    /// failed member incarnation.
+    async fn restore_resumed_member(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        original_origin: ProvisionSessionOrigin,
     ) -> Result<(), MobError>;
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
@@ -375,6 +396,50 @@ fn stamp_eager_session_owned_initial_turn_metadata(req: &mut CreateSessionReques
 
 #[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
+    #[cfg(feature = "runtime-adapter")]
+    async fn restore_failed_resume_before_receipt(
+        &self,
+        session_id: &SessionId,
+        restore_retired: bool,
+    ) -> Result<(), MobError> {
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            MobError::Internal(format!(
+                "resume rollback for '{session_id}' requires runtime authority"
+            ))
+        })?;
+        if restore_retired
+            && adapter.contains_session(session_id).await
+            && !adapter
+                .meerkat_machine_archive_snapshot(session_id)
+                .await
+                .is_some_and(|snapshot| {
+                    snapshot.control.phase == meerkat_runtime::RuntimeState::Retired
+                })
+        {
+            adapter.retire_runtime(session_id).await.map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to restore revived session '{session_id}' to Retired: {error}"
+                ))
+            })?;
+        }
+        if adapter.contains_session(session_id).await {
+            adapter
+                .try_unregister_session(session_id)
+                .await
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to detach resumed session '{session_id}': {error}"
+                    ))
+                })?;
+        }
+        match self.session_service.discard_live_session(session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.remove_runtime_session_state(session_id).await;
+        Ok(())
+    }
+
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<MeerkatMachine>>,
@@ -1953,6 +2018,7 @@ impl MobProvisioner for SessionBackend {
         &self,
         mut req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError> {
+        let mut session_origin = req.session_origin;
         tracing::debug!(
             binding = ?req.binding,
             peer_name = %req.peer_name,
@@ -1969,6 +2035,7 @@ impl MobProvisioner for SessionBackend {
         // RequestRuntimeBinding -> PrepareBindings path, after MobMachine has
         // committed the member-owned AgentRuntimeId and fence.
         let mut prepared_ops_binding: Option<(SessionId, Arc<dyn OpsLifecycleRegistry>)> = None;
+        let mut reviving_retired_session = false;
         let pre_registered_bridge_session_id = if let Some(adapter) = &self.runtime_adapter {
             if req.create_session.build.is_none() {
                 req.create_session.build =
@@ -2027,6 +2094,16 @@ impl MobProvisioner for SessionBackend {
                 "SessionBackend::provision_member prepared local session bindings"
             );
             let ops_registry = Arc::clone(bindings.ops_lifecycle());
+            if session_origin == ProvisionSessionOrigin::ResumedDurable
+                && adapter
+                    .meerkat_machine_archive_snapshot(&member_bridge_session_id)
+                    .await
+                    .is_some_and(|snapshot| {
+                        snapshot.control.phase == meerkat_runtime::RuntimeState::Retired
+                    })
+            {
+                reviving_retired_session = true;
+            }
             if let Some(ref mut build) = req.create_session.build {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
@@ -2046,11 +2123,24 @@ impl MobProvisioner for SessionBackend {
             None
         };
         tracing::debug!("SessionBackend::provision_member creating bridge session");
-        let created = match self
-            .session_service
-            .create_session(req.create_session)
-            .await
-        {
+        let create_result = if reviving_retired_session {
+            let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+                MobError::Internal(
+                    "retired durable session revival requires runtime authority".into(),
+                )
+            })?;
+            self.session_service
+                .create_session_with_machine_archived_resume_authority(
+                    req.create_session,
+                    adapter.session_control_authority(),
+                )
+                .await
+        } else {
+            self.session_service
+                .create_session(req.create_session)
+                .await
+        };
+        let created = match create_result {
             Ok(created) => created,
             Err(e) => {
                 // Rollback: unregister the pre-registered session on failure
@@ -2068,6 +2158,8 @@ impl MobProvisioner for SessionBackend {
             "SessionBackend::provision_member created session service session"
         );
         let created_bridge_session_id = created.session_id.clone();
+        let rollback_origin = session_origin;
+        let finalize_result = async {
         if let Some(admitted_bridge_session_id) = admitted_bridge_session_id.as_ref()
             && admitted_bridge_session_id != &created_bridge_session_id
         {
@@ -2179,6 +2271,55 @@ impl MobProvisioner for SessionBackend {
             .ops_adapter
             .mark_member_provisioned(&created_bridge_session_id, &req.peer_name)
             .await?;
+        if reviving_retired_session {
+            let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+                MobError::Internal(
+                    "retired durable session revival lost runtime authority".into(),
+                )
+            })?;
+            // Prove and consume the archived+retired revival boundary before
+            // mutating runtime state.  The document transition is authorized
+            // only while the durable runtime still says Retired; resetting it
+            // first would erase the evidence that makes this a revival rather
+            // than an arbitrary archived-session reopen.
+            if let Err(error) = self
+                .session_service
+                .promote_revivable_retired_session(
+                    &created_bridge_session_id,
+                    adapter.session_control_authority(),
+                )
+                .await
+            {
+                let _ = adapter.retire_runtime(&created_bridge_session_id).await;
+                adapter.unregister_session(&created_bridge_session_id).await;
+                let _ = self
+                    .session_service
+                    .discard_live_session(&created_bridge_session_id)
+                    .await;
+                return Err(MobError::Internal(format!(
+                    "failed to promote revived durable session document '{created_bridge_session_id}': {error}"
+                )));
+            }
+            if let Err(error) = adapter.reset_runtime(&created_bridge_session_id).await {
+                // The document is active now, so restore the exact
+                // archived+retired pair before returning failure.  This path
+                // is deliberately authority-backed and retryable; it never
+                // leaves an Active document pointing at a Retired runtime.
+                let restore_error = self
+                    .archive_with_authority_then_unregister(&created_bridge_session_id)
+                    .await
+                    .err();
+                return Err(MobError::Internal(format!(
+                    "failed to promote revived durable session '{created_bridge_session_id}' to idle: {error}{}",
+                    restore_error
+                        .map(|restore_error| format!(
+                            "; restoring archived+retired lifecycle also failed: {restore_error}"
+                        ))
+                        .unwrap_or_default()
+                )));
+            }
+            session_origin = ProvisionSessionOrigin::RevivedRetired;
+        }
         tracing::debug!(
             bridge_session_id = %created_bridge_session_id,
             operation_id = %operation_id,
@@ -2191,7 +2332,27 @@ impl MobProvisioner for SessionBackend {
         Ok(MemberSpawnReceipt {
             member_ref: MemberRef::from_bridge_session_id(created_bridge_session_id),
             operation_id,
+            session_origin,
         })
+        }
+        .await;
+        if let Err(error) = finalize_result {
+            if rollback_origin != ProvisionSessionOrigin::Fresh
+                && let Err(cleanup_error) = self
+                    .restore_failed_resume_before_receipt(
+                        &created.session_id,
+                        rollback_origin == ProvisionSessionOrigin::RevivedRetired
+                            || reviving_retired_session,
+                    )
+                    .await
+            {
+                return Err(MobError::Internal(format!(
+                    "resume provision failed: {error}; durable rollback failed: {cleanup_error}"
+                )));
+            }
+            return Err(error);
+        }
+        finalize_result
     }
 
     async fn abort_member_provision(
@@ -2243,6 +2404,60 @@ impl MobProvisioner for SessionBackend {
             }
             Some((_status, false)) => self.retire_member(member_ref).await,
         }
+    }
+
+    async fn restore_resumed_member(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        original_origin: ProvisionSessionOrigin,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "restore failed resume for")?;
+        if original_origin == ProvisionSessionOrigin::RevivedRetired {
+            return match self
+                .archive_with_authority_then_unregister(&session_id)
+                .await
+            {
+                Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+                Err(error) => Err(error.into()),
+            };
+        }
+        let Some(adapter) = &self.runtime_adapter else {
+            return Err(MobError::Internal(format!(
+                "cannot restore resumed session '{session_id}' without runtime authority"
+            )));
+        };
+
+        if adapter.contains_session(&session_id).await {
+            adapter
+                .try_unregister_session(&session_id)
+                .await
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to return resumed session '{session_id}' to durable idle: {error}"
+                    ))
+                })?;
+        }
+        match self.session_service.discard_live_session(&session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.remove_runtime_session_state(&session_id).await;
+
+        if matches!(
+            self.ops_adapter
+                .operation_status_with_terminality(&session_id, operation_id)?,
+            Some((OperationStatus::Provisioning, false))
+        ) {
+            self.ops_adapter
+                .abort_member_provision(
+                    &session_id,
+                    operation_id,
+                    Some("resume provisioning rolled back without archive".to_string()),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
@@ -3236,6 +3451,7 @@ impl MultiBackendProvisioner {
         Ok(MemberSpawnReceipt {
             member_ref,
             operation_id,
+            session_origin: ProvisionSessionOrigin::Fresh,
         })
     }
 }
@@ -3253,6 +3469,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                 self.session
                     .provision_member(ProvisionMemberRequest {
                         create_session: req.create_session,
+                        session_origin: req.session_origin,
                         binding: RuntimeBinding::Session,
                         peer_name: req.peer_name,
                         owner_bridge_session_id: req.owner_bridge_session_id,
@@ -3324,6 +3541,26 @@ impl MobProvisioner for MultiBackendProvisioner {
             _ => {
                 self.session
                     .abort_member_provision(member_ref, operation_id, reason)
+                    .await
+            }
+        }
+    }
+
+    async fn restore_resumed_member(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        original_origin: ProvisionSessionOrigin,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => Err(MobError::Internal(
+                "peer-only provision cannot be classified as a resumed durable session".into(),
+            )),
+            _ => {
+                self.session
+                    .restore_resumed_member(member_ref, operation_id, original_origin)
                     .await
             }
         }
@@ -3506,6 +3743,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                         input_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
                         content: req.prompt.clone(),
                         handling_mode: req.runtime.handling_mode,
+                        objective_id: req
+                            .runtime
+                            .turn_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.transcript_identity.objective_id),
                         // Rides the delivery payload; the receiving runtime
                         // lowers it as InjectedContext-role appends before
                         // the peer work append (empty is omitted on the

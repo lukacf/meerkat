@@ -92,6 +92,10 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_failed: Set<AgentIdentity>,
             member_kickoff_cancelled: Set<AgentIdentity>,
             member_kickoff_error: Map<AgentIdentity, String>,
+            member_kickoff_objective_ids: Map<AgentIdentity, String>,
+            objective_owner_ids: Map<String, AgentIdentity>,
+            objective_outcomes: Map<String, String>,
+            concluded_objective_ids: Set<String>,
             // Identity-level restore failures are lifecycle facts owned by
             // MobMachine. Projection code may surface the reason, but the
             // Broken/terminal classification comes from this map.
@@ -128,6 +132,20 @@ macro_rules! mob_catalog_machine_dsl {
             // transition that replaces or clears the member's restore
             // classification. The session-registry cache never owns this fact.
             member_revival_pending: Set<AgentIdentity>,
+            // Machine-owned member execution-health projection. The shell
+            // supplies raw execution snapshots; MobMachine detects progress
+            // token changes, owns the last-progress timestamp, and classifies
+            // degradation/wedging from elapsed time.
+            member_run_open: Map<AgentIdentity, bool>,
+            member_in_flight_work: Map<AgentIdentity, u64>,
+            member_progress_tokens: Map<AgentIdentity, String>,
+            // Highest wall-clock observation accepted for this identity. Raw
+            // clocks may move backwards; stale samples are ignored so neither
+            // progress time nor machine-owned health can regress.
+            member_last_observed_at_ms: Map<AgentIdentity, u64>,
+            member_last_progress_at_ms: Map<AgentIdentity, u64>,
+            member_last_progress_event: Map<AgentIdentity, Enum<MemberProgressEventKind>>,
+            member_health_class: Map<AgentIdentity, Enum<MemberHealthClass>>,
             // --- Spawn-execution phase ladder (machine owns the phase ORDER) ---
             // A lightweight per-identity phase ladder: `BeginSpawnExec` opens
             // the window (Opened), `CommitSpawnMembership` commits the membership
@@ -405,6 +423,10 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_failed = EmptySet,
             member_kickoff_cancelled = EmptySet,
             member_kickoff_error = EmptyMap,
+            member_kickoff_objective_ids = EmptyMap,
+            objective_owner_ids = EmptyMap,
+            objective_outcomes = EmptyMap,
+            concluded_objective_ids = EmptySet,
             member_restore_failures = EmptyMap,
             member_restore_failure_codes = EmptyMap,
             runtime_retire_refusal_codes = EmptyMap,
@@ -413,6 +435,13 @@ macro_rules! mob_catalog_machine_dsl {
             remote_runtime_retired_ids = EmptySet,
             remote_supervisor_revoked_ids = EmptySet,
             member_revival_pending = EmptySet,
+            member_run_open = EmptyMap,
+            member_in_flight_work = EmptyMap,
+            member_progress_tokens = EmptyMap,
+            member_last_observed_at_ms = EmptyMap,
+            member_last_progress_at_ms = EmptyMap,
+            member_last_progress_event = EmptyMap,
+            member_health_class = EmptyMap,
             spawn_exec_phase = EmptyMap,
             member_state_markers = EmptyMap,
             wiring_edges = EmptySet,
@@ -675,6 +704,13 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeSpawnProfile { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool },
             ClassifySpawnManyFailure { observation: Enum<MobSpawnManyFailureObservationKind> },
             ClassifyMemberWait { agent_identity: AgentIdentity },
+            ObserveMemberProgress {
+                agent_identity: AgentIdentity,
+                run_open: bool,
+                in_flight_work: u64,
+                progress_token: String,
+                observed_at_ms: u64,
+            },
             // Flow topology edge admission. The shell extracts the pure
             // rule-match verdict from the declarative `TopologyRules`
             // (`evaluate_topology`) and the configured enforcement mode, then
@@ -886,7 +922,9 @@ macro_rules! mob_catalog_machine_dsl {
             ResolveSpawnPolicy { agent_identity: AgentIdentity, revision: u64, profile_name: Option<String>, runtime_mode: Option<Enum<SpawnPolicyRuntimeMode>> },
             Shutdown,
             ForceCancel { agent_identity: AgentIdentity },
-            KickoffMarkPending { member_id: AgentIdentity },
+            KickoffMarkPending { member_id: AgentIdentity, objective_id: String },
+            BindObjectiveOwner { owner_id: AgentIdentity, objective_id: String },
+            ConcludeObjective { member_id: AgentIdentity, objective_id: String, outcome: String },
             KickoffMarkStarting { member_id: AgentIdentity },
             StartupMarkReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             KickoffResolveStarted { member_id: AgentIdentity },
@@ -1151,6 +1189,8 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverRosterMemberRetired { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
             ConvergeRecoveredRosterTopology { edge: WiringEdge, a_identity: AgentIdentity, b_identity: AgentIdentity },
             RecoverMemberKickoff { member_id: AgentIdentity, phase: KickoffPhase, error: Option<String> },
+            RecoverObjectiveBinding { member_id: AgentIdentity, objective_id: String },
+            RecoverObjectiveConclusion { member_id: AgentIdentity, objective_id: String, outcome: String },
             RecoverRosterWiring { edge: WiringEdge },
             RecoverRosterUnwire { edge: WiringEdge },
             RecoverExternalPeerWiring { key: ExternalPeerKey, edge: ExternalPeerEdge },
@@ -1223,6 +1263,8 @@ macro_rules! mob_catalog_machine_dsl {
             PersistKickoffUpdate { member_id: AgentIdentity, phase: KickoffPhase },
             PersistKickoffFailureUpdate { member_id: AgentIdentity, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: AgentIdentity, intent: Enum<KickoffIntent> },
+            PersistObjectiveOwnerBinding { owner_id: AgentIdentity, objective_id: String },
+            PersistObjectiveConclusion { member_id: AgentIdentity, objective_id: String, outcome: String },
             // 0.7.2 L5 (rows 12/13): machine-owned drain obligation for the
             // autonomous-kickoff completion-waiter task. Emitted by every
             // member retire / destroy-retire admission. The shell discharges
@@ -1498,6 +1540,8 @@ macro_rules! mob_catalog_machine_dsl {
         disposition PersistKickoffUpdate => local seam NoOwnerRealization,
         disposition PersistKickoffFailureUpdate => local seam NoOwnerRealization,
         disposition EmitKickoffLifecycleNotice => external seam OwnerRealizationOnly,
+        disposition PersistObjectiveOwnerBinding => local seam NoOwnerRealization,
+        disposition PersistObjectiveConclusion => local seam NoOwnerRealization,
         // 0.7.2 L5 drain obligations: realized by the owning mob actor itself
         // (same-machine effect→feedback shape; feedback inputs
         // `KickoffQuiesced` / `CancelPendingSpawn` close them and teardown
@@ -1940,6 +1984,117 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit MemberWaitClassified { agent_identity: agent_identity, result: MemberWaitClassificationKind::RuntimeMaterialPresent }
+        }
+
+        transition ObserveMemberProgressChangedOpen {
+            per_phase [Running]
+            on input ObserveMemberProgress { agent_identity, run_open, in_flight_work, progress_token, observed_at_ms }
+            guard "observation_monotonic" { self.member_last_observed_at_ms.get_copied(agent_identity) <= Some(observed_at_ms) }
+            guard "member_progress_changed" { self.member_progress_tokens.get_cloned(agent_identity) != Some(progress_token) }
+            guard "run_open" { run_open == true }
+            update {
+                self.member_last_progress_at_ms.insert(agent_identity, observed_at_ms);
+                self.member_last_progress_event.insert(agent_identity, MemberProgressEventKind::ExecutionAdvanced);
+                self.member_health_class.insert(agent_identity, MemberHealthClass::Healthy);
+                self.member_run_open.insert(agent_identity, run_open);
+                self.member_in_flight_work.insert(agent_identity, in_flight_work);
+                self.member_progress_tokens.insert(agent_identity, progress_token);
+                self.member_last_observed_at_ms.insert(agent_identity, observed_at_ms);
+            }
+            to Running
+        }
+
+        transition ObserveMemberProgressChangedIdle {
+            per_phase [Running]
+            on input ObserveMemberProgress { agent_identity, run_open, in_flight_work, progress_token, observed_at_ms }
+            guard "observation_monotonic" { self.member_last_observed_at_ms.get_copied(agent_identity) <= Some(observed_at_ms) }
+            guard "member_progress_changed" { self.member_progress_tokens.get_cloned(agent_identity) != Some(progress_token) }
+            guard "run_idle" { run_open == false }
+            update {
+                self.member_last_progress_at_ms.insert(agent_identity, observed_at_ms);
+                self.member_last_progress_event.insert(agent_identity, MemberProgressEventKind::BecameIdle);
+                self.member_health_class.insert(agent_identity, MemberHealthClass::Healthy);
+                self.member_run_open.insert(agent_identity, run_open);
+                self.member_in_flight_work.insert(agent_identity, in_flight_work);
+                self.member_progress_tokens.insert(agent_identity, progress_token);
+                self.member_last_observed_at_ms.insert(agent_identity, observed_at_ms);
+            }
+            to Running
+        }
+
+        transition ObserveMemberProgressUnchangedIdle {
+            per_phase [Running]
+            on input ObserveMemberProgress { agent_identity, run_open, in_flight_work, progress_token, observed_at_ms }
+            guard "observation_monotonic" { self.member_last_observed_at_ms.get_copied(agent_identity) <= Some(observed_at_ms) }
+            guard "member_progress_unchanged" { self.member_progress_tokens.get_cloned(agent_identity) == Some(progress_token) }
+            guard "run_idle" { run_open == false }
+            update {
+                self.member_last_progress_event.insert(agent_identity, MemberProgressEventKind::Unchanged);
+                self.member_health_class.insert(agent_identity, MemberHealthClass::Healthy);
+                self.member_run_open.insert(agent_identity, run_open);
+                self.member_in_flight_work.insert(agent_identity, in_flight_work);
+                self.member_last_observed_at_ms.insert(agent_identity, observed_at_ms);
+            }
+            to Running
+        }
+
+        transition ObserveMemberProgressUnchangedOpenHealthy {
+            per_phase [Running]
+            on input ObserveMemberProgress { agent_identity, run_open, in_flight_work, progress_token, observed_at_ms }
+            guard "observation_monotonic" { self.member_last_observed_at_ms.get_copied(agent_identity) <= Some(observed_at_ms) }
+            guard "member_progress_unchanged" { self.member_progress_tokens.get_cloned(agent_identity) == Some(progress_token) }
+            guard "run_open" { run_open == true }
+            guard "progress_recent" { observed_at_ms - self.member_last_progress_at_ms.get_cloned(agent_identity).get("value") < 60000 }
+            update {
+                self.member_last_progress_event.insert(agent_identity, MemberProgressEventKind::Unchanged);
+                self.member_health_class.insert(agent_identity, MemberHealthClass::Healthy);
+                self.member_run_open.insert(agent_identity, run_open);
+                self.member_in_flight_work.insert(agent_identity, in_flight_work);
+                self.member_last_observed_at_ms.insert(agent_identity, observed_at_ms);
+            }
+            to Running
+        }
+
+        transition ObserveMemberProgressUnchangedOpenDegraded {
+            per_phase [Running]
+            on input ObserveMemberProgress { agent_identity, run_open, in_flight_work, progress_token, observed_at_ms }
+            guard "observation_monotonic" { self.member_last_observed_at_ms.get_copied(agent_identity) <= Some(observed_at_ms) }
+            guard "member_progress_unchanged" { self.member_progress_tokens.get_cloned(agent_identity) == Some(progress_token) }
+            guard "run_open" { run_open == true }
+            guard "progress_degraded" { observed_at_ms - self.member_last_progress_at_ms.get_cloned(agent_identity).get("value") >= 60000 && observed_at_ms - self.member_last_progress_at_ms.get_cloned(agent_identity).get("value") < 300000 }
+            update {
+                self.member_last_progress_event.insert(agent_identity, MemberProgressEventKind::Unchanged);
+                self.member_health_class.insert(agent_identity, MemberHealthClass::Degraded);
+                self.member_run_open.insert(agent_identity, run_open);
+                self.member_in_flight_work.insert(agent_identity, in_flight_work);
+                self.member_last_observed_at_ms.insert(agent_identity, observed_at_ms);
+            }
+            to Running
+        }
+
+        transition ObserveMemberProgressUnchangedOpenWedged {
+            per_phase [Running]
+            on input ObserveMemberProgress { agent_identity, run_open, in_flight_work, progress_token, observed_at_ms }
+            guard "observation_monotonic" { self.member_last_observed_at_ms.get_copied(agent_identity) <= Some(observed_at_ms) }
+            guard "member_progress_unchanged" { self.member_progress_tokens.get_cloned(agent_identity) == Some(progress_token) }
+            guard "run_open" { run_open == true }
+            guard "progress_wedged" { observed_at_ms - self.member_last_progress_at_ms.get_cloned(agent_identity).get("value") >= 300000 }
+            update {
+                self.member_last_progress_event.insert(agent_identity, MemberProgressEventKind::Unchanged);
+                self.member_health_class.insert(agent_identity, MemberHealthClass::Wedged);
+                self.member_run_open.insert(agent_identity, run_open);
+                self.member_in_flight_work.insert(agent_identity, in_flight_work);
+                self.member_last_observed_at_ms.insert(agent_identity, observed_at_ms);
+            }
+            to Running
+        }
+
+        transition ObserveMemberProgressStale {
+            per_phase [Running]
+            on input ObserveMemberProgress { agent_identity, run_open, in_flight_work, progress_token, observed_at_ms }
+            guard "observation_stale" { self.member_last_observed_at_ms.get_copied(agent_identity) > Some(observed_at_ms) }
+            update {}
+            to Running
         }
 
         transition ClassifyMemberWaitRuntimeMaterialPresentStopped {
@@ -4492,6 +4647,48 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        transition RecoverObjectiveBinding {
+            on signal RecoverObjectiveBinding { member_id, objective_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.member_kickoff_objective_ids.insert(member_id, objective_id);
+                if !self.objective_owner_ids.contains_key(objective_id) {
+                    self.objective_owner_ids.insert(objective_id, member_id);
+                }
+            }
+            to Running
+        }
+
+        transition BindObjectiveOwner {
+            per_phase [Running]
+            on input BindObjectiveOwner { owner_id, objective_id }
+            guard "objective_owner_unbound" { self.objective_owner_ids.contains_key(objective_id) == false }
+            update {
+                self.objective_owner_ids.insert(objective_id, owner_id);
+            }
+            to Running
+            emit PersistObjectiveOwnerBinding { owner_id: owner_id, objective_id: objective_id }
+        }
+
+        transition BindObjectiveOwnerIdempotent {
+            per_phase [Running]
+            on input BindObjectiveOwner { owner_id, objective_id }
+            guard "objective_owner_matches" { self.objective_owner_ids.get_cloned(objective_id) == Some(owner_id) }
+            update {}
+            to Running
+        }
+
+        transition RecoverObjectiveConclusion {
+            on signal RecoverObjectiveConclusion { member_id, objective_id, outcome }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "objective_belongs_to_lead" { self.objective_owner_ids.get_cloned(objective_id) == Some(member_id) }
+            update {
+                self.objective_outcomes.insert(objective_id, outcome);
+                self.concluded_objective_ids.insert(objective_id);
+            }
+            to Running
+        }
+
         // Row #351: machine-owned membership reconciliation. The batch diff
         // (desired-vs-current) is recomputed in-DSL from `identity_to_runtime`
         // and stored into the membership-intent sets. The handle reads these
@@ -4558,7 +4755,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition KickoffMarkPending {
             per_phase [Running, Stopped, Completed]
-            on input KickoffMarkPending { member_id }
+            on input KickoffMarkPending { member_id, objective_id }
             guard "kickoff_not_started" {
                 !self.member_kickoff_pending.contains(member_id)
                 && !self.member_kickoff_starting.contains(member_id)
@@ -4575,10 +4772,37 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_kickoff_failed.remove(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
                 self.member_kickoff_error.remove(member_id);
+                self.member_kickoff_objective_ids.insert(member_id, objective_id);
+                if !self.objective_owner_ids.contains_key(objective_id) {
+                    self.objective_owner_ids.insert(objective_id, member_id);
+                }
             }
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Pending }
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Pending }
+        }
+
+        transition ConcludeObjective {
+            per_phase [Running]
+            on input ConcludeObjective { member_id, objective_id, outcome }
+            guard "objective_belongs_to_lead" { self.objective_owner_ids.get_cloned(objective_id) == Some(member_id) }
+            guard "objective_not_concluded" { self.concluded_objective_ids.contains(objective_id) == false }
+            update {
+                self.objective_outcomes.insert(objective_id, outcome);
+                self.concluded_objective_ids.insert(objective_id);
+            }
+            to Running
+            emit PersistObjectiveConclusion { member_id: member_id, objective_id: objective_id, outcome: outcome }
+        }
+
+        transition ConcludeObjectiveIdempotent {
+            per_phase [Running]
+            on input ConcludeObjective { member_id, objective_id, outcome }
+            guard "objective_belongs_to_lead" { self.objective_owner_ids.get_cloned(objective_id) == Some(member_id) }
+            guard "objective_already_concluded" { self.concluded_objective_ids.contains(objective_id) == true }
+            guard "objective_outcome_matches" { self.objective_outcomes.get_cloned(objective_id) == Some(outcome) }
+            update {}
+            to Running
         }
 
         transition KickoffMarkStarting {
@@ -11790,6 +12014,7 @@ macro_rules! mob_catalog_machine_dsl {
             Generation(current.saturating_add(1))
         }
 
+
         // Row #351: members that must be spawned — desired identities that are
         // not currently bound to a runtime.
         fn mob_machine_members_to_spawn(
@@ -12515,6 +12740,23 @@ pub enum MemberWaitClassificationKind {
     #[default]
     RuntimeMaterialPresent,
     MissingRuntimeMaterial,
+}
+
+/// Machine-owned execution-health class for one member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemberHealthClass {
+    Healthy,
+    Degraded,
+    Wedged,
+    Unknown,
+}
+
+/// Typed description of the last progress observation committed by MobMachine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemberProgressEventKind {
+    ExecutionAdvanced,
+    BecameIdle,
+    Unchanged,
 }
 
 /// Typed public rejection class for [`MobMachineInput::SubmitWork`].

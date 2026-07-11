@@ -45,6 +45,10 @@ pub(crate) fn for_input(
         Input::ExternalEvent(event) => RuntimeTurnMetadata {
             handling_mode: Some(event.handling_mode),
             render_metadata: event.render_metadata.clone(),
+            transcript_identity: TranscriptMessageIdentity {
+                objective_id: event.objective_id,
+                ..Default::default()
+            },
             ..Default::default()
         },
         Input::Continuation(continuation) => RuntimeTurnMetadata {
@@ -54,6 +58,10 @@ pub(crate) fn for_input(
         },
         Input::Peer(peer) => RuntimeTurnMetadata {
             handling_mode: peer.handling_mode,
+            transcript_identity: TranscriptMessageIdentity {
+                objective_id: peer.objective_id,
+                ..Default::default()
+            },
             ..Default::default()
         },
         _ => RuntimeTurnMetadata::default(),
@@ -64,10 +72,7 @@ pub(crate) fn for_input(
     metadata.execution_kind = Some(semantics.execution_kind);
     metadata.peer_response_terminal_apply_intent = semantics.peer_response_terminal_apply_intent;
     if let Some(correlation_id) = input.header().correlation_id.as_ref() {
-        metadata.transcript_identity = TranscriptMessageIdentity {
-            interaction_id: Some(InteractionId(correlation_id.0)),
-            run_id: None,
-        };
+        metadata.transcript_identity.interaction_id = Some(InteractionId(correlation_id.0));
     }
     metadata
 }
@@ -2201,6 +2206,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2228,6 +2234,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer_message_uses_body_when_projection_text_is_empty() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2256,6 +2263,7 @@ mod tests {
     #[test]
     fn input_to_prompt_peer_request_is_runtime_owned_and_ignores_bogus_body() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2295,6 +2303,7 @@ mod tests {
     #[test]
     fn machine_batch_projection_peer_response_terminal_is_runtime_owned_from_typed_payload() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2348,6 +2357,7 @@ mod tests {
         // convention + the Result JSON verbatim; any per-fixture semantics
         // belong to the peer application, not the runtime.
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2507,6 +2517,7 @@ mod tests {
     fn peer_response_terminal_forced_immediate_boundary_is_invalid_apply_intent()
     -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2585,6 +2596,7 @@ mod tests {
         // override and the runtime-loop batch path already stages it as
         // RunStart.
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2641,6 +2653,7 @@ mod tests {
         // runtime), which later surfaced as
         // "wire requires comms runtime for '<peer>'" during respawn.
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2691,6 +2704,7 @@ mod tests {
     #[test]
     fn queued_peer_response_terminal_starts_requester_reaction_turn() -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2756,6 +2770,7 @@ mod tests {
     fn peer_response_terminal_apply_intent_is_policy_runtime_and_executor_consistent()
     -> Result<(), String> {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -2831,6 +2846,7 @@ mod tests {
 
     fn make_peer_message(peer_id: &str, body: &str) -> Input {
         Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -3089,6 +3105,7 @@ mod tests {
 
     fn make_terminal_peer_response(peer_id: &str, request_id: &str) -> Input {
         Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -3301,6 +3318,7 @@ mod tests {
         ];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963001";
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -3362,6 +3380,7 @@ mod tests {
         ];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963002";
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -3417,6 +3436,7 @@ mod tests {
         }];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963003";
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -3471,6 +3491,7 @@ mod tests {
         }];
         let peer_id = "018f6f79-7a82-7c4e-a552-a3b86f963004";
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -3584,6 +3605,7 @@ mod tests {
             },
         ];
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3632,6 +3654,7 @@ mod tests {
             data: "abc123".into(),
         }];
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3674,6 +3697,7 @@ mod tests {
     #[test]
     fn external_event_prefers_source_name_over_event_type_without_body() -> Result<(), String> {
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3717,6 +3741,7 @@ mod tests {
                     meerkat_core::PeerIngressKind::PlainEvent,
                 ),
                 interaction: InboxInteraction {
+                    objective_id: None,
                     sender_taint: None,
                     id: interaction_id,
                     from_route: None,
@@ -3735,6 +3760,7 @@ mod tests {
         .map_err(|err| err.to_string())?;
 
         let direct = Input::ExternalEvent(crate::input::ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -3769,6 +3795,7 @@ mod tests {
             salience: meerkat_core::types::RenderSalience::Urgent,
         };
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: InputId::new(),
                 timestamp: Utc::now(),
@@ -4298,6 +4325,7 @@ mod tests {
     #[test]
     fn primitive_from_peer_terminal_has_content_turn() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -4340,6 +4368,7 @@ mod tests {
         // helper batch that mixes kinds must fail instead of inventing a local
         // ContentTurn default.
         let peer = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {

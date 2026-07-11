@@ -747,6 +747,7 @@ impl MobSupervisorBridge {
         })?;
         let receipt = runtime
             .send(CommsCommand::PeerMessage {
+                objective_id: None,
                 to: PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone()),
                 body,
                 blocks: None,
@@ -937,6 +938,7 @@ impl MobSupervisorBridge {
         })?;
         let receipt = runtime
             .send(CommsCommand::PeerRequest {
+                objective_id: None,
                 to,
                 intent: intent.to_string(),
                 params,
@@ -1260,6 +1262,7 @@ mod tests {
         );
         meerkat_runtime::test_peer_input_candidate_from_interaction(
             InboxInteraction {
+                objective_id: None,
                 sender_taint: None,
                 id,
                 from_route: Some(worker_peer_id),
@@ -1499,6 +1502,7 @@ mod tests {
 
         let add_probe = runtime
             .send(CommsCommand::PeerRequest {
+                objective_id: None,
                 to: PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone()),
                 intent: super::super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({"probe": "trust-added"}),
@@ -1529,6 +1533,7 @@ mod tests {
 
         let send_result = runtime
             .send(CommsCommand::PeerRequest {
+                objective_id: None,
                 to: PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone()),
                 intent: super::super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({"probe": "trust-removed"}),

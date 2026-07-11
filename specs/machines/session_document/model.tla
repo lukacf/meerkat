@@ -878,6 +878,15 @@ RecoverSessionLifecycleTerminal(session_id, terminal) ==
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
 
 
+ReviveArchivedSessionDocument(session_id) ==
+    /\ phase = "Ready"
+    /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Archived")
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, "Active")
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count >>
+
+
 ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_present, runtime_observation) ==
     /\ phase = "Ready"
     /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_lifecycle_terminal) THEN Some((IF session_id \in DOMAIN session_lifecycle_terminal THEN session_lifecycle_terminal[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Active")
@@ -1006,6 +1015,7 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditFork(session_id, fork_or_rewrite_directive)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditRewrite(session_id, fork_or_rewrite_directive)
     \/ \E session_id \in SessionIdValues : \E terminal \in SessionDocumentLifecycleValues : RecoverSessionLifecycleTerminal(session_id, terminal)
+    \/ \E session_id \in SessionIdValues : ReviveArchivedSessionDocument(session_id)
     \/ \E session_id \in SessionIdValues : \E runtime_backed \in BOOLEAN : \E durable_document_present \in BOOLEAN : \E runtime_observation \in SessionArchiveRuntimeObservationValues : ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_present, runtime_observation)
     \/ \E session_id \in SessionIdValues : \E runtime_backed \in BOOLEAN : \E durable_document_present \in BOOLEAN : \E runtime_observation \in SessionArchiveRuntimeObservationValues : ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_document_present, runtime_observation)
     \/ \E session_id \in SessionIdValues : \E runtime_backed \in BOOLEAN : \E durable_document_present \in BOOLEAN : \E runtime_observation \in SessionArchiveRuntimeObservationValues : ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_document_present, runtime_observation)

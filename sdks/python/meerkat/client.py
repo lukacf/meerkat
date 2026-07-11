@@ -76,6 +76,8 @@ from .generated.types import (
     MobSpawnManySpawnedResult,
     MobSpawnSpecParams,
     MobRotateSupervisorResult,
+    MobConcludeObjectiveParams,
+    MobConcludeObjectiveResult,
     MobTurnStartParams,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
@@ -90,6 +92,7 @@ from .generated.types import (
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
+    WireMemberProgressSnapshot,
     ToolsRegisterParams,
     ToolsRegisterResult,
 )
@@ -2146,6 +2149,7 @@ class MeerkatClient:
         budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
         inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
         override_profile: WireMobProfile | dict[str, Any] | None = None,
+        model_override: str | None = None,
         auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
         params: dict[str, Any] = {
@@ -2168,6 +2172,7 @@ class MeerkatClient:
             "budget_split_policy": budget_split_policy,
             "inherited_tool_filter": inherited_tool_filter,
             "override_profile": override_profile,
+            "model_override": model_override,
             "auth_binding": auth_binding,
         }.items():
             if value is not None:
@@ -2507,6 +2512,11 @@ class MeerkatClient:
             **(
                 {"external_member": result["external_member"]}
                 if "external_member" in result
+                else {}
+            ),
+            **(
+                {"progress": cast(WireMemberProgressSnapshot, result["progress"])}
+                if isinstance(result.get("progress"), dict)
                 else {}
             ),
             # Preserve `current_session_id` as diagnostic status/continuity data only.
@@ -2885,6 +2895,7 @@ class MeerkatClient:
         work_ref: str | None = None,
         origin: WorkOrigin = "external",
         injected_context: list[WireContentInput] | None = None,
+        objective_id: str | None = None,
     ) -> dict[str, Any]:
         """Submit a unit of work to a mob member through the work lane.
 
@@ -2909,7 +2920,26 @@ class MeerkatClient:
             params["work_ref"] = work_ref
         if injected_context:
             params["injected_context"] = injected_context
+        if objective_id is not None:
+            params["objective_id"] = objective_id
         return await self._request("mob/submit_work", params)
+
+    async def mob_conclude_objective(
+        self, member_ref: MobMemberRef, objective_id: str, outcome: str
+    ) -> MobConcludeObjectiveResult:
+        """Conclude a machine-owned kickoff objective."""
+        params = MobConcludeObjectiveParams(
+            member_ref=member_ref, objective_id=objective_id, outcome=outcome
+        )
+        result = await self._request(
+            "mob/conclude_objective", params.__dict__
+        )
+        context = "Invalid mob/conclude_objective response"
+        return MobConcludeObjectiveResult(
+            member_ref=self._require_string_field(result, "member_ref", context),
+            objective_id=self._require_string_field(result, "objective_id", context),
+            concluded=self._require_bool_field(result, "concluded", context),
+        )
 
     async def mob_cancel_work(self, mob_id: str, work_ref: str) -> dict[str, Any]:
         """Cancel a previously submitted unit of work.

@@ -47,6 +47,9 @@ pub enum MobMemberKickoffPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MobMemberKickoffSnapshot {
+    /// Durable objective correlation minted for this kickoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     pub phase: MobMemberKickoffPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -110,6 +113,10 @@ pub struct RosterEntry {
     /// (keyed by `self.role`) is authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_profile_override: Option<crate::profile::Profile>,
+    /// Field-scoped model override that follows current definition fields for
+    /// every other profile property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model_override: Option<String>,
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -127,6 +134,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) transport_public_key: Option<String>,
     pub(crate) labels: BTreeMap<String, String>,
     pub(crate) effective_profile_override: Option<crate::profile::Profile>,
+    pub(crate) effective_model_override: Option<String>,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -190,6 +198,7 @@ impl Roster {
                     // override so restarts without a SpawnMemberCustomizer
                     // keep per-spawn declarative tooling.
                     effective_profile_override: member_spawned.effective_profile_override.clone(),
+                    effective_model_override: member_spawned.effective_model_override.clone(),
                 });
             }
             // Retirement admission is not roster terminality. Keep the spawn
@@ -328,6 +337,7 @@ impl Roster {
                     labels: entry.labels,
                     kickoff: None,
                     effective_profile_override: entry.effective_profile_override,
+                    effective_model_override: entry.effective_model_override,
                 },
             )
             .is_none()
@@ -658,6 +668,7 @@ mod tests {
             transport_public_key: None,
             labels,
             effective_profile_override: None,
+            effective_model_override: None,
         }
     }
 
@@ -1072,6 +1083,7 @@ mod tests {
             labels: BTreeMap::new(),
             kickoff: None,
             effective_profile_override: None,
+            effective_model_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();

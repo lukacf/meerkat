@@ -322,6 +322,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverSessionLifecycleTerminal`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ReviveArchivedSessionDocument`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ArchiveSessionDocumentActive`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -430,6 +433,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SessionLifecycleTerminalRecovered`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SessionRevivalResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SessionArchiveResolved`

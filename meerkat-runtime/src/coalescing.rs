@@ -129,6 +129,7 @@ mod tests {
     #[test]
     fn external_event_is_coalescing_eligible() {
         let input = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(None),
             event_type: "webhook".into(),
             payload: serde_json::json!({}),
@@ -142,6 +143,7 @@ mod tests {
     #[test]
     fn response_progress_is_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header_with_supersession(None),
@@ -171,6 +173,7 @@ mod tests {
     #[test]
     fn peer_message_not_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header_with_supersession(None),
@@ -186,6 +189,7 @@ mod tests {
     fn supersession_same_scope() {
         let runtime = LogicalRuntimeId::new("agent-1");
         let input1 = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(Some("status")),
             event_type: "status_update".into(),
             payload: serde_json::json!({"v": 1}),
@@ -194,6 +198,7 @@ mod tests {
             render_metadata: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(Some("status")),
             event_type: "status_update".into(),
             payload: serde_json::json!({"v": 2}),
@@ -209,6 +214,7 @@ mod tests {
     fn supersession_different_key() {
         let runtime = LogicalRuntimeId::new("agent-1");
         let input1 = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(Some("status-a")),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
@@ -217,6 +223,7 @@ mod tests {
             render_metadata: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(Some("status-b")),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
@@ -232,6 +239,7 @@ mod tests {
     fn supersession_no_key() {
         let runtime = LogicalRuntimeId::new("agent-1");
         let input1 = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(None),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
@@ -240,6 +248,7 @@ mod tests {
             render_metadata: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(None),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
@@ -255,6 +264,7 @@ mod tests {
     fn cross_kind_supersession_forbidden() {
         let runtime = LogicalRuntimeId::new("agent-1");
         let input1 = Input::ExternalEvent(ExternalEventInput {
+            objective_id: None,
             header: make_header_with_supersession(Some("same-key")),
             event_type: "type-a".into(),
             payload: serde_json::json!({}),
@@ -280,6 +290,7 @@ mod tests {
         let sources: Vec<Input> = (0..3)
             .map(|_| {
                 Input::ExternalEvent(ExternalEventInput {
+                    objective_id: None,
                     header: make_header_with_supersession(None),
                     event_type: "test".into(),
                     payload: serde_json::json!({}),

@@ -1764,6 +1764,62 @@ fn seed_mob_authority_sync_from_events(
                     },
                     "recover_member_kickoff",
                 )?;
+                if let Some(objective_id) = kickoff.objective_id {
+                    if authority.state().implicit_delegation_mob
+                        && let Some(owner_session_id) = authority
+                            .state()
+                            .owner_bridge_session_id
+                            .as_ref()
+                            .and_then(|session_id| SessionId::parse(&session_id.0).ok())
+                    {
+                        let owner_identity =
+                            AgentIdentity::objective_lead_for_session(&owner_session_id);
+                        apply_seeded_mob_input(
+                            authority,
+                            mob_dsl::MobMachineInput::BindObjectiveOwner {
+                                owner_id: mob_dsl::AgentIdentity::from_domain(&owner_identity),
+                                objective_id: objective_id.to_string(),
+                            },
+                            "recover_implicit_objective_owner",
+                        )?;
+                    }
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::RecoverObjectiveBinding {
+                            member_id: mob_dsl::AgentIdentity::from_domain(member),
+                            objective_id: objective_id.to_string(),
+                        },
+                        "recover_objective_binding",
+                    )?;
+                }
+            }
+            MobEventKind::ObjectiveOwnerBound {
+                owner,
+                objective_id,
+            } => {
+                apply_seeded_mob_input(
+                    authority,
+                    mob_dsl::MobMachineInput::BindObjectiveOwner {
+                        owner_id: mob_dsl::AgentIdentity::from_domain(owner),
+                        objective_id: objective_id.to_string(),
+                    },
+                    "recover_objective_owner",
+                )?;
+            }
+            MobEventKind::ObjectiveConcluded {
+                member,
+                objective_id,
+                outcome,
+            } => {
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverObjectiveConclusion {
+                        member_id: mob_dsl::AgentIdentity::from_domain(member),
+                        objective_id: objective_id.to_string(),
+                        outcome: outcome.clone(),
+                    },
+                    "recover_objective_conclusion",
+                )?;
             }
             MobEventKind::MembersWired { a, b } => {
                 apply_seeded_mob_signal(
@@ -3094,6 +3150,7 @@ impl MobBuilder {
             restore_spec.runtime_mode = Some(entry.runtime_mode);
             restore_spec.labels = Some(entry.labels.clone());
             restore_spec.override_profile = entry.effective_profile_override.clone();
+            restore_spec.model_override = entry.effective_model_override.clone();
             if let Some(customizer) = spawn_member_customizer.as_ref() {
                 let ctx = super::SpawnCustomizationContext {
                     mob_id: definition.id.clone(),
@@ -3122,12 +3179,14 @@ impl MobBuilder {
                 per_spawn_external_tools_seed.insert(entry.agent_identity.clone(), tools);
             }
             let restore_profile_override = restore_spec.override_profile.clone();
+            let restore_model_override = restore_spec.model_override.clone();
             let restore_labels = restore_spec
                 .labels
                 .clone()
                 .unwrap_or_else(|| entry.labels.clone());
             if let Some(roster_entry) = roster.get_by_identity_mut(&entry.agent_identity) {
                 roster_entry.effective_profile_override = restore_profile_override.clone();
+                roster_entry.effective_model_override = restore_model_override.clone();
             }
 
             if matches!(entry.member_ref, MemberRef::Session { .. })
@@ -3222,6 +3281,9 @@ impl MobBuilder {
                         .resolve_profile(&entry.role, realm_profile_store.as_ref())
                         .await?
                 };
+                if let Some(model) = restore_model_override.as_ref() {
+                    profile.model.clone_from(model);
+                }
                 if restore_spec.inherited_tool_filter.is_some()
                     && restore_profile_override.is_none()
                 {
@@ -3339,6 +3401,7 @@ impl MobBuilder {
                 match provisioner
                     .provision_member(super::provisioner::ProvisionMemberRequest {
                         create_session: req,
+                        session_origin: super::provisioner::ProvisionSessionOrigin::ResumedDurable,
                         binding: crate::RuntimeBinding::Session,
                         peer_name,
                         owner_bridge_session_id: None,
@@ -3421,6 +3484,9 @@ impl MobBuilder {
                     .resolve_profile(&entry.role, realm_profile_store.as_ref())
                     .await?
             };
+            if let Some(model) = restore_model_override.as_ref() {
+                profile.model.clone_from(model);
+            }
             if restore_spec.inherited_tool_filter.is_some() && restore_profile_override.is_none() {
                 build::open_profile_tool_categories_for_inherited_filter(&mut profile);
             }
@@ -3480,6 +3546,7 @@ impl MobBuilder {
             )?;
             let mut provision_request = super::provisioner::ProvisionMemberRequest {
                 create_session: req,
+                session_origin: super::provisioner::ProvisionSessionOrigin::Fresh,
                 binding: crate::RuntimeBinding::Session,
                 peer_name,
                 owner_bridge_session_id: None,
@@ -4438,6 +4505,7 @@ mod tests {
                 kind: MobEventKind::MemberKickoffUpdated {
                     member: identity.clone(),
                     kickoff: MobMemberKickoffSnapshot {
+                        objective_id: None,
                         phase: MobMemberKickoffPhase::Pending,
                         error: None,
                         updated_at: UNIX_EPOCH,

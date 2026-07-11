@@ -1727,6 +1727,12 @@ pub struct SessionForkAtRequest {
     pub message_index: usize,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
+    /// Effective call-level tool policy for executions resumed from the fork.
+    ///
+    /// `None` and `Inherit` preserve the source session's effective policy;
+    /// concrete allow/deny policies replace it on the fork only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
 }
 
 /// Request to fork a session and apply a typed transcript replacement.
@@ -1738,6 +1744,12 @@ pub struct SessionForkReplaceRequest {
     pub replacement: TranscriptReplacement,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
+    /// Effective call-level tool policy for executions resumed from the fork.
+    ///
+    /// `None` and `Inherit` preserve the source session's effective policy;
+    /// concrete allow/deny policies replace it on the fork only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
 }
 
 /// Result of creating an edited transcript branch.

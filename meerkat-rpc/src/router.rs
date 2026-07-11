@@ -1864,6 +1864,10 @@ impl MethodRouter {
                 handlers::mob::handle_submit_work(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/conclude_objective" => {
+                handlers::mob::handle_conclude_objective(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/cancel_work" => {
                 handlers::mob::handle_cancel_work(id, params, &self.mob_state).await
             }
@@ -2610,6 +2614,7 @@ impl MethodRouter {
                     SessionForkAtRequest {
                         message_index: params.message_index,
                         running_behavior: params.running_behavior,
+                        tool_access_policy: params.tool_access_policy,
                     },
                 )
                 .await
@@ -2675,6 +2680,7 @@ impl MethodRouter {
                         message_index: params.message_index,
                         replacement,
                         running_behavior: params.running_behavior,
+                        tool_access_policy: params.tool_access_policy,
                     },
                 )
                 .await
@@ -5974,6 +5980,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-forward-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
@@ -6024,6 +6031,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-steer-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {
@@ -7088,6 +7096,7 @@ mod tests {
         CoreCommsRuntime::send(
             &*sender,
             CommsCommand::PeerResponse {
+                objective_id: None,
                 content_taint: None,
                 to: PeerRoute::with_display_name(
                     operator_pubkey.to_peer_id(),

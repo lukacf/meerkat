@@ -14,6 +14,7 @@ static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
 
 fn message(body: &str) -> MessageKind {
     MessageKind::Message {
+        objective_id: None,
         content_taint: None,
         body: body.to_string(),
         blocks: None,

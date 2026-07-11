@@ -525,6 +525,7 @@ export interface SpawnManySpec {
   readonly context?: unknown;
   readonly additionalInstructions?: string[];
   readonly authBinding?: WireAuthBindingRef;
+  readonly modelOverride?: string;
 }
 
 export interface SpawnSpec extends SpawnManySpec {

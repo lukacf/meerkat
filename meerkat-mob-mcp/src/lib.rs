@@ -1366,6 +1366,101 @@ impl MobMcpState {
             .await
     }
 
+    /// Explicitly conclude the kickoff objective owned by a member.
+    pub async fn mob_conclude_objective(
+        &self,
+        mob_id: &MobId,
+        identity: &meerkat_mob::AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+        outcome: impl Into<String>,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .conclude_objective(identity, objective_id, outcome)
+            .await
+    }
+
+    pub async fn mob_bind_objective_owner(
+        &self,
+        mob_id: &MobId,
+        owner_identity: meerkat_mob::AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .bind_objective_owner(owner_identity, objective_id)
+            .await
+    }
+
+    fn objective_owner_identity_for_session(
+        bridge_session_id: &SessionId,
+    ) -> meerkat_mob::AgentIdentity {
+        meerkat_mob::AgentIdentity::objective_lead_for_session(bridge_session_id)
+    }
+
+    pub async fn objective_principal_for_bridge_session(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> Result<Option<(MobId, meerkat_mob::AgentIdentity)>, MobError> {
+        self.ensure_restored().await?;
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        // A real roster binding is authoritative when the same session also
+        // owns an implicit child mob: conclusions belong in the lead's mob.
+        for mob_id in &mob_ids {
+            let roster = self.handle_for(mob_id).await?.roster().await;
+            if let Some(entry) = roster.find_by_bridge_session_id(bridge_session_id) {
+                return Ok(Some((mob_id.clone(), entry.agent_identity.clone())));
+            }
+        }
+        for mob_id in mob_ids {
+            let handle = self.handle_for(&mob_id).await?;
+            if handle.owns_bridge_session(bridge_session_id).await? {
+                return Ok(Some((
+                    mob_id,
+                    Self::objective_owner_identity_for_session(bridge_session_id),
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn objective_principal_for_mob_owner_session(
+        &self,
+        mob_id: &MobId,
+        bridge_session_id: &SessionId,
+    ) -> Result<meerkat_mob::AgentIdentity, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        let roster = handle.roster().await;
+        if let Some(entry) = roster.find_by_bridge_session_id(bridge_session_id) {
+            return Ok(entry.agent_identity.clone());
+        }
+        drop(roster);
+        if handle.owns_bridge_session(bridge_session_id).await? {
+            return Ok(Self::objective_owner_identity_for_session(
+                bridge_session_id,
+            ));
+        }
+        Err(MobError::Internal(format!(
+            "bridge session {bridge_session_id} is not an objective lead for mob {mob_id}"
+        )))
+    }
+
+    #[doc(hidden)]
+    pub async fn member_for_bridge_session(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> Result<Option<(MobId, meerkat_mob::AgentIdentity)>, MobError> {
+        self.ensure_restored().await?;
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        for mob_id in mob_ids {
+            let roster = self.handle_for(&mob_id).await?.roster().await;
+            if let Some(entry) = roster.find_by_bridge_session_id(bridge_session_id) {
+                return Ok(Some((mob_id, entry.agent_identity.clone())));
+            }
+        }
+        Ok(None)
+    }
+
     /// Cancel a previously submitted unit of work. Finding C4.
     pub async fn mob_cancel_work(
         &self,

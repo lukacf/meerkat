@@ -223,6 +223,7 @@ mod tests {
                 labels: std::collections::BTreeMap::new(),
                 kickoff: None,
                 effective_profile_override: None,
+                effective_model_override: None,
             },
             retiring_key: None,
             retiring_comms: None,

@@ -138,6 +138,27 @@ pub(crate) async fn retire_runtime_session_for_archive(
 pub trait MobSessionService:
     SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
 {
+    #[cfg(feature = "runtime-adapter")]
+    async fn create_session_with_machine_archived_resume_authority(
+        &self,
+        _req: meerkat_core::service::CreateSessionRequest,
+        _authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        Err(SessionError::Unsupported(
+            "session service does not support machine-authorized archived resume".into(),
+        ))
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn promote_revivable_retired_session(
+        &self,
+        _session_id: &SessionId,
+        _authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "session service does not support archived document revival".into(),
+        ))
+    }
     /// Subscribe to session-wide events regardless of triggering interaction.
     async fn subscribe_session_events(
         &self,
@@ -266,6 +287,17 @@ pub trait MobSessionService:
     /// without durable persistence returned no snapshot, letting callers treat
     /// the session as missing and fall through to recreate-from-roster paths.
     async fn load_persisted_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        Ok(None)
+    }
+
+    /// Load a retired session only for an explicit resume/revival operation.
+    /// Ordinary reads remain archive-filtered. Implementations must return a
+    /// value only when an intact authoritative snapshot and a Retired runtime
+    /// lifecycle record coexist.
+    async fn load_revivable_retired_session(
         &self,
         _session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
@@ -703,6 +735,28 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    #[cfg(feature = "runtime-adapter")]
+    async fn create_session_with_machine_archived_resume_authority(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        let admission = self.reserve_create_session_admission().await?;
+        self.create_session_with_reserved_machine_archived_resume_admission(
+            req, admission, authority,
+        )
+        .await
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn promote_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        self.revive_archived_session_with_machine_authority(session_id, authority)
+            .await
+    }
     fn supports_persistent_sessions(&self) -> bool {
         true
     }
@@ -744,6 +798,18 @@ where
             return Ok(None);
         }
         Ok(Some(session))
+    }
+
+    async fn load_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        if self.persisted_runtime_state(session_id).await?
+            != Some(meerkat_runtime::RuntimeState::Retired)
+        {
+            return Ok(None);
+        }
+        self.load_authoritative_session(session_id).await
     }
 
     /// Metadata-only authoritative read. Same visibility contract as

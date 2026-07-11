@@ -494,6 +494,17 @@
               "input_id": {
                 "type": "string"
               },
+              "objective_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ObjectiveId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Durable delegated-objective causality for this work delivery."
+              },
               "protocol_version": {
                 "$ref": "#/components/schemas/BridgeProtocolVersion"
               },
@@ -2302,8 +2313,8 @@
           {
             "additionalProperties": false,
             "properties": {
-              "acked": {
-                "type": "boolean"
+              "delivery": {
+                "$ref": "#/components/schemas/PeerDeliveryOutcome"
               },
               "envelope_id": {
                 "type": "string"
@@ -2316,7 +2327,7 @@
             "required": [
               "kind",
               "envelope_id",
-              "acked"
+              "delivery"
             ],
             "type": "object"
           },
@@ -4326,6 +4337,10 @@
         "title": "ModelsCatalogResponse",
         "type": "object"
       },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
+      },
       "Occurrence": {
         "properties": {
           "attempt_count": {
@@ -4699,6 +4714,26 @@
       "PeerCorrelationId": {
         "description": "Canonical correlation identifier for the peer request/response lifecycle.\n\nOn the sender side, `PeerCorrelationId` is both the outbound request\nenvelope id and the reservation key for any stream subscription. On the\nreceiver side, every response envelope carries it as `in_reply_to`. The\nsender routes a reply back to its originating request by matching on this\nid — no local id-translation map.\n\nWrapping it in a newtype prevents raw-`Uuid` confusion at every site that\nfires a DSL input, inserts into the subscriber registry, or closes out an\ninbound request.",
         "type": "string"
+      },
+      "PeerDeliveryOutcome": {
+        "description": "Strongest successful peer-delivery fact proved by the selected transport.",
+        "oneOf": [
+          {
+            "const": "acked",
+            "description": "A peer acknowledgement was received and verified.",
+            "type": "string"
+          },
+          {
+            "const": "handed_off",
+            "description": "The receiver's local inbox admitted the envelope directly.",
+            "type": "string"
+          },
+          {
+            "const": "queued",
+            "description": "The envelope was written to a transport that does not acknowledge this\nmessage kind; receiver admission is not known.",
+            "type": "string"
+          }
+        ]
       },
       "PeerDirectoryEntry": {
         "properties": {

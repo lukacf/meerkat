@@ -5225,6 +5225,7 @@ mod tests {
                     let id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
                     crate::interaction::PeerInputCandidate {
                         interaction: crate::interaction::InboxInteraction {
+                            objective_id: None,
                             id,
                             from_route: None,
                             from: "unknown".into(),

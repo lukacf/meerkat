@@ -53,6 +53,7 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     let receipt = CoreCommsRuntime::send(
         a.as_ref(),
         CommsCommand::PeerRequest {
+            objective_id: None,
             content_taint: None,
             to: PeerRoute::with_display_name(
                 b.public_key().to_peer_id(),
@@ -113,6 +114,7 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     let _response_receipt = CoreCommsRuntime::send(
         b.as_ref(),
         CommsCommand::PeerResponse {
+            objective_id: None,
             content_taint: None,
             to: PeerRoute::with_display_name(
                 a.public_key().to_peer_id(),

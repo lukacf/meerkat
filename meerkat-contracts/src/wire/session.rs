@@ -79,6 +79,8 @@ pub struct ForkSessionAtParams {
     pub message_index: usize,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
 }
 
 /// Request payload for `session/fork_replace`.
@@ -96,6 +98,8 @@ pub struct ForkSessionReplaceParams {
     pub replacement: WireTranscriptReplacement,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
 }
 
 /// Public transcript message accepted by same-session rewrite APIs.
@@ -2224,6 +2228,7 @@ mod tests {
         user.identity = meerkat_core::types::TranscriptMessageIdentity {
             interaction_id: Some(interaction_id),
             run_id: None,
+            objective_id: None,
         };
         let mut assistant = BlockAssistantMessage::new(
             vec![AssistantBlock::Text {
@@ -2235,6 +2240,7 @@ mod tests {
         assistant.identity = meerkat_core::types::TranscriptMessageIdentity {
             interaction_id: Some(interaction_id),
             run_id: Some(run_id.clone()),
+            objective_id: None,
         };
         let page = SessionHistoryPage {
             session_id: SessionId::new(),

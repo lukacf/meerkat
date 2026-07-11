@@ -34,17 +34,22 @@ pub struct TranscriptMessageIdentity {
     pub interaction_id: Option<crate::interaction::InteractionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<crate::lifecycle::RunId>,
+    /// Durable delegated-objective causality, shared by every message in a
+    /// causally-related turn chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<crate::interaction::ObjectiveId>,
 }
 
 impl TranscriptMessageIdentity {
     pub fn is_empty(&self) -> bool {
-        self.interaction_id.is_none() && self.run_id.is_none()
+        self.interaction_id.is_none() && self.run_id.is_none() && self.objective_id.is_none()
     }
 
     pub fn with_run_id(&self, run_id: crate::lifecycle::RunId) -> Self {
         Self {
             interaction_id: self.interaction_id,
             run_id: Some(run_id),
+            objective_id: self.objective_id,
         }
     }
 }

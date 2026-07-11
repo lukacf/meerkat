@@ -385,6 +385,17 @@ pub enum MobEventKind {
         /// Current kickoff snapshot.
         kickoff: MobMemberKickoffSnapshot,
     },
+    /// Durable authority binding for the lead allowed to conclude an objective.
+    ObjectiveOwnerBound {
+        owner: AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+    },
+    /// Lead explicitly concluded the durable kickoff objective.
+    ObjectiveConcluded {
+        member: AgentIdentity,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+        outcome: String,
+    },
     /// Bidirectional wiring edge established between two local members.
     ///
     /// DSL-emit-driven observability: the shell records this variant on
@@ -591,6 +602,10 @@ pub struct MemberSpawnedEvent {
     /// `None` means the definition profile keyed by `role` is authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_profile_override: Option<crate::profile::Profile>,
+    /// Field-scoped model override, reapplied over the current definition
+    /// profile on every materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model_override: Option<String>,
     /// Typed continuity evidence emitted at spawn finalization.
     #[serde(default, skip_serializing_if = "crate::event::is_ephemeral_continuity")]
     pub continuity_intent: crate::runtime::SpawnContinuityIntent,
@@ -625,6 +640,7 @@ impl MemberSpawnedEvent {
             runtime_mode: MobRuntimeMode::AutonomousHost,
             labels: BTreeMap::new(),
             effective_profile_override: None,
+            effective_model_override: None,
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             bridge_member_ref: None,
             member_peer_endpoint: None,

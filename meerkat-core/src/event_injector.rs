@@ -102,6 +102,31 @@ pub trait SubscribableInjector: EventInjector {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<(), EventInjectorError>;
+
+    /// Inject a host event with the complete causal identity available to the
+    /// caller. Implementations must preserve `objective_id` into runtime turn
+    /// metadata; the default exists only for compatibility test doubles.
+    fn inject_with_turn_identity(
+        &self,
+        interaction_id: Option<crate::interaction::InteractionId>,
+        objective_id: Option<crate::interaction::ObjectiveId>,
+        content: ContentInput,
+        source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
+        let _ = objective_id;
+        match interaction_id {
+            Some(interaction_id) => self.inject_with_interaction_id(
+                interaction_id,
+                content,
+                source,
+                handling_mode,
+                render_metadata,
+            ),
+            None => self.inject(content, source, handling_mode, render_metadata),
+        }
+    }
 }
 
 #[cfg(test)]

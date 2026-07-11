@@ -16,6 +16,7 @@ from .generated.types import (
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
+    WireMemberProgressSnapshot,
 )
 from .streaming import EventSubscription
 from .types import ResolvedModelCapabilities
@@ -149,6 +150,7 @@ MobMemberSnapshot = TypedDict(
         "external_member": NotRequired[Any],
         # Diagnostic bridge-session id for status/continuity only.
         "current_session_id": NotRequired[str],
+        "progress": NotRequired[WireMemberProgressSnapshot],
     },
 )
 
@@ -211,6 +213,7 @@ MobSpawnSpec = TypedDict(
         "context": NotRequired[dict[str, Any] | None],
         "additional_instructions": NotRequired[list[str] | None],
         "auth_binding": NotRequired[WireAuthBindingRef | dict[str, str] | None],
+        "model_override": NotRequired[str | None],
     },
 )
 

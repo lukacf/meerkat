@@ -54,6 +54,7 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobSpawnManyFailedResult",
     "MobSpawnReceiptWire",
     "MobMemberListEntryWire",
+    "WireMemberProgressSnapshot",
     "WireMobToolConfig",
     "WireMobProfile",
     "WireMobRun",
@@ -110,6 +111,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobRotateSupervisorResult",
     "MobSubmitWorkParams",
     "MobSubmitWorkResult",
+    "MobConcludeObjectiveParams",
+    "MobConcludeObjectiveResult",
     "MobCancelWorkParams",
     "MobCancelWorkResult",
     "MobCancelAllWorkParams",
@@ -2073,7 +2076,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
         doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
-        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        local_defs = (
+            set(schema.get("$defs", {}).keys()) - emitted_python_dataclasses
+            if isinstance(schema, dict)
+            else set()
+        )
         schema_root = dict(root_schema)
         schema_root["$defs"] = {
             **root_schema.get("$defs", {}),
@@ -2723,7 +2730,11 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         schema = _lookup_named_schema(root_schema, name)
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
-        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        local_defs = (
+            set(schema.get("$defs", {}).keys()) - emitted_typescript_interfaces
+            if isinstance(schema, dict)
+            else set()
+        )
         schema_root = dict(root_schema)
         schema_root["$defs"] = {
             **root_schema.get("$defs", {}),
@@ -4461,7 +4472,11 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
             raise KeyError(f"schema for generated web mob type {name} not found")
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
-        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        local_defs = (
+            set(schema.get("$defs", {}).keys()) - emitted
+            if isinstance(schema, dict)
+            else set()
+        )
         schema_root = _schema_root_with_local_defs(wire_schema, schema)
         lines.append(f"export interface {name} {{")
         for field_name, field_schema in properties.items():
@@ -4482,7 +4497,11 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
         schema = _lookup_named_schema(wire_schema, name)
         if not schema:
             raise KeyError(f"schema for generated web mob alias {name} not found")
-        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        local_defs = (
+            set(schema.get("$defs", {}).keys()) - emitted
+            if isinstance(schema, dict)
+            else set()
+        )
         schema_root = _schema_root_with_local_defs(wire_schema, schema)
         alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         lines.append(f"export type {name} = {alias_type};")
@@ -4491,6 +4510,10 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
 
     append_alias("WireMobMemberStatus")
     append_alias("WireMemberRef")
+    append_alias("WireMemberProgressEvent")
+    append_alias("WireMemberRunState")
+    append_alias("WireMemberHealthClass")
+    append_interface("WireMemberProgressSnapshot")
     append_interface("MobStatusResult")
     lines.append("export interface MobListResult {")
     lines.append("  mobs: MobStatusResult[];")

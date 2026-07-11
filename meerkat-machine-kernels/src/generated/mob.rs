@@ -1939,6 +1939,64 @@ impl std::fmt::Display for MemberAdmissionVerdictKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MemberHealthClass {
+    #[default]
+    #[serde(rename = "Healthy")]
+    Healthy,
+    #[serde(rename = "Degraded")]
+    Degraded,
+    #[serde(rename = "Wedged")]
+    Wedged,
+    #[serde(rename = "Unknown")]
+    Unknown,
+}
+impl MemberHealthClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Healthy => "Healthy",
+            Self::Degraded => "Degraded",
+            Self::Wedged => "Wedged",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberHealthClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Healthy" => Ok(Self::Healthy),
+            "Degraded" => Ok(Self::Degraded),
+            "Wedged" => Ok(Self::Wedged),
+            "Unknown" => Ok(Self::Unknown),
+            other => Err(format!("invalid MemberHealthClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberHealthClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberHealthClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MemberLifecycleKind {
     #[default]
     #[serde(rename = "Spawned")]
@@ -2048,6 +2106,60 @@ impl std::fmt::Display for MemberLiveMaterializationObservationKind {
     }
 }
 pub type MemberPeerEndpoint = meerkat_machine_schema::catalog::dsl::mob_machine::MemberPeerEndpoint;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberProgressEventKind {
+    #[default]
+    #[serde(rename = "ExecutionAdvanced")]
+    ExecutionAdvanced,
+    #[serde(rename = "BecameIdle")]
+    BecameIdle,
+    #[serde(rename = "Unchanged")]
+    Unchanged,
+}
+impl MemberProgressEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExecutionAdvanced => "ExecutionAdvanced",
+            Self::BecameIdle => "BecameIdle",
+            Self::Unchanged => "Unchanged",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberProgressEventKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ExecutionAdvanced" => Ok(Self::ExecutionAdvanced),
+            "BecameIdle" => Ok(Self::BecameIdle),
+            "Unchanged" => Ok(Self::Unchanged),
+            other => Err(format!("invalid MemberProgressEventKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberProgressEventKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberProgressEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -4832,6 +4944,10 @@ pub struct State {
     pub member_kickoff_failed: std::collections::BTreeSet<AgentIdentity>,
     pub member_kickoff_cancelled: std::collections::BTreeSet<AgentIdentity>,
     pub member_kickoff_error: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_kickoff_objective_ids: std::collections::BTreeMap<AgentIdentity, String>,
+    pub objective_owner_ids: std::collections::BTreeMap<String, AgentIdentity>,
+    pub objective_outcomes: std::collections::BTreeMap<String, String>,
+    pub concluded_objective_ids: std::collections::BTreeSet<String>,
     pub member_restore_failures: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_restore_failure_codes: std::collections::BTreeMap<AgentIdentity, String>,
     pub runtime_retire_refusal_codes: std::collections::BTreeMap<AgentRuntimeId, String>,
@@ -4840,6 +4956,14 @@ pub struct State {
     pub remote_runtime_retired_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub remote_supervisor_revoked_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub member_revival_pending: std::collections::BTreeSet<AgentIdentity>,
+    pub member_run_open: std::collections::BTreeMap<AgentIdentity, bool>,
+    pub member_in_flight_work: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub member_progress_tokens: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_last_observed_at_ms: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub member_last_progress_at_ms: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub member_last_progress_event:
+        std::collections::BTreeMap<AgentIdentity, MemberProgressEventKind>,
+    pub member_health_class: std::collections::BTreeMap<AgentIdentity, MemberHealthClass>,
     pub spawn_exec_phase: std::collections::BTreeMap<AgentIdentity, SpawnExecPhase>,
     pub member_state_markers: std::collections::BTreeMap<AgentRuntimeId, MobMemberState>,
     pub wiring_edges: std::collections::BTreeSet<WiringEdge>,
@@ -5175,6 +5299,14 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyMemberWait {
         pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveMemberProgress {
+        pub agent_identity: AgentIdentity,
+        pub run_open: bool,
+        pub in_flight_work: u64,
+        pub progress_token: String,
+        pub observed_at_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveFlowDelegationEdgeAdmission {
@@ -5660,6 +5792,18 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffMarkPending {
         pub member_id: AgentIdentity,
+        pub objective_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindObjectiveOwner {
+        pub owner_id: AgentIdentity,
+        pub objective_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConcludeObjective {
+        pub member_id: AgentIdentity,
+        pub objective_id: String,
+        pub outcome: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffMarkStarting {
@@ -5945,6 +6089,7 @@ pub enum Input {
     AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
     ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
     ClassifyMemberWait(inputs::ClassifyMemberWait),
+    ObserveMemberProgress(inputs::ObserveMemberProgress),
     ResolveFlowDelegationEdgeAdmission(inputs::ResolveFlowDelegationEdgeAdmission),
     ClassifyRemoteMemberRuntimeObservation(inputs::ClassifyRemoteMemberRuntimeObservation),
     ResolveSpawnMemberAdmission(inputs::ResolveSpawnMemberAdmission),
@@ -6040,6 +6185,8 @@ pub enum Input {
     Shutdown(inputs::Shutdown),
     ForceCancel(inputs::ForceCancel),
     KickoffMarkPending(inputs::KickoffMarkPending),
+    BindObjectiveOwner(inputs::BindObjectiveOwner),
+    ConcludeObjective(inputs::ConcludeObjective),
     KickoffMarkStarting(inputs::KickoffMarkStarting),
     StartupMarkReady(inputs::StartupMarkReady),
     KickoffResolveStarted(inputs::KickoffResolveStarted),
@@ -6111,6 +6258,7 @@ impl Input {
             Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
             Self::ClassifySpawnManyFailure(_) => InputKind::ClassifySpawnManyFailure,
             Self::ClassifyMemberWait(_) => InputKind::ClassifyMemberWait,
+            Self::ObserveMemberProgress(_) => InputKind::ObserveMemberProgress,
             Self::ResolveFlowDelegationEdgeAdmission(_) => {
                 InputKind::ResolveFlowDelegationEdgeAdmission
             }
@@ -6236,6 +6384,8 @@ impl Input {
             Self::Shutdown(_) => InputKind::Shutdown,
             Self::ForceCancel(_) => InputKind::ForceCancel,
             Self::KickoffMarkPending(_) => InputKind::KickoffMarkPending,
+            Self::BindObjectiveOwner(_) => InputKind::BindObjectiveOwner,
+            Self::ConcludeObjective(_) => InputKind::ConcludeObjective,
             Self::KickoffMarkStarting(_) => InputKind::KickoffMarkStarting,
             Self::StartupMarkReady(_) => InputKind::StartupMarkReady,
             Self::KickoffResolveStarted(_) => InputKind::KickoffResolveStarted,
@@ -6314,6 +6464,7 @@ pub enum InputKind {
     AuthorizeSpawnProfile,
     ClassifySpawnManyFailure,
     ClassifyMemberWait,
+    ObserveMemberProgress,
     ResolveFlowDelegationEdgeAdmission,
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
@@ -6401,6 +6552,8 @@ pub enum InputKind {
     Shutdown,
     ForceCancel,
     KickoffMarkPending,
+    BindObjectiveOwner,
+    ConcludeObjective,
     KickoffMarkStarting,
     StartupMarkReady,
     KickoffResolveStarted,
@@ -6605,6 +6758,17 @@ pub mod signals {
         pub error: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverObjectiveBinding {
+        pub member_id: AgentIdentity,
+        pub objective_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverObjectiveConclusion {
+        pub member_id: AgentIdentity,
+        pub objective_id: String,
+        pub outcome: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRosterWiring {
         pub edge: WiringEdge,
     }
@@ -6741,6 +6905,8 @@ pub enum Signal {
     RecoverRosterMemberRetired(signals::RecoverRosterMemberRetired),
     ConvergeRecoveredRosterTopology(signals::ConvergeRecoveredRosterTopology),
     RecoverMemberKickoff(signals::RecoverMemberKickoff),
+    RecoverObjectiveBinding(signals::RecoverObjectiveBinding),
+    RecoverObjectiveConclusion(signals::RecoverObjectiveConclusion),
     RecoverRosterWiring(signals::RecoverRosterWiring),
     RecoverRosterUnwire(signals::RecoverRosterUnwire),
     RecoverExternalPeerWiring(signals::RecoverExternalPeerWiring),
@@ -6812,6 +6978,8 @@ impl Signal {
             Self::RecoverRosterMemberRetired(_) => SignalKind::RecoverRosterMemberRetired,
             Self::ConvergeRecoveredRosterTopology(_) => SignalKind::ConvergeRecoveredRosterTopology,
             Self::RecoverMemberKickoff(_) => SignalKind::RecoverMemberKickoff,
+            Self::RecoverObjectiveBinding(_) => SignalKind::RecoverObjectiveBinding,
+            Self::RecoverObjectiveConclusion(_) => SignalKind::RecoverObjectiveConclusion,
             Self::RecoverRosterWiring(_) => SignalKind::RecoverRosterWiring,
             Self::RecoverRosterUnwire(_) => SignalKind::RecoverRosterUnwire,
             Self::RecoverExternalPeerWiring(_) => SignalKind::RecoverExternalPeerWiring,
@@ -6874,6 +7042,8 @@ pub enum SignalKind {
     RecoverRosterMemberRetired,
     ConvergeRecoveredRosterTopology,
     RecoverMemberKickoff,
+    RecoverObjectiveBinding,
+    RecoverObjectiveConclusion,
     RecoverRosterWiring,
     RecoverRosterUnwire,
     RecoverExternalPeerWiring,
@@ -7096,6 +7266,17 @@ pub mod effects {
     pub struct EmitKickoffLifecycleNotice {
         pub member_id: AgentIdentity,
         pub intent: KickoffIntent,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PersistObjectiveOwnerBinding {
+        pub owner_id: AgentIdentity,
+        pub objective_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PersistObjectiveConclusion {
+        pub member_id: AgentIdentity,
+        pub objective_id: String,
+        pub outcome: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestKickoffQuiesce {
@@ -7576,6 +7757,8 @@ pub enum Effect {
     PersistKickoffUpdate(effects::PersistKickoffUpdate),
     PersistKickoffFailureUpdate(effects::PersistKickoffFailureUpdate),
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
+    PersistObjectiveOwnerBinding(effects::PersistObjectiveOwnerBinding),
+    PersistObjectiveConclusion(effects::PersistObjectiveConclusion),
     RequestKickoffQuiesce(effects::RequestKickoffQuiesce),
     RequestPendingSpawnQuiesceForDestroy(effects::RequestPendingSpawnQuiesceForDestroy),
     MemberAdmissionProbed(effects::MemberAdmissionProbed),
@@ -7691,6 +7874,8 @@ pub enum EffectKind {
     PersistKickoffUpdate,
     PersistKickoffFailureUpdate,
     EmitKickoffLifecycleNotice,
+    PersistObjectiveOwnerBinding,
+    PersistObjectiveConclusion,
     RequestKickoffQuiesce,
     RequestPendingSpawnQuiesceForDestroy,
     MemberAdmissionProbed,
@@ -7925,6 +8110,13 @@ pub enum TransitionId {
     ClassifyFlowRunPublicResultSuccessRunning,
     ClassifyFlowRunPublicResultFailureRunning,
     ClassifyMemberWaitRuntimeMaterialPresentRunning,
+    ObserveMemberProgressChangedOpenRunning,
+    ObserveMemberProgressChangedIdleRunning,
+    ObserveMemberProgressUnchangedIdleRunning,
+    ObserveMemberProgressUnchangedOpenHealthyRunning,
+    ObserveMemberProgressUnchangedOpenDegradedRunning,
+    ObserveMemberProgressUnchangedOpenWedgedRunning,
+    ObserveMemberProgressStaleRunning,
     ClassifyMemberWaitRuntimeMaterialPresentStopped,
     ClassifyMemberWaitRuntimeMaterialPresentCompleted,
     ClassifyMemberWaitRuntimeMaterialPresentDestroyed,
@@ -8242,6 +8434,10 @@ pub enum TransitionId {
     RecoverMemberKickoffStarted,
     RecoverMemberKickoffFailed,
     RecoverMemberKickoffCancelled,
+    RecoverObjectiveBinding,
+    BindObjectiveOwnerRunning,
+    BindObjectiveOwnerIdempotentRunning,
+    RecoverObjectiveConclusion,
     ReconcileRunning,
     ReconcileStopped,
     ReconcileCompleted,
@@ -8253,6 +8449,8 @@ pub enum TransitionId {
     KickoffMarkPendingRunning,
     KickoffMarkPendingStopped,
     KickoffMarkPendingCompleted,
+    ConcludeObjectiveRunning,
+    ConcludeObjectiveIdempotentRunning,
     KickoffMarkStartingRunning,
     KickoffMarkStartingStopped,
     KickoffMarkStartingCompleted,
@@ -8888,6 +9086,10 @@ pub fn initial_state() -> State {
         member_kickoff_failed: Default::default(),
         member_kickoff_cancelled: Default::default(),
         member_kickoff_error: Default::default(),
+        member_kickoff_objective_ids: Default::default(),
+        objective_owner_ids: Default::default(),
+        objective_outcomes: Default::default(),
+        concluded_objective_ids: Default::default(),
         member_restore_failures: Default::default(),
         member_restore_failure_codes: Default::default(),
         runtime_retire_refusal_codes: Default::default(),
@@ -8896,6 +9098,13 @@ pub fn initial_state() -> State {
         remote_runtime_retired_ids: Default::default(),
         remote_supervisor_revoked_ids: Default::default(),
         member_revival_pending: Default::default(),
+        member_run_open: Default::default(),
+        member_in_flight_work: Default::default(),
+        member_progress_tokens: Default::default(),
+        member_last_observed_at_ms: Default::default(),
+        member_last_progress_at_ms: Default::default(),
+        member_last_progress_event: Default::default(),
+        member_health_class: Default::default(),
         spawn_exec_phase: Default::default(),
         member_state_markers: Default::default(),
         wiring_edges: Default::default(),

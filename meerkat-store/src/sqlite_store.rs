@@ -21,7 +21,24 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
-const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 60_000;
+
+/// Per-store SQLite contention policy. The default tolerates the long WAL
+/// writer holds produced by large durable snapshot commits while keeping the
+/// wait bounded. Runtime/session stores may override it per instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqliteConnectionOptions {
+    /// Maximum time SQLite's busy handler waits and retries a locked write.
+    pub busy_timeout: Duration,
+}
+
+impl Default for SqliteConnectionOptions {
+    fn default() -> Self {
+        Self {
+            busy_timeout: Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS),
+        }
+    }
+}
 
 const CREATE_SESSIONS_TABLE_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -106,11 +123,18 @@ fn parse_session_id(raw: String) -> Result<SessionId, StoreError> {
 }
 
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
+    open_connection_with_options(path, SqliteConnectionOptions::default())
+}
+
+pub fn open_connection_with_options(
+    path: &Path,
+    options: SqliteConnectionOptions,
+) -> Result<Connection, StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+    conn.busy_timeout(options.busy_timeout)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
     ensure_schema(&conn)?;
@@ -118,6 +142,16 @@ pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
 }
 
 pub fn begin_immediate_transaction(conn: &mut Connection) -> Result<Transaction<'_>, StoreError> {
+    begin_immediate_transaction_with_options(conn, SqliteConnectionOptions::default())
+}
+
+pub fn begin_immediate_transaction_with_options(
+    conn: &mut Connection,
+    _options: SqliteConnectionOptions,
+) -> Result<Transaction<'_>, StoreError> {
+    // rusqlite's configured busy handler performs the bounded retry while
+    // BEGIN IMMEDIATE waits for the WAL writer. Keeping it on the connection
+    // makes the policy apply consistently to begin, statements, and commit.
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(StoreError::from)
 }
@@ -648,14 +682,22 @@ fn write_head_canonical_session_in_txn(
 /// SQLite-backed session store with one connection per operation.
 pub struct SqliteSessionStore {
     path: PathBuf,
+    options: SqliteConnectionOptions,
 }
 
 impl SqliteSessionStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::open_with_options(path, SqliteConnectionOptions::default())
+    }
+
+    pub fn open_with_options(
+        path: impl Into<PathBuf>,
+        options: SqliteConnectionOptions,
+    ) -> Result<Self, StoreError> {
         let path = path.into();
-        let conn = open_connection(&path)?;
+        let conn = open_connection_with_options(&path, options)?;
         drop(conn);
-        Ok(Self { path })
+        Ok(Self { path, options })
     }
 
     pub fn path(&self) -> &Path {
@@ -670,9 +712,12 @@ impl SqliteSessionStore {
         F: FnOnce(&Transaction<'_>) -> Result<T, SessionStoreError> + Send + 'static,
     {
         let path = self.path.clone();
+        let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
-            let mut conn = open_connection(&path).map_err(into_session_store_error)?;
-            let tx = begin_immediate_transaction(&mut conn).map_err(into_session_store_error)?;
+            let mut conn =
+                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
+            let tx = begin_immediate_transaction_with_options(&mut conn, options)
+                .map_err(into_session_store_error)?;
             let value = op(&tx)?;
             tx.commit()
                 .map_err(StoreError::from)
@@ -691,8 +736,10 @@ impl SqliteSessionStore {
         F: FnOnce(&Transaction<'_>) -> Result<T, SessionStoreError> + Send + 'static,
     {
         let path = self.path.clone();
+        let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<T, SessionStoreError> {
-            let mut conn = open_connection(&path).map_err(into_session_store_error)?;
+            let mut conn =
+                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
             let tx = conn
                 .transaction()
                 .map_err(StoreError::from)
@@ -851,8 +898,10 @@ impl SessionStore for SqliteSessionStore {
 
     async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
         let path = self.path.clone();
+        let options = self.options;
         tokio::task::spawn_blocking(move || -> Result<Vec<SessionMeta>, SessionStoreError> {
-            let conn = open_connection(&path).map_err(into_session_store_error)?;
+            let conn =
+                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
             let created_after = filter.created_after.map(system_time_millis);
             let updated_after = filter.updated_after.map(system_time_millis);
 
@@ -927,9 +976,11 @@ impl SessionStore for SqliteSessionStore {
     /// full session document.
     async fn load_meta(&self, id: &SessionId) -> Result<Option<SessionMeta>, SessionStoreError> {
         let path = self.path.clone();
+        let options = self.options;
         let session_id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<SessionMeta>, SessionStoreError> {
-            let conn = open_connection(&path).map_err(into_session_store_error)?;
+            let conn =
+                open_connection_with_options(&path, options).map_err(into_session_store_error)?;
             let mut meta = conn
                 .query_row(
                     r"
@@ -1363,6 +1414,32 @@ mod tests {
         let path = dir.path().join("sessions.sqlite3");
         let store = SqliteSessionStore::open(&path).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn busy_writer_is_retried_with_per_store_policy() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("busy.sqlite3");
+        let options = SqliteConnectionOptions {
+            busy_timeout: Duration::from_millis(250),
+        };
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            let mut connection = open_connection_with_options(&holder_path, options).unwrap();
+            let transaction =
+                begin_immediate_transaction_with_options(&mut connection, options).unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(120));
+            transaction.commit().unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let mut contender = open_connection_with_options(&path, options).unwrap();
+        let transaction = begin_immediate_transaction_with_options(&mut contender, options)
+            .expect("bounded busy retry should survive the concurrent writer");
+        transaction.commit().unwrap();
+        holder.join().unwrap();
     }
 
     #[tokio::test]

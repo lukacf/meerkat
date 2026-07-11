@@ -3743,6 +3743,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                         input_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
                         content: req.prompt.clone(),
                         handling_mode: req.runtime.handling_mode,
+                        objective_id: req
+                            .runtime
+                            .turn_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.transcript_identity.objective_id),
                         // Rides the delivery payload; the receiving runtime
                         // lowers it as InjectedContext-role appends before
                         // the peer work append (empty is omitted on the

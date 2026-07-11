@@ -494,6 +494,17 @@
               "input_id": {
                 "type": "string"
               },
+              "objective_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ObjectiveId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Durable delegated-objective causality for this work delivery."
+              },
               "protocol_version": {
                 "$ref": "#/components/schemas/BridgeProtocolVersion"
               },
@@ -4325,6 +4336,10 @@
         ],
         "title": "ModelsCatalogResponse",
         "type": "object"
+      },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
       },
       "Occurrence": {
         "properties": {

@@ -2736,6 +2736,7 @@ class BridgeDeliveryPayload:
     protocol_version: BridgeProtocolVersion
     supervisor: BridgePeerSpec
     injected_context: Optional[list[ContentInput]] = None
+    objective_id: Optional[str] = None
 
 
 @dataclass
@@ -4981,6 +4982,7 @@ class BridgeCommandDeliverMemberInput(TypedDict, total=False):
     handling_mode: Required[HandlingMode]
     injected_context: NotRequired[list[ContentInput]]
     input_id: Required[str]
+    objective_id: NotRequired[Any]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 

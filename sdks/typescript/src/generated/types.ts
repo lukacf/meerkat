@@ -1886,6 +1886,7 @@ export interface BridgeDeliveryPayload {
   handling_mode: HandlingMode;
   injected_context?: ContentInput[];
   input_id: string;
+  objective_id?: string;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
 }
@@ -2509,6 +2510,7 @@ export interface BridgeCommandDeliverMemberInput {
   handling_mode: HandlingMode;
   injected_context?: ContentInput[];
   input_id: string;
+  objective_id?: unknown;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
 }

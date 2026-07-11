@@ -961,7 +961,7 @@ fn peer_input_from_delivery_payload(
     payload: BridgeDeliveryPayload,
 ) -> Input {
     Input::Peer(PeerInput {
-        objective_id: None,
+        objective_id: payload.objective_id,
         header: InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
@@ -7153,6 +7153,7 @@ mod tests {
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             InteractionId(Uuid::new_v4()),
             BridgeDeliveryPayload {
+                objective_id: None,
                 injected_context: Vec::new(),
                 supervisor: supervisor_bridge_spec(),
                 epoch: 1,
@@ -7179,11 +7180,13 @@ mod tests {
     /// peer work append.
     #[test]
     fn bridge_delivery_payload_injected_context_projects_before_peer_append() {
+        let objective_id = meerkat_core::interaction::ObjectiveId::new();
         let input = peer_input_from_delivery_payload(
             &SessionId::new(),
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             InteractionId(Uuid::new_v4()),
             BridgeDeliveryPayload {
+                objective_id: Some(objective_id),
                 injected_context: vec![
                     meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
                     meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
@@ -7207,6 +7210,7 @@ mod tests {
                 meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
             ],
         );
+        assert_eq!(peer.objective_id, Some(objective_id));
 
         let projection = crate::input::runtime_input_projection_for_machine_batch(&input);
         assert_eq!(

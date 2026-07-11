@@ -9873,6 +9873,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         .expect("old supervisor bridge should explicitly trust peer for stale-epoch probe");
     let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
         super::bridge_protocol::BridgeDeliveryPayload {
+            objective_id: None,
             injected_context: Vec::new(),
             supervisor: old_bridge
                 .supervisor_spec()

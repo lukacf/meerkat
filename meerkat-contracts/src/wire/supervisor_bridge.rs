@@ -177,6 +177,10 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   terminal receipt. This is a semantic fold rather than an additive field,
 ///   so new authorities default to V4 while V2/V3 remain decodable for their
 ///   pre-rotation command vocabulary.
+/// - `4` (additive, no bump): `DeliverMemberInput` carries the optional
+///   delegated objective identity. `None` is omitted for byte compatibility;
+///   a present value must fail loud on an older strict receiver rather than
+///   silently losing objective causality.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -1079,6 +1083,9 @@ pub struct BridgeDeliveryPayload {
     pub input_id: String,
     pub content: meerkat_core::types::ContentInput,
     pub handling_mode: meerkat_core::types::HandlingMode,
+    /// Durable delegated-objective causality for this work delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Host-attached injected context delivered alongside the work content.
     /// Each entry materializes on the member as a separate typed
     /// injected-context transcript message immediately before the work
@@ -1789,6 +1796,7 @@ mod tests {
     #[test]
     fn bridge_command_deliver_member_input_round_trip() {
         let cmd = BridgeCommand::DeliverMemberInput(BridgeDeliveryPayload {
+            objective_id: None,
             supervisor: sample_peer_spec(),
             epoch: 2,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -1841,6 +1849,7 @@ mod tests {
     #[test]
     fn bridge_command_deliver_member_input_with_injected_context_round_trip() {
         let cmd = BridgeCommand::DeliverMemberInput(BridgeDeliveryPayload {
+            objective_id: Some(meerkat_core::interaction::ObjectiveId::new()),
             supervisor: sample_peer_spec(),
             epoch: 2,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -1862,6 +1871,7 @@ mod tests {
     #[test]
     fn bridge_delivery_payload_empty_injected_context_is_byte_compatible() {
         let payload = BridgeDeliveryPayload {
+            objective_id: None,
             supervisor: sample_peer_spec(),
             epoch: 2,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,

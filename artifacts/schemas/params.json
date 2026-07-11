@@ -760,6 +760,17 @@
               "input_id": {
                 "type": "string"
               },
+              "objective_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ObjectiveId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Durable delegated-objective causality for this work delivery."
+              },
               "protocol_version": {
                 "$ref": "#/$defs/BridgeProtocolVersion"
               },
@@ -2109,6 +2120,10 @@
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
         "type": "string"
       },
       "PeerId": {

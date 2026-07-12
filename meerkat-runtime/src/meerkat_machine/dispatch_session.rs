@@ -624,12 +624,29 @@ impl MeerkatMachine {
                     // Machine-emitted revival: refresh the durable lifecycle
                     // record so cross-process readers never observe a stale
                     // `Stopped` snapshot for a revived session.
-                    if let Err(err) = driver_handle
-                        .lock()
-                        .await
-                        .persist_current_machine_lifecycle("resume")
-                        .await
-                    {
+                    let persistence_result = {
+                        let mut driver = driver_handle.lock().await;
+                        driver.persist_current_machine_lifecycle("resume").await
+                    };
+                    if let Err(err) = persistence_result {
+                        let restored = Self::restore_dsl_authority_snapshot_if_current(
+                            &dsl_authority_shared,
+                            staged.committed_snapshot,
+                            staged.previous_snapshot,
+                        );
+                        if restored {
+                            driver_handle
+                                .lock()
+                                .await
+                                .sync_control_projection_from_dsl_authority();
+                        }
+                        let err = if restored {
+                            err
+                        } else {
+                            RuntimeDriverError::Internal(format!(
+                                "{err}; additionally failed to restore generated Stopped authority after revival persistence failure"
+                            ))
+                        };
                         drop(registration_gate_guard);
                         return Err(if inserted_by_call {
                             self.compensate_inserted_session_error(
@@ -643,6 +660,19 @@ impl MeerkatMachine {
                             err
                         });
                     }
+                    let mut sessions = self.sessions.write().await;
+                    let entry =
+                        sessions
+                            .get_mut(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?;
+                    if entry.epoch_id != epoch_id || !Arc::ptr_eq(&entry.driver, &driver_handle) {
+                        return Err(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        });
+                    }
+                    entry.retire_completed_runtime_stop_after_revival(&session_id)?;
                 }
             }
             Err(reason) => {
@@ -1066,7 +1096,9 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Bool(
                     sessions
                         .get(&session_id)
-                        .map(RuntimeSessionEntry::generated_executor_registration_active)
+                        .map(
+                            RuntimeSessionEntry::generated_executor_registration_has_viable_attachment,
+                        )
                         .unwrap_or(false),
                 ))
             }

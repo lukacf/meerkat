@@ -528,6 +528,19 @@ fn test_trusted_peer_descriptor(name: &str, address: &str) -> TrustedPeerDescrip
     .expect("valid non-zero test trusted peer descriptor")
 }
 
+async fn unregister_runtime_session_until_complete(
+    adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+    loop {
+        match adapter.unregister_session(session_id).await {
+            Ok(()) => return Ok(()),
+            Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 async fn install_machine_peer_request_response_authority(
     adapter: &meerkat_runtime::MeerkatMachine,
     runtime: &Arc<meerkat_comms::CommsRuntime>,
@@ -1312,6 +1325,7 @@ struct MockSessionService {
     create_session_max_in_flight: AtomicU64,
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
+    start_turn_interrupts: RwLock<HashMap<SessionId, tokio::sync::watch::Sender<u64>>>,
     inject_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
@@ -1384,6 +1398,7 @@ impl MockSessionService {
             create_session_max_in_flight: AtomicU64::new(0),
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
+            start_turn_interrupts: RwLock::new(HashMap::new()),
             inject_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
@@ -2021,6 +2036,11 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .insert(session_id.clone(), comms);
+        self.start_turn_interrupts
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_insert_with(|| tokio::sync::watch::channel(0).0);
         if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
             session.set_system_prompt(system_prompt.to_string());
         }
@@ -2204,6 +2224,12 @@ impl SessionService for MockSessionService {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        let mut interrupt_rx = self
+            .start_turn_interrupts
+            .read()
+            .await
+            .get(id)
+            .map(tokio::sync::watch::Sender::subscribe);
         self.flow_turn_overlays
             .write()
             .await
@@ -2254,7 +2280,23 @@ impl SessionService for MockSessionService {
         }
         let start_turn_delay = self.start_turn_delay_ms.load(Ordering::Relaxed);
         if start_turn_delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(start_turn_delay)).await;
+            match interrupt_rx.as_mut() {
+                Some(interrupt_rx) => {
+                    tokio::select! {
+                        () = tokio::time::sleep(std::time::Duration::from_millis(start_turn_delay)) => {}
+                        changed = interrupt_rx.changed() => {
+                            if changed.is_ok() {
+                                return Err(SessionError::Agent(
+                                    meerkat_core::error::AgentError::Cancelled,
+                                ));
+                            }
+                        }
+                    }
+                }
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(start_turn_delay)).await;
+                }
+            }
         }
         if self
             .fail_start_turn
@@ -2362,6 +2404,9 @@ impl SessionService for MockSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
+        if let Some(interrupt_tx) = self.start_turn_interrupts.read().await.get(id) {
+            interrupt_tx.send_modify(|generation| *generation = generation.saturating_add(1));
+        }
         if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
             notifier.notify_waiters();
         }
@@ -2928,6 +2973,7 @@ impl MobSessionService for MockSessionService {
         self.sessions.write().await.remove(session_id);
         self.live_session_data.write().await.remove(session_id);
         self.keep_alive_notifiers.write().await.remove(session_id);
+        self.start_turn_interrupts.write().await.remove(session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.external_tools_by_session
             .write()
@@ -9023,8 +9069,7 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
         .cloned()
         .expect("session-backed worker");
 
-    adapter
-        .unregister_session(&bridge_session_id)
+    unregister_runtime_session_until_complete(adapter.as_ref(), &bridge_session_id)
         .await
         .expect("bridge session should unregister cleanly");
 
@@ -27815,6 +27860,175 @@ async fn test_stop_pending_spawn_archive_failure_retains_cleanup_anchor_for_retr
 }
 
 #[tokio::test]
+async fn test_retire_retry_drains_exact_failed_pending_cleanup_before_classifying_later_spawn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let agent_identity = AgentIdentity::from("w-retire-pending-cleanup-retry");
+    let committed_session_id = handle
+        .spawn(ProfileName::from("worker"), agent_identity.clone(), None)
+        .await
+        .expect("spawn committed member")
+        .bridge_session_id()
+        .expect("session-backed committed member")
+        .clone();
+
+    // Materialize the provisioned session that the pending-spawn abort owns.
+    // The test-only actor seam stages only the real pending shell capability;
+    // the public Retire below performs classification, CancelPendingSpawn,
+    // abort/archive, and exact anchor retention through production code.
+    let pending_session = Session::new();
+    let pending_session_id = pending_session.id().clone();
+    service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "retained pending cleanup".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(pending_session),
+                comms_name: Some(test_comms_name("worker", "w-retire-pending-cleanup-anchor")),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create provisioned pending-spawn session");
+    service.set_archive_failure(&pending_session_id).await;
+
+    handle
+        .debug_stage_pending_spawn_for_retire(
+            agent_identity.clone(),
+            pending_session_id.clone(),
+            meerkat_core::ops::OperationId::new(),
+        )
+        .await
+        .expect("stage exact pending-spawn capability for committed member");
+    let first_error = handle
+        .retire(agent_identity.clone())
+        .await
+        .expect_err("first exact pending-spawn abort must retain its failed cleanup anchor");
+    assert!(
+        first_error.to_string().contains("mock archive failure"),
+        "archive refusal should surface from the first abort, got: {first_error}"
+    );
+    let after_first_failure = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after first failed abort");
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from(agent_identity.as_str());
+    assert!(
+        !after_first_failure
+            .pending_spawn_sessions
+            .contains_key(&dsl_identity),
+        "CancelPendingSpawn must commit before the mechanical cleanup failure"
+    );
+    assert!(
+        service
+            .has_live_session(&pending_session_id)
+            .await
+            .expect("read retained pending session"),
+        "failed abort must retain the exact provisioned session for retry"
+    );
+
+    // A distinct later pending incarnation may appear before the caller
+    // retries. While the old exact cleanup still fails, Retire must stop before
+    // classification and leave this current machine-owned pending session
+    // untouched.
+    let later_pending_session = Session::new();
+    let later_pending_session_id = later_pending_session.id().clone();
+    service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "later pending incarnation".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(later_pending_session),
+                comms_name: Some(test_comms_name("worker", "w-retire-pending-cleanup-later")),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create later provisioned pending-spawn session");
+    handle
+        .debug_stage_pending_spawn_for_retire(
+            agent_identity.clone(),
+            later_pending_session_id.clone(),
+            meerkat_core::ops::OperationId::new(),
+        )
+        .await
+        .expect("stage later pending incarnation");
+    let retry_error = handle
+        .retire(agent_identity.clone())
+        .await
+        .expect_err("retry must fail before classifying while exact older cleanup is refused");
+    assert!(
+        retry_error.to_string().contains("mock archive failure"),
+        "retry should surface the retained exact cleanup failure, got: {retry_error}"
+    );
+    let after_failed_retry = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after failed retry");
+    assert_eq!(
+        after_failed_retry
+            .pending_spawn_sessions
+            .get(&dsl_identity)
+            .map(|session_id| session_id.0.clone()),
+        Some(later_pending_session_id.to_string()),
+        "a failed older-anchor retry must not classify or cancel a later pending incarnation"
+    );
+
+    // Clear the original cleanup refusal. The next public retire must drain
+    // the retained exact session first, then classify the distinct current
+    // pending incarnation through MobMachine and clean it through the normal
+    // cancellation path before retiring the committed member.
+    service.clear_archive_failure(&pending_session_id).await;
+    handle
+        .retire(agent_identity.clone())
+        .await
+        .expect("retry should clean the exact retained anchor then retire the member");
+
+    assert!(
+        !service
+            .has_live_session(&pending_session_id)
+            .await
+            .expect("read cleaned pending session"),
+        "successful retry must archive the exact retained pending session"
+    );
+    assert!(
+        !service
+            .has_live_session(&later_pending_session_id)
+            .await
+            .expect("read cleaned later pending session"),
+        "post-anchor classification must cancel the distinct current pending incarnation"
+    );
+    assert!(
+        !service
+            .has_live_session(&committed_session_id)
+            .await
+            .expect("read retired committed session"),
+        "normal machine classification must continue after exact anchor cleanup"
+    );
+    assert!(
+        handle
+            .get_member(&agent_identity)
+            .await
+            .expect("read retired member")
+            .is_none(),
+        "retry must complete retirement after exact cleanup converges"
+    );
+}
+
+#[tokio::test]
 async fn test_retire_absent_does_not_cancel_later_pending_spawn_incarnation() {
     let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -38825,8 +39039,7 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
         .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
         .await
         .expect("session-backed");
-    adapter
-        .unregister_session(&session_id)
+    unregister_runtime_session_until_complete(adapter.as_ref(), &session_id)
         .await
         .expect("bridge session should unregister cleanly");
 
@@ -41352,19 +41565,18 @@ async fn test_resume_reconciliation_runs_spawn_customizer_for_missing_session_re
         .resolve_bridge_session_id(&spawned.agent_identity)
         .await
         .expect("bridge session");
-    // Drop the live session while keeping the durable snapshot loadable
-    // (archive is terminal for durable snapshots).
+    // Mirror real teardown ordering: unregister while the live session still
+    // owns the interrupt capability needed to unwind an autonomous turn. Only
+    // then drop the live material while keeping the durable snapshot loadable
+    // (archive would be terminal for that snapshot). Reversing this order
+    // strands the exact executor in a non-interruptible mock turn and violates
+    // the production archive owner contract.
+    unregister_runtime_session_until_complete(adapter.as_ref(), &session_id)
+        .await
+        .expect("bridge session should unregister cleanly");
     MobSessionService::discard_live_session(service.as_ref(), &session_id)
         .await
         .expect("discard live session before resume reconciliation");
-    // Mirror real teardown: dropping the live session detaches its peer
-    // ingress and unregisters its runtime. The machine's transport-swap guard
-    // rightly rejects re-attaching a different comms runtime to a stale
-    // pre-teardown ingress, so the simulation must not leave one behind.
-    adapter
-        .unregister_session(&session_id)
-        .await
-        .expect("bridge session should unregister cleanly");
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
@@ -44327,6 +44539,7 @@ enum MobRuntimeParityProbeInput {
     Spawn,
     AuthorizeSpawnProfile,
     ClassifyMemberWait,
+    ClassifyRetirePendingSpawnDisposition,
     EnsureMember,
     Reconcile,
     SubmitWork,
@@ -44605,6 +44818,9 @@ fn mob_runtime_parity_probe_for_input_variant(
         }
         SchemaMobMachineInputVariant::ClassifyMemberWait => {
             Some(MobRuntimeParityProbeInput::ClassifyMemberWait)
+        }
+        SchemaMobMachineInputVariant::ClassifyRetirePendingSpawnDisposition => {
+            Some(MobRuntimeParityProbeInput::ClassifyRetirePendingSpawnDisposition)
         }
         SchemaMobMachineInputVariant::EnsureMember => {
             Some(MobRuntimeParityProbeInput::EnsureMember)
@@ -46203,6 +46419,7 @@ fn mob_modeled_schema_result_summary(
         MobRuntimeParityProbeInput::EnsureMember
         | MobRuntimeParityProbeInput::AuthorizeSpawnProfile
         | MobRuntimeParityProbeInput::ClassifyMemberWait
+        | MobRuntimeParityProbeInput::ClassifyRetirePendingSpawnDisposition
         | MobRuntimeParityProbeInput::Reconcile
         | MobRuntimeParityProbeInput::CancelFlow
         | MobRuntimeParityProbeInput::Retire
@@ -46373,6 +46590,7 @@ async fn mob_runtime_parity_prepare_probe(
         MobRuntimeParityProbeInput::Spawn
         | MobRuntimeParityProbeInput::AuthorizeSpawnProfile
         | MobRuntimeParityProbeInput::ClassifyMemberWait
+        | MobRuntimeParityProbeInput::ClassifyRetirePendingSpawnDisposition
         | MobRuntimeParityProbeInput::Stop
         | MobRuntimeParityProbeInput::Resume
         | MobRuntimeParityProbeInput::Complete
@@ -46450,6 +46668,17 @@ async fn mob_runtime_parity_execute_probe(
             .handle
             .apply_machine_input_effects(
                 crate::machines::mob_machine::MobMachineInput::ClassifyMemberWait {
+                    agent_identity: crate::machines::mob_machine::AgentIdentity::from(
+                        fixture.worker_identity.as_str(),
+                    ),
+                },
+            )
+            .await
+            .map(|_| summarize_mob_runtime_success(probe, "unit")),
+        MobRuntimeParityProbeInput::ClassifyRetirePendingSpawnDisposition => fixture
+            .handle
+            .apply_machine_input_effects(
+                crate::machines::mob_machine::MobMachineInput::ClassifyRetirePendingSpawnDisposition {
                     agent_identity: crate::machines::mob_machine::AgentIdentity::from(
                         fixture.worker_identity.as_str(),
                     ),
@@ -47254,6 +47483,9 @@ fn mob_runtime_parity_probe_input_variant(
         }
         MobRuntimeParityProbeInput::ClassifyMemberWait => {
             Some(SchemaMobMachineInputVariant::ClassifyMemberWait)
+        }
+        MobRuntimeParityProbeInput::ClassifyRetirePendingSpawnDisposition => {
+            Some(SchemaMobMachineInputVariant::ClassifyRetirePendingSpawnDisposition)
         }
         MobRuntimeParityProbeInput::EnsureMember => {
             Some(SchemaMobMachineInputVariant::EnsureMember)

@@ -87,6 +87,41 @@ impl MeerkatMachine {
         )
     }
 
+    /// Stage a fieldless transition on behalf of the runtime owner itself.
+    /// Runtime-owner observations are intentionally excluded from the generic
+    /// typed-internal stager so only the attachment owner can publish them.
+    pub(super) fn stage_runtime_owner_dsl_transition_on_authority(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        input: MeerkatMachineFieldlessRuntimeInternalInput,
+    ) -> Result<StagedSessionDslInput, String> {
+        let variant = input.input_variant();
+        if !canonical_meerkat_machine_runtime_internal_input_variant_manifest().contains(&variant) {
+            return Err(format!(
+                "runtime-owner input {variant:?} is absent from the typed production manifest"
+            ));
+        }
+        if !canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+            .contains(&variant)
+        {
+            return Err(format!(
+                "runtime-owner input {variant:?} is absent from the typed fieldless manifest"
+            ));
+        }
+        if input.authority()
+            != crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalAuthority::RuntimeOwner
+        {
+            return Err(format!(
+                "fieldless runtime-internal input {variant:?} is owned by {:?}, not RuntimeOwner",
+                input.authority()
+            ));
+        }
+        Self::stage_dsl_transition_on_authority_after_typed_gate(
+            authority,
+            input.dsl_input(),
+            variant.as_str(),
+        )
+    }
+
     pub(super) async fn stage_session_dsl_input(
         &self,
         session_id: &SessionId,

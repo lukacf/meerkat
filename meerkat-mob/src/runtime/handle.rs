@@ -5407,6 +5407,22 @@ impl MobHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn debug_stage_pending_spawn_for_retire(
+        &self,
+        agent_identity: AgentIdentity,
+        pending_spawn_session_id: SessionId,
+        operation_id: meerkat_core::ops::OperationId,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::StagePendingSpawnForRetireTest {
+            agent_identity,
+            pending_spawn_session_id,
+            operation_id,
+            reply_tx,
+        })
+        .await?
+    }
+
     /// 0.7.2 L5 test seam: deliver a kickoff completion outcome through the
     /// REAL actor command path (`MobCommand::KickoffOutcomeResolved`), exactly
     /// as the spawned completion-waiter task does. Used by the

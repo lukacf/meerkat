@@ -141,10 +141,12 @@ via cargo-semver-checks against the published baselines).
 
 - Runtime executor stop now transfers required post-terminalization cleanup to
   an external teardown task and resolves a request-specific acknowledgement
-  only after loop exit, cleanup, unregister, and completion authority settle.
-  Cleanup failure is returned to the exact stop caller and retained unregister
-  authority remains retryable instead of timing out on a two-second self-join
-  or reporting success from the projected `Stopped` state alone.
+  only after loop exit, cleanup, and completion authority settle. Ordinary
+  stop preserves the registered `Stopped` session; explicit unregister and
+  executor-required teardown continue through durable registry removal.
+  Cleanup failure is returned to the exact stop caller and the exact executor
+  handoff remains retryable instead of timing out on a two-second self-join or
+  reporting success from the projected `Stopped` state alone.
 - Sticky model fallback now prevalidates extraction/provider parameters and
   target-client schema lowering, reversibly activates the exact prebuilt client,
   and preauthorizes identity, effective-registry-scoped catalog-profile

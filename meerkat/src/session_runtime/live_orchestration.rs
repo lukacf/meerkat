@@ -10,23 +10,16 @@
 //! that don't ship a live channel (CLI today, MCP-server, embedded
 //! examples) don't pull in the `meerkat-live` dependency.
 //!
-//! The load-bearing methods (`precheck_live_open`,
-//! `recover_live_session_for_realtime_open`,
-//! `materialize_staged_session_for_realtime_open`,
-//! `realtime_session_open_config`, `live_open_config_for_session`,
-//! `propagate_config_to_live_channels`) currently live in
-//! `meerkat-rpc::SessionRuntime` because they consume a long list of
-//! still-RPC-private helpers (`replay_promoted_system_context_on_service`,
-//! `current_materialized_llm_identity`, `archive_runtime_cleanup`,
-//! `runtime_state_ops`). Once the corresponding accessors land in
-//! W3-A/W3-B they will be promoted onto `LiveOrchestrator<'a>`.
+//! The load-bearing open, recovery, staged-materialization, configuration, and
+//! propagation methods are owned by `LiveOrchestrator<'a>`. RPC supplies its
+//! surface-specific adapters and policy inputs instead of reimplementing the
+//! lifecycle orchestration.
 //!
 //! These free functions only depend on `meerkat-llm-core`, `meerkat-core`,
 //! and the model catalog — they do NOT import `meerkat-live`, so they
 //! compile unconditionally regardless of the `live` feature. The
-//! `live` feature is reserved for the future
-//! [`crate::session_runtime::live_orchestration::LiveOrchestrator`]
-//! struct that will own the methods consuming `LiveAdapterHost`.
+//! `live` feature gates the [`crate::session_runtime::live_orchestration::LiveOrchestrator`]
+//! methods that consume `LiveAdapterHost`.
 
 use meerkat_core::error::AgentError;
 use meerkat_core::service::SessionError;
@@ -960,6 +953,16 @@ mod orchestrator {
                     Ok(())
                 }
                 Err(error) => {
+                    if let Err(replenish_error) = promotion_cleanup
+                        .replenish_staged_capacity_admission(self.service)
+                        .await
+                    {
+                        promotion_cleanup.restore_now().await;
+                        return Err(combine_staged_materialization_replenish_errors(
+                            error,
+                            replenish_error,
+                        ));
+                    }
                     promotion_cleanup.restore_now().await;
                     Err(error)
                 }
@@ -1767,9 +1770,21 @@ mod orchestrator {
         )))
     }
 
+    fn combine_staged_materialization_replenish_errors(
+        primary_error: SessionError,
+        replenish_error: SessionError,
+    ) -> SessionError {
+        SessionError::Agent(AgentError::InternalError(format!(
+            "{primary_error}; additionally failed to replenish staged capacity before materialization rollback: {replenish_error}"
+        )))
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::combine_recovery_materialization_cleanup_errors;
+        use super::{
+            combine_recovery_materialization_cleanup_errors,
+            combine_staged_materialization_replenish_errors,
+        };
         use meerkat_core::error::AgentError;
         use meerkat_core::service::SessionError;
 
@@ -1786,6 +1801,21 @@ mod orchestrator {
             let rendered = combined.to_string();
             assert!(rendered.contains("synthetic materialization failure"));
             assert!(rendered.contains("synthetic unregister failure"));
+        }
+
+        #[test]
+        fn staged_materialization_error_retains_replenish_failure() {
+            let combined = combine_staged_materialization_replenish_errors(
+                SessionError::Agent(AgentError::InternalError(
+                    "synthetic materialization failure".to_string(),
+                )),
+                SessionError::Agent(AgentError::InternalError(
+                    "synthetic capacity replenish failure".to_string(),
+                )),
+            );
+            let rendered = combined.to_string();
+            assert!(rendered.contains("synthetic materialization failure"));
+            assert!(rendered.contains("synthetic capacity replenish failure"));
         }
     }
 }

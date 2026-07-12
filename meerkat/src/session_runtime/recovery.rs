@@ -6,25 +6,26 @@
 //! `recovered_create_request*`).
 //!
 //! `recovery_overrides_from_turn` (depends on the RPC-private
-//! `TurnOverrides`), `recovery_external_tools` (depends on the RPC
-//! callback dispatcher), and `cleanup_recovered_runtime_if_new` (depends
-//! on the RPC-private `ArchiveRuntimeCleanup` — deferred to W3-A) stay
-//! in `meerkat-rpc` until those upstream blockers clear.
+//! `TurnOverrides`) and `recovery_external_tools` (depends on the RPC
+//! callback dispatcher) remain in `meerkat-rpc`. Runtime rollback cleanup is
+//! surface-agnostic and owned by `LiveOrchestrator` via
+//! [`super::runtime_state::ArchiveRuntimeCleanup`].
 
 use meerkat_core::service::CreateSessionRequest;
 
 /// Result of `recovered_create_request*`: a [`CreateSessionRequest`]
 /// reconstructed from a persisted session, plus a flag indicating
-/// whether the recovery process registered a fresh runtime binding for
-/// the session (so callers can roll back the registration on
+/// whether the runtime binding already existed before recovery (so callers
+/// roll back only a binding created by this recovery attempt on
 /// pre-run-apply failure via `cleanup_recovered_runtime_if_new`).
 #[derive(Debug)]
 pub struct RecoveredCreateRequest {
     /// Reconstructed create request that surfaces feed back into the
     /// session service.
     pub request: CreateSessionRequest,
-    /// Whether the recovery flow registered a *new* runtime binding for
-    /// this session (i.e. it was not already live in the runtime).
+    /// Whether this session already had a runtime binding before recovery.
+    /// `false` means this recovery attempt created the binding and owns
+    /// rollback if later preparation fails.
     pub runtime_was_registered: bool,
 }
 

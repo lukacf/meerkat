@@ -1531,7 +1531,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_loop_drained`
   - `comms_drain_exited`
   - `completion_waiters_drained`
-- To: `Idle`
+- To: `Retired`
 
 ### `UnregisterSessionStopped`
 - From: `Stopped`

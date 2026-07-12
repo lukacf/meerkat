@@ -298,10 +298,9 @@ impl ArchiveRuntimeCleanup {
 /// [`discard_stale_live_session`], [`live_session_is_stale`]). Surfaces
 /// build one per call from their own SessionRuntime borrows.
 ///
-/// `archived_persisted_session_without_live` and `try_recover_persisted_session`
-/// stay in `meerkat-rpc` until W3-A: the former depends on the RPC-private
-/// `ArchiveRuntimeCleanup`; the latter is a `#[cfg(test)]` helper that
-/// composes RPC-private `TurnOverrides` and `RpcError`.
+/// RPC-facing archived-session rejection and `try_recover_persisted_session`
+/// remain in `meerkat-rpc`: they compose RPC-private `TurnOverrides`,
+/// `RpcError`, and surface policy around these shared state operations.
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 mod ops {
     use std::sync::Arc;

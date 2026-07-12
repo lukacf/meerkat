@@ -17,11 +17,9 @@ use meerkat::{
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::AgentError;
 use meerkat_core::event::AgentEvent;
-#[cfg(test)]
-use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorBoundaryHandle,
+    CoreExecutorError, CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
@@ -119,7 +117,10 @@ fn wrap_mcp_runtime_pre_admission_cleanup(
         let release_pre_admission = match completion {
             Ok(cleanup_observation) => {
                 context
-                    .cleanup_runtime_after_completion_outcome(&session_id, cleanup_observation)
+                    .cleanup_runtime_after_completion_outcome_locked(
+                        &session_id,
+                        cleanup_observation,
+                    )
                     .await?
             }
             Err(error) => {
@@ -194,7 +195,28 @@ impl McpRuntimeIngressContext {
         &self,
         session_id: &SessionId,
     ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
-        if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
+        let lock = self.runtime_registration_lock(session_id);
+        let _guard = lock.mutex().lock().await;
+        self.runtime_session_state_locked(session_id).await
+    }
+
+    /// Materialize and attach while the caller owns the per-session
+    /// registration lock. Accept paths already own this lock while carrying a
+    /// reserved admission, so they use this non-reentrant form.
+    async fn runtime_session_state_locked(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
+        let existing = self.runtime_sessions.read().await.get(session_id).cloned();
+        let state = existing
+            .clone()
+            .unwrap_or_else(|| Arc::new(McpRuntimeSessionState::default()));
+        if !self.service.has_live_session(session_id).await? {
+            self.rematerialize_persisted_session(session_id, Arc::clone(&state))
+                .await?;
+            return Ok(state);
+        }
+        if let Some(existing) = existing {
             if self
                 .runtime_adapter
                 .session_has_executor(session_id)
@@ -216,7 +238,6 @@ impl McpRuntimeIngressContext {
             return Ok(existing);
         }
 
-        let state = Arc::new(McpRuntimeSessionState::default());
         let executor = Box::new(McpSessionRuntimeExecutor::new(
             self.clone(),
             session_id.clone(),
@@ -240,6 +261,13 @@ impl McpRuntimeIngressContext {
         self.runtime_session_state(session_id).await
     }
 
+    pub(crate) async fn ensure_session_locked(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
+        self.runtime_session_state_locked(session_id).await
+    }
+
     pub(crate) async fn current_callback_tools(
         &self,
         session_id: &SessionId,
@@ -259,18 +287,30 @@ impl McpRuntimeIngressContext {
         callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
         replace_runtime_attachment: bool,
     ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
+        let lock = self.runtime_registration_lock(session_id);
+        let _guard = lock.mutex().lock().await;
+        self.configure_session_locked(session_id, callback_tools, replace_runtime_attachment)
+            .await
+    }
+
+    pub(crate) async fn configure_session_locked(
+        &self,
+        session_id: &SessionId,
+        callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
+        replace_runtime_attachment: bool,
+    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
         if replace_runtime_attachment {
             self.runtime_adapter
                 .unregister_session(session_id)
                 .await
                 .map_err(runtime_driver_error_to_session_error)?;
         }
-        let state = self.runtime_session_state(session_id).await?;
+        let state = self.runtime_session_state_locked(session_id).await?;
         state.set_callback_tools(callback_tools).await;
         Ok(state)
     }
 
-    async fn clear_runtime_session_state(
+    async fn clear_runtime_session_state_locked(
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
@@ -304,7 +344,7 @@ impl McpRuntimeIngressContext {
             .await;
     }
 
-    async fn clear_runtime_session_state_after_verified_termination(
+    async fn clear_runtime_session_state_after_verified_termination_locked(
         &self,
         session_id: &SessionId,
         cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
@@ -319,7 +359,7 @@ impl McpRuntimeIngressContext {
                 "MCP runtime termination cleanup for {session_id} expected an already-absent registration"
             )));
         }
-        self.clear_runtime_session_state(session_id).await
+        self.clear_runtime_session_state_locked(session_id).await
     }
 
     /// Idempotently drive machine-owned unregister to verified absence.
@@ -343,7 +383,16 @@ impl McpRuntimeIngressContext {
     }
 
     pub(crate) async fn clear_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        self.clear_runtime_session_state(session_id).await?;
+        let lock = self.runtime_registration_lock(session_id);
+        let _guard = lock.mutex().lock().await;
+        self.clear_session_locked(session_id).await
+    }
+
+    pub(crate) async fn clear_session_locked(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.clear_runtime_session_state_locked(session_id).await?;
         self.discard_all_runtime_pre_admissions_for_session(session_id)
             .await;
         Ok(())
@@ -370,7 +419,9 @@ impl McpRuntimeIngressContext {
             .await
     }
 
-    async fn cleanup_runtime_after_completion_outcome(
+    /// Resolve completion cleanup while the caller owns the per-session
+    /// runtime-registration lock.
+    async fn cleanup_runtime_after_completion_outcome_locked(
         &self,
         session_id: &SessionId,
         cleanup_observation: meerkat_runtime::completion::CompletionCleanupObservation,
@@ -431,7 +482,7 @@ impl McpRuntimeIngressContext {
                 if runtime_termination_cleanup
                     && !self.runtime_adapter.contains_session(session_id).await
                 {
-                    self.clear_runtime_session_state_after_verified_termination(
+                    self.clear_runtime_session_state_after_verified_termination_locked(
                         session_id,
                         &runtime_termination_proof,
                     )
@@ -463,14 +514,16 @@ impl McpRuntimeIngressContext {
             let clear_error = if runtime_termination_cleanup
                 && !self.runtime_adapter.contains_session(session_id).await
             {
-                self.clear_runtime_session_state_after_verified_termination(
+                self.clear_runtime_session_state_after_verified_termination_locked(
                     session_id,
                     &runtime_termination_proof,
                 )
                 .await
                 .err()
             } else {
-                self.clear_runtime_session_state(session_id).await.err()
+                self.clear_runtime_session_state_locked(session_id)
+                    .await
+                    .err()
             };
             if discard_error.is_some() || clear_error.is_some() {
                 let mut causes = Vec::new();
@@ -674,7 +727,9 @@ impl McpRuntimeIngressContext {
         let requested_input_id = input.id().clone();
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-        let pre_admission = match self
+        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
+        let runtime_state_existed = self.runtime_sessions.read().await.contains_key(session_id);
+        let mut pre_admission = match self
             .service
             .reserve_runtime_turn_admission(session_id)
             .await
@@ -686,6 +741,45 @@ impl McpRuntimeIngressContext {
                 });
             }
         };
+        if !self
+            .service
+            .has_live_session(session_id)
+            .await
+            .map_err(|error| meerkat_runtime::RuntimeDriverError::Internal(error.to_string()))?
+        {
+            let admission = pre_admission.take().ok_or_else(|| {
+                meerkat_runtime::RuntimeDriverError::Internal(
+                    "persisted-only MCP recovery lost its reserved admission".to_string(),
+                )
+            })?;
+            let state = self
+                .runtime_sessions
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(McpRuntimeSessionState::default()));
+            if let Err(error) = self
+                .rematerialize_persisted_session_with_admission(session_id, state, admission)
+                .await
+            {
+                if let Err(cleanup) = self
+                    .clear_session_if_new_locked(
+                        session_id,
+                        runtime_was_registered,
+                        runtime_state_existed,
+                    )
+                    .await
+                {
+                    return Err(meerkat_runtime::RuntimeDriverError::Internal(format!(
+                        "{error}; additionally failed to clear newly rematerialized MCP runtime session: {cleanup}"
+                    )));
+                }
+                return Err(meerkat_runtime::RuntimeDriverError::Internal(
+                    error.to_string(),
+                ));
+            }
+        }
         let mut pre_admission_registration = None;
         if let Some(admission) = pre_admission {
             if let Err(error) = self
@@ -709,9 +803,7 @@ impl McpRuntimeIngressContext {
             ));
         }
 
-        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
-        let runtime_state_existed = self.runtime_sessions.read().await.contains_key(session_id);
-        let state = match self.runtime_session_state(session_id).await {
+        let state = match self.runtime_session_state_locked(session_id).await {
             Ok(state) => state,
             Err(error) => {
                 self.discard_runtime_pre_admission(session_id, &requested_input_id)
@@ -1289,10 +1381,10 @@ async fn apply_runtime_turn(
         let appends = pending_system_context_appends(&staged.context_appends);
         let boundary = primitive.apply_boundary();
         let contributing_input_ids = staged.contributing_input_ids.clone();
-        let mut pre_admission = context
+        let pre_admission = context
             .take_runtime_pre_admission(session_id, &contributing_input_ids)
             .await;
-        let apply_result = if let Some(admission) = pre_admission.take() {
+        return if let Some(admission) = pre_admission {
             match context
                 .service
                 .apply_runtime_context_appends_with_recoverable_reserved_admission(
@@ -1307,7 +1399,7 @@ async fn apply_runtime_turn(
             {
                 Ok(output) => Ok(output),
                 Err((error, admission)) => {
-                    pre_admission = admission;
+                    drop(admission);
                     Err(error)
                 }
             }
@@ -1322,39 +1414,6 @@ async fn apply_runtime_turn(
                     contributing_input_ids.clone(),
                 )
                 .await
-        };
-        return match apply_result {
-            Ok(output) => Ok(output),
-            Err(SessionError::NotFound { .. }) => {
-                if let Some(admission) = pre_admission.take() {
-                    if let Err(error) =
-                        Box::pin(context.rematerialize_persisted_session_with_admission(
-                            session_id,
-                            state.clone(),
-                            admission,
-                        ))
-                        .await
-                    {
-                        return Err(error);
-                    }
-                } else if let Err(error) =
-                    Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
-                        .await
-                {
-                    return Err(error);
-                }
-                context
-                    .service
-                    .apply_runtime_context_appends_with_boundary(
-                        session_id,
-                        run_id,
-                        appends,
-                        boundary,
-                        contributing_input_ids,
-                    )
-                    .await
-            }
-            Err(error) => Err(error),
         };
     }
 
@@ -1379,18 +1438,18 @@ async fn apply_runtime_turn(
 
     let mut turn_request = StartTurnRequest {
         injected_context: Vec::new(),
-        prompt: prompt.clone(),
+        prompt,
         system_prompt: None,
-        event_tx: event_tx.clone(),
+        event_tx,
         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
             HandlingMode::Queue,
             primitive
                 .turn_metadata()
                 .and_then(|meta| meta.turn_tool_overlay.clone()),
-            pre_turn_context_appends.clone(),
+            pre_turn_context_appends,
             primitive.turn_metadata().cloned(),
         )
-        .with_typed_turn_appends(typed_turn_appends.clone()),
+        .with_typed_turn_appends(typed_turn_appends),
     };
     meerkat::surface::inject_workgraph_attention_turn_overlay(
         context.service.as_ref(),
@@ -1403,10 +1462,10 @@ async fn apply_runtime_turn(
         SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
     })?;
 
-    let mut pre_admission = context
+    let pre_admission = context
         .take_runtime_pre_admission(session_id, &contributing_input_ids)
         .await;
-    let apply_result = if let Some(admission) = pre_admission.take() {
+    if let Some(admission) = pre_admission {
         match context
             .service
             .apply_runtime_turn_with_recoverable_reserved_admission(
@@ -1421,7 +1480,7 @@ async fn apply_runtime_turn(
         {
             Ok(output) => Ok(output),
             Err((error, admission)) => {
-                pre_admission = admission;
+                drop(admission);
                 Err(error)
             }
         }
@@ -1436,64 +1495,6 @@ async fn apply_runtime_turn(
                 contributing_input_ids.clone(),
             )
             .await
-    };
-
-    match apply_result {
-        Ok(output) => Ok(output),
-        Err(SessionError::NotFound { .. }) => {
-            if let Some(admission) = pre_admission.take() {
-                if let Err(error) =
-                    Box::pin(context.rematerialize_persisted_session_with_admission(
-                        session_id,
-                        state.clone(),
-                        admission,
-                    ))
-                    .await
-                {
-                    return Err(error);
-                }
-            } else if let Err(error) =
-                Box::pin(context.rematerialize_persisted_session(session_id, state.clone())).await
-            {
-                return Err(error);
-            }
-            let mut recovered_turn_request = StartTurnRequest {
-                injected_context: Vec::new(),
-                prompt,
-                system_prompt: None,
-                event_tx,
-                runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                    HandlingMode::Queue,
-                    primitive
-                        .turn_metadata()
-                        .and_then(|meta| meta.turn_tool_overlay.clone()),
-                    pre_turn_context_appends,
-                    primitive.turn_metadata().cloned(),
-                )
-                .with_typed_turn_appends(typed_turn_appends),
-            };
-            meerkat::surface::inject_workgraph_attention_turn_overlay(
-                context.service.as_ref(),
-                Some(&context.workgraph_service),
-                session_id,
-                &mut recovered_turn_request,
-            )
-            .await
-            .map_err(|error| {
-                SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
-            })?;
-            context
-                .service
-                .apply_runtime_turn_outcome(
-                    session_id,
-                    run_id,
-                    recovered_turn_request,
-                    boundary,
-                    contributing_input_ids,
-                )
-                .await
-        }
-        Err(error) => Err(error),
     }
 }
 
@@ -2002,6 +2003,138 @@ mod tests {
                         .contains("mcp recovered context")
             }),
             "context-only recovery should persist MCP runtime context append: {system_context:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_apply_does_not_rematerialize_session_lost_after_locked_preparation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let created = context
+            .service
+            .create_session(create_request(
+                "lost after preparation",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create session");
+        let session_id = created.session_id;
+        let state = context
+            .ensure_session(&session_id)
+            .await
+            .expect("locked preparation attaches executor");
+        context
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("simulate live session loss after preparation");
+
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![ConversationContextAppend {
+                key: "lost-after-preparation".to_string(),
+                content: CoreRenderable::Text {
+                    text: "must not rematerialize from apply".to_string(),
+                },
+            }],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+        });
+        let mut executor =
+            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), state);
+        let error = CoreExecutor::apply(&mut executor, RunId::new(), primitive)
+            .await
+            .expect_err("post-preparation loss must surface to the runtime-loop handoff");
+        assert!(error.requires_runtime_teardown());
+        assert!(
+            !context
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("check live absence"),
+            "apply must not recreate the missing live session"
+        );
+        assert!(context.runtime_adapter.contains_session(&session_id).await);
+        context
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("external teardown owner unregisters after apply returns");
+    }
+
+    #[tokio::test]
+    async fn mcp_cold_start_materializes_before_non_empty_compaction_outbox_validation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let created = context
+            .service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "hello".into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(1024),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(meerkat_core::service::SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        context
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        context
+            .clear_session(&session_id)
+            .await
+            .expect("clear runtime registration");
+
+        let state = context
+            .ensure_session(&session_id)
+            .await
+            .expect("cold startup must materialize before attaching the runtime loop");
+        let mut executor =
+            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), Arc::clone(&state));
+        let intent: meerkat_core::CompactionProjectionIntent =
+            serde_json::from_value(serde_json::json!({
+                "projection": {
+                    "session_id": session_id,
+                    "parent_revision": "cold-parent",
+                    "revision": "cold-revision",
+                    "commit_fingerprint": "sha256:cold-start-outbox"
+                },
+                "summary_tokens": 3,
+                "messages_before": 2,
+                "messages_after": 1
+            }))
+            .expect("valid compaction intent fixture");
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            executor.reconcile_committed_compaction_projections(&[intent]),
+        )
+        .await
+        .expect("cold non-empty outbox reconciliation must not deadlock")
+        .expect_err("unbacked projection fixture must still fail closed");
+        assert!(
+            !error.to_string().contains("session not found"),
+            "non-empty outbox must reach the materialized memory owner: {error}"
+        );
+        assert!(
+            context
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("check live session"),
+            "startup reconciliation must materialize the durable memory owner first"
         );
     }
 
@@ -2857,6 +2990,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_cold_ensure_and_accept_share_one_materialization_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 1).await;
+        let created = context
+            .service
+            .create_session(create_request(
+                "cold concurrency",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create persisted session");
+        let session_id = created.session_id;
+        context
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        context
+            .clear_session(&session_id)
+            .await
+            .expect("remove initial runtime registration");
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let ensure_task = {
+            let context = context.clone();
+            let session_id = session_id.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                context.ensure_session(&session_id).await
+            })
+        };
+        let accept_task = {
+            let context = context.clone();
+            let session_id = session_id.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                context
+                    .accept_input_with_completion(
+                        &session_id,
+                        Input::Prompt(meerkat_runtime::PromptInput::new(
+                            "concurrent cold accept",
+                            None,
+                        )),
+                        None,
+                    )
+                    .await
+            })
+        };
+        barrier.wait().await;
+
+        let ensured = ensure_task
+            .await
+            .expect("ensure task join")
+            .expect("cold ensure succeeds");
+        let (outcome, handle) = accept_task
+            .await
+            .expect("accept task join")
+            .expect("cold accept succeeds");
+        assert!(matches!(outcome, AcceptOutcome::Accepted { .. }));
+        let installed = context
+            .runtime_sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("one runtime state installed");
+        assert!(Arc::ptr_eq(&ensured, &installed));
+        assert!(context.runtime_adapter.contains_session(&session_id).await);
+        if let Some(handle) = handle {
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
+                .await
+                .expect("concurrent cold accept completion must not hang")
+                .expect("concurrent cold accept completes successfully");
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_ensure_and_clear_never_publish_split_runtime_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let created = context
+            .service
+            .create_session(create_request(
+                "cold ensure clear race",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create persisted session");
+        let session_id = created.session_id;
+        context
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        context
+            .clear_session(&session_id)
+            .await
+            .expect("remove initial runtime registration");
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let ensure_task = {
+            let context = context.clone();
+            let session_id = session_id.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                context.ensure_session(&session_id).await
+            })
+        };
+        let clear_task = {
+            let context = context.clone();
+            let session_id = session_id.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                context.clear_session(&session_id).await
+            })
+        };
+        barrier.wait().await;
+        let ensured = ensure_task.await.expect("ensure task join");
+        clear_task
+            .await
+            .expect("clear task join")
+            .expect("clear succeeds");
+
+        let registered = context.runtime_adapter.contains_session(&session_id).await;
+        let installed = context
+            .runtime_sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned();
+        assert_eq!(registered, installed.is_some());
+        if let (Ok(ensured), Some(installed)) = (ensured, installed) {
+            assert!(
+                Arc::ptr_eq(&ensured, &installed),
+                "the attached executor and published runtime state must share one exact Arc"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn mcp_runtime_recovery_no_pending_releases_capacity() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
@@ -2868,7 +3145,7 @@ mod tests {
         .await
         .expect("completed target create should succeed");
         let session_id = target.session_id;
-        let state = context
+        context
             .ensure_session(&session_id)
             .await
             .expect("MCP runtime executor should attach");
@@ -2882,6 +3159,10 @@ mod tests {
             .unregister_session(&session_id)
             .await
             .expect("runtime session should unregister cleanly");
+        let state = context
+            .ensure_session(&session_id)
+            .await
+            .expect("canonical pre-attach recovery should rematerialize the session");
 
         let input_id = InputId::new();
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
@@ -2902,16 +3183,32 @@ mod tests {
             "expected no-pending terminal from recovered completed session: {output:?}"
         );
         assert!(
-            !context
+            context
                 .service
                 .has_live_session(&session_id)
                 .await
-                .expect("check recovered live session"),
-            "no-op recovery should discard the rematerialized live session"
+                .expect("check recovered live session before handoff cleanup"),
+            "direct apply must retain the rebuilt live session until the exact executor is handed off"
         );
         assert!(
             context.runtime_adapter.contains_session(&session_id).await,
             "direct apply helper must retain runtime authority until post-handoff unregister"
+        );
+
+        let mut executor =
+            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), state);
+        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
+            &mut executor,
+        )
+        .await
+        .expect("post-handoff MCP executor cleanup should discard the rebuilt live session");
+        assert!(
+            !context
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("check recovered live session after handoff cleanup"),
+            "no-op recovery should discard the rematerialized live session only after stop terminalization"
         );
 
         context

@@ -1364,42 +1364,22 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: impl Into<String>,
     ) -> Result<(), RuntimeDriverError> {
-        let machine = self.clone();
-        let session_id = session_id.clone();
-        let reason = reason.into();
-        let (result_tx, result_rx) = crate::tokio::sync::oneshot::channel();
-        let worker = crate::tokio::spawn(async move {
-            match machine
-                .execute_meerkat_machine_command(
-                    None,
-                    MeerkatMachineCommand::StopRuntimeExecutor { session_id, reason },
-                )
-                .await
-                .map_err(MeerkatMachine::driver_error_from_command_error)?
-            {
-                MeerkatMachineCommandResult::Unit => Ok(()),
-                other => Err(RuntimeDriverError::Internal(format!(
-                    "stop_runtime_executor: unexpected command result variant: {other:?}"
-                ))),
-            }
-        });
-        // A supervisor owns the worker result independently of this caller's
-        // future. Cancellation at DSL staging, effect delivery, or unregister
-        // finalization therefore cannot abandon a partially-open stop.
-        crate::tokio::spawn(async move {
-            let result = match worker.await {
-                Ok(result) => result,
-                Err(join_error) => Err(RuntimeDriverError::Internal(format!(
-                    "owned runtime-stop task failed: {join_error}"
-                ))),
-            };
-            let _ = result_tx.send(result);
-        });
-        result_rx.await.map_err(|_| {
-            RuntimeDriverError::Internal(
-                "owned runtime-stop supervisor dropped without a typed result".into(),
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::StopRuntimeExecutor {
+                    session_id: session_id.clone(),
+                    reason: reason.into(),
+                },
             )
-        })?
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "stop_runtime_executor: unexpected command result variant: {other:?}"
+            ))),
+        }
     }
 
     pub(super) async fn stop_runtime_executor_inner(
@@ -1407,99 +1387,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        let (effect_tx, effect, stop_completion) = {
-            let Some(gate) = self.session_mutation_gate(session_id).await else {
-                return Err(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                });
-            };
-            let gate_guard = Arc::clone(&gate).lock_owned().await;
-            let staged = match self
-                .stage_session_dsl_transition(
-                    session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
-                        reason,
-                    },
-                    "StopRuntimeExecutor",
-                )
-                .await
-            {
-                Ok(staged) => staged,
-                Err(reason) => {
-                    // Stage-first classification: a rejection on a Destroyed
-                    // binding surfaces as the terminal `Destroyed` truth.
-                    return Err(self
-                        .classify_session_dsl_rejection(session_id, reason)
-                        .await);
-                }
-            };
-            let projected_effect =
-                crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
-                    .map_err(RuntimeDriverError::Internal)?;
-
-            let effect_tx = {
-                let sessions = self.sessions.read().await;
-                let entry = sessions
-                    .get(session_id)
-                    .ok_or(RuntimeDriverError::NotReady {
-                        state: RuntimeState::Destroyed,
-                    })?;
-                if !Arc::ptr_eq(&entry.mutation_gate, &gate) {
-                    return Err(RuntimeDriverError::NotReady {
-                        state: RuntimeState::Destroyed,
-                    });
-                }
-                entry.effect_sender()
-            };
-            let (stop_completion_tx, stop_completion_rx) = tokio::sync::oneshot::channel();
-            let effect = projected_effect
-                .into_effect()
-                .with_stop_completion(stop_completion_tx)?;
-            drop(gate_guard);
-            (effect_tx, effect, stop_completion_rx)
-        };
-
-        if let Some(effect_tx) = effect_tx
-            && effect_tx.send(effect).await.is_ok()
-        {
-            let teardown_result = self.unregister_session_inner(session_id).await;
-            let acknowledged_result = stop_completion.await.map_err(|_| {
-                RuntimeDriverError::Internal(
-                    "runtime loop exited without acknowledging required stop cleanup".into(),
-                )
-            })?;
-            return match (teardown_result, acknowledged_result) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(teardown_error), Ok(())) => Err(RuntimeDriverError::Internal(format!(
-                    "unregister teardown failed after stop acknowledgement: {teardown_error}"
-                ))),
-                (_, Err(ack_error)) => Err(ack_error),
-            };
-        }
-
-        let (retained_teardown, driver, completions) = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            (
-                entry.runtime_loop_teardown.is_some(),
-                Arc::clone(&entry.driver),
-                Arc::clone(&entry.completions),
-            )
-        };
-        if retained_teardown {
-            // A dead/missing sender is not cleanup authority when an exact
-            // executor handoff still exists. Join the same owned teardown.
-            return self.unregister_session_inner(session_id).await;
-        }
-
-        // A registration that never owned an executor has no external cleanup
-        // obligation. Preserve the longstanding Stopped registration/revival
-        // contract while still terminalizing through machine authority.
-        crate::control_plane::terminalize_async_stop(&driver, Some(&completions)).await
+        self.request_runtime_stop(session_id, reason).await
     }
 
     /// Accept an input and return a completion handle that resolves when the

@@ -611,9 +611,10 @@ pub trait CoreExecutor: Send + Sync {
     /// after the runtime control plane has durably terminalized the stop.
     ///
     /// This hook must not unregister the runtime session. The machine-owned
-    /// unregister coordinator invokes it and owns registration removal; a
-    /// recursive unregister would attempt to join the coordinator from its own
-    /// worker task and is rejected fail-closed.
+    /// runtime-loop cleanup coordinator invokes it; ordinary stop preserves
+    /// the registered `Stopped` session, while explicit or executor-required
+    /// unregister separately owns registration removal. Recursive unregister
+    /// from this hook is rejected fail-closed.
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         Ok(())
     }

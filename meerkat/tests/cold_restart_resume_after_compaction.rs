@@ -28,11 +28,15 @@ mod tests {
     use meerkat_core::SessionBuildOptions;
     use meerkat_core::session_store::{SessionFilter, SessionStore, SessionStoreError};
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
-    use meerkat_core::{MemoryEnumerationRequest, MemorySearchScope, MemoryStore};
-    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    use meerkat_core::{
+        MemoryEnumerationRequest, MemoryIndexBatch, MemoryIndexRequest, MemoryIndexScope,
+        MemoryMetadata, MemorySearchScope, MemorySource, MemoryStore, MessageRange, SessionService,
+    };
     use meerkat_runtime::RuntimeStore;
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{Input, MeerkatMachine, PromptInput};
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    use meerkat_session::event_store::EventStore;
     use tokio::time::Duration;
 
     /// Deterministic client whose compaction response actually carries the
@@ -351,6 +355,259 @@ mod tests {
         builder.default_llm_client = Some(client);
         let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
         (Arc::new(service), adapter, runtime_store)
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn staged_compaction_projection(
+        session_id: &meerkat::SessionId,
+    ) -> meerkat_core::CompactionProjectionId {
+        serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "parent_revision": "pre-runtime-commit-parent",
+            "revision": "pre-runtime-commit-revision",
+            "commit_fingerprint": "sha256:pre-runtime-commit-crash-window",
+        }))
+        .expect("valid staged compaction projection fixture")
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn staged_compaction_batch(session_id: &meerkat::SessionId, content: &str) -> MemoryIndexBatch {
+        MemoryIndexBatch::single(
+            MemoryIndexRequest::new(
+                MemoryIndexScope::for_session(session_id.clone()),
+                meerkat_core::MemoryIndexableContent::Indexable(content.to_string()),
+                MemoryMetadata {
+                    session_id: session_id.clone(),
+                    source: MemorySource::Compaction {
+                        source_range: MessageRange::single(0),
+                    },
+                    indexed_at: meerkat_core::time_compat::SystemTime::now(),
+                },
+            )
+            .expect("valid staged compaction memory request"),
+        )
+    }
+
+    /// A process may die after HNSW durably stages discarded history but
+    /// before RuntimeStore::atomic_apply commits the transcript + outbox. On
+    /// restart the authoritative outbox is empty, and runtime attachment may
+    /// ask for reconciliation before any SessionTask exists. That empty
+    /// authority must still reach the builder-owned canonical HNSW backend and
+    /// abort the orphan instead of declaring a no-op.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn empty_outbox_aborts_stale_hnsw_stage_before_session_task_materialization() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = meerkat::SessionId::new();
+        let projection = staged_compaction_projection(&session_id);
+        let memory_dir = temp.path().join("sessions").join("memory");
+
+        // Process one: persist the invisible stage, then die before the paired
+        // runtime snapshot/outbox boundary.
+        {
+            let memory_store = meerkat_memory::HnswMemoryStore::open(&memory_dir)
+                .expect("open canonical HNSW store for crash fixture");
+            memory_store
+                .stage_compaction_batch(
+                    projection.clone(),
+                    staged_compaction_batch(&session_id, "orphaned pre-commit memory"),
+                )
+                .await
+                .expect("persist orphaned compaction stage");
+        }
+
+        // Process two: construct fresh service/runtime owners without
+        // materializing the session task.
+        let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
+        let (service, _adapter, runtime_store) = build_callback_memory_service(temp.path(), client);
+        assert!(
+            !service
+                .has_live_session(&session_id)
+                .await
+                .expect("query live session materialization"),
+            "regression must reconcile before SessionTask materialization"
+        );
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        assert!(
+            runtime_store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .expect("load empty runtime outbox")
+                .is_empty(),
+            "crash-before-atomic-apply must leave no committed runtime outbox"
+        );
+
+        service
+            .reconcile_runtime_compaction_projections(&session_id, Vec::new())
+            .await
+            .expect("builder-owned empty authority must abort the absent-session stage");
+        assert!(
+            !service
+                .has_live_session(&session_id)
+                .await
+                .expect("recheck live session materialization"),
+            "reconciliation must not fabricate a SessionTask"
+        );
+
+        // Reusing the exact projection id with a different payload is rejected
+        // while the original stage exists. Success therefore proves the stale
+        // durable row was deleted by the public reconciliation path.
+        let memory_store = meerkat_memory::HnswMemoryStore::open(&memory_dir)
+            .expect("reopen canonical HNSW after reconciliation");
+        memory_store
+            .stage_compaction_batch(
+                projection.clone(),
+                staged_compaction_batch(&session_id, "replacement proof payload"),
+            )
+            .await
+            .expect("stale stage must be gone before replacement proof stage");
+        memory_store
+            .abort_compaction_batch(&projection)
+            .await
+            .expect("clean replacement proof stage");
+    }
+
+    /// Durable audit-log wrapper that fails exactly the next canonical
+    /// TranscriptRewriteCommitted append. Ordinary run events continue to
+    /// persist, so the injected fault isolates the post-runtime-commit audit
+    /// projection window exercised by the recovery test below.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    struct FailNextRewriteAuditEventStore {
+        inner: meerkat_session::event_store::FileEventStore,
+        fail_next_rewrite: AtomicBool,
+        failed_rewrite_appends: AtomicUsize,
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    impl FailNextRewriteAuditEventStore {
+        fn new(root: impl Into<std::path::PathBuf>) -> Self {
+            Self {
+                inner: meerkat_session::event_store::FileEventStore::new(root),
+                fail_next_rewrite: AtomicBool::new(false),
+                failed_rewrite_appends: AtomicUsize::new(0),
+            }
+        }
+
+        fn arm(&self) {
+            self.fail_next_rewrite.store(true, Ordering::Release);
+        }
+
+        fn failed_rewrite_appends(&self) -> usize {
+            self.failed_rewrite_appends.load(Ordering::Acquire)
+        }
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[async_trait::async_trait]
+    impl meerkat_session::event_store::EventStore for FailNextRewriteAuditEventStore {
+        async fn append_envelopes(
+            &self,
+            session_id: &meerkat::SessionId,
+            envelopes: &[meerkat_core::event::EventEnvelope<meerkat_core::AgentEvent>],
+        ) -> Result<u64, meerkat_session::event_store::EventStoreError> {
+            let is_rewrite_audit = envelopes.iter().any(|envelope| {
+                matches!(
+                    envelope.payload,
+                    meerkat_core::AgentEvent::TranscriptRewriteCommitted { .. }
+                )
+            });
+            if is_rewrite_audit && self.fail_next_rewrite.swap(false, Ordering::AcqRel) {
+                self.failed_rewrite_appends.fetch_add(1, Ordering::AcqRel);
+                return Err(meerkat_session::event_store::EventStoreError::Io(
+                    std::io::Error::other(
+                        "injected TranscriptRewriteCommitted audit append failure",
+                    ),
+                ));
+            }
+            self.inner.append_envelopes(session_id, envelopes).await
+        }
+
+        async fn record_projection_halt(
+            &self,
+            session_id: &meerkat::SessionId,
+            reason: &str,
+        ) -> Result<(), meerkat_session::event_store::EventStoreError> {
+            self.inner.record_projection_halt(session_id, reason).await
+        }
+
+        async fn projection_halt(
+            &self,
+            session_id: &meerkat::SessionId,
+        ) -> Result<
+            Option<meerkat_session::event_store::EventProjectionHaltMarker>,
+            meerkat_session::event_store::EventStoreError,
+        > {
+            self.inner.projection_halt(session_id).await
+        }
+
+        async fn read_from(
+            &self,
+            session_id: &meerkat::SessionId,
+            from_seq: u64,
+        ) -> Result<
+            Vec<meerkat_session::event_store::StoredEvent>,
+            meerkat_session::event_store::EventStoreError,
+        > {
+            self.inner.read_from(session_id, from_seq).await
+        }
+
+        async fn read_page(
+            &self,
+            session_id: &meerkat::SessionId,
+            from_seq: u64,
+            limit: usize,
+        ) -> Result<
+            Vec<meerkat_session::event_store::StoredEvent>,
+            meerkat_session::event_store::EventStoreError,
+        > {
+            self.inner.read_page(session_id, from_seq, limit).await
+        }
+
+        async fn last_seq(
+            &self,
+            session_id: &meerkat::SessionId,
+        ) -> Result<u64, meerkat_session::event_store::EventStoreError> {
+            self.inner.last_seq(session_id).await
+        }
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn build_rewrite_audit_failure_memory_service(
+        root: &std::path::Path,
+        client: Arc<dyn LlmClient>,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        Arc<meerkat_runtime::store::SqliteRuntimeStore>,
+        Arc<FailNextRewriteAuditEventStore>,
+    ) {
+        let sqlite_path = root.join("sessions.sqlite3");
+        let session_store: Arc<dyn SessionStore> = Arc::new(
+            meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open session sqlite"),
+        );
+        let runtime_store = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
+                .expect("open runtime sqlite"),
+        );
+        let runtime_store_for_bundle: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
+        let bundle = PersistenceBundle::new(session_store, runtime_store_for_bundle, blob_store);
+
+        let factory = AgentFactory::new(root.join("sessions")).memory(true);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(client);
+        let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
+        let event_store = Arc::new(FailNextRewriteAuditEventStore::new(
+            root.join(".rkat").join("events"),
+        ));
+        let service = service.with_event_projection(
+            event_store.clone(),
+            Arc::new(meerkat_session::projector::SessionProjector::new(
+                root.join(".rkat"),
+            )),
+        );
+        (Arc::new(service), adapter, runtime_store, event_store)
     }
 
     /// RuntimeStore fault wrapper that rejects exactly one `atomic_apply`
@@ -1008,6 +1265,215 @@ mod tests {
         );
     }
 
+    /// An audit-log I/O failure happens after the runtime atomically commits
+    /// the compacted transcript and outbox and after HNSW publishes the staged
+    /// memory. It must not quarantine that valid runtime authority. Recovery
+    /// retries the pending outbox, appends the missing audit, clears the intent,
+    /// and leaves exactly one visible memory record.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn rewrite_audit_append_failure_preserves_compaction_outbox_for_idempotent_recovery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let discarded_source = "discarded source before audit append failure";
+
+        let session_id = {
+            let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
+            let (service, adapter, runtime_store, event_store) =
+                build_rewrite_audit_failure_memory_service(temp.path(), client);
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize_callback_memory_session(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, discarded_source).await;
+
+            event_store.arm();
+            let outcome = run_prompt_capture(
+                &adapter,
+                &session_id,
+                "second turn compacts before the rewrite audit append fails",
+            )
+            .await;
+            assert_eq!(
+                event_store.failed_rewrite_appends(),
+                1,
+                "test setup must fail exactly the post-commit rewrite audit append"
+            );
+            assert!(
+                !matches!(outcome, Ok(CompletionOutcome::CallbackPending { .. })),
+                "a failed durable audit projection must not report clean callback completion: {outcome:?}"
+            );
+
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+            let pending = runtime_store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .expect("load outbox after audit append failure");
+            assert_eq!(
+                pending.len(),
+                1,
+                "the committed outbox must remain pending for recovery retry"
+            );
+            assert!(
+                !runtime_store
+                    .is_runtime_projection_quarantined(&runtime_id)
+                    .await
+                    .expect("load runtime projection quarantine marker"),
+                "audit infrastructure failure must not quarantine valid runtime authority"
+            );
+            let snapshot = runtime_store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("load runtime snapshot after audit append failure")
+                .expect("valid committed runtime snapshot must survive audit append failure");
+            let runtime_session: Session =
+                serde_json::from_slice(&snapshot).expect("runtime snapshot is a session");
+            assert!(has_compaction_summary(&runtime_session));
+            assert_eq!(
+                runtime_session
+                    .compaction_projection_intents()
+                    .expect("read runtime snapshot outbox")
+                    .len(),
+                1,
+                "the surviving snapshot must carry the retryable projection intent"
+            );
+
+            let memory_store =
+                meerkat_memory::HnswMemoryStore::open(temp.path().join("sessions").join("memory"))
+                    .expect("reopen HNSW after audit append failure");
+            let page = memory_store
+                .enumerate_scoped(
+                    &MemorySearchScope::for_session(session_id.clone()),
+                    MemoryEnumerationRequest {
+                        limit: 64,
+                        offset: 0,
+                        source_overlap: None,
+                        indexed_after: None,
+                    },
+                )
+                .await
+                .expect("enumerate memory after audit append failure");
+            assert_eq!(
+                page.records
+                    .iter()
+                    .filter(|record| record.content.contains(discarded_source))
+                    .count(),
+                1,
+                "memory is visible once while its paired runtime outbox remains retryable"
+            );
+            let rewrite_audits = event_store
+                .read_from(&session_id, 1)
+                .await
+                .expect("read event log after injected failure")
+                .into_iter()
+                .filter(|stored| {
+                    matches!(
+                        stored.event,
+                        meerkat_core::AgentEvent::TranscriptRewriteCommitted { .. }
+                    )
+                })
+                .count();
+            assert_eq!(
+                rewrite_audits, 0,
+                "the injected append failure must leave the audit missing until retry"
+            );
+            session_id
+        };
+
+        // New service/runtime/agent/HNSW handles model a process restart. Feed
+        // it the surviving runtime snapshot directly; runtime recovery owns
+        // outbox reconciliation and must converge every derived projection.
+        let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
+        let (service, adapter, runtime_store, event_store) =
+            build_rewrite_audit_failure_memory_service(temp.path(), client);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load surviving runtime snapshot for recovery")
+            .expect("runtime snapshot must survive into the new process");
+        let resume_source: Session =
+            serde_json::from_slice(&snapshot).expect("recovery snapshot is a session");
+        materialize_callback_memory_session(&service, &adapter, resume_source).await;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("poll recovering outbox")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recovery must finalize the pending compaction outbox");
+
+        let recovered_snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load recovered runtime snapshot")
+            .expect("recovered runtime snapshot must remain authoritative");
+        let recovered_session: Session =
+            serde_json::from_slice(&recovered_snapshot).expect("recovered snapshot is a session");
+        assert!(has_compaction_summary(&recovered_session));
+        assert!(
+            recovered_session
+                .compaction_projection_intents()
+                .expect("read recovered snapshot outbox")
+                .is_empty(),
+            "recovery acknowledgement must clean the runtime snapshot intent"
+        );
+        assert!(
+            !runtime_store
+                .is_runtime_projection_quarantined(&runtime_id)
+                .await
+                .expect("load recovered quarantine marker"),
+            "successful retry must retain the runtime snapshot as authority"
+        );
+
+        let memory_store =
+            meerkat_memory::HnswMemoryStore::open(temp.path().join("sessions").join("memory"))
+                .expect("cold reopen recovered HNSW");
+        let page = memory_store
+            .enumerate_scoped(
+                &MemorySearchScope::for_session(session_id.clone()),
+                MemoryEnumerationRequest {
+                    limit: 64,
+                    offset: 0,
+                    source_overlap: None,
+                    indexed_after: None,
+                },
+            )
+            .await
+            .expect("enumerate memory after recovery retry");
+        assert_eq!(
+            page.records
+                .iter()
+                .filter(|record| record.content.contains(discarded_source))
+                .count(),
+            1,
+            "idempotent recovery must not duplicate already-published memory"
+        );
+        let rewrite_audits = event_store
+            .read_from(&session_id, 1)
+            .await
+            .expect("read recovered event log")
+            .into_iter()
+            .filter(|stored| {
+                matches!(
+                    stored.event,
+                    meerkat_core::AgentEvent::TranscriptRewriteCommitted { .. }
+                )
+            })
+            .count();
+        assert!(
+            rewrite_audits >= 1,
+            "recovery must append the missing rewrite audit"
+        );
+    }
+
     /// A rejected RuntimeStore atomic boundary has no committed outbox
     /// authority. The live agent must therefore roll back the compaction
     /// rewrite and delete its exact invisible HNSW stage immediately; later
@@ -1394,6 +1860,43 @@ mod tests {
             );
             session_id
         };
+        let runtime_store =
+            meerkat_runtime::store::SqliteRuntimeStore::new(temp.path().join("sessions.sqlite3"))
+                .expect("reopen runtime store after kill window");
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let runtime_snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load runtime snapshot after kill window");
+        let quarantined = runtime_store
+            .is_runtime_projection_quarantined(&runtime_id)
+            .await
+            .expect("load runtime projection quarantine marker");
+        let pending_projections = runtime_store
+            .load_pending_compaction_projections(&runtime_id)
+            .await
+            .expect("load compaction outbox after kill window");
+        assert!(
+            runtime_snapshot.is_some(),
+            "committed runtime snapshot must survive projection failure; quarantined={quarantined}, pending_projections={pending_projections:?}"
+        );
+        let runtime_snapshot = runtime_snapshot
+            .expect("asserted committed runtime snapshot must survive projection failure");
+        let runtime_session: Session = serde_json::from_slice(&runtime_snapshot)
+            .expect("committed runtime snapshot must remain a Session");
+        assert!(
+            has_compaction_summary(&runtime_session),
+            "projection failure must not discard the committed compacted transcript"
+        );
+        assert!(
+            !quarantined,
+            "a failed compatibility projection must not quarantine committed runtime authority"
+        );
+        assert_eq!(
+            pending_projections.len(),
+            0,
+            "this no-memory-store fixture must not invent a compaction projection outbox"
+        );
         // Host restart clears the transient write fault.
         fail_row_writes.store(false, Ordering::Release);
 

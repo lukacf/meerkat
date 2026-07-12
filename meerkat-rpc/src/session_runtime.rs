@@ -5947,6 +5947,31 @@ impl SessionRuntime {
                 build_config.llm_client_override = Some(client);
                 promotion_cleanup.update_build_config(&build_config);
             }
+            // A staged slot may survive executor-required teardown and retry.
+            // Its serialized build config therefore cannot remain the owner
+            // of epoch-local SessionRuntimeBindings: refresh from the current
+            // MeerkatMachine registration immediately before materialization
+            // and preserve that witness if this attempt is restored again.
+            let current_bindings = match self
+                .runtime_adapter
+                .prepare_bindings(session_id.clone())
+                .await
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    promotion_cleanup.restore_now().await;
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: format!(
+                            "failed to refresh runtime bindings for staged session {session_id}: {error}"
+                        ),
+                        data: None,
+                    });
+                }
+            };
+            build_config.runtime_build_mode =
+                meerkat_core::RuntimeBuildMode::SessionOwned(current_bindings);
+            promotion_cleanup.update_build_config(&build_config);
             let runtime_generation = if build_config.config_generation.is_none() {
                 if let Some(runtime) = self.config_runtime() {
                     runtime.get().await.ok().map(|snapshot| snapshot.generation)
@@ -7657,14 +7682,6 @@ impl SessionRuntime {
                 )
                 .await
                 .map_err(session_error_to_rpc)?;
-                self.pending_session_event_streams
-                    .lock()
-                    .await
-                    .remove(session_id);
-                #[cfg(feature = "mcp")]
-                if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
-                    state.adapter.shutdown().await;
-                }
                 return Ok(());
             }
             Ok(false) => {}
@@ -7684,45 +7701,13 @@ impl SessionRuntime {
             }
         }
 
-        let result = await_session_archive_with_runtime_cleanup(
+        await_session_archive_with_runtime_cleanup(
             Arc::clone(&self.service),
             self.archive_runtime_cleanup(),
             session_id.clone(),
         )
         .await
-        .map_err(session_error_to_rpc);
-
-        if result.is_ok() {
-            self.runtime_adapter
-                .unregister_session(session_id)
-                .await
-                .map_err(runtime_driver_error_to_session_error)
-                .map_err(session_error_to_rpc)?;
-
-            #[cfg(feature = "mcp")]
-            if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
-                state.adapter.shutdown().await;
-            }
-
-            self.pending_session_event_streams
-                .lock()
-                .await
-                .remove(session_id);
-
-            #[cfg(feature = "comms")]
-            if let Err(error) = self.runtime_adapter.abort_comms_drain(session_id).await {
-                // The primary archive outcome owns `result`; the drain-abort
-                // fault is surfaced as a typed warning rather than overwriting
-                // the committed archive verdict.
-                tracing::warn!(
-                    %session_id,
-                    %error,
-                    "failed to abort comms drain during session archive cleanup"
-                );
-            }
-        }
-
-        result
+        .map_err(session_error_to_rpc)
     }
 
     /// List all active sessions, optionally filtered by query parameters.
@@ -9205,58 +9190,15 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
-    struct RuntimeTerminationFixtureExecutor;
-
-    #[async_trait]
-    impl meerkat_core::lifecycle::CoreExecutor for RuntimeTerminationFixtureExecutor {
-        async fn apply(
-            &mut self,
-            run_id: meerkat_core::lifecycle::RunId,
-            primitive: meerkat_core::lifecycle::RunPrimitive,
-        ) -> Result<
-            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
-            meerkat_core::lifecycle::CoreExecutorError,
-        > {
-            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
-                    run_id,
-                    boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                },
-                session_snapshot: None,
-                terminal: None,
-            })
-        }
-
-        async fn cancel_after_boundary(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
-            Ok(())
-        }
-
-        async fn stop_runtime_executor(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
-            Ok(())
-        }
-    }
-
     async fn runtime_terminated_completion_handle(
         adapter: &Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
         session_id: &SessionId,
         reason: &str,
     ) -> meerkat_runtime::CompletionHandle {
         adapter
-            .ensure_session_with_executor(
-                session_id.clone(),
-                Box::new(RuntimeTerminationFixtureExecutor),
-            )
+            .register_session(session_id.clone())
             .await
-            .expect("test machine should attach runtime executor");
+            .expect("test machine should register runtime authority");
         let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
             "pending completion fixture",
             None,
@@ -15669,7 +15611,7 @@ mod tests {
             )
             .await
             .expect("archive through machine authority");
-        runtime_store.fail_next_delete_ops_lifecycle();
+        runtime_store.fail_next_lifecycle_commit();
 
         let failed = runtime
             .reject_archived_persisted_session_without_live(&session_id)
@@ -15678,7 +15620,7 @@ mod tests {
         assert!(
             failed
                 .message
-                .contains("synthetic RPC unregister cleanup failure"),
+                .contains("synthetic service-turn lifecycle commit failure"),
             "unexpected archived cleanup error: {failed:?}"
         );
         assert!(
@@ -16693,7 +16635,7 @@ mod tests {
             "external cleanup must retain machine registration authority"
         );
 
-        runtime_store.fail_next_delete_ops_lifecycle();
+        runtime_store.fail_next_lifecycle_commit();
         let error = runtime
             .runtime_adapter
             .unregister_session(&session_id)
@@ -16702,7 +16644,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("synthetic RPC unregister cleanup failure"),
+                .contains("synthetic service-turn lifecycle commit failure"),
             "machine saga should preserve the real unregister failure: {error}"
         );
         assert!(
@@ -17062,8 +17004,8 @@ mod tests {
             .reconcile_runtime_compaction_projections(&missing_session, Vec::new())
             .await;
         assert!(
-            matches!(reconcile, Err(SessionError::NotFound { ref id }) if id == &missing_session),
-            "empty committed reconciliation must reach the persistent owner instead of taking the SessionService default: {reconcile:?}"
+            reconcile.is_ok(),
+            "empty committed reconciliation must reach the builder-owned absent-session memory seam: {reconcile:?}"
         );
 
         let abort = service
@@ -19968,6 +19910,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn realtime_materialization_create_failure_restores_staged_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create staged realtime session");
+        store.set_fail_save(true);
+        let failed = runtime
+            .materialize_staged_session_for_realtime_open(&session_id)
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("forced save failure")),
+            "injected create failure should be surfaced: {failed:?}"
+        );
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "failed realtime materialization must restore the staged session"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.message.contains("Max sessions")),
+            "restored staged session must retain its capacity admission: {blocked:?}"
+        );
+
+        store.clear_failures();
+        runtime
+            .materialize_staged_session_for_realtime_open(&session_id)
+            .await
+            .expect("materialization should retry after durable store recovers");
+        assert!(
+            runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query retried live session"),
+            "successful retry should materialize the restored staged session"
+        );
+        assert!(!runtime.staged_sessions.contains(&session_id).await);
+    }
+
+    #[tokio::test]
     async fn pending_runtime_apply_pre_run_archive_projection_failure_fails_closed_and_retries() {
         // LUC-524 R004: the no-pending pre-run cleanup archive on the
         // runtime-apply path fails closed when the durable lifecycle commit
@@ -20017,6 +20015,33 @@ mod tests {
             Some(RuntimeState::Retired),
             "failed cleanup archive must not retire the runtime (document commit realizes first)"
         );
+        assert_eq!(
+            failed
+                .as_ref()
+                .err()
+                .and_then(|error| error.data.as_ref())
+                .and_then(|data| data.get("core_executor_teardown_reason"))
+                .and_then(serde_json::Value::as_str),
+            Some(
+                meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable
+                    .as_str()
+            ),
+            "failed staged rollback must request post-handoff runtime teardown: {failed:?}"
+        );
+        let mut failed_executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            session_id.clone(),
+        );
+        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
+            &mut failed_executor,
+        )
+        .await
+        .expect("post-handoff cleanup should discard the failed materialization");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("post-handoff teardown should unregister the failed runtime");
 
         store.clear_failures();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -20618,6 +20643,23 @@ mod tests {
             "recovered resume-pending without a boundary should return no-pending terminal: {output:?}"
         );
         assert!(
+            runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query live recovered session before handoff cleanup"),
+            "direct apply must retain the recovered live session until the exact executor is handed off"
+        );
+        let mut executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            session_id.clone(),
+        );
+        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
+            &mut executor,
+        )
+        .await
+        .expect("post-handoff RPC executor cleanup should discard the recovered live session");
+        assert!(
             !runtime
                 .service
                 .has_live_session(&session_id)
@@ -20626,9 +20668,14 @@ mod tests {
             "recovered pre-run terminal must not leave an untracked live deferred session"
         );
         assert!(
-            !runtime.runtime_adapter.contains_session(&session_id).await,
-            "recovered pre-run terminal must unregister stale runtime registration"
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "external executor cleanup must retain registration for the machine-owned unregister saga"
         );
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test should drive the post-handoff unregister saga");
 
         runtime
             .create_session(mock_build_config(), None, None, Vec::new())

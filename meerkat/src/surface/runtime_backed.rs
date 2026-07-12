@@ -2166,7 +2166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_persistent_stop_acks_only_after_discard_and_unregister() {
+    async fn production_persistent_stop_acks_after_discard_and_retains_stopped_registration() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
         let result = Box::pin(materialize_session(
@@ -2208,9 +2208,23 @@ mod tests {
             "stop success must follow PersistentRuntimeExecutor live-session discard"
         );
         assert!(
-            !adapter.contains_session(&result.session_id).await,
-            "stop success must follow persistent runtime unregister"
+            adapter.contains_session(&result.session_id).await,
+            "ordinary stop must preserve the registered session"
         );
+        assert_eq!(
+            adapter
+                .meerkat_machine_spine_snapshot(&result.session_id)
+                .await
+                .expect("stopped runtime snapshot")
+                .control
+                .phase,
+            RuntimeState::Stopped
+        );
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("explicit unregister should remove the stopped runtime");
+        assert!(!adapter.contains_session(&result.session_id).await);
     }
 
     #[tokio::test]
@@ -2759,8 +2773,11 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_runtime_executor_archived_normal_turn_requests_post_handoff_teardown() {
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::run_primitive::{ConversationAppend, ConversationAppendRole};
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, RunApplyBoundary, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
+        };
+        use meerkat_core::lifecycle::{InputId, RunId};
 
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
@@ -2793,11 +2810,20 @@ mod tests {
         let rejected = executor
             .apply(
                 RunId::new(),
-                RunPrimitive::ImmediateAppend(ConversationAppend {
-                    role: ConversationAppendRole::User,
-                    content: CoreRenderable::Text {
-                        text: "normal turn after archive".to_string(),
-                    },
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: RunApplyBoundary::RunStart,
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "normal turn after archive".to_string(),
+                        },
+                    }],
+                    context_appends: Vec::new(),
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
                 }),
             )
             .await;
@@ -2817,8 +2843,11 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_runtime_executor_missing_normal_turn_requests_unavailable_teardown() {
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::run_primitive::{ConversationAppend, ConversationAppendRole};
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, RunApplyBoundary, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
+        };
+        use meerkat_core::lifecycle::{InputId, RunId};
 
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
@@ -2835,11 +2864,20 @@ mod tests {
         let rejected = executor
             .apply(
                 RunId::new(),
-                RunPrimitive::ImmediateAppend(ConversationAppend {
-                    role: ConversationAppendRole::User,
-                    content: CoreRenderable::Text {
-                        text: "normal turn for missing session".to_string(),
-                    },
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: RunApplyBoundary::RunStart,
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "normal turn for missing session".to_string(),
+                        },
+                    }],
+                    context_appends: Vec::new(),
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
                 }),
             )
             .await;

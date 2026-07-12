@@ -671,16 +671,30 @@ impl SessionBackend {
             }
 
             // Unregister is idempotent and owns its complete two-phase drain.
-            // An outer timeout can cancel that authority mid-transition and
-            // strand the session in Draining, so archive cleanup awaits it.
-            adapter
-                .unregister_session(session_id)
-                .await
-                .map_err(|error| {
-                    Self::runtime_archive_error(format!(
-                        "failed to unregister runtime session during mob archive cleanup for {session_id}: {error}"
-                    ))
-                })?;
+            // The public call bounds each caller join and reports typed
+            // UnregisterInProgress while the independently-owned saga keeps
+            // running. Archive cleanup requires verified absence, so keep
+            // joining that same saga rather than misclassifying its caller
+            // grace as a terminal archive failure.
+            loop {
+                match adapter.unregister_session(session_id).await {
+                    Ok(()) => break,
+                    Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress {
+                        runtime_id,
+                    }) => {
+                        tracing::debug!(
+                            %session_id,
+                            %runtime_id,
+                            "mob archive cleanup is still joining the owned runtime unregister saga"
+                        );
+                    }
+                    Err(error) => {
+                        return Err(Self::runtime_archive_error(format!(
+                            "failed to unregister runtime session during mob archive cleanup for {session_id}: {error}"
+                        )));
+                    }
+                }
+            }
             if adapter.contains_session(session_id).await {
                 return Err(Self::runtime_archive_error(format!(
                     "runtime session remains registered after mob archive cleanup for {session_id}"

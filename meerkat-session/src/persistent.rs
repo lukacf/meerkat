@@ -82,7 +82,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::{EphemeralSessionService, SessionAgentBuilder};
-use crate::event_store::EventStore;
+use crate::event_store::{EventStore, EventStoreError};
 use crate::projector::SessionProjector;
 
 fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
@@ -732,6 +732,28 @@ fn is_incremental_cas_conflict(error: &SessionError) -> bool {
                 Some(SessionStoreError::TranscriptRevisionConflict { .. })
             )
     )
+}
+
+/// Whether a committed runtime checkpoint failed only while realizing a
+/// downstream durable projection.
+///
+/// These failures say nothing about the semantic validity of the already-
+/// committed runtime snapshot. Preserve that authority (and its compaction
+/// outbox) so recovery can retry the idempotent projection/audit work. Typed
+/// continuity and rewrite-validation failures deliberately remain outside
+/// this class and continue through the quarantine path below.
+fn is_retryable_committed_runtime_projection_error(
+    error: &(dyn std::error::Error + 'static),
+) -> bool {
+    error
+        .downcast_ref::<SessionStoreError>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                SessionStoreError::Io(_) | SessionStoreError::Internal(_)
+            )
+        })
+        || error.downcast_ref::<EventStoreError>().is_some()
 }
 
 /// Advance a head in place: same identity/envelope, new strand position.
@@ -5252,6 +5274,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             drop(guard);
             return match error {
                 SessionError::Store(store_error) => {
+                    if is_retryable_committed_runtime_projection_error(store_error.as_ref()) {
+                        // RuntimeStore has already committed this boundary;
+                        // SessionStore plus the transcript audit log are
+                        // downstream durable projections. A mechanical write
+                        // failure must not delete the committed runtime
+                        // transcript or its outbox. Discard the live agent so
+                        // the next materialization reloads that authority, then
+                        // retry projection/audit realization from recovery.
+                        tracing::error!(
+                            session_id = %session.id(),
+                            error = %store_error,
+                            "downstream projection write failed after committed runtime checkpoint; retaining runtime snapshot authority for retry"
+                        );
+                        match self.discard_live_session(session.id()).await {
+                            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                            Err(discard_error) => {
+                                tracing::warn!(
+                                    session_id = %session.id(),
+                                    error = %discard_error,
+                                    "failed to discard live session after committed runtime projection write failure"
+                                );
+                            }
+                        }
+                        return Err(SessionError::Store(store_error));
+                    }
                     let store_error = SessionStoreError::Internal(store_error.to_string());
                     Err(self
                         .quarantine_failed_runtime_projection_update(

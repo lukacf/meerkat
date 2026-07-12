@@ -489,6 +489,25 @@ pub trait SessionAgentBuilder: Send + Sync {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError>;
+
+    /// Reconcile durable compaction stages for an exact session before its
+    /// live [`SessionAgent`] has been materialized.
+    ///
+    /// The runtime calls this seam only when its authoritative compaction
+    /// outbox is empty. An empty outbox is still semantic authority: every
+    /// durable stage for `session_id` is an uncommitted crash/cancellation
+    /// orphan and must be aborted. The builder owns this pre-materialization
+    /// boundary because it owns construction-time access to the canonical
+    /// memory backend. Generic builders fail closed until they explicitly
+    /// provide that backend-owned reconciliation.
+    async fn abort_absent_session_compaction_stages(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(format!(
+            "session builder cannot reconcile durable compaction stages before session {session_id} is materialized"
+        )))
+    }
 }
 
 /// Trait abstracting over the agent's run/cancel interface.
@@ -1318,11 +1337,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     ) -> Result<(), SessionError> {
         let command_tx = {
             let sessions = self.sessions.read().await;
-            sessions
-                .get(id)
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
-                .command_tx
-                .clone()
+            match sessions.get(id) {
+                Some(session) => session.command_tx.clone(),
+                None if intents.is_empty() => {
+                    // Runtime attachment may precede SessionTask
+                    // materialization. The empty outbox must still reach the
+                    // durable memory owner so crash-before-atomic-commit stages
+                    // are aborted; declaring success here would orphan them.
+                    return self
+                        .builder
+                        .abort_absent_session_compaction_stages(id)
+                        .await;
+                }
+                None => return Err(SessionError::NotFound { id: id.clone() }),
+            }
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
@@ -5108,6 +5136,52 @@ mod runtime_turn_metadata_tests {
                 Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>
             })
         }
+    }
+
+    #[tokio::test]
+    async fn absent_session_compaction_reconciliation_requires_builder_owned_empty_authority_seam()
+    {
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            1,
+        );
+        let missing_session_id = SessionId::new();
+
+        let empty_error = service
+            .reconcile_runtime_compaction_projections(&missing_session_id, Vec::new())
+            .await
+            .expect_err("generic builders must not silently ignore empty runtime authority");
+        assert!(
+            matches!(empty_error, SessionError::Unsupported(_)),
+            "an absent session needs an explicit builder-owned durable-memory seam: {empty_error}"
+        );
+
+        let intent = meerkat_core::CompactionProjectionIntent {
+            projection: serde_json::from_value(serde_json::json!({
+                "session_id": &missing_session_id,
+                "parent_revision": "missing-parent",
+                "revision": "missing-revision",
+                "commit_fingerprint": "sha256:absent-session-regression-fixture",
+            }))
+            .expect("valid projection fixture"),
+            summary_tokens: 1,
+            messages_before: 2,
+            messages_after: 1,
+        };
+        let error = service
+            .reconcile_runtime_compaction_projections(&missing_session_id, vec![intent])
+            .await
+            .expect_err("non-empty runtime outbox requires its live session agent");
+        assert!(
+            matches!(error, SessionError::NotFound { ref id } if id == &missing_session_id),
+            "non-empty reconciliation must fail closed for an absent session: {error}"
+        );
     }
 
     #[derive(Clone)]

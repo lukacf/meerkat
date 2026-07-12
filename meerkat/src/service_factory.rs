@@ -787,6 +787,63 @@ impl FactoryAgentBuilder {
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
+    async fn abort_absent_session_compaction_stages(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<(), SessionError> {
+        #[cfg(all(feature = "memory-store-session", not(target_arch = "wasm32")))]
+        {
+            use meerkat_core::memory::{MemoryOwner, MemoryStore};
+
+            let memory_dir = self.factory.store_path.join("memory");
+            let memory_store_exists = memory_dir.try_exists().map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to inspect canonical memory store at {} before session materialization: {error}",
+                    memory_dir.display()
+                )))
+            })?;
+            if !memory_store_exists {
+                // No durable backend exists, so an empty runtime outbox has no
+                // stage owner to reconcile. Avoid creating a memory database
+                // for sessions whose memory capability is disabled.
+                return Ok(());
+            }
+
+            let store = meerkat_memory::HnswMemoryStore::open(&memory_dir).map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to open canonical memory store at {} before session materialization: {error}",
+                    memory_dir.display()
+                )))
+            })?;
+            let receipt = store
+                .reconcile_compaction_stages(
+                    &MemoryOwner::canonical_session(session_id.clone()),
+                    &[],
+                )
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to reconcile empty runtime compaction authority for absent session {session_id}: {error}"
+                    )))
+                })?;
+            tracing::debug!(
+                %session_id,
+                aborted_orphans = receipt.aborted_orphans,
+                retained_committed = receipt.retained_committed,
+                "reconciled durable compaction stages before SessionTask materialization"
+            );
+            return Ok(());
+        }
+
+        #[cfg(not(all(feature = "memory-store-session", not(target_arch = "wasm32"))))]
+        {
+            let _ = session_id;
+            // This concrete builder has no durable staged-memory backend in
+            // this build, so the empty outbox is already fully reconciled.
+            Ok(())
+        }
+    }
+
     async fn model_supports_inline_video(
         &self,
         identity: &meerkat_core::SessionLlmIdentity,

@@ -9981,6 +9981,7 @@ mod tests {
                 .with_effective_model_registry(Arc::clone(&registry)),
             explicit_hot_swap_session("primary"),
         )
+        .with_tool_visibility_owner(explicit_test_visibility_owner())
         .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
         agent.config.max_turns = Some(1);
@@ -10054,6 +10055,7 @@ mod tests {
                 .with_effective_model_registry(Arc::clone(&registry)),
             explicit_hot_swap_session("primary"),
         )
+        .with_tool_visibility_owner(explicit_test_visibility_owner())
         .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
         agent.config.max_turns = Some(1);

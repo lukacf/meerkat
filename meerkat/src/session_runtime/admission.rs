@@ -234,22 +234,75 @@ impl RuntimeRegistrationLockLease {
     }
 }
 
+fn evict_runtime_registration_lock_if_last(
+    locks: &StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>,
+    session_id: &SessionId,
+    lock: &Arc<Mutex<()>>,
+) {
+    let this_lock = Arc::downgrade(lock);
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Every normal Weak upgrade is made under this same map mutex. Recheck the
+    // owner count here so an acquisition cannot race the final lease's Drop
+    // and leave a live per-session mutex unregistered.
+    if Arc::strong_count(lock) == 1
+        && locks
+            .get(session_id)
+            .is_some_and(|registered| registered.ptr_eq(&this_lock))
+    {
+        locks.remove(session_id);
+    }
+}
+
 impl Drop for RuntimeRegistrationLockLease {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.lock) != 1 {
-            return;
-        }
-        let this_lock = Arc::downgrade(&self.lock);
-        let mut locks = self
-            .locks
+        evict_runtime_registration_lock_if_last(&self.locks, &self.session_id, &self.lock);
+    }
+}
+
+#[cfg(test)]
+mod registration_lock_tests {
+    use super::*;
+
+    #[test]
+    fn lease_eviction_rechecks_concurrent_weak_upgrade_under_map_lock() {
+        let locks = Arc::new(StdMutex::new(HashMap::new()));
+        let session_id = SessionId::new();
+        let lock = Arc::new(Mutex::new(()));
+        locks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if locks
-            .get(&self.session_id)
-            .is_some_and(|registered: &Weak<Mutex<()>>| registered.ptr_eq(&this_lock))
-        {
-            locks.remove(&self.session_id);
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::downgrade(&lock));
+
+        // Deterministically model the former TOCTOU: Drop's old precheck saw
+        // one owner, then another caller upgraded the registered Weak before
+        // Drop acquired the map mutex.
+        assert_eq!(Arc::strong_count(&lock), 1);
+        let concurrent_lock = locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .and_then(Weak::upgrade)
+            .expect("concurrent caller upgrades the registered mutex");
+
+        evict_runtime_registration_lock_if_last(&locks, &session_id, &lock);
+
+        let third_caller_lock = locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .and_then(Weak::upgrade)
+            .expect("live upgraded mutex must remain registered");
+        assert!(Arc::ptr_eq(&concurrent_lock, &third_caller_lock));
+        assert!(Arc::ptr_eq(&lock, &third_caller_lock));
+        let _concurrent_guard = concurrent_lock
+            .try_lock()
+            .expect("concurrent caller enters the shared critical section");
+        assert!(
+            third_caller_lock.try_lock().is_err(),
+            "third caller must not enter a split critical section"
+        );
     }
 }
 

@@ -334,17 +334,11 @@ async fn reconcile_loaded_compaction_projection_outbox(
                 "compaction projection reconciliation failed: {error}"
             ))
         })?;
-    for intent in &intents {
-        let driver = driver.lock().await;
-        driver
-            .mark_compaction_projection_finalized(&intent.projection)
-            .await?;
-    }
     let authoritative_snapshot = {
         let driver = driver.lock().await;
         driver.load_compaction_checkpoint_snapshot().await?
     };
-    if let Some(snapshot) = authoritative_snapshot.as_deref() {
+    let compatibility_checkpoint = if let Some(snapshot) = authoritative_snapshot.as_deref() {
         let cleaned = compatibility_checkpoint_after_compaction_finalize(snapshot, &intents)?;
         executor
             .checkpoint_committed_session_snapshot(&cleaned)
@@ -354,9 +348,25 @@ async fn reconcile_loaded_compaction_projection_outbox(
                     "failed to checkpoint authoritative runtime snapshot after compaction reconciliation: {error}"
                 ))
             })?;
-        return Ok(Some(cleaned));
+        Some(cleaned)
+    } else {
+        None
+    };
+
+    // The SessionStore row is a compatibility projection of the committed
+    // runtime snapshot. Keep the durable outbox pending until that projection
+    // succeeds: marking an intent finalized also cleans it from the runtime
+    // snapshot, so doing that first would let a projection failure quarantine
+    // and delete the only committed transcript authority. With the outbox
+    // still pending, a failed checkpoint leaves the runtime snapshot intact
+    // and cold recovery can retry the idempotent projection finalization.
+    for intent in &intents {
+        let driver = driver.lock().await;
+        driver
+            .mark_compaction_projection_finalized(&intent.projection)
+            .await?;
     }
-    Ok(None)
+    Ok(compatibility_checkpoint)
 }
 
 /// Settle a failed runtime boundary using the post-error outbox observation.
@@ -462,10 +472,24 @@ fn fail_closed_completion_waiters(
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RuntimeLoopTeardownDisposition {
+    #[default]
+    PreserveRegistration,
+    UnregisterRequired,
+}
+
+impl RuntimeLoopTeardownDisposition {
+    pub(crate) fn requires_unregister(self) -> bool {
+        matches!(self, Self::UnregisterRequired)
+    }
+}
+
 struct RuntimeLoopTerminalHandoff {
     stop_completion: Option<crate::effect::StopEffectCompletion>,
     executor_stop_retry_reason: Option<String>,
     deferred_executor_stop_error: Option<crate::RuntimeDriverError>,
+    disposition: RuntimeLoopTeardownDisposition,
 }
 
 impl Default for RuntimeLoopTerminalHandoff {
@@ -476,6 +500,7 @@ impl Default for RuntimeLoopTerminalHandoff {
                 "runtime loop exited without a canonical terminal stop".into(),
             ),
             deferred_executor_stop_error: None,
+            disposition: RuntimeLoopTeardownDisposition::PreserveRegistration,
         }
     }
 }
@@ -493,15 +518,16 @@ enum RuntimeLoopTeardownState {
 }
 
 /// Shared mechanical handoff from the runtime-loop body to the machine-owned
-/// unregister coordinator.
+/// cleanup coordinator.
 ///
 /// The loop deposits its exact executor here as its final action. The
 /// coordinator, not a caller future and not a detached surface task, owns the
 /// required cleanup. A failed cleanup restores the executor into `Ready`, so a
-/// later unregister retry can discharge the same obligation exactly once.
+/// later explicit stop/unregister retry can discharge the same obligation.
 pub(crate) struct RuntimeLoopTeardownSlot {
     state: std::sync::Mutex<RuntimeLoopTeardownState>,
     last_unregister_result: std::sync::Mutex<Option<Result<(), crate::RuntimeDriverError>>>,
+    disposition: std::sync::Mutex<RuntimeLoopTeardownDisposition>,
     changed: tokio::sync::Notify,
 }
 
@@ -510,8 +536,18 @@ impl RuntimeLoopTeardownSlot {
         std::sync::Arc::new(Self {
             state: std::sync::Mutex::new(RuntimeLoopTeardownState::Pending),
             last_unregister_result: std::sync::Mutex::new(None),
+            disposition: std::sync::Mutex::new(
+                RuntimeLoopTeardownDisposition::PreserveRegistration,
+            ),
             changed: tokio::sync::Notify::new(),
         })
+    }
+
+    pub(crate) fn disposition(&self) -> RuntimeLoopTeardownDisposition {
+        *self
+            .disposition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn last_unregister_result(&self) -> Option<Result<(), crate::RuntimeDriverError>> {
@@ -535,6 +571,10 @@ impl RuntimeLoopTeardownSlot {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(*state, RuntimeLoopTeardownState::Pending) {
+            *self
+                .disposition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = handoff.terminal.disposition;
             // The owned unregister worker can fail while the loop is still in
             // CoreExecutor::apply (for example, persisting BeginUnregister may
             // fail before it takes the attachment). Reconcile that retained
@@ -734,6 +774,35 @@ impl RuntimeLoopTeardownSlot {
             receipt.acknowledge(result);
         }
     }
+
+    /// Publish an ordinary-stop coordinator result to the exact stop request
+    /// without recording unregister terminal truth. Completed cleanup remains
+    /// retryable through the entry-owned stop coordinator.
+    pub(crate) fn acknowledge_runtime_stop_result(
+        &self,
+        result: Result<(), crate::RuntimeDriverError>,
+    ) {
+        let receipt = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &mut *state {
+                RuntimeLoopTeardownState::Cleaned(receipt) => receipt.take(),
+                RuntimeLoopTeardownState::Ready(handoff) => handoff
+                    .terminal
+                    .stop_completion
+                    .take()
+                    .map(|stop_completion| RuntimeLoopCleanupReceipt {
+                        stop_completion: Some(stop_completion),
+                    }),
+                RuntimeLoopTeardownState::Pending | RuntimeLoopTeardownState::Cleaning => None,
+            }
+        };
+        if let Some(receipt) = receipt {
+            receipt.acknowledge(result);
+        }
+    }
 }
 
 impl RuntimeLoopTeardownState {
@@ -866,6 +935,95 @@ impl Drop for RuntimeLoopHandoffGuard {
 pub(crate) struct SpawnedRuntimeLoop {
     pub(crate) loop_handle: tokio::task::JoinHandle<()>,
     pub(crate) teardown_slot: std::sync::Arc<RuntimeLoopTeardownSlot>,
+    pub(crate) startup: std::sync::Arc<RuntimeLoopStartupSlot>,
+}
+
+impl SpawnedRuntimeLoop {
+    pub(crate) fn startup_slot(&self) -> std::sync::Arc<RuntimeLoopStartupSlot> {
+        std::sync::Arc::clone(&self.startup)
+    }
+}
+
+/// Publishes exactly one typed startup result for the runtime-loop attachment.
+///
+/// The guard is constructed before the loop task is spawned, so aborting the
+/// task before its first poll still fails the waiter instead of leaving
+/// `ensure_session_with_executor` blocked forever.
+struct RuntimeLoopStartupGuard {
+    slot: std::sync::Arc<RuntimeLoopStartupSlot>,
+    published: bool,
+}
+
+impl RuntimeLoopStartupGuard {
+    fn new(slot: std::sync::Arc<RuntimeLoopStartupSlot>) -> Self {
+        Self {
+            slot,
+            published: false,
+        }
+    }
+
+    fn publish(&mut self, result: Result<(), String>) {
+        self.slot.publish(result);
+        self.published = true;
+    }
+}
+
+impl Drop for RuntimeLoopStartupGuard {
+    fn drop(&mut self) {
+        if !self.published {
+            self.slot.publish(Err(
+                "runtime loop exited before startup reconciliation completed".to_string(),
+            ));
+        }
+    }
+}
+
+/// Mechanical readiness handoff from the loop to its attachment caller.
+///
+/// Attachment publication alone is not readiness: the loop first has to
+/// reconcile the durable compaction projection outbox through its exact
+/// executor. The slot keeps that boundary cancellation-safe and race-free.
+pub(crate) struct RuntimeLoopStartupSlot {
+    result: std::sync::Mutex<Option<Result<(), String>>>,
+    changed: tokio::sync::Notify,
+}
+
+impl RuntimeLoopStartupSlot {
+    fn pending() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            result: std::sync::Mutex::new(None),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn publish(&self, result: Result<(), String>) {
+        let mut current = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.is_some() {
+            return;
+        }
+        *current = Some(result);
+        drop(current);
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) async fn wait(&self) -> Result<(), crate::RuntimeDriverError> {
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            changed.as_mut().enable();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return result.map_err(crate::RuntimeDriverError::Internal);
+            }
+            changed.await;
+        }
+    }
 }
 
 async fn apply_runtime_loop_effect_and_record_handoff(
@@ -1315,6 +1473,42 @@ impl RuntimeLoopAuthorityBinding {
                 err
             })
     }
+
+    async fn runtime_stop_cleanup_in_progress(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+    ) -> Result<bool, crate::traits::RuntimeDriverError> {
+        #[cfg(test)]
+        if self.detached_test_gate.is_some() {
+            let _ = driver;
+            return Ok(false);
+        }
+
+        let machine =
+            self.machine
+                .upgrade()
+                .ok_or(crate::traits::RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?;
+        machine
+            .current_runtime_stop_cleanup_in_progress(&self.session_id, driver)
+            .await
+    }
+
+    async fn begin_durable_unregister_for_teardown(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
+        let machine =
+            self.machine
+                .upgrade()
+                .ok_or(crate::traits::RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?;
+        machine
+            .begin_unregister_from_runtime_loop_teardown(&self.session_id, driver)
+            .await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1339,11 +1533,14 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     session_id: meerkat_core::types::SessionId,
 ) -> SpawnedRuntimeLoop {
     let teardown_slot = RuntimeLoopTeardownSlot::pending();
+    let startup = RuntimeLoopStartupSlot::pending();
+    let startup_guard = RuntimeLoopStartupGuard::new(std::sync::Arc::clone(&startup));
     let teardown_watcher_slot = std::sync::Arc::clone(&teardown_slot);
     let teardown_machine = machine_weak.clone();
     let teardown_session_id = session_id.clone();
     tokio::spawn(async move {
         teardown_watcher_slot.wait_until_published().await;
+        let disposition = teardown_watcher_slot.disposition();
         let Some(machine) = teardown_machine.upgrade() else {
             return;
         };
@@ -1353,7 +1550,11 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         // a completed failure into an implicit retry. The saga never awaits
         // this watcher, so no self-join cycle is possible.
         if let Err(error) = machine
-            .observe_runtime_loop_teardown(&teardown_session_id)
+            .observe_runtime_loop_teardown(
+                &teardown_session_id,
+                std::sync::Arc::clone(&teardown_watcher_slot),
+                disposition,
+            )
             .await
         {
             tracing::warn!(
@@ -1375,6 +1576,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     let loop_handoff_guard = RuntimeLoopHandoffGuard::new(loop_teardown_slot, executor);
     let loop_handle = tokio::spawn(async move {
         let mut loop_handoff_guard = loop_handoff_guard;
+        let mut startup_guard = startup_guard;
         macro_rules! executor_or_return {
             () => {
                 match loop_handoff_guard.executor_mut() {
@@ -1450,6 +1652,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         if let Err(error) =
             reconcile_compaction_projection_outbox(&driver, executor_or_return!()).await
         {
+            startup_guard.publish(Err(error.to_string()));
             tracing::error!(
                 session_id = %authority_binding.session_id,
                 %error,
@@ -1468,6 +1671,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
             }
             return;
         }
+        startup_guard.publish(Ok(()));
 
         loop {
             // Build a future for the idle wake. Backed by the completion feed
@@ -1636,7 +1840,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 
         // This publication is the loop task's final action. The machine-owned
         // coordinator receives the exact executor, awaits this task externally,
-        // and runs the external-only cleanup hook before unregister removal.
+        // and runs the external-only cleanup hook before any separately
+        // authorized unregister removal.
         if let Err(error) = loop_handoff_guard.publish(terminal_handoff) {
             tracing::error!(%error, "runtime loop failed to publish executor handoff");
         }
@@ -1644,6 +1849,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     SpawnedRuntimeLoop {
         loop_handle,
         teardown_slot,
+        startup,
     }
 }
 
@@ -1968,6 +2174,19 @@ async fn process_queue(
         }
         drop(effect_authority_guard);
 
+        // Stop ownership is installed before its worker enqueues the executor
+        // effect. If that coordinator is already active, yield to the outer
+        // biased select instead of admitting queued ordinary work in the gap
+        // between the two operations.
+        match authority_binding
+            .runtime_stop_cleanup_in_progress(driver)
+            .await
+        {
+            Ok(true) => return false,
+            Ok(false) => {}
+            Err(_) => return true,
+        }
+
         let queue_authority_guard = match authority_binding
             .lock_current_driver_authority(driver, "runtime loop queue processing")
             .await
@@ -1975,6 +2194,22 @@ async fn process_queue(
             Ok(guard) => guard,
             Err(_) => return true,
         };
+
+        // Stop coordinator insertion takes this same mutation gate. Recheck
+        // after claiming it so coordinator ownership and ordinary dequeue have
+        // one total order; a stop installed after the earlier fast-path check
+        // can no longer lose one queued batch in the gap.
+        match authority_binding
+            .runtime_stop_cleanup_in_progress(driver)
+            .await
+        {
+            Ok(true) => {
+                drop(queue_authority_guard);
+                return false;
+            }
+            Ok(false) => {}
+            Err(_) => return true,
+        }
 
         enum RuntimeLoopDequeueOutcome {
             Ready {
@@ -2454,11 +2689,32 @@ async fn process_queue(
                         .await;
                         drop(terminal_authority_guard);
                         if teardown_after_commit {
+                            handoff.disposition =
+                                RuntimeLoopTeardownDisposition::UnregisterRequired;
+                            if let Err(error) = authority_binding
+                                .begin_durable_unregister_for_teardown(driver)
+                                .await
+                            {
+                                // The typed handoff disposition is the
+                                // fail-closed fallback. Its watcher starts the
+                                // unregister saga, which must persist Draining
+                                // before taking the exact executor.
+                                tracing::error!(
+                                    session_id = %authority_binding.session_id,
+                                    %error,
+                                    "no-pending runtime apply could not persist BeginUnregister before loop handoff"
+                                );
+                            }
                             return true;
                         }
                     }
                     Err(e) => {
                         drop(d);
+                        let teardown_required = e.requires_runtime_teardown();
+                        if teardown_required {
+                            handoff.disposition =
+                                RuntimeLoopTeardownDisposition::UnregisterRequired;
+                        }
                         let terminal_authority_guard = match authority_binding
                             .lock_current_driver_authority(driver, "runtime loop terminal failure")
                             .await
@@ -2477,7 +2733,6 @@ async fn process_queue(
                             }
                         };
                         let cancelled = e.is_cancelled();
-                        let teardown_required = e.requires_runtime_teardown();
                         let error_msg = e.to_string();
                         let terminal_failure = match &e {
                             CoreExecutorError::TerminalFailure {
@@ -2553,6 +2808,20 @@ async fn process_queue(
                             // unregister from inside CoreExecutor::apply would
                             // self-join this loop.
                             drop(terminal_authority_guard);
+                            if let Err(error) = authority_binding
+                                .begin_durable_unregister_for_teardown(driver)
+                                .await
+                            {
+                                // The typed handoff disposition is the
+                                // fail-closed fallback. Its watcher starts the
+                                // unregister saga, which must persist Draining
+                                // before taking the exact executor.
+                                tracing::error!(
+                                    session_id = %authority_binding.session_id,
+                                    %error,
+                                    "teardown-required apply could not persist BeginUnregister before loop handoff"
+                                );
+                            }
                             return true;
                         }
                         // The stop path inside the backlog resolution can
@@ -2765,6 +3034,44 @@ mod tests {
                 .expect("teardown publication waiter must not miss notify_waiters")
                 .expect("teardown publication waiter task must not panic");
         }
+    }
+
+    #[tokio::test]
+    async fn startup_guard_fails_waiter_on_pre_ready_exit() {
+        let startup = RuntimeLoopStartupSlot::pending();
+        drop(RuntimeLoopStartupGuard::new(Arc::clone(&startup)));
+
+        let error = tokio::time::timeout(Duration::from_secs(1), startup.wait())
+            .await
+            .expect("pre-ready exit must publish startup failure")
+            .expect_err("pre-ready exit cannot be reported as ready");
+        assert!(
+            error
+                .to_string()
+                .contains("exited before startup reconciliation completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_guard_fails_waiter_when_task_is_aborted_before_ready() {
+        let startup = RuntimeLoopStartupSlot::pending();
+        let startup_guard = RuntimeLoopStartupGuard::new(Arc::clone(&startup));
+        let task = tokio::spawn(async move {
+            let _startup_guard = startup_guard;
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let _ = task.await;
+
+        let error = tokio::time::timeout(Duration::from_secs(1), startup.wait())
+            .await
+            .expect("aborted pre-ready task must publish startup failure")
+            .expect_err("aborted pre-ready task cannot be reported as ready");
+        assert!(
+            error
+                .to_string()
+                .contains("exited before startup reconciliation completed")
+        );
     }
 
     #[tokio::test]

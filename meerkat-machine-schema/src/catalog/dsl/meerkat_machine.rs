@@ -6727,7 +6727,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.unregister_teardown_retains_snapshot = false;
             }
-            to Idle
+            to Retired
         }
         transition UnregisterSessionStopped {
             on input UnregisterSession { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }

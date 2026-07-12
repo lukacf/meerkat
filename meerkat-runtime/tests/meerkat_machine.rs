@@ -2431,10 +2431,12 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_runtime::input_state::InputLifecycleState;
 
-    struct PanicOnStopExecutor;
+    struct PanicOnceOnStopExecutor {
+        stop_calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait::async_trait]
-    impl CoreExecutor for PanicOnStopExecutor {
+    impl CoreExecutor for PanicOnceOnStopExecutor {
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -2464,7 +2466,11 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
             &mut self,
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
-            panic!("synthetic stop panic to kill the loop and leave driver attached");
+            assert!(
+                self.stop_calls.fetch_add(1, Ordering::SeqCst) != 0,
+                "synthetic stop panic to kill the loop and leave driver attached"
+            );
+            Ok(())
         }
     }
 
@@ -2510,8 +2516,14 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
+    let stop_calls = Arc::new(AtomicUsize::new(0));
     adapter
-        .register_session_with_executor(sid.clone(), Box::new(PanicOnStopExecutor))
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(PanicOnceOnStopExecutor {
+                stop_calls: Arc::clone(&stop_calls),
+            }),
+        )
         .await
         .expect("runtime executor registration should succeed");
     assert_eq!(
@@ -2536,15 +2548,24 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                 .hard_cancel_current_run(&sid, "stale attachment repair probe")
                 .await
             {
-                Err(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Attached,
-                }) => break,
+                Err(RuntimeDriverError::NotReady { .. }) => break,
                 _ => tokio::time::sleep(Duration::from_millis(5)).await,
             }
         }
     })
     .await
     .expect("runtime loop should die and leave a stale attached driver state behind");
+    assert!(
+        !adapter
+            .session_has_executor(&sid)
+            .await
+            .expect("dead-attachment viability query"),
+        "generated Active plus a closed attachment is not a viable executor"
+    );
+    adapter
+        .stop_runtime_executor(&sid, "explicitly acknowledge repaired stale stop")
+        .await
+        .expect("explicit stop retry should consume the retained coordinator failure");
 
     let apply_called = Arc::new(AtomicBool::new(false));
     adapter

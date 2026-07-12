@@ -2470,6 +2470,10 @@ pub(crate) async fn machine_recover_persistent_driver(
     let recovered_runtime_state = recovered_lifecycle
         .as_ref()
         .map(crate::store::MachineLifecycleSnapshot::runtime_state);
+    let recovered_unregister_progress = recovered_lifecycle
+        .as_ref()
+        .and_then(crate::store::MachineLifecycleSnapshot::unregister_progress)
+        .cloned();
     if let Some(snapshot) = recovered_lifecycle {
         let session_id = driver.session_authority_id_for_recovery();
         let binding = snapshot.binding();
@@ -2555,6 +2559,33 @@ pub(crate) async fn machine_recover_persistent_driver(
     }
 
     let report = machine_recover_ephemeral_driver(driver)?;
+
+    // Generic input recovery may rebuild the ordinary runtime phase from
+    // stored ingress. The durable unregister prefix is later lifecycle
+    // authority, so replay it after that reconstruction and before the
+    // PersistentRuntimeDriver persists the recovered image.
+    if let Some(progress) = recovered_unregister_progress.as_ref() {
+        let session_id = driver.session_authority_id_for_recovery();
+        let session_id = SessionId::parse(&session_id.0).map_err(|error| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "invalid session identity while replaying durable unregister progress: {error}"
+                ),
+            }
+        })?;
+        let authority = driver.shared_dsl_authority();
+        {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::session_management::replay_durable_unregister_progress(
+                &mut authority,
+                &session_id,
+                Some(progress),
+            )?;
+        }
+        driver.sync_control_projection_from_dsl_authority();
+    }
 
     for (input_id, _input) in recovered_payloads {
         let should_requeue =

@@ -102,6 +102,11 @@ sqlite-store = ["meerkat-store/sqlite", "meerkat-runtime/sqlite-store"]
 session-store = [
     "meerkat-session/session-store",
     "meerkat-runtime/sqlite-store",
+    # Session persistence owns the built-in Memory and SQLite realm variants.
+    # Keeping Memory aligned with this facade feature prevents target/dev
+    # feature unification from exposing an enum variant that the persistence
+    # bundle cannot realize. Jsonl remains separately opt-in.
+    "meerkat-store/memory",
     "meerkat-store/sqlite",
     "meerkat-tools/sqlite",
 ]

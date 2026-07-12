@@ -1076,6 +1076,7 @@ enum CommittedEffectDispatchFailure {
 }
 
 type UnregisterTeardownResult = Result<(), RuntimeDriverError>;
+type RuntimeStopCleanupResult = Result<(), RuntimeDriverError>;
 
 /// Joinable result channel for the one owned unregister saga of an epoch.
 #[derive(Clone)]
@@ -1083,6 +1084,22 @@ struct UnregisterTeardownCoordinator {
     epoch_id: meerkat_core::RuntimeEpochId,
     coordinator_id: uuid::Uuid,
     result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+}
+
+/// Joinable result channel for the one owned ordinary-stop cleanup operation
+/// of an epoch. Completed results remain installed until a successful resume
+/// replaces the executor, or an explicit stop/unregister authorizes a retry.
+#[derive(Clone)]
+struct RuntimeStopCleanupCoordinator {
+    epoch_id: meerkat_core::RuntimeEpochId,
+    coordinator_id: uuid::Uuid,
+    teardown_slot: Option<Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>>,
+    completion_authority: Arc<
+        crate::tokio::sync::Mutex<
+            Option<crate::meerkat_machine::driver::RuntimeCompletionResultAuthority>,
+        >,
+    >,
+    result_rx: crate::tokio::sync::watch::Receiver<Option<RuntimeStopCleanupResult>>,
 }
 
 #[derive(Clone)]
@@ -1198,6 +1215,9 @@ struct RuntimeSessionEntry {
     runtime_loop_teardown: Option<Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>>,
     /// Current epoch's owned unregister saga, if one is active.
     unregister_coordinator: Option<UnregisterTeardownCoordinator>,
+    /// Current epoch's single ordinary-stop cleanup owner. Unlike unregister,
+    /// its successful terminal leaves this registration in generated Stopped.
+    runtime_stop_cleanup_coordinator: Option<RuntimeStopCleanupCoordinator>,
     /// Retry witness installed before the final generated UnregisterSession
     /// transition. If an owned saga panics after that transition changes the
     /// live projection to Queuing/session_id=None, the next saga resumes the
@@ -1276,11 +1296,21 @@ impl RuntimeSessionEntry {
         if let Some(error) = self.dsl_mutation_blocked_by_unregister(session_id) {
             return Some(error);
         }
-        self.unregister_coordinator
-            .is_some()
-            .then(|| RuntimeDriverError::NotReady {
+        if self.unregister_coordinator.is_some() {
+            return Some(RuntimeDriverError::NotReady {
                 state: self.control_snapshot().phase,
-            })
+            });
+        }
+        let Some(coordinator) = self.runtime_stop_cleanup_coordinator.as_ref() else {
+            return None;
+        };
+        match coordinator.result_rx.borrow().clone() {
+            None => Some(RuntimeDriverError::RuntimeStopInProgress {
+                runtime_id: self.runtime_id.clone(),
+            }),
+            Some(Ok(())) => None,
+            Some(Err(error)) => Some(error),
+        }
     }
 
     fn control_snapshot(&self) -> crate::driver::ephemeral::RuntimeControlProjection {
@@ -1311,6 +1341,14 @@ impl RuntimeSessionEntry {
             authority.state().registration_phase,
             dsl::RegistrationPhase::Active
         )
+    }
+
+    fn generated_executor_registration_has_viable_attachment(&self) -> bool {
+        self.generated_executor_registration_active()
+            && match &self.attachment_slot {
+                RuntimeLoopAttachmentSlot::Empty => true,
+                RuntimeLoopAttachmentSlot::Attached(_) => self.attachment_is_live(),
+            }
     }
 
     fn close_handle_teardown_gate(&self) {
@@ -1371,7 +1409,7 @@ impl RuntimeSessionEntry {
     }
 
     fn stage_generated_executor_exit_observation(&self) -> Result<StagedSessionDslInput, String> {
-        MeerkatMachine::stage_runtime_internal_dsl_transition_on_authority(
+        MeerkatMachine::stage_runtime_owner_dsl_transition_on_authority(
             &self.dsl_authority,
             crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited,
         )
@@ -1394,8 +1432,13 @@ impl RuntimeSessionEntry {
         let crate::runtime_loop::SpawnedRuntimeLoop {
             loop_handle,
             teardown_slot,
+            startup: _,
         } = spawned_loop;
         self.provisional_interrupt_handle = None;
+        // Generated revival admits a new executor only after the prior stop
+        // coordinator completed successfully. The new attachment owns a fresh
+        // epoch-local cleanup operation and replaces the completed receipt.
+        self.runtime_stop_cleanup_coordinator = None;
         self.runtime_loop_teardown = Some(Arc::clone(&teardown_slot));
         self.attachment_slot = RuntimeLoopAttachmentSlot::Attached(RuntimeLoopAttachment {
             wake_tx,
@@ -1428,6 +1471,37 @@ impl RuntimeSessionEntry {
             return true;
         }
         false
+    }
+
+    fn retire_completed_runtime_stop_after_revival(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        if !matches!(self.attachment_slot, RuntimeLoopAttachmentSlot::Empty) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "revived session {session_id} still carries a runtime-loop attachment"
+            )));
+        }
+        match self.runtime_stop_cleanup_coordinator.as_ref() {
+            None if self.runtime_loop_teardown.is_none() => return Ok(()),
+            None => {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "revived session {session_id} carries a teardown slot without its stop coordinator"
+                )));
+            }
+            Some(coordinator) => match coordinator.result_rx.borrow().clone() {
+                Some(Ok(())) => {}
+                None => {
+                    return Err(RuntimeDriverError::RuntimeStopInProgress {
+                        runtime_id: self.runtime_id.clone(),
+                    });
+                }
+                Some(Err(error)) => return Err(error),
+            },
+        }
+        self.runtime_stop_cleanup_coordinator = None;
+        self.runtime_loop_teardown = None;
+        Ok(())
     }
 
     fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
@@ -1615,6 +1689,33 @@ impl MeerkatMachine {
             }
         }
         Ok(gate_guard)
+    }
+
+    pub(crate) async fn current_runtime_stop_cleanup_in_progress(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+    ) -> Result<bool, RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        if !Arc::ptr_eq(&entry.driver, driver) {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            });
+        }
+        let Some(coordinator) = entry.runtime_stop_cleanup_coordinator.as_ref() else {
+            return Ok(false);
+        };
+        if coordinator.epoch_id != entry.epoch_id {
+            return Err(RuntimeDriverError::Internal(format!(
+                "stale runtime-stop cleanup coordinator epoch for session {session_id}"
+            )));
+        }
+        Ok(coordinator.result_rx.borrow().is_none())
     }
 
     async fn session_dsl_authority(

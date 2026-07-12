@@ -6291,6 +6291,30 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
+    async fn synchronize_live_session_after_archived_revival(
+        &self,
+        id: &SessionId,
+        active: &Session,
+    ) -> Result<(), SessionError> {
+        if !self.inner.has_live_session(id).await? {
+            return Ok(());
+        }
+        match self
+            .inner
+            .sync_session_from_durable_snapshot(id, active.clone())
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(SessionError::NotFound { .. }) if !self.inner.has_live_session(id).await? => {
+                // The live task may exit between the presence probe and the
+                // command send. No stale live projection remains to overwrite
+                // the promoted durable document in that case.
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Promote an archived document back to Active under explicit machine
     /// control. This is the durable half of retired-session revival; ordinary
     /// create/resume remains unable to cross the absorbing Archived terminal.
@@ -6318,7 +6342,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // as an idempotent in-progress revival, repair the compatibility
             // projection, and let the caller perform the runtime reset. No
             // other runtime state is accepted here.
-            self.save_compatibility_projection_only(session).await?;
+            let active = self.save_compatibility_projection_only(session).await?;
+            self.synchronize_live_session_after_archived_revival(id, &active)
+                .await?;
             return Ok(());
         }
 
@@ -6373,7 +6399,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to persist revived runtime snapshot for session {id}: {error}"
                 )))
             })?;
-        self.save_compatibility_projection_only(session).await?;
+        let active = self.save_compatibility_projection_only(session).await?;
+        self.synchronize_live_session_after_archived_revival(id, &active)
+            .await?;
         if let Some(gate) = self.existing_gate_for_session(id).await {
             *gate.cancelled.lock().await = false;
         }

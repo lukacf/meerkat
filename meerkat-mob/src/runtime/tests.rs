@@ -6856,6 +6856,22 @@ impl SessionAgent for OverlayProbeSessionAgent {
         Ok(self.session.clone())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_session_from_durable_snapshot(
+        &mut self,
+        session: Session,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        if session.id() != self.session.id() {
+            return Err(meerkat_core::error::AgentError::InternalError(format!(
+                "durable overlay-probe session {} does not match live session {}",
+                session.id(),
+                self.session.id()
+            )));
+        }
+        self.session = session;
+        Ok(())
+    }
+
     fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
         self.session
             .session_metadata()
@@ -26832,6 +26848,232 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
         signal_surface.log.lock().await.is_empty(),
         "member provisioning must not publish RuntimeBound with the session runtime id; the routed mob binding owns that signal"
     );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_retired_session_revival_failure_restores_archived_retired_pair() {
+    let provider_visible_tools = Arc::new(Mutex::new(Vec::new()));
+    let provider_turn_overlays = Arc::new(Mutex::new(Vec::new()));
+    let memory_store = Arc::new(MemoryStore::new());
+    let session_store: Arc<dyn SessionStore> = memory_store.clone();
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_dyn: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        OverlayProbeSessionAgentBuilder {
+            provider_visible_tools,
+            provider_turn_overlays,
+        },
+        16,
+        session_store,
+        runtime_store_dyn,
+        blob_store,
+    ));
+    let adapter = service
+        .runtime_adapter()
+        .expect("persistent service runtime adapter");
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
+    let session = Session::new();
+    let session_id = session.id().clone();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+
+    let receipt = provisioner
+        .provision_member(super::provisioner::ProvisionMemberRequest {
+            session_origin: super::provisioner::ProvisionSessionOrigin::Fresh,
+            create_session: CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "retired revival rollback seed".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    resume_session: Some(session),
+                    comms_name: Some("test-mob/worker/revival-rollback".to_string()),
+                    keep_alive: true,
+                    ..Default::default()
+                }),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                labels: None,
+            },
+            binding: test_external_binding("revival-rollback-worker"),
+            peer_name: "revival-rollback-worker".to_string(),
+            owner_bridge_session_id: None,
+            ops_registry: None,
+            generated_self_owned_operation_owner: Some(session_id.clone()),
+        })
+        .await
+        .expect("seed session provision");
+    provisioner
+        .retire_member(&receipt.member_ref)
+        .await
+        .expect("retire seed session");
+
+    let archived = memory_store
+        .load(&session_id)
+        .await
+        .expect("load archived seed projection")
+        .expect("archived seed projection remains durable");
+    assert!(
+        service
+            .load_persisted_session(&session_id)
+            .await
+            .expect("ordinary read of retired seed session")
+            .is_none(),
+        "Retired runtime authority must make the seed session archived to ordinary reads"
+    );
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load retired seed runtime"),
+        Some(meerkat_runtime::RuntimeState::Retired)
+    );
+
+    // The generated owner mismatch is deliberately validated after the
+    // authorized promotion/reset and executor attachment. It therefore gives
+    // the pre-receipt rollback its strongest deterministic failure point.
+    let mismatched_owner = SessionId::new();
+    let error = provisioner
+        .provision_member(super::provisioner::ProvisionMemberRequest {
+            session_origin: super::provisioner::ProvisionSessionOrigin::ResumedDurable,
+            create_session: CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "retired revival rollback resume".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    resume_session: Some(archived),
+                    comms_name: Some("test-mob/worker/revival-rollback".to_string()),
+                    keep_alive: true,
+                    ..Default::default()
+                }),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                labels: None,
+            },
+            binding: test_external_binding("revival-rollback-worker"),
+            peer_name: "revival-rollback-worker".to_string(),
+            owner_bridge_session_id: None,
+            ops_registry: None,
+            generated_self_owned_operation_owner: Some(mismatched_owner),
+        })
+        .await
+        .expect_err("post-attachment validation must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("did not match created bridge session"),
+        "unexpected post-attachment failure: {error:?}"
+    );
+
+    let restored = memory_store
+        .load(&session_id)
+        .await
+        .expect("load rolled-back session projection")
+        .expect("rolled-back session projection remains durable");
+    assert_eq!(
+        restored.lifecycle_terminal(),
+        Some(meerkat_core::session::SessionLifecycleTerminal::Archived),
+        "post-promotion failure must restore the Archived document"
+    );
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load rolled-back runtime"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "post-promotion failure must restore the Retired runtime"
+    );
+    assert!(
+        service
+            .load_persisted_session(&session_id)
+            .await
+            .expect("ordinary read after rollback")
+            .is_none(),
+        "rolled-back archived session must stay hidden from ordinary reads"
+    );
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("live-session lookup after rollback"),
+        "rollback must discard the revived live agent"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "rollback must remove the runtime registration"
+    );
+    assert!(
+        !adapter
+            .session_has_executor(&session_id)
+            .await
+            .unwrap_or(false),
+        "rollback must remove the runtime executor"
+    );
+    assert!(
+        !provisioner
+            .has_runtime_session_sidecar_for_test(&session_id)
+            .await,
+        "rollback must remove the provisioner sidecar"
+    );
+
+    // Also pin the earlier crash midpoint: document promotion committed but
+    // runtime reset did not. Retired compatibility evidence must not make the
+    // rollback mistake an Active document for an already-written archive.
+    adapter
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect("recover retired runtime registration for midpoint rollback");
+    service
+        .revive_archived_session_with_machine_authority(
+            &session_id,
+            adapter.session_control_authority(),
+        )
+        .await
+        .expect("promote document into Active+Retired crash midpoint");
+    assert_eq!(
+        memory_store
+            .load(&session_id)
+            .await
+            .expect("load midpoint projection")
+            .expect("midpoint projection remains durable")
+            .lifecycle_terminal(),
+        Some(meerkat_core::session::SessionLifecycleTerminal::Active)
+    );
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load midpoint runtime"),
+        Some(meerkat_runtime::RuntimeState::Retired)
+    );
+
+    provisioner
+        .restore_failed_resume_before_receipt(&session_id, true)
+        .await
+        .expect("rollback Active+Retired crash midpoint");
+    assert_eq!(
+        memory_store
+            .load(&session_id)
+            .await
+            .expect("load midpoint rollback projection")
+            .expect("midpoint rollback projection remains durable")
+            .lifecycle_terminal(),
+        Some(meerkat_core::session::SessionLifecycleTerminal::Archived),
+        "midpoint rollback must restore the explicit Archived document"
+    );
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load midpoint rollback runtime"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "midpoint rollback must restore the Retired runtime"
+    );
+    assert!(!adapter.contains_session(&session_id).await);
 }
 
 #[cfg(feature = "runtime-adapter")]

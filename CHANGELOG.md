@@ -111,6 +111,12 @@ via cargo-semver-checks against the published baselines).
   recurrence, cycle, and persisted-MCP integrity checks intact. Long-lived
   sessions therefore stop growing quadratically with turn count while real
   transcript revisions remain listable and restorable.
+- Explicit mob-member resume now revives an archived session in authority
+  order: promote the session document, synchronize the live semantic snapshot,
+  reset the durable `Retired` runtime, then attach the executor. Ordinary
+  executor registration still cannot cross the `Retired` terminal, and any
+  later provisioning failure restores the exact `Archived` + `Retired` pair
+  without leaving a live agent, executor, or provisioner sidecar.
 - Python and TypeScript now validate canonical `comms/send` result variants and
   member-progress snapshots before returning them, rejecting missing, legacy,
   malformed, or unknown fields instead of casting them to generated types.

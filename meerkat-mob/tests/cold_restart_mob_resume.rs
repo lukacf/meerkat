@@ -569,6 +569,232 @@ async fn mob_cold_restart_resume_autonomous_lead_durable_runtime_store() {
     run_cold_restart_scenario(true, MobRuntimeMode::AutonomousHost).await;
 }
 
+/// An explicitly resumed member may adopt its archived+Retired session after a
+/// full host restart. The revival must promote both lifecycle projections and
+/// preserve the exact bridge-session identity and transcript.
+#[tokio::test(flavor = "multi_thread")]
+async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_place() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+
+    let mut definition = mob_definition(MobRuntimeMode::TurnDriven);
+    definition.id = MobId::from("retired-revival-mob");
+    definition.orchestrator = None;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: false,
+        role_wiring: vec![],
+    };
+
+    // ---------------- Lifetime 1: create, use, then retire ----------------
+    let (service_1, store_1) = persistent_service(&paths, runtime_store.clone());
+    let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
+    let handle_1 = MobBuilder::new(definition, storage_1)
+        .with_session_service(service_1.clone())
+        .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .create()
+        .await
+        .expect("create persistent mob");
+
+    let worker = AgentIdentity::from("w-1");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("worker", worker.clone()))
+        .await
+        .expect("spawn worker before retirement");
+    let original_session_id = handle_1
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("worker session id before retirement");
+    send_and_wait(
+        &handle_1,
+        service_1.as_ref(),
+        "w-1",
+        "PRE_RETIRE_REVIVAL_TOKEN alpha",
+        "before-retirement",
+    )
+    .await;
+
+    handle_1
+        .retire(worker.clone())
+        .await
+        .expect("retire worker before cold restart");
+
+    assert!(
+        service_1
+            .load_persisted_session(&original_session_id)
+            .await
+            .expect("ordinary persisted-session read after retirement")
+            .is_none(),
+        "ordinary reads must continue to hide archived sessions"
+    );
+    let mut archived = service_1
+        .load_revivable_retired_session(&original_session_id)
+        .await
+        .expect("load retired session through explicit revival seam")
+        .expect("archived+Retired session must remain available for explicit revival");
+    assert_eq!(archived.id(), &original_session_id);
+    let archived_history = to_string(archived.messages()).expect("serialize archived history");
+    assert!(
+        archived_history.contains("PRE_RETIRE_REVIVAL_TOKEN alpha"),
+        "retired session must retain its pre-retirement transcript: {archived_history}"
+    );
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&original_session_id);
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after retirement"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "retirement must durably retire runtime authority"
+    );
+
+    // Mob retirement also accepts the older Retired-only compatibility shape,
+    // where the explicit document marker is absent. Exercise the stronger
+    // archived-document variant as well: older stores and direct machine
+    // archive authority can carry an explicit Archived marker, and revival
+    // must synchronize that promoted Active snapshot into the already-created
+    // live agent before its first checkpoint.
+    archived
+        .set_lifecycle_terminal(meerkat_core::session::SessionLifecycleTerminal::Archived)
+        .expect("stamp explicit archived document fixture");
+    runtime_store
+        .commit_session_snapshot(
+            &runtime_id,
+            meerkat_runtime::store::SessionDelta {
+                session_snapshot: serde_json::to_vec(&archived)
+                    .expect("serialize explicit archived runtime snapshot"),
+            },
+        )
+        .await
+        .expect("persist explicit archived runtime snapshot");
+    store_1
+        .save_authoritative_projection(&archived)
+        .await
+        .expect("persist explicit archived compatibility projection");
+    assert_eq!(
+        service_1
+            .load_revivable_retired_session(&original_session_id)
+            .await
+            .expect("reload explicit archived session")
+            .expect("explicit archived session remains revivable")
+            .lifecycle_terminal(),
+        Some(meerkat_core::session::SessionLifecycleTerminal::Archived)
+    );
+
+    handle_1
+        .shutdown()
+        .await
+        .expect("shutdown mob before cold restart");
+    drop(handle_1);
+    drop(service_1);
+
+    // ---------------- Lifetime 2: reopen, then explicitly revive ----------
+    let (service_2, store_2) = persistent_service(&paths, runtime_store.clone());
+    let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    let handle_2 = MobBuilder::for_resume(storage_2)
+        .with_session_service(service_2.clone())
+        .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("resume mob after cold restart");
+
+    handle_2
+        .spawn_spec(
+            SpawnMemberSpec::new("worker", worker.clone())
+                .with_resume_bridge_session_id(original_session_id.clone()),
+        )
+        .await
+        .expect("explicitly revive archived+Retired worker session");
+
+    assert_eq!(
+        handle_2.resolve_bridge_session_id(&worker).await,
+        Some(original_session_id.clone()),
+        "revival must preserve the exact bridge-session id"
+    );
+    assert_member_active(&member_entry(&handle_2, "w-1").await, "after revival");
+
+    let revived = service_2
+        .load_authoritative_session(&original_session_id)
+        .await
+        .expect("load revived authoritative session")
+        .expect("revived session must remain durable");
+    assert_eq!(
+        revived.lifecycle_terminal(),
+        Some(meerkat_core::session::SessionLifecycleTerminal::Active),
+        "revival must promote the durable session document to Active"
+    );
+    assert!(
+        service_2
+            .load_persisted_session(&original_session_id)
+            .await
+            .expect("ordinary persisted-session read after revival")
+            .is_some(),
+        "revival must make the session visible through the ordinary active-session seam"
+    );
+    assert_ne!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state after revival"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "revival must reactivate runtime authority"
+    );
+
+    wait_for_history_contains_all(
+        service_2.as_ref(),
+        &original_session_id,
+        &["PRE_RETIRE_REVIVAL_TOKEN alpha"],
+        "after-revival-history",
+    )
+    .await;
+    send_and_wait(
+        &handle_2,
+        service_2.as_ref(),
+        "w-1",
+        "POST_REVIVAL_TOKEN omega",
+        "after-revival-turn",
+    )
+    .await;
+    wait_for_history_contains_all(
+        service_2.as_ref(),
+        &original_session_id,
+        &["PRE_RETIRE_REVIVAL_TOKEN alpha", "POST_REVIVAL_TOKEN omega"],
+        "final-revival-history",
+    )
+    .await;
+
+    let after_turn = service_2
+        .load_authoritative_session(&original_session_id)
+        .await
+        .expect("load authoritative session after revived turn")
+        .expect("revived session remains authoritative after turn");
+    assert_eq!(
+        after_turn.lifecycle_terminal(),
+        Some(meerkat_core::session::SessionLifecycleTerminal::Active),
+        "the revived live agent must not checkpoint its stale Archived snapshot over durable Active"
+    );
+    let compatibility_projection = store_2
+        .load(&original_session_id)
+        .await
+        .expect("load compatibility projection after revived turn")
+        .expect("compatibility projection remains present after revived turn");
+    assert_eq!(
+        compatibility_projection.lifecycle_terminal(),
+        Some(meerkat_core::session::SessionLifecycleTerminal::Active),
+        "the first revived turn must preserve the Active compatibility projection"
+    );
+    assert!(
+        service_2
+            .load_persisted_session(&original_session_id)
+            .await
+            .expect("ordinary persisted-session read after revived turn")
+            .is_some(),
+        "the first revived turn must leave the session visible through the active read seam"
+    );
+
+    handle_2.shutdown().await.expect("final shutdown");
+}
+
 /// A broken wired member still needs its exact old-generation endpoint after
 /// a full service restart. The endpoint is required to retire reciprocal trust
 /// safely before spawning and wiring the replacement generation.

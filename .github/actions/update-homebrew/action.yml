@@ -1,0 +1,175 @@
+name: Update Homebrew tap
+description: Update the rkat formula from published release checksums
+
+inputs:
+  release_tag:
+    description: Release tag, for example v0.7.29
+    required: true
+  github_token:
+    description: GitHub token used to inspect the source repository release
+    required: true
+  tap_token:
+    description: Token with push access to lukacf/homebrew-meerkat
+    required: true
+  checksums_path:
+    description: Optional local checksum manifest; downloads the release manifest when omitted
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # An assets-only backfill can target an OLD tag after a newer release has
+    # shipped. The tap must never downgrade every `brew upgrade` user.
+    - name: Require target tag to be the latest release
+      id: latest_guard
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        set -euo pipefail
+        LATEST=$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)
+        if [ "${LATEST}" != "${RELEASE_TAG}" ]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "target ${RELEASE_TAG} is not the latest release (${LATEST}); leaving the tap untouched"
+        else
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Checkout tap
+      if: steps.latest_guard.outputs.skip != 'true'
+      uses: actions/checkout@v6
+      with:
+        repository: lukacf/homebrew-meerkat
+        token: ${{ inputs.tap_token }}
+        path: homebrew-meerkat
+
+    - name: Resolve checksums
+      id: checksums
+      if: steps.latest_guard.outputs.skip != 'true'
+      shell: bash
+      env:
+        CHECKSUMS_PATH: ${{ inputs.checksums_path }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        set -euo pipefail
+        resolved="${RUNNER_TEMP}/rkat-checksums.sha256"
+        if [[ -n "${CHECKSUMS_PATH}" ]]; then
+          source="${CHECKSUMS_PATH}"
+          if [[ "${source}" != /* ]]; then
+            source="${GITHUB_WORKSPACE}/${source}"
+          fi
+          if [[ ! -f "${source}" ]]; then
+            echo "Local checksum manifest does not exist: ${source}" >&2
+            exit 1
+          fi
+          cp "${source}" "${resolved}"
+        else
+          curl -fsSL "https://github.com/lukacf/meerkat/releases/download/${RELEASE_TAG}/checksums.sha256" -o "${resolved}"
+        fi
+        echo "path=${resolved}" >> "${GITHUB_OUTPUT}"
+
+    - name: Generate updated formula
+      if: steps.latest_guard.outputs.skip != 'true'
+      shell: bash
+      env:
+        CHECKSUMS_PATH: ${{ steps.checksums.outputs.path }}
+        VERSION: ${{ inputs.release_tag }}
+      run: |
+        set -euo pipefail
+        VERSION="${VERSION#v}"
+        TAG="${{ inputs.release_tag }}"
+        BASE="https://github.com/lukacf/meerkat/releases/download/${TAG}"
+
+        get_sha() {
+          local name="$1" sha
+          sha="$(awk -v name="${name}" '$2 == name { print $1; found = 1 } END { if (!found) exit 1 }' "${CHECKSUMS_PATH}")"
+          if [[ ! "${sha}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Missing or invalid SHA256 for ${name}" >&2
+            return 1
+          fi
+          printf '%s\n' "${sha}"
+        }
+
+        gen_resource() {
+          local name="$1" target="$2" sha
+          sha="$(get_sha "${name}-${VERSION}-${target}.tar.gz")"
+          echo "  resource \"${name}\" do"
+          echo "    url \"${BASE}/${name}-${VERSION}-${target}.tar.gz\""
+          echo "    sha256 \"${sha}\""
+          echo "  end"
+        }
+
+        gen_platform() {
+          local target="$1" sha
+          sha="$(get_sha "rkat-${VERSION}-${target}.tar.gz")"
+          echo "    url \"${BASE}/rkat-${VERSION}-${target}.tar.gz\""
+          echo "    sha256 \"${sha}\""
+          echo ""
+          for r in rkat-rpc rkat-rest rkat-mcp; do
+            gen_resource "$r" "$target"
+            echo ""
+          done
+        }
+
+        {
+          echo 'class Rkat < Formula'
+          echo '  desc "Minimal, high-performance agent harness for LLM-powered applications"'
+          echo '  homepage "https://github.com/lukacf/meerkat"'
+          echo "  version \"${VERSION}\""
+          echo '  license "MIT"'
+          echo ''
+          echo '  on_macos do'
+          echo '    on_arm do'
+          gen_platform "aarch64-apple-darwin"
+          echo '    end'
+          echo ''
+          echo '    on_intel do'
+          gen_platform "x86_64-apple-darwin"
+          echo '    end'
+          echo '  end'
+          echo ''
+          echo '  on_linux do'
+          echo '    on_arm do'
+          gen_platform "aarch64-unknown-linux-gnu"
+          echo '    end'
+          echo ''
+          echo '    on_intel do'
+          gen_platform "x86_64-unknown-linux-gnu"
+          echo '    end'
+          echo '  end'
+          echo ''
+          echo '  def install'
+          echo '    bin.install "rkat"'
+          echo ''
+          echo '    %w[rkat-rpc rkat-rest rkat-mcp].each do |name|'
+          echo '      resource(name).stage do'
+          echo '        bin.install name'
+          echo '      end'
+          echo '    end'
+          echo '  end'
+          echo ''
+          echo '  test do'
+          echo '    assert_match "rkat #{version}", shell_output("#{bin}/rkat --version")'
+          echo '  end'
+          echo 'end'
+        } > homebrew-meerkat/rkat.rb
+
+    - name: Commit and push formula
+      if: steps.latest_guard.outputs.skip != 'true'
+      shell: bash
+      working-directory: homebrew-meerkat
+      env:
+        VERSION: ${{ inputs.release_tag }}
+      run: |
+        set -euo pipefail
+        if git diff --quiet -- rkat.rb; then
+          echo "Homebrew formula already up to date"
+          exit 0
+        fi
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add rkat.rb
+        git commit -m "Update rkat to ${VERSION#v}"
+        git push

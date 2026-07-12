@@ -15,6 +15,13 @@ fn workflow_yml_path() -> PathBuf {
     path
 }
 
+fn manifest_script_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop();
+    path.push("scripts/release-build-asset-manifest");
+    path
+}
+
 fn read_workflow(path: &Path) -> serde_yaml::Value {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
@@ -48,36 +55,14 @@ fn step_script<'a>(
         })
 }
 
-fn embedded_python(script: &str) -> &str {
-    script
-        .split_once("python3 - <<'PY'\n")
-        .and_then(|(_, rest)| rest.rsplit_once("\nPY").map(|(python, _)| python))
-        .unwrap_or_else(|| {
-            panic!("manifest step must contain a python3 heredoc; script:\n{script}")
-        })
-}
-
-fn run_manifest(python: &str, root: &Path) -> Output {
+fn run_manifest(root: &Path) -> Output {
     let interpreter = std::env::var_os("PYTHON").unwrap_or_else(|| OsString::from("python3"));
     Command::new(interpreter)
-        .arg("-c")
-        .arg(python)
-        .current_dir(root)
-        .env("RELEASE_TAG", "v0.7.28")
+        .arg(manifest_script_path())
+        .arg(root)
+        .arg("v0.7.28")
         .output()
         .expect("run release manifest Python")
-}
-
-fn manifest_python() -> String {
-    let path = workflow_yml_path();
-    let workflow = read_workflow(&path);
-    let script = step_script(
-        &workflow,
-        &path,
-        "publish_github_release",
-        "Build checksum manifest",
-    );
-    embedded_python(script).to_owned()
 }
 
 #[test]
@@ -90,6 +75,15 @@ fn release_asset_manifest_contract_stays_flat_and_collision_checked() {
         "publish_github_release",
         "Build checksum manifest",
     );
+    assert!(
+        script
+            .contains("scripts/release-build-asset-manifest release-artifacts \"${RELEASE_TAG}\""),
+        "release workflow must delegate to the manifest authority; script:\n{script}"
+    );
+
+    let manifest_path = manifest_script_path();
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest_path.display()));
 
     for contract in [
         "key=lambda path: (path.name, path.as_posix())",
@@ -100,17 +94,17 @@ fn release_asset_manifest_contract_stays_flat_and_collision_checked() {
         "\"artifacts\": list(artifacts_by_name)",
     ] {
         assert!(
-            script.contains(contract),
-            "release manifest step must preserve `{contract}`; script:\n{script}"
+            manifest.contains(contract),
+            "release manifest authority must preserve `{contract}`; script:\n{manifest}"
         );
     }
 
     assert!(
-        !script.contains("p.as_posix().lstrip(\"./\")"),
+        !manifest.contains("p.as_posix().lstrip(\"./\")"),
         "index.json must not expose workflow-artifact staging directories"
     );
     assert!(
-        !script.contains("xargs sha256sum"),
+        !manifest.contains("xargs sha256sum"),
         "checksums.sha256 must be rendered from public basenames, not staged paths"
     );
 }
@@ -128,7 +122,7 @@ fn nested_release_artifacts_render_flat_sorted_manifests() {
     std::fs::write(cli_dir.join(cli_name), b"alpha").expect("write cli archive");
     std::fs::write(rpc_dir.join(rpc_name), b"beta").expect("write rpc archive");
 
-    let output = run_manifest(&manifest_python(), temp.path());
+    let output = run_manifest(temp.path());
     assert!(
         output.status.success(),
         "manifest script failed: {}",
@@ -173,7 +167,7 @@ fn duplicate_release_asset_basenames_fail_before_manifest_write() {
             .expect("write duplicate archive");
     }
 
-    let output = run_manifest(&manifest_python(), temp.path());
+    let output = run_manifest(temp.path());
     assert!(
         !output.status.success(),
         "duplicate public asset names must fail"

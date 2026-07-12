@@ -3404,13 +3404,14 @@ impl Session {
     /// Atomically refresh the synthetic runtime notices of one kind.
     ///
     /// This is the ONE transcript authority operation for synthetic-notice
-    /// refresh: it strips every existing `SystemNotice` message of `kind` and
-    /// appends `replacements` (possibly empty, meaning "no current notice")
+    /// refresh: it strips every synthetic `SystemNotice` projection of `kind`
+    /// while preserving durable notices that share the kind, then appends
+    /// `replacements` (possibly empty, meaning "no current synthetic notice")
     /// as one mechanical projection update. It deliberately does not mint an
-    /// audited transcript rewrite commit. On a strip fault nothing is pushed and the typed
-    /// [`TranscriptEditError`] propagates — callers must not re-implement
-    /// the strip-then-push pair (the swallowed-strip variant leaves a stale
-    /// notice beside a fresh one: a divergence window).
+    /// audited transcript rewrite commit. On a strip fault nothing is pushed
+    /// and the typed [`TranscriptEditError`] propagates — callers must not
+    /// re-implement the strip-then-push pair (the swallowed-strip variant
+    /// leaves a stale notice beside a fresh one: a divergence window).
     pub fn replace_synthetic_notices(
         &mut self,
         kind: crate::types::SystemNoticeKind,
@@ -3419,13 +3420,6 @@ impl Session {
         if !kind.is_synthetic_refresh_projection() {
             return Err(TranscriptEditError::InvalidTranscriptShape(format!(
                 "system notice kind {kind:?} is durable transcript content, not a synthetic refresh projection"
-            )));
-        }
-        if self.messages.iter().any(|message| {
-            matches!(message, Message::SystemNotice(notice) if notice.kind == kind && !notice.is_synthetic_refresh_projection())
-        }) {
-            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                "system notice kind {kind:?} includes a durable notice that cannot be mechanically refreshed"
             )));
         }
         for (index, message) in replacements.iter().enumerate() {
@@ -3444,9 +3438,13 @@ impl Session {
         let mut refreshed = self
             .messages
             .iter()
-            .filter(
-                |message| !matches!(message, Message::SystemNotice(notice) if notice.kind == kind),
-            )
+            .filter(|message| {
+                !matches!(
+                    message,
+                    Message::SystemNotice(notice)
+                        if notice.kind == kind && notice.is_synthetic_refresh_projection()
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         refreshed.extend(replacements);
@@ -6612,12 +6610,45 @@ mod tests {
         )));
         let before = session.messages().to_vec();
 
-        assert!(
-            session
-                .replace_synthetic_notices(SystemNoticeKind::McpPending, Vec::new())
-                .is_err()
-        );
+        session
+            .replace_synthetic_notices(SystemNoticeKind::McpPending, Vec::new())
+            .expect("synthetic refresh must coexist with a durable notice of the same kind");
         assert_eq!(session.messages(), before);
+    }
+
+    #[test]
+    fn replace_synthetic_notices_replaces_projection_beside_persisted_mcp_fact() {
+        use crate::types::{SystemNoticeBlock, SystemNoticeKind, SystemNoticeMessage};
+
+        let durable = Message::SystemNotice(SystemNoticeMessage::with_block(
+            SystemNoticeKind::McpPending,
+            Some("persisted pending fact".to_string()),
+            SystemNoticeBlock::Mcp {
+                server_id: Some("server".to_string()),
+                operation: None,
+                phase: None,
+                persisted: true,
+                detail: None,
+                pending_sources: Vec::new(),
+            },
+        ));
+        let stale = Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale synthetic projection",
+        ));
+        let fresh = Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "fresh synthetic projection",
+        ));
+        let mut session = Session::new();
+        session.push(durable.clone());
+        session.push(stale);
+
+        session
+            .replace_synthetic_notices(SystemNoticeKind::McpPending, vec![fresh.clone()])
+            .expect("synthetic refresh beside durable fact");
+
+        assert_eq!(session.messages(), &[durable, fresh]);
     }
 
     #[test]

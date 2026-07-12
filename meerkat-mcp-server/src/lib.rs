@@ -4995,6 +4995,9 @@ mod tests {
                 mob_member_binding: None,
             })
             .expect("session metadata should serialize");
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
         (state, session_id)
     }
@@ -6614,8 +6617,11 @@ mod tests {
         let (state, session_id) = state_with_persisted_session().await;
         let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
         state
-            .runtime_ingress_context()
-            .ensure_session(&parsed)
+            .runtime_adapter
+            .ensure_session_with_executor(
+                parsed.clone(),
+                Box::new(RuntimeTerminationFixtureExecutor),
+            )
             .await
             .expect("MCP runtime executor should attach");
         assert!(
@@ -7172,6 +7178,9 @@ mod tests {
                 mob_member_binding: None,
             })
             .expect("session metadata should serialize");
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
         state
             .upsert_mcp_adapter(
@@ -7260,10 +7269,16 @@ mod tests {
                 mob_member_binding: None,
             })
             .expect("session metadata should serialize");
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
         state
-            .runtime_ingress_context()
-            .ensure_session(&session_id)
+            .runtime_adapter
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(RuntimeTerminationFixtureExecutor),
+            )
             .await
             .expect("MCP runtime executor should attach");
         state
